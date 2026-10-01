@@ -1,0 +1,31 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.2
+    hooks:
+      - id: codespell
+        additional_dependencies:
+          - tomli
+
+  - repo: local
+    hooks:
+      # Exactly what `make check` and CI's check job run - ruff format --check, ruff check, mypy and
+      # bandit, on the same files with the tool versions of the poetry environment.
+      - id: make-check
+        name: make check
+        entry: make _check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: pytest
+        entry: make test
+        language: system
+        types: [python]
+        pass_filenames: false

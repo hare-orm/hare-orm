@@ -1,0 +1,79 @@
+name: Bug report / Сообщение об ошибке
+description: Something in hare-orm behaves incorrectly. / Что-то в hare-orm работает неправильно.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Security vulnerabilities should go through
+        [SECURITY.md](https://github.com/hare-orm/hare-orm/security/policy) instead of a
+        public issue.
+
+        Спасибо, что нашли время сообщить. Об уязвимостях сообщайте по правилам
+        [SECURITY](https://github.com/hare-orm/hare-orm/security/policy), а не публичным issue.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before reporting / Перед сообщением
+      options:
+        - label: I searched the existing issues and this hasn't been reported yet. / Я поискал среди существующих issues, об этом ещё не сообщали.
+          required: true
+        - label: It happens on the latest release (or on `dev`). / Это происходит на последнем выпуске (или на `dev`).
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened? / Что произошло?
+      description: What did you expect, and what actually happened instead? / Чего вы ожидали и что произошло на самом деле?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction / Минимальное воспроизведение
+      description: >
+        A minimal model + code snippet that reproduces it. A runnable script (e.g. against
+        `sqlite://:memory:`) gets a faster fix than a description alone.
+        Минимальная модель и фрагмент кода, которые воспроизводят ошибку. Запускаемый скрипт
+        (например, на `sqlite://:memory:`) исправят быстрее, чем одно описание.
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: hare-orm version / Версия hare-orm
+      placeholder: "e.g. 0.9.0, or a commit hash if installed from git / например 0.9.0 или хеш коммита при установке из git"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Dialect and driver / Диалект и драйвер
+      multiple: true
+      options:
+        - SQLite
+        - PostgreSQL (rust_pg, postgresql://)
+        - PostgreSQL (asyncpg, postgresql+asyncpg://)
+        - A third-party dialect / Сторонний диалект
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version / Версия Python
+      placeholder: "e.g. 3.14.1 / например 3.14.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Traceback / error output / Трассировка или вывод ошибки
+      render: text

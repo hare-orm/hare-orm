@@ -1,0 +1,8 @@
+# The ORMs benchmarks/bench.py compares hare-orm with, at the versions the published results use.
+# hare-orm itself comes from the checkout: pip install -e . -r benchmarks/requirements.txt
+asyncpg==0.31.0
+Django==6.1.1
+psycopg[binary,pool]==3.3.6
+SQLAlchemy[asyncio]==2.1.1
+tortoise-orm[asyncpg]==1.1.8
+yara-orm==1.17.0

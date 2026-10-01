@@ -1,0 +1,62 @@
+import pytest
+
+from hare.query.relation_loading.prefetch import Prefetch
+from tests.testmodels import Principal, School, Student
+
+
+@pytest.mark.asyncio
+async def test_relation_with_unique(db):
+    school1 = await School.objects.create(id=1024, name="School1")
+    student1 = await Student.objects.create(name="Sang-Heon Jeon1", school_id=school1.id)
+
+    student_schools = await Student.objects.filter(name="Sang-Heon Jeon1").values("name", "school__name")
+    assert student_schools[0] == {"name": "Sang-Heon Jeon1", "school__name": "School1"}
+    student_schools = await Student.objects.all().values(school="school__name")
+    assert student_schools[0]["school"] == school1.name
+    student_schools = await Student.objects.all().values_list("school__name")
+    assert student_schools[0][0] == school1.name
+
+    await Student.objects.create(name="Sang-Heon Jeon2", school=school1)
+    school_with_filtered = (
+        await School.objects.all()
+        .prefetch_related(Prefetch("students", queryset=Student.objects.filter(name="Sang-Heon Jeon1")))
+        .first()
+    )
+    school_without_filtered = await School.objects.first().prefetch_related("students")
+    assert len(school_with_filtered.students) == 1
+    assert len(school_without_filtered.students) == 2
+
+    student_direct_prefetch = await Student.objects.first().prefetch_related("school")
+    assert student_direct_prefetch.school.id == school1.id
+
+    school2 = await School.objects.create(id=2048, name="School2")
+    await Student.objects.all().update(school=school2)
+    student = await Student.objects.first()
+    assert student.school_id == school2.id
+
+    await Student.objects.filter(id=student1.id).update(school=school1)
+    schools = await School.objects.all().order_by("students__name")
+    assert [school.name for school in schools] == ["School1", "School2"]
+    schools = await School.objects.all().order_by("-students__name")
+    assert [school.name for school in schools] == ["School2", "School1"]
+
+    fetched_principal = await Principal.objects.create(name="Sang-Heon Jeon3", school=school1)
+    assert fetched_principal.name == "Sang-Heon Jeon3"
+    fetched_school = await School.objects.filter(name="School1").prefetch_related("principal").first()
+    assert fetched_school.name == "School1"
+
+
+@pytest.mark.asyncio
+async def test_filter_by_fk_instance_uses_to_field(db):
+    # https://github.com/hare/hare-orm/issues/2225
+    # School's primary key is `uuid`, but Student.school points to to_field="id"
+    # (a non-PK unique field). Filtering by a School instance must use the
+    # `to_field` value (school.id), not the primary key (school.uuid).
+    school = await School.objects.create(id=42, name="School1")
+    await Student.objects.create(name="Sang-Heon Jeon1", school=school)
+
+    assert school.pk != school.id
+
+    found = await Student.objects.filter(school=school).first()
+    assert found is not None
+    assert found.name == "Sang-Heon Jeon1"

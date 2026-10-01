@@ -1,0 +1,50 @@
+import importlib.metadata as importlib_metadata
+import os
+import re
+import shlex
+import shutil
+import subprocess  # nosec
+import sys
+from contextlib import chdir
+from pathlib import Path
+
+from hare import __version__
+from hare.contrib import test
+
+
+def _load_version():
+    return importlib_metadata.version("hare-orm")
+
+
+def test_version():
+    assert _load_version() == __version__
+
+
+def _run_shell(cmd: str, **kw) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(shlex.split(cmd), **kw)  # nosec
+
+
+def _capture_output(cmd: str) -> str:
+    return _run_shell(cmd, text=True, capture_output=True, encoding="utf-8").stdout
+
+
+@test.skipIf(
+    os.getenv("HARE_TEST_POETRY_ADD", "").lower() not in ("1", "true", "yes", "on"),
+    "Env 'HARE_TEST_POETRY_ADD' is not true",
+)
+def test_added_by_poetry_v2(tmp_path: Path):
+    hare_orm = Path(__file__).parent.resolve().parent
+    py = "{}.{}".format(*sys.version_info)
+    poetry = "poetry"
+    if shutil.which(poetry) is None:
+        poetry = "uvx " + poetry
+    with chdir(tmp_path):
+        package = "foo"
+        _run_shell(f"{poetry} new {package} --python=^{py}")  # nosec
+        with chdir(package):
+            _run_shell(f"{poetry} config --local virtualenvs.in-project true")  # nosec
+            _run_shell(f"{poetry} env use {py}")  # nosec
+            r = _run_shell(f"{poetry} add {hare_orm}")  # nosec
+            assert r.returncode == 0
+            out = _capture_output(f"{poetry} run pip list")  # nosec
+            assert re.search(rf"hare-orm\s*{__version__}", out)

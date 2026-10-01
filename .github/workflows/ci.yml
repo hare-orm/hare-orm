@@ -1,0 +1,348 @@
+name: ci
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+      - name: Install dependencies
+        run: make deps
+      - name: Run checks
+        run: make check
+
+  # Builds rust.native once from this commit and hands it to every Linux job below as an artifact,
+  # so they all run the Rust source this push carries.
+  build-native-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+      - name: Install dependencies
+        run: make deps
+      - name: Build rust.native
+        run: make build_native
+      - name: Verify the extension imports
+        run: poetry run python -c "from rust.native import pg, rows; print(pg.__version__)"
+      - name: Upload compiled rust.native artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: hare-native-linux-so
+          path: rust/native*.so
+          if-no-files-found: error
+
+  test-sqlite:
+    runs-on: ubuntu-22.04
+    needs: [build-native-linux]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - uses: actions/download-artifact@v5
+        with:
+          name: hare-native-linux-so
+          path: rust/
+      - name: Install dependencies
+        run: make deps
+      - name: Test SQLite
+        run: make test_sqlite
+        env:
+          PYTHONDEVMODE: 1
+      - name: Test SQLite with regexp functions
+        run: make test_sqlite_regexp
+        env:
+          PYTHONDEVMODE: 1
+      - name: Test the columnar test dialect
+        run: make test_columnar
+        env:
+          PYTHONDEVMODE: 1
+      - name: Test poetry add
+        run: |
+          poetry run pytest $PYTEST_ARGS tests/test_version.py::test_added_by_poetry_v2
+        env:
+          HARE_TEST_POETRY_ADD: 1
+          PYTHONDEVMODE: 1
+          PYTEST_ARGS: '-n auto --cov=hare --cov-append --cov-branch --tb=native -q'
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-sqlite
+          path: .coverage
+          if-no-files-found: error
+          include-hidden-files: true
+
+  test-postgres:
+    runs-on: ubuntu-22.04
+    needs: [build-native-linux]
+    services:
+      postgres:
+        image: postgres
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_PASSWORD: 123456
+          POSTGRES_USER: postgres
+        options: --health-cmd=pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      HARE_TEST_MODULES: tests.testmodels
+      HARE_POSTGRES_PASS: 123456
+      HARE_POSTGRES_PORT: 5432
+      HARE_POSTGRES_WORKERS: auto
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - uses: actions/download-artifact@v5
+        with:
+          name: hare-native-linux-so
+          path: rust/
+      - name: Tune Postgres for tests
+        # Every DROP DATABASE forces a checkpoint; with fsync on, those dominate the suite's
+        # runtime. max_prepared_transactions enables the distributed-transaction tests. Both need
+        # a restart, which a services: container can't get through its own options.
+        run: |
+          PGPASSWORD=123456 psql -h 127.0.0.1 -U postgres -c "ALTER SYSTEM SET fsync = off"             -c "ALTER SYSTEM SET full_page_writes = off" -c "ALTER SYSTEM SET synchronous_commit = off"             -c "ALTER SYSTEM SET max_prepared_transactions = 64"
+          docker restart ${{ job.services.postgres.id }}
+          until pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
+      - name: Install dependencies
+        run: make deps
+      - name: Test PostgreSQL asyncpg
+        run: make test_postgres_asyncpg
+        env:
+          PYTHONDEVMODE: 1
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres
+          path: .coverage
+          if-no-files-found: error
+          include-hidden-files: true
+
+  # The whole suite through rust_pg, the default driver of postgresql:// URLs - every value the ORM
+  # reads is decoded by the driver, so the suite runs under each PostgreSQL driver.
+  test-postgres-rust:
+    runs-on: ubuntu-22.04
+    needs: [build-native-linux]
+    services:
+      postgres:
+        image: postgres
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_PASSWORD: 123456
+          POSTGRES_USER: postgres
+        options: --health-cmd=pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      HARE_TEST_MODULES: tests.testmodels
+      HARE_POSTGRES_PASS: 123456
+      HARE_POSTGRES_PORT: 5432
+      HARE_POSTGRES_WORKERS: auto
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - uses: actions/download-artifact@v5
+        with:
+          name: hare-native-linux-so
+          path: rust/
+      - name: Tune Postgres for tests
+        # Every DROP DATABASE forces a checkpoint; with fsync on, those dominate the suite's
+        # runtime. max_prepared_transactions enables the distributed-transaction tests. Both need
+        # a restart, which a services: container can't get through its own options.
+        run: |
+          PGPASSWORD=123456 psql -h 127.0.0.1 -U postgres -c "ALTER SYSTEM SET fsync = off"             -c "ALTER SYSTEM SET full_page_writes = off" -c "ALTER SYSTEM SET synchronous_commit = off"             -c "ALTER SYSTEM SET max_prepared_transactions = 64"
+          docker restart ${{ job.services.postgres.id }}
+          until pg_isready -h 127.0.0.1 -U postgres; do sleep 1; done
+      - name: Install dependencies
+        run: make deps
+      - name: Test PostgreSQL rust_pg driver
+        run: make test_postgres_rust
+        env:
+          PYTHONDEVMODE: 1
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-postgres-rust
+          path: .coverage
+          if-no-files-found: error
+          include-hidden-files: true
+
+  # Windows build of rust.native - build and import only: GitHub runs `services:` containers on
+  # Linux runners alone. Plain pip/maturin calls instead of make, which windows-latest may lack.
+  build-native-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+      - name: Install dependencies
+        run: poetry install --extras asyncpg
+        shell: bash
+      - name: Build rust.native
+        shell: bash
+        run: |
+          pip install maturin
+          rm -f rust/native*.so rust/native*.pyd
+          PYO3_USE_RAW_DYLIB=0 poetry run maturin develop --release --manifest-path rust/native/Cargo.toml
+          cp rust/native/python/rust/native*.pyd rust/
+      - name: Verify the extension imports
+        shell: bash
+        run: poetry run python -c "from rust.native import pg, rows; print(pg.__version__)"
+      - name: Upload compiled rust.native artifact (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: hare-native-windows-pyd
+          path: rust/native*.pyd
+          if-no-files-found: error
+
+  # Commits the Linux .so and the Windows .pyd of rust.native back into dev/main, so a plain git
+  # dependency on the repository gets the rust_pg driver and the codecs without a Rust toolchain.
+  # Gated on every job that ran the Linux build and on the Windows build.
+  commit-native-binary:
+    needs: [test-sqlite, test-postgres, test-postgres-rust, build-native-windows]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: hare-native-linux-so
+          path: rust/
+      - uses: actions/download-artifact@v5
+        with:
+          name: hare-native-windows-pyd
+          path: rust/
+      - name: Commit the compiled extensions if they changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f rust/native*.so rust/native*.pyd
+          if git diff --cached --quiet; then
+            echo "rust.native unchanged - nothing to commit."
+            exit 0
+          fi
+          # [skip ci] - this push must not retrigger this workflow.
+          git commit -m "chore: update compiled rust.native extensions for linux/windows [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+  # Publishes docs/ to GitHub Pages on every push to dev (the repo's actual default branch) -
+  # gated on `check` so a build with broken formatting/types doesn't get published, but not on
+  # the much slower Postgres/Rust test jobs, since a docs-only change shouldn't have to wait on
+  # those. Needs the repo's Pages source set to "GitHub Actions" (Settings -> Pages) once.
+  deploy-docs:
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+      - name: Install dependencies
+        run: make deps
+      - name: Build docs
+        run: poetry run mkdocs build --strict
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
