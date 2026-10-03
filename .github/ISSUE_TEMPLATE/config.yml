@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability / Уязвимость
+    url: https://github.com/hare-orm/hare-orm/security/advisories/new
+    about: Please report vulnerabilities privately - see SECURITY.md. / Сообщайте об уязвимостях закрыто - см. SECURITY.ru.md.
+  - name: Documentation / Документация
+    url: https://hare-orm.github.io/hare-orm/
+    about: Check the reference before filing a "how do I..." question - it's written directly against the source. / Прежде чем спрашивать "как сделать...", загляните в справочник - он написан по исходному коду.

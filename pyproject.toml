@@ -1,0 +1,248 @@
+[project]
+name = "hare-orm"
+version = "0.9.0"
+description = "Easy async ORM for python, built with relations in mind"
+readme = "README.md"
+authors = [
+    {name = "Vladislav Yaremenko", email = "vlad.yaremenko.98@yandex.ru"}
+]
+license = "MIT"
+keywords = ["sql", "postgresql", "postgres", "sqlite", "aiosqlite", "asyncpg", "relational", "database", "rdbms", "orm", "object mapper", "async", "asyncio", "aio"]
+requires-python = ">=3.14"
+dependencies = [
+    # iso8601 stays a base dependency too - hare.fields.data.temporal's own try/except ImportError
+    # falls back to it wherever ciso8601 isn't installed (Windows, where it has no wheel).
+    "iso8601 (>=2.1.0,<3.0.0); python_version < '4.0'",
+    # ciso8601.parse_datetime is a ~36x faster ISO8601 parser than iso8601.parse_date's
+    # regex-based one (measured: 145ms -> 4ms hydrating 100 rows x 300 reps) - every
+    # DatetimeField read on a driver that hands back a string (sqlite; asyncpg only for a
+    # naive TIMESTAMP column) goes through this, so it's worth the same wheel-availability bet
+    # as uvloop below rather than staying opt-in.
+    "ciso8601; sys_platform != 'win32' and implementation_name == 'cpython'",
+    # A faster asyncio event loop - same platform bet as ciso8601 (no Windows wheel).
+    "uvloop; sys_platform != 'win32' and implementation_name == 'cpython'",
+    # orjson (itself Rust-backed) is JSONField's faster json.dumps/loads replacement whenever
+    # installed (hare.fields.data.json's own try/except ImportError) - no platform restriction,
+    # unlike ciso8601/uvloop above.
+    "orjson",
+    "aiosqlite (>=0.20.0,<1.0.0)",
+    "anyio",
+    # Windows ships no system IANA timezone database, so zoneinfo.ZoneInfo() (hare.utils.timezone,
+    # used by every DatetimeField conversion, not just tests) raises
+    # ZoneInfoNotFoundError there without this - Linux/macOS get theirs from the OS itself.
+    "tzdata; sys_platform == 'win32'",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: PL/SQL",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Database",
+    "Typing :: Typed",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[project.optional-dependencies]
+ipython = [
+    "ipython",
+    "nest-asyncio>=1.6.0",
+]
+asyncpg = ["asyncpg"]
+opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+tzlocal = ["tzlocal>=5.0"]
+# Fernet at-rest encryption for hare.fields.EncryptedTextField/EncryptedJSONField.
+encryption = ["cryptography>=42.0"]
+# hare.contrib.request_query - a query built from the parameters of a request.
+request-query = ["pydantic (>=2.0,!=2.7.0)"]
+# hare.contrib.frameworks.litestar - Hare in a Litestar app, request queries as its dependencies.
+litestar = ["litestar (>=2.23,<3.0); python_version < '4.0'", "pydantic (>=2.0,!=2.7.0)"]
+# hare.contrib.frameworks.fastapi - Hare in a FastAPI app, request queries as its dependencies.
+fastapi = ["fastapi (>=0.135); python_version < '4.0'", "pydantic (>=2.0,!=2.7.0)"]
+# hare.contrib.frameworks.robyn - Hare in a Robyn app, request queries for its handlers.
+robyn = ["robyn (>=0.88,<0.89); python_version < '4.0'", "pydantic (>=2.0,!=2.7.0)"]
+
+[project.urls]
+Homepage = "https://github.com/hare-orm/hare-orm"
+Documentation = "https://hare-orm.github.io/hare-orm/"
+Repository = "https://github.com/hare-orm/hare-orm"
+Issues = "https://github.com/hare-orm/hare-orm/issues"
+Changelog = "https://github.com/hare-orm/hare-orm/blob/dev/CHANGELOG.md"
+
+[project.scripts]
+hare = "hare.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [
+    {include = "hare"}
+]
+# The compiled rust.native extension (the rust_pg driver, the row readers/writers and the field
+# codecs) goes into the wheel only. A release builds one wheel per platform with that platform's
+# extension in rust/ (.github/scripts/build_wheel.py, the release workflow), plus a pure wheel and an
+# sdist with none. `rust` has no `__init__.py` (a PEP 420 namespace package): a flat
+# `rust/native*.so`/`rust/native*.pyd` next to the `rust/native/` crate source is what `import
+# rust.native` resolves to, in a checkout (the repository root on sys.path) and in an installed wheel
+# alike. The explicit {path, format} form is what carries a file into the wheel; a bare string reaches
+# only the sdist.
+#
+# A checkout also carries the Linux and Windows builds CI commits into rust/ on every push to
+# dev/main, so a git dependency on the repository has a working rust_pg driver on those platforms
+# without a Rust toolchain.
+include = [
+    {path = "rust/native*.so", format = ["wheel"]},
+    {path = "rust/native*.pyd", format = ["wheel"]},
+]
+
+[tool.poetry.group.dev.dependencies]
+mypy = "*"
+ruff = "*"
+bandit = "*"
+codespell = "*"
+twine = "*"
+types-PyYAML = "*"
+types-pytz = "*"
+pre-commit = "^4.6.2"
+
+[tool.poetry.group.contrib.dependencies]
+# Pydantic support (hare.contrib.pydantic)
+pydantic = ">=2.0,!=2.7.0"
+# Litestar support (hare.contrib.frameworks.litestar)
+litestar = {version = ">=2.23,<3.0", python = "<4.0"}
+# FastAPI support (hare.contrib.frameworks.fastapi)
+fastapi = {version = ">=0.135", python = "<4.0"}
+# Robyn support (hare.contrib.frameworks.robyn)
+robyn = {version = ">=0.88,<0.89", python = "<4.0"}
+pytest-asyncio = ">=0.24.0"
+
+[tool.poetry.group.test.dependencies]
+pytest = "*"
+pytest-xdist = "*"
+pytest-cov = "*"
+pytest-asyncio = "*"
+cryptography = ">=46.0.3"
+pytz = ">=2025.2"
+# The PostgreSQL tests with use_tz=False read the machine's zone name through it.
+tzlocal = ">=5.0"
+
+[tool.poetry.group.docs.dependencies]
+mkdocs = "*"
+mkdocs-material = "*"
+mkdocs-static-i18n = "*"
+
+[tool.mypy]
+pretty = true
+enable_error_code = ["ignore-without-code"]
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_return_any = false
+warn_unused_configs = true
+warn_unreachable = true
+allow_redefinition = true
+strict_equality = true
+show_error_context = true
+
+[[tool.mypy.overrides]]
+module = "hare.contrib.test.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["conftest", "hare.dialects.base.client"]
+disallow_untyped_defs = false
+
+# IPython (used only for the optional interactive `hare shell` command) has no reliable type
+# stubs across the versions the "ipython" extra can resolve to - whether InteractiveShellEmbed()
+# is seen as typed or not flips depending on exactly which IPython version is installed, making a
+# single inline `# type: ignore` unstable (flags as unused-ignore on one installed version, as a
+# real error on another). Disabling untyped-call checking for this one narrow, shell-launching
+# module is immune to that either way, rather than chasing the flip with an inline comment.
+[[tool.mypy.overrides]]
+module = "hare.cli.shell"
+disallow_untyped_calls = false
+
+# rust.native is a native PyO3 extension with no .pyi stubs - `rust/` sitting in the
+# repo as real (non-Python) crate source, not just an absent import, means the blanket
+# ignore_missing_imports above doesn't apply (mypy resolves the namespace package itself just
+# fine, then reports genuine attr-defined errors for the native attributes it has no stub for).
+# follow_imports = "skip" treats the whole import target as untyped (matching the opaque `Any`
+# these modules already were before they had any on-disk presence at all).
+[[tool.mypy.overrides]]
+module = "rust.*"
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# A module's tests run in one xdist worker - its module-scoped database and schema are set up once,
+# not again in every worker a share of its tests lands on.
+addopts = "--dist loadscope"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+markers = [
+    "slow: Tests that spawn real subprocesses or otherwise run noticeably longer than the suite average",
+]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+exclude = [
+    ".bzr", ".direnv", ".eggs", ".git", ".git-rewrite", ".mypy_cache",
+    ".pytest_cache", ".pytype", ".ruff_cache", ".venv", ".vscode", "venv",
+]
+target-version = "py314"
+line-length = 119
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["D"]
+
+[tool.ruff.lint.per-file-ignores]
+# These compare generated output against a large triple-quoted expected-content string - some
+# of its lines are legitimately over the limit (e.g. long generated SQL/migration-file lines);
+# splitting them would insert whitespace into the literal and break the exact-match assertion.
+"tests/migrations/test_writer.py" = ["E501"]
+"tests/schema/test_generate_schema.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.ruff.format]
+indent-style = "space"
+line-ending = "auto"
+docstring-code-format = true
+
+[tool.bandit]
+exclude_dirs = [
+    "tests",
+    "conftest.py",
+]
+
+[tool.codespell]
+# "nam" - deliberately misspelled in a couple of tests/comments demonstrating what a typo'd
+# kwarg (Model(nam="x") instead of name="x") looks like, not an actual typo to fix.
+# "unter" - "Unter den Linden", a real Berlin street name used as test fixture data, not a typo.
+# "aadd", "acount" - Django's async ORM methods, called by the benchmark.
+ignore-words-list = "notin,NotIn,brin,BRIN,astroid,nam,unter,aadd,acount"
