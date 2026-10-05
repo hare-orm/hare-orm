@@ -1,0 +1,4 @@
+<clickhouse>
+    <!-- BEGIN TRANSACTION / COMMIT / ROLLBACK over MergeTree tables - an experimental server feature. -->
+    <allow_experimental_transactions>42</allow_experimental_transactions>
+</clickhouse>
