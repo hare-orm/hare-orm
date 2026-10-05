@@ -1,0 +1,9 @@
+# Force LF for tracked Python source - Windows checkouts must not silently gain CRLF (git's
+# own core.autocrlf conversion) on files migration writers/tests compare byte-for-byte, and
+# generated migrations under */migrations/ are always written with explicit LF (see
+# hare/migrations/writer.py's MigrationWriter.write()) regardless of the platform that ran
+# makemigrations.
+*.py text eol=lf
+
+# Shell scripts run inside Linux containers (tests/docker) - a CRLF line ending breaks their shebang.
+*.sh text eol=lf

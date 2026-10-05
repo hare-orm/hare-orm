@@ -1,0 +1,2 @@
+# Proper names that are not code in documentation.
+doc-valid-idents = ["PostgreSQL", "PyO3", "SQLite", "PgBouncer", "CPython", "PostGIS", "OpenSSL", ".."]

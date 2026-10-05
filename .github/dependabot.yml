@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Python dependencies (pyproject.toml, poetry.lock). One grouped pull request a week keeps the
+  # lock file moving without a pull request per package.
+  - package-ecosystem: pip
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  # The native extension: the PostgreSQL driver, the row readers/writers and the field codecs.
+  - package-ecosystem: cargo
+    directories:
+      - /rust/native
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

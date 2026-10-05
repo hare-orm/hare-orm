@@ -1,0 +1,286 @@
+site_name: hare-orm
+site_description: Async Python ORM for PostgreSQL, SQLite and ClickHouse with pluggable dialects and a Rust PostgreSQL driver.
+site_url: https://hare-orm.github.io/hare-orm/
+repo_url: https://github.com/hare-orm/hare-orm
+repo_name: hare-orm
+
+docs_dir: docs
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/logo-light.png
+  favicon: assets/logo-dark.png
+  font:
+    text: Public Sans
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - content.code.copy
+    - content.tabs.link
+
+extra_css:
+  - assets/extra.css
+
+hooks:
+  - mkdocs_hooks/callout_titles.py
+  - mkdocs_hooks/heading_anchors.py
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: ru
+          name: Русский
+          build: true
+          site_description: Асинхронная ORM для Python с PostgreSQL, SQLite и ClickHouse, подключаемыми диалектами и драйвером PostgreSQL на Rust.
+          nav_translations:
+            Home: Главная
+            Getting started: Начало работы
+            Installation: Установка
+            Your first model: Первая модель
+            Using hare-orm: Работа с hare-orm
+            Models: Модели
+            Field types: Типы полей
+            Encrypted and sensitive fields: Зашифрованные и чувствительные поля
+            Relations: Связи
+            Meta options: Опции Meta
+            Indexes: Индексы
+            Constraints and triggers: Ограничения и триггеры
+            "Views, functions, sequences and access": "Представления, функции, последовательности и доступ"
+            Validators: Проверки значений
+            Model methods: Методы модели
+            Models registered at runtime: "Модели, зарегистрированные во время работы"
+            Querying: Запросы
+            Managers and querysets: Менеджеры и QuerySet
+            QuerySet methods: Методы QuerySet
+            Filters and lookups: Фильтры и операторы фильтра
+            "values() and values_list()": "values() и values_list()"
+            Expressions: Выражения
+            Database functions: Функции базы данных
+            "Aggregates, grouping and window functions": "Агрегаты, группировка и оконные функции"
+            Raw SQL: Сырой SQL
+            Describing filters and orderings: Описание фильтров и сортировок
+            Query plan cache: Кэш планов запросов
+            Type checking queries: Проверка типов запросов
+            Migrations: Миграции
+            The hare command: Команда hare
+            Making and applying migrations: Создание и применение миграций
+            Operations: Операции
+            Zero-downtime migrations: Миграции без остановки приложения
+            Migrations without files: Миграции без файлов
+            Models from an existing database: Модели по существующей базе
+            Detecting drift: Поиск расхождений
+            Connections and transactions: Подключения и транзакции
+            "Configuration and Hare.init()": "Настройка и Hare.init()"
+            Connections: Подключения
+            Transactions: Транзакции
+            Distributed transactions: Распределённые транзакции
+            Several databases: Несколько баз данных
+            Connection poolers: Пулеры соединений
+            "Soft delete, versions and tenants": "Мягкое удаление, версии и арендаторы"
+            Soft delete: Мягкое удаление
+            Versioned models: Версии записей
+            Multi-tenancy: Разделение данных по арендаторам
+            Schema per tenant: Схема на арендатора
+            Observability: Наблюдение
+            Observers: Наблюдатели
+            SQL comment tags: Метки в комментариях SQL
+            N+1 query detection: Поиск повторяющихся запросов (N+1)
+            OpenTelemetry: OpenTelemetry
+            Pool metrics and health: Метрики пула и здоровье
+            Testing: Тестирование
+            Test setup: Настройка тестов
+            Isolation and cleanup: Изоляция и очистка
+            Factories: Фабрики
+            Query and value assertions: Проверки запросов и значений
+            Errors: Ошибки
+            Exceptions: Исключения
+            Migration errors: Ошибки миграций
+            Databases: Базы данных
+            Dialects and features: Диалекты и их возможности
+            Search and geodata: Поиск и геоданные
+            Geographic data (GIS): Геоданные (GIS)
+            PostgreSQL: PostgreSQL
+            ClickHouse: ClickHouse
+            Connecting: Подключение
+            What runs differently: Что работает иначе
+            Query modifiers: Модификаторы запросов
+            Types: Типы
+            Aggregates: Агрегаты
+            Schema objects: Объекты схемы
+            Transactions and locks: Транзакции и блокировки
+            Fields: Поля
+            Functions: Функции
+            Trigram similarity and unaccent: Сходство по триграммам и unaccent
+            Full-text search: Полнотекстовый поиск
+            Vector search: Поиск по векторам
+            LISTEN/NOTIFY: LISTEN/NOTIFY
+            Integrations: Интеграции
+            Pydantic: Pydantic
+            Request queries: Запросы из параметров HTTP-запроса
+            Web frameworks: Веб-фреймворки
+            Litestar: Litestar
+            FastAPI: FastAPI
+            Robyn: Robyn
+            Transactional outbox: Очередь исходящих событий
+            taskiq: taskiq
+            Extending hare-orm: Расширение hare-orm
+            Custom fields: Свои поля
+            Custom lookups: Свои операторы фильтра
+            Custom functions and expressions: Свои функции и выражения
+            Writing a dialect: Как написать диалект
+            Benchmarks: Производительность
+            Summary: Сводка
+            SQLite: SQLite
+
+markdown_extensions:
+  - attr_list
+  - admonition
+  # A GitHub alert (> [!WARNING]) renders as an admonition - the pages read the same on GitHub.
+  - github-callouts
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Your first model: getting-started/first-model.md
+  - Using hare-orm:
+      - Models:
+          - Field types: models/field-types.md
+          - Encrypted and sensitive fields: models/encrypted-and-sensitive-fields.md
+          - Relations: models/relations.md
+          - Meta options: models/meta-options.md
+          - Indexes: models/indexes.md
+          - Constraints and triggers: models/constraints-and-triggers.md
+          - "Views, functions, sequences and access": models/schema-objects.md
+          - Validators: models/validators.md
+          - Model methods: models/model-methods.md
+          - Models registered at runtime: models/runtime-models.md
+      - Querying:
+          - Managers and querysets: querying/managers.md
+          - QuerySet methods: querying/queryset-methods.md
+          - Filters and lookups: querying/filters.md
+          - "values() and values_list()": querying/values.md
+          - Expressions: querying/expressions.md
+          - Database functions: querying/functions.md
+          - "Aggregates, grouping and window functions": querying/aggregation.md
+          - Raw SQL: querying/raw-sql.md
+          - Describing filters and orderings: querying/describing-filters.md
+          - Query plan cache: querying/query-plan-cache.md
+          - Type checking queries: querying/type-checking.md
+      - Migrations:
+          - The hare command: migrations/cli.md
+          - Making and applying migrations: migrations/migrations.md
+          - Operations: migrations/operations.md
+          - Zero-downtime migrations: migrations/zero-downtime.md
+          - Migrations without files: migrations/migrations-without-files.md
+          - Models from an existing database: migrations/inspectdb.md
+          - Detecting drift: migrations/drift.md
+      - Connections and transactions:
+          - "Configuration and Hare.init()": connections/configuration.md
+          - Connections: connections/connections.md
+          - Transactions: connections/transactions.md
+          - Distributed transactions: connections/distributed-transactions.md
+          - Several databases: connections/multiple-databases.md
+          - Connection poolers: connections/connection-poolers.md
+      - "Soft delete, versions and tenants":
+          - Soft delete: soft-delete-versions-tenants/soft-delete.md
+          - Versioned models: soft-delete-versions-tenants/versioned-models.md
+          - Multi-tenancy: soft-delete-versions-tenants/multi-tenancy.md
+          - Schema per tenant: soft-delete-versions-tenants/schema-per-tenant.md
+      - Observability:
+          - Observers: observability/observers.md
+          - SQL comment tags: observability/query-tags.md
+          - N+1 query detection: observability/repeated-queries.md
+          - OpenTelemetry: observability/opentelemetry.md
+          - Pool metrics and health: observability/pool-health.md
+      - Testing:
+          - Test setup: testing/setup.md
+          - Isolation and cleanup: testing/isolation-and-cleanup.md
+          - Factories: testing/factories.md
+          - Query and value assertions: testing/assertions.md
+      - Errors:
+          - Exceptions: errors/exceptions.md
+          - Migration errors: errors/migration-errors.md
+  - Databases:
+      - Dialects and features: dialects/dialects-and-features.md
+      - Search and geodata:
+          - Geographic data (GIS): dialects/search-and-geodata/gis.md
+          - Full-text search: dialects/search-and-geodata/full-text-search.md
+          - Vector search: dialects/search-and-geodata/vector-search.md
+      - PostgreSQL:
+          - Fields: dialects/postgresql/fields.md
+          - Functions: dialects/postgresql/functions.md
+          - Trigram similarity and unaccent: dialects/postgresql/trigrams.md
+          - LISTEN/NOTIFY: dialects/postgresql/listen-notify.md
+      - ClickHouse:
+          - Connecting: dialects/clickhouse/connecting.md
+          - Models: dialects/clickhouse/models.md
+          - Types: dialects/clickhouse/types.md
+          - Query modifiers: dialects/clickhouse/query-modifiers.md
+          - Aggregates: dialects/clickhouse/aggregates.md
+          - Schema objects: dialects/clickhouse/schema-objects.md
+          - Transactions and locks: dialects/clickhouse/transactions-and-locks.md
+          - What runs differently: dialects/clickhouse/differences.md
+          - Testing: dialects/clickhouse/testing.md
+  - Integrations:
+      - Pydantic: integrations/pydantic.md
+      - Request queries: integrations/request-queries.md
+      - Web frameworks:
+          - Litestar: integrations/litestar.md
+          - FastAPI: integrations/fastapi.md
+          - Robyn: integrations/robyn.md
+      - Transactional outbox: integrations/outbox.md
+      - taskiq: integrations/taskiq.md
+  - Extending hare-orm:
+      - Custom fields: extending/custom-fields.md
+      - Custom lookups: extending/custom-lookups.md
+      - Custom functions and expressions: extending/custom-functions-and-expressions.md
+      - Writing a dialect: extending/writing-a-dialect.md
+  - Benchmarks:
+      - Summary: benchmarks/index.md
+      - PostgreSQL: benchmarks/postgresql.md
+      - SQLite: benchmarks/sqlite.md
+      - ClickHouse: benchmarks/clickhouse.md
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
