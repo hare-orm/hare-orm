@@ -1,0 +1,38 @@
+name: Set up Python and poetry
+description: >-
+  The Python a job runs on, the poetry every job installs hare-orm with (make deps, make matrix_venvs),
+  make on Windows, and the poetry cache of that Python and poetry.lock.
+inputs:
+  python-version:
+    description: The Python to set up - a version setup-python takes.
+    required: true
+outputs:
+  python-path:
+    description: The path of the Python's executable.
+    value: ${{ steps.python.outputs.python-path }}
+  python-version:
+    description: The exact version set up.
+    value: ${{ steps.python.outputs.python-version }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v6
+      id: python
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install poetry
+      shell: bash
+      run: pipx install poetry==2.1.4
+    - name: Install make
+      if: runner.os == 'Windows'
+      shell: bash
+      run: command -v make || choco install make --no-progress
+    - uses: actions/cache@v5
+      with:
+        path: |
+          ~/.cache/pypoetry
+          ~/Library/Caches/pypoetry
+          ~/AppData/Local/pypoetry/Cache
+        key: ${{ runner.os }}-poetry-${{ steps.python.outputs.python-version }}-${{ hashFiles('poetry.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-poetry-${{ steps.python.outputs.python-version }}-

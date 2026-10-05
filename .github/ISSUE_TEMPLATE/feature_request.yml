@@ -1,0 +1,28 @@
+name: Feature request / Предложение
+description: Propose new behavior, an API addition, or a missing capability. / Предложите новое поведение, дополнение API или недостающую возможность.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem? / В чём задача?
+      description: What are you trying to do that hare-orm doesn't support today? / Что вы хотите сделать, а hare-orm сейчас этого не умеет?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API / Предлагаемый API
+      description: >
+        Sketch the API you'd want to use, even roughly - a code snippet is worth more than a
+        description here.
+        Набросайте API, которым хотели бы пользоваться, хотя бы примерно, - фрагмент кода здесь
+        полезнее описания.
+      render: python
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried / Какие обходные пути вы пробовали
+      description: Is there already a way to do this today, just an awkward one? / Можно ли сделать это уже сейчас, пусть и неудобно?

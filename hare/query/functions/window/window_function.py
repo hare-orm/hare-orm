@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from hare.classes.value_descriptions import ValueDescriptions
+from hare.exceptions import QueryError
+from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.query.expressions import Expression, F
+from hare.query.functions.window.constants import WINDOW_FUNCTION_ROW_COUNT_MAX
+from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
+from hare.query.plans.description.plannable import Plannable
+from hare.query.plans.enums import PlanPartType
+from hare.sql.terms.functions.analytic_function import AnalyticFunction
+
+if TYPE_CHECKING:
+    from hare.fields.field import Field
+    from hare.query.expressions import ExpressionContext, ExpressionResult
+    from hare.query.expressions.expression_result import TableCriterionTuple
+
+
+class WindowFunction(Plannable, abstract=True):
+    """Base for values usable as the ``expression`` of ``Window(...)``."""
+
+    #: Whether the window gets an explicit ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    #: frame - the default frame of an ordered window ends at the current row.
+    full_partition_frame: bool = False
+    #: Whether the function only passes a field's stored value through (or counts it), so an
+    #: encrypted field's ciphertext still decrypts to a meaningful result.
+    accepts_encrypted_field: bool = False
+    #: The field or expression the function reads - set by a subclass reading one.
+    field: str | Expression
+
+    plan_parts: ClassVar[DeclaredPlanParts] = (("get_plan_options", PlanPartType.KEY_METHOD),)
+
+    def get_plan_options(self) -> tuple[Any, ...]:
+        """Options baked into the function's SQL (not bound values) - part of the plan key."""
+        return ()
+
+    @staticmethod
+    def raise_if_not_read_field(function_name: str, field: Any) -> None:
+        """Rejects what a window function reads when it isn't a field or annotation name or an
+        expression - any other value would be written into the SQL as a constant it reads.
+
+        Args:
+            function_name: The function, for the message.
+            field: What it reads.
+
+        Raises:
+            QueryError: It isn't one.
+        """
+
+        if not isinstance(field, str | Expression) or not field:
+            raise QueryError(f"{function_name}() reads a field name or an expression, got {field!r}")
+
+    @staticmethod
+    def raise_if_not_row_count(function_name: str, argument_name: str, value: Any, lowest: int) -> None:
+        """Rejects a row count argument that isn't an integer from ``lowest`` to
+        ``WINDOW_FUNCTION_ROW_COUNT_MAX`` - an expression the database computes is taken as it is.
+
+        Args:
+            function_name: The function, for the message.
+            argument_name: The argument, for the message.
+            value: The argument's value.
+            lowest: The smallest value it takes.
+
+        Raises:
+            QueryError: It isn't one.
+        """
+        if isinstance(value, Expression):
+            return
+        is_integer = isinstance(value, int) and not isinstance(value, bool)
+        if not is_integer or not lowest <= value <= WINDOW_FUNCTION_ROW_COUNT_MAX:
+            raise QueryError(
+                f"{function_name}() {argument_name} must be an integer from {lowest} to "
+                f"{WINDOW_FUNCTION_ROW_COUNT_MAX}, got {ValueDescriptions.get_shown_value(value)}"
+            )
+
+    def _get_field_result(self, expression_context: ExpressionContext) -> tuple[ExpressionResult, Field[Any] | None]:
+        """Resolves the field or expression this window function reads, refusing an encrypted
+        field - the database would compute over its ciphertext.
+
+        Args:
+            expression_context: The query's resolve context.
+
+        Returns:
+            The resolved field and the field describing its values.
+
+        Raises:
+            QueryError: The field is encrypted.
+        """
+        field_expression = F(self.field) if isinstance(self.field, str) else self.field
+        field_result = field_expression.get_result(expression_context)
+        value_field = (
+            field_result.output_field
+            if isinstance(self.field, str)
+            else field_expression.get_value_field(field_result)
+        )
+        self._raise_if_encrypted_field(value_field)
+        return field_result, value_field
+
+    def _raise_if_encrypted_field(self, field_object: Field[Any] | None) -> None:
+        """Rejects an encrypted field this window function can't compute over.
+
+        Args:
+            field_object: The field the function reads.
+
+        Raises:
+            FieldError: ``field_object`` is encrypted and the function computes over its value.
+        """
+        if not self.accepts_encrypted_field:
+            EncryptedFieldBase.raise_if_encrypted(field_object, f"{type(self).__name__}()")
+
+    def build(
+        self, expression_context: ExpressionContext
+    ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:
+        """Builds the window function's term.
+
+        Args:
+            expression_context: The context the arguments resolve against.
+
+        Returns:
+            The term, the joins its arguments need, and the field its value is read by - None for the
+            function's own.
+        """
+        raise NotImplementedError()
+
+    #: The SQL window function's name.
+    function_name: ClassVar[str]
+    #: The SQL class of the function - one taking a frame (``ROWS BETWEEN ...``) where it has one.
+    analytic_class: ClassVar[type[AnalyticFunction]] = AnalyticFunction
+
+    def get_analytic_term(self, *args: Any) -> AnalyticFunction:
+        """The SQL window function over ``args``."""
+        return self.analytic_class(self.function_name, *args)
