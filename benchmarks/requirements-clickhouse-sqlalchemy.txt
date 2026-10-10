@@ -1,0 +1,5 @@
+# The sqlalchemy-clickhouse target's own environment (.bench-venv-clickhouse-sqlalchemy, Python 3.12):
+# clickhouse-sqlalchemy's asynchronous driver runs only on these versions.
+SQLAlchemy[asyncio]==2.0.30
+clickhouse-sqlalchemy==0.3.2
+asynch==0.2.5

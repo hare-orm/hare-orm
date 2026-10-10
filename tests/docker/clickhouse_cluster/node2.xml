@@ -1,0 +1,7 @@
+<clickhouse>
+    <macros>
+        <shard>01</shard>
+        <replica>node2</replica>
+    </macros>
+    <interserver_http_host>hare-orm-test-clickhouse-node2</interserver_http_host>
+</clickhouse>

@@ -1,0 +1,602 @@
+name: ci
+on:
+  push:
+    branches:
+      - dev
+      - main
+  pull_request:
+  # The whole matrix every night, on the default branch.
+  schedule:
+    - cron: '0 3 * * *'
+  # The whole matrix on demand.
+  workflow_dispatch:
+  # The whole matrix before a release - release.yml calls this workflow with full: true.
+  workflow_call:
+    inputs:
+      full:
+        description: Run the whole matrix.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its older run; pushes to dev and main always finish.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every job runs the Makefile targets a developer runs locally (CONTRIBUTING.md, CI and the test
+# matrix): the test jobs together are `make test_matrix` - Python 3.12-3.14 x SQLite 3.35.5 to the
+# newest on Linux, Windows and macOS, the columnar test dialect, PostgreSQL 14-18 through asyncpg
+# and rust_pg - each job one part of it. The whole matrix runs for a pull request into main, every
+# night, on demand and before a release; a push and a pull request into another branch run its
+# newest corner - the newest Python, SQLite and PostgreSQL (`make test_matrix MATRIX_OPTIONS=--newest`).
+jobs:
+  # Picks the matrix of this run - the whole one, or its newest corner - for the jobs below.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.plan.outputs.full }}
+      sqlite: ${{ steps.plan.outputs.sqlite }}
+      columnar: ${{ steps.plan.outputs.columnar }}
+      postgres: ${{ steps.plan.outputs.postgres }}
+      matrix_options: ${{ steps.plan.outputs.matrix_options }}
+      sqlite_versions: ${{ steps.plan.outputs.sqlite_versions }}
+    steps:
+      - id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          # Set only when release.yml calls this workflow - github.event_name is then the caller's.
+          FULL_REQUESTED: ${{ inputs.full == true }}
+        run: |
+          if [ "$FULL_REQUESTED" = true ] || [ "$EVENT_NAME" = schedule ] || [ "$EVENT_NAME" = workflow_dispatch ] \
+            || { [ "$EVENT_NAME" = pull_request ] && [ "$BASE_REF" = main ]; }; then
+            {
+              echo 'full=true'
+              echo 'sqlite={"os": ["ubuntu-24.04", "windows-2025", "macos-15"], "python": ["3.12", "3.13", "3.14"]}'
+              echo 'columnar={"python": ["3.12", "3.13", "3.14"]}'
+              echo 'postgres={"postgres": ["14", "15", "16", "17", "18"], "python": ["3.12", "3.13", "3.14"]}'
+              echo 'matrix_options='
+              echo 'sqlite_versions='
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo 'full=false'
+              echo 'sqlite={"os": ["ubuntu-24.04"], "python": ["3.14"]}'
+              echo 'columnar={"python": ["3.14"]}'
+              echo 'postgres={"postgres": ["18"], "python": ["3.14"]}'
+              echo 'matrix_options=--newest'
+              echo 'sqlite_versions=newest'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+  # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
+  # the Rust unit tests, and actionlint on these workflows - `make check`.
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # The toolchain rust-toolchain.toml pins.
+      - name: Install Rust
+        run: rustup toolchain install
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-3.12-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-3.12-
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+      - name: Install dependencies
+        run: make deps
+      - name: Run checks
+        run: make check
+
+  # rust.native of Python 3.12, 3.13 and 3.14 for Linux, built in the maturin image (manylinux2014)
+  # from this commit - `make build_native_linux`. Every Linux job below runs it, and
+  # commit-native-binary commits it.
+  build-native-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+      - name: Build rust.native
+        run: make build_native_linux
+      - name: The extension of every Python is built
+        run: |
+          for version in 312 313 314; do
+            test -f "rust/native.cpython-$version-x86_64-linux-gnu.so" || { echo "::error::rust.native for cp$version is missing."; exit 1; }
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/native.cpython-*-x86_64-linux-gnu.so
+          if-no-files-found: error
+
+  # rust.native of Python 3.12, 3.13 and 3.14 for Windows and for macOS (one universal2 file per Python,
+  # for Apple silicon and Intel Macs), built on the runner on every run - `make build_native_windows`,
+  # `make build_native_macos`. commit-native-binary commits them with the Linux ones, so a checkout on
+  # any of the three systems runs without a Rust toolchain.
+  build-native:
+    name: build-native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            make_target: build_native_windows
+            extension_files: rust/native.cp3*-win_amd64.pyd
+          - os: macos-15
+            make_target: build_native_macos
+            extension_files: rust/native.cpython-3*-darwin.so
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
+      # `python` poetry runs on.
+      - uses: actions/setup-python@v6
+        id: python312
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-python@v6
+        id: python313
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-python@v6
+        id: python314
+        with:
+          python-version: '3.14'
+      # The toolchain rust-toolchain.toml pins.
+      - name: Install Rust
+        run: rustup toolchain install
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - name: Install make
+        if: runner.os == 'Windows'
+        run: command -v make || choco install make --no-progress
+      - uses: actions/cache@v5
+        with:
+          path: rust/native/target
+          key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-native-
+      - name: Install dependencies
+        run: make deps
+      - name: Build rust.native
+        env:
+          PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          PYTHON_314: ${{ steps.python314.outputs.python-path }}
+        run: make ${{ matrix.make_target }} native_interpreters="$PYTHON_312 $PYTHON_313 $PYTHON_314"
+      - name: The extension of every Python imports
+        env:
+          PYTHON_312: ${{ steps.python312.outputs.python-path }}
+          PYTHON_313: ${{ steps.python313.outputs.python-path }}
+          PYTHON_314: ${{ steps.python314.outputs.python-path }}
+        run: |
+          for python in "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"; do
+            "$python" -c "from rust.native import pg, rows; print(pg.__version__)"
+          done
+      - uses: actions/upload-artifact@v5
+        with:
+          name: native-${{ runner.os }}
+          path: ${{ matrix.extension_files }}
+          if-no-files-found: error
+
+  # The suite on every SQLite version of the matrix and with SQLite's regular expression functions,
+  # and the tests reading no test database (a suite of their own, run here once per OS and Python
+  # and in no other job), on each Python and each OS: the version is loaded through LD_LIBRARY_PATH (Linux), next to a copy
+  # of _sqlite3.pyd on PYTHONPATH (Windows) or through an _sqlite3 module built against it (macOS,
+  # where Python carries SQLite linked in statically), and a run on another SQLite stops at once -
+  # `make matrix_venvs`, `make sqlite_versions`, `make test_matrix`.
+  test-sqlite:
+    name: test-sqlite (${{ matrix.os }}, ${{ matrix.python }})
+    needs: [plan, build-native-linux, build-native]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.sqlite) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - name: Install make
+        if: runner.os == 'Windows'
+        run: command -v make || choco install make --no-progress
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-${{ matrix.python }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-${{ matrix.python }}-
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-${{ runner.os }}
+          path: rust/
+      - name: Create the virtualenv
+        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      - name: Prepare the SQLite versions
+        run: make sqlite_versions matrix_python_versions=${{ matrix.python }} matrix_sqlite_versions="${{ needs.plan.outputs.sqlite_versions }}"
+      # The SpatiaLite tests read the library from HARE_TEST_SPATIALITE_PATH (and PROJ's proj.db from
+      # HARE_TEST_SPATIALITE_PROJ_DATABASE on Windows, where the download carries its own).
+      - name: Install SpatiaLite
+        run: |
+          case "${{ runner.os }}" in
+            Linux)
+              sudo apt-get update
+              sudo apt-get install -y libsqlite3-mod-spatialite
+              echo "HARE_TEST_SPATIALITE_PATH=mod_spatialite" >> "$GITHUB_ENV" ;;
+            macOS)
+              brew install libspatialite
+              echo "HARE_TEST_SPATIALITE_PATH=$(brew --prefix)/lib/mod_spatialite" >> "$GITHUB_ENV" ;;
+            Windows)
+              make spatialite matrix_python_versions=${{ matrix.python }} >> "$GITHUB_ENV" ;;
+          esac
+      - name: Test every SQLite version
+        run: |
+          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent --suite 'sqlite-*' \
+            --workers auto --print-failed-logs \
+            ${{ needs.plan.outputs.matrix_options }}"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: matrix-logs-sqlite-${{ runner.os }}-${{ matrix.python }}
+          path: .test-matrix/
+          if-no-files-found: ignore
+
+  # The whole suite on the columnar test dialect, a third-party dialect without transactions, foreign
+  # keys or unique constraints - `make test_matrix` with the columnar suite.
+  test-columnar:
+    name: test-columnar (${{ matrix.python }})
+    needs: [plan, build-native-linux]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.columnar) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-${{ matrix.python }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-${{ matrix.python }}-
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Create the virtualenv
+        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      - name: Test the columnar test dialect
+        run: make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite columnar --workers auto --print-failed-logs"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: matrix-logs-columnar-${{ matrix.python }}
+          path: .test-matrix/
+          if-no-files-found: ignore
+
+  # The whole suite on each PostgreSQL version through both drivers, asyncpg and rust_pg, on each
+  # Python. The server is the test image (tests/docker/postgres: PostGIS, pgvector and the contrib
+  # extensions - ltree, hstore, citext, pg_trgm, unaccent, ...) - `make test_db_matrix_up`,
+  # `make matrix_venvs`, `make test_matrix`.
+  test-postgres:
+    name: test-postgres (${{ matrix.postgres }}, ${{ matrix.python }})
+    needs: [plan, build-native-linux]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.postgres) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-${{ matrix.python }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-${{ matrix.python }}-
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Start PostgreSQL ${{ matrix.postgres }}
+        run: make test_db_matrix_up matrix_postgres_versions=${{ matrix.postgres }}
+      - name: Create the virtualenv
+        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      - name: Test PostgreSQL ${{ matrix.postgres }} through asyncpg and rust_pg
+        run: |
+          make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} \
+            --suite rust_pg-${{ matrix.postgres }} --print-failed-logs"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: matrix-logs-postgres-${{ matrix.postgres }}-${{ matrix.python }}
+          path: .test-matrix/
+          if-no-files-found: ignore
+
+  # hare's direct dependencies at the lowest versions their declared bounds allow, on Python 3.12
+  # (uv, --resolution lowest-direct), the whole suite on SQLite and on PostgreSQL through both
+  # drivers - `make lowest_dependencies_venv`, `make test_db_up`, `make test_lowest_dependencies`.
+  # Part of the whole matrix only.
+  # The outbox's wakeups and deliveries against live Redis, RabbitMQ and Kafka - `make test_brokers_up`,
+  # `make test_brokers`.
+  test-brokers:
+    needs: [plan, build-native-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Install dependencies
+        run: make deps
+      - name: Start the brokers
+        run: make test_brokers_up
+      - name: Test the wakeups and deliveries
+        run: make test_brokers
+
+  # The ClickHouse dialect's own tests against a live server - `make test_clickhouse_up`,
+  # `make test_clickhouse`.
+  test-clickhouse:
+    needs: [plan, build-native-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Install dependencies
+        run: make deps options="--extras clickhouse --extras clickhouse-driver"
+      - name: Start ClickHouse
+        run: make test_clickhouse_up
+      - name: Test the ClickHouse dialect
+        run: make test_clickhouse
+
+  # The Postgres suite through PgBouncer in transaction pooling (1.21+, prepared statements across
+  # transactions) with both drivers - `make test_db_up`, `make test_pgbouncer_up`, `make test_pgbouncer`.
+  test-pgbouncer:
+    needs: [plan, build-native-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Install dependencies
+        run: make deps
+      - name: Start PostgreSQL and PgBouncer
+        run: make test_db_up test_pgbouncer_up
+      - name: Test through PgBouncer
+        run: make test_pgbouncer
+
+  test-lowest-dependencies:
+    needs: [plan, build-native-linux]
+    if: needs.plan.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        run: pipx install uv==0.12.7
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - name: Start PostgreSQL
+        run: make test_db_up
+      - name: Install the lowest dependency versions
+        run: make lowest_dependencies_venv
+      - name: Test on the lowest dependency versions
+        run: make test_lowest_dependencies
+
+  # A poetry project adding hare-orm from this checkout as its dependency - `make test_poetry_add`.
+  test-poetry-add:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-3.12-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-3.12-
+      - name: Install dependencies
+        run: make deps
+      - name: Add hare-orm to a new poetry project
+        run: make test_poetry_add
+
+  # Commits the nine compiled rust.native files - rust/native.cpython-3XX-x86_64-linux-gnu.so,
+  # rust/native.cp3XX-win_amd64.pyd and rust/native.cpython-3XX-darwin.so for Python 3.12, 3.13 and
+  # 3.14 - back into dev/main, so a checkout or a plain git dependency on the repository gets the
+  # rust_pg driver and the codecs on Linux, Windows and macOS without a Rust toolchain. Runs only when every check and every test job of the run passed - a
+  # job the run's matrix leaves out (test-lowest-dependencies on a push) is skipped, not failed.
+  commit-native-binary:
+    needs:
+      - check
+      - build-native-linux
+      - build-native
+      - test-sqlite
+      - test-columnar
+      - test-postgres
+      - test-brokers
+      - test-clickhouse
+      - test-pgbouncer
+      - test-lowest-dependencies
+      - test-poetry-add
+    if: >-
+      !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+      && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Linux
+          path: rust/
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-Windows
+          path: rust/
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-macOS
+          path: rust/
+      - name: Commit the compiled extensions if they changed
+        run: |
+          extension_files=()
+          for version in 312 313 314; do
+            extension_files+=(
+              "rust/native.cpython-$version-x86_64-linux-gnu.so"
+              "rust/native.cp$version-win_amd64.pyd"
+              "rust/native.cpython-$version-darwin.so"
+            )
+          done
+          for extension_file in "${extension_files[@]}"; do
+            test -f "$extension_file" || { echo "::error::$extension_file is missing."; exit 1; }
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f "${extension_files[@]}"
+          if git diff --cached --quiet; then
+            echo "rust.native unchanged - nothing to commit."
+            exit 0
+          fi
+          # [skip ci] - this push must not retrigger this workflow.
+          git commit -m "chore: update compiled rust.native extensions for linux/windows/macos [skip ci]"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+  # Publishes docs/ to GitHub Pages on every push to dev (the repo's actual default branch) -
+  # gated on `check` so a build with broken formatting/types doesn't get published, but not on
+  # the much slower test jobs, since a docs-only change shouldn't have to wait on those. Needs the
+  # repo's Pages source set to "GitHub Actions" (Settings -> Pages) once - `make docs`.
+  deploy-docs:
+    needs: [check]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install poetry
+        run: pipx install poetry==2.1.4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/pypoetry
+            ~/Library/Caches/pypoetry
+            ~/AppData/Local/pypoetry/Cache
+          key: ${{ runner.os }}-poetry-3.14-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-3.14-
+      - name: Build docs
+        run: make docs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "hare-native"
+version = "0.1.0"
+description = "The native part of hare-orm: the rust_pg PostgreSQL driver, row reading and writing, field codecs and the SQLite functions."
+requires-python = ">=3.12"
+
+[tool.maturin]
+module-name = "rust.native"
+manifest-path = "Cargo.toml"
+python-source = "python"

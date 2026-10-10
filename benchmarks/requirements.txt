@@ -1,0 +1,12 @@
+# The libraries benchmarks/bench.py compares hare-orm with, at the versions the published results use.
+# hare-orm itself comes from the checkout: pip install -e . -r benchmarks/requirements.txt
+asyncpg==0.31.0
+clickhouse-cityhash==1.0.2.6
+clickhouse-connect[async]==1.10.0
+clickhouse-driver==0.2.11
+Django==6.1.1
+django-clickhouse-backend==2.0
+psycopg[binary,pool]==3.3.6
+SQLAlchemy[asyncio]==2.1.1
+tortoise-orm[asyncpg]==1.1.8
+yara-orm==1.17.0

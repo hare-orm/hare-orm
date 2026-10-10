@@ -1,0 +1,18 @@
+{
+    "connections": {
+        "default": {
+            "engine": "sqlite+aiosqlite",
+            "credentials": {
+                "file_path": "/tmp/tester.sqlite"
+            }
+        }
+    },
+    "apps": {
+        "models": {
+            "models": [
+                "tests.testmodels"
+            ],
+            "default_connection": "default"
+        }
+    }
+}

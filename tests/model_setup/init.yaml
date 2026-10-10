@@ -1,0 +1,10 @@
+apps:
+  models:
+    default_connection: default
+    models:
+      - tests.testmodels
+connections:
+  default:
+    credentials:
+      file_path: ":memory:"
+    engine: sqlite+aiosqlite

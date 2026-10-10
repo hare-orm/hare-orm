@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import dataclasses
+from copy import copy
+from typing import TYPE_CHECKING, Any, ClassVar, cast
+
+from hare.exceptions import (
+    FieldError,
+    QueryError,
+)
+from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
+from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
+from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
+from hare.query.expressions.expression_context import ExpressionContext
+from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.f import F
+from hare.query.lookup_info.lookup_paths import LookupPaths
+from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
+from hare.query.plans.enums import PlanPartType
+from hare.sql.terms.term import Term
+
+if TYPE_CHECKING:  # pragma: nocoverage
+    from collections.abc import Iterator
+
+from hare.query.expressions.subqueries.outer_query_state import (
+    outer_aggregate_references,
+    outer_expression_context,
+    outer_extra_joins,
+    outer_reference_terms,
+)
+from hare.sql.terms.qualified_outer_field import QualifiedOuterField
+from hare.sql.terms.subqueries.outer_aggregate_term import OuterAggregateTerm
+
+
+class OuterReference(CombinableExpression):
+    """A reference to a field of the outer query from a child queryset in
+    ``Exists(...)``/``Subquery(...)``; outside one it raises ``QueryError``. The field may be
+    reached through a relation (``OuterReference("author__name")``) - the join is added to the outer
+    query.
+
+    Example:
+        ``Ticket.objects.annotate(open=Exists(Report.objects.filter(ticket_id=OuterReference("id"),
+        status="open")))``
+    """
+
+    def __init__(self, field: str) -> None:
+        if not isinstance(field, str):
+            raise QueryError(
+                f"OuterReference(...) expects a field NAME (str), got {field!r} - nesting one OuterReference "
+                "inside another isn't supported, since there's only ever one enclosing outer "
+                "query to refer to."
+            )
+        self.field = field
+
+    plan_parts: ClassVar[DeclaredPlanParts] = (("field", PlanPartType.KEY),)
+
+    @staticmethod
+    def _record_outer_reference_terms(column_terms: list[Term]) -> None:
+        """Hands the outer columns this reference reads to the enclosing Exists/Subquery.
+
+        Args:
+            column_terms: The outer query's column terms.
+        """
+        if (reference_terms := outer_reference_terms.get()) is not None:
+            reference_terms.extend(column_terms)
+
+    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        outer_context = outer_expression_context.get()
+        if outer_context is None:
+            raise QueryError("OuterReference() can only be used inside a queryset wrapped in Exists(...)")
+        if "__" in self.field:
+            term, joins, nested_output_field = LookupPaths.get_nested_field(
+                outer_context.model,
+                outer_context.table,
+                self.field,
+                visibility=outer_context.visibility,
+                select_related_extra_conditions=outer_context.select_related_extra_conditions,
+                dialect=expression_context.dialect,
+                connection=expression_context.connection,
+            )
+            # Every join table of a relation path is aliased, so the term is always qualified.
+            extra_joins = outer_extra_joins.get()
+            if extra_joins is not None:
+                extra_joins.extend(joins)
+            # A to-many hop joined into the outer query repeats its rows like any other JOIN.
+            if (tracker := AggregatedMultiValuedPaths.get_from(outer_context)) is not None:
+                tracker.record_lookup(outer_context.model, self.field, outer_context.select_related_path_prefix)
+            self._record_outer_reference_terms(term.get_group_by_column_terms())
+            return ExpressionResult(term=term, output_field=nested_output_field)
+        # A term that always qualifies its column: the reference crosses a query boundary, and the
+        # child query computes its own namespacing - an unqualified "id" would bind to the child's
+        # table.
+        outer_meta = outer_context.model._meta
+        field_name = (
+            outer_meta.primary_key_attribute
+            if self.field == "pk" and isinstance(outer_meta.primary_key_attribute, str)
+            else self.field
+        )
+        field_object = outer_meta.fields_map.get(field_name)
+        if field_name not in outer_meta.fields_db_projection and isinstance(
+            field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)
+        ):
+            # A forward relation's own name means its key column, as F("author") does.
+            if len(field_object.source_fields) > 1:
+                raise FieldError(
+                    f"OuterReference('{self.field}'): {outer_context.model.__name__}.{self.field} is a "
+                    "composite relation - reference each of its key columns separately instead."
+                )
+            field_name = cast("str", field_object.source_field)
+            field_object = outer_meta.fields_map.get(field_name)
+        column = outer_meta.fields_db_projection.get(field_name)
+        if column is not None:
+            outer_field_term = QualifiedOuterField(outer_context.table, column)
+            self._record_outer_reference_terms([outer_field_term])
+            return ExpressionResult(term=outer_field_term, output_field=field_object)
+        if field_name in outer_context.annotations:
+            # The enclosing query's annotation is resolved again here, its values recorded where
+            # the reference stands.
+            annotation_result = F(field_name).get_result(
+                dataclasses.replace(
+                    outer_context, value_wrapper_references=expression_context.value_wrapper_references
+                )
+            )
+            annotation_term = annotation_result.term
+            annotation_nodes: Iterator[Any] = annotation_term.nodes_()
+            if any(getattr(node, "is_analytic", False) is True for node in annotation_nodes):
+                raise QueryError(
+                    f"OuterReference('{self.field}') references a window function (Window(...)) annotation - "
+                    "SQL does not allow a window function inside a subquery of the query computing it. "
+                    "Wrap the outer queryset in a subquery and reference that instead."
+                )
+            if annotation_term.contains_aggregate:
+                if (aggregate_references := outer_aggregate_references.get()) is not None:
+                    aggregate_references.append(field_name)
+                annotation_term = OuterAggregateTerm(annotation_term)
+            outer_table = outer_context.table
+            if not outer_table.alias:
+                # Aliased under its own name so every outer column inside the annotation renders
+                # table-qualified, whatever namespace setting the child query renders with.
+                qualified_outer_table = copy(outer_table)
+                qualified_outer_table.alias = outer_table.get_table_name()
+                annotation_term = annotation_term.replace_table(outer_table, qualified_outer_table)
+            self._record_outer_reference_terms(annotation_term.get_group_by_column_terms())
+            return ExpressionResult(term=annotation_term, output_field=annotation_result.output_field)  # type:ignore[call-overload]
+        raise FieldError(f"OuterReference('{self.field}'): no such field on {outer_context.model.__name__}")
