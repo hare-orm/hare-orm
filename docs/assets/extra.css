@@ -1,0 +1,79 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
+
+:root {
+  --md-primary-fg-color: #ab4b2b;
+  --md-primary-fg-color--light: #c0653f;
+  --md-primary-fg-color--dark: #7c3820;
+  --md-primary-bg-color: #faf9f4;
+  --md-accent-fg-color: #ab4b2b;
+  --md-accent-fg-color--transparent: #ab4b2b1a;
+
+  --md-default-bg-color: #faf9f4;
+  --md-default-fg-color: #1e1b15;
+  --md-default-fg-color--light: #6e6754;
+  --md-default-fg-color--lighter: #9a927b;
+  --md-typeset-a-color: #7c3820;
+
+  --hare-sidebar-bg: #f2efe6;
+  --hare-border: #e7e1d1;
+  --hare-code-bg: #1c221f;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #e2884f;
+  --md-primary-fg-color--light: #eda471;
+  --md-primary-fg-color--dark: #c06a35;
+  --md-accent-fg-color: #e2884f;
+  --md-accent-fg-color--transparent: #e2884f1a;
+
+  --md-default-bg-color: #15130f;
+  --md-default-fg-color: #ede7d8;
+  --md-default-fg-color--light: #a89d84;
+  --md-default-fg-color--lighter: #756c59;
+  --md-typeset-a-color: #f0a877;
+
+  --hare-sidebar-bg: #100e0b;
+  --hare-border: #2c2619;
+  --hare-code-bg: #0f1412;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 600;
+}
+
+.md-header,
+.md-tabs {
+  background-color: var(--md-default-bg-color);
+  color: var(--md-default-fg-color);
+  border-bottom: 1px solid var(--hare-border);
+}
+
+.md-nav {
+  background-color: var(--hare-sidebar-bg);
+}
+
+.md-typeset code {
+  background-color: var(--hare-code-bg);
+}
+
+/* The logo follows the colour scheme: the light one in the light scheme, the dark one in slate. */
+.md-logo img.hare-logo {
+  height: 1.6rem;
+  width: 1.6rem;
+  border-radius: 0.3rem;
+}
+
+.md-logo img.hare-logo--dark {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .md-logo img.hare-logo--light {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .md-logo img.hare-logo--dark {
+  display: block;
+}
