@@ -455,8 +455,8 @@ class QuerySet:
 мягко удалённые, если запрос их видит (`Model.objects.only_deleted().hard_delete()` очищает корзину).
 Связанные строки следуют своему `on_delete` так же, как при `delete()` модели без мягкого удаления; у
 модели без `Meta.soft_delete_field` это то же, что `delete()`. У модели с переопределённым
-`hard_delete()` оно вызывается для каждой подходящей строки по одной. Результат ожидания — число строк — `None` на
-базе, которая его не сообщает (`Features.reports_written_row_count` выключен: ClickHouse).
+`hard_delete()` оно вызывается для каждой подходящей строки по одной. Результат ожидания — число
+строк — `None` на базе, которая его не сообщает (`Features.reports_written_row_count` выключен: ClickHouse).
 
 ### <a id="restore"></a>`restore()`
 

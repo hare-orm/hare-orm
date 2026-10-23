@@ -73,9 +73,10 @@ one query per relation and model, however many rows it reaches. A related model 
 has that override called for each of its rows — a relation leading to it, even one the database enforces,
 is then cascaded in Python. A row a hard delete removes for real (`hard_delete()`, or the cascade of a
 model without soft delete) whose model has `Meta.soft_delete_field` goes through that model's own
-`hard_delete()` override instead - its `delete()` would only mark it deleted; without one the cascade
-goes on below it to the overrides there. With `Meta.optimistic_lock_field` the row is deleted only at the version the
-instance read it at — a row changed since raises `StaleObjectError` and stays, the rows the cascade
+`hard_delete()` override instead — its `delete()` would only mark it deleted; without one the cascade
+goes on below it to the overrides there. With `Meta.optimistic_lock_field` the row is deleted only at
+the version the instance read it at — a row changed since raises `StaleObjectError` and stays, the rows
+the cascade
 removed with it too. Raises `QueryError` (never saved), `IncompleteInstanceError` (the pk or
 `Meta.optimistic_lock_field` not loaded), `ProtectedError` (a `PROTECT` relation blocks it),
 `IntegrityError`, `StaleObjectError`.

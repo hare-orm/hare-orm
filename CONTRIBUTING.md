@@ -44,7 +44,7 @@ poetry run pre-commit install
 ```
 
 On every commit the hooks run `codespell`, `check-yaml`, `end-of-file-fixer` and `trailing-whitespace`,
-then `make _check` — the same ruff, mypy, bandit, Rust and actionlint checks, with the same tool
+then `make _check` — the same ruff, mypy, bandit, Rust, actionlint and docs checks, with the same tool
 versions, as `make check` and CI's check job — and, for a commit touching Python files, `make test`
 (the whole SQLite suite). The Rust checks need a Rust toolchain, and
 actionlint runs in Docker (see [Code style & checks](#code-style--checks)).
@@ -336,7 +336,7 @@ part of it:
 
 | Job | What it does | Makefile targets |
 | --- | --- | --- |
-| `check` | ruff format check, ruff, mypy and bandit on Python 3.12; cargo fmt, clippy and the Rust unit tests; actionlint | `make deps`, `make check` |
+| `check` | ruff format check, ruff, mypy and bandit on Python 3.12; cargo fmt, clippy and the Rust unit tests; actionlint; the documentation built in strict mode | `make deps`, `make check` |
 | `build-native-linux` | `rust.native` for Python 3.12, 3.13 and 3.14 on Linux, in the maturin image (manylinux2014) | `make build_native_linux` |
 | `build-native` | `rust.native` for Python 3.12, 3.13 and 3.14 on Windows and on macOS (universal2), one job per system | `make deps`, `make build_native_windows`, `make build_native_macos` |
 | `test-sqlite` | every SQLite version and `sqlite-regexp`, on Linux, one job per Python | `make matrix_venvs`, `make sqlite_versions`, `make test_matrix` |
@@ -358,7 +358,7 @@ The test jobs run the `rust.native` this commit builds, not the committed files,
 ```bash
 make style   # auto-format (ruff format + ruff check --fix)
 make lint    # auto-format + type-check (mypy) + bandit
-make check   # format check + ruff + mypy + bandit + rust_check + actionlint, no auto-fixing — what CI runs
+make check   # format check + ruff + mypy + bandit + rust_check + actionlint + strict docs build, no auto-fixing — what CI runs
 make actionlint                         # the GitHub Actions workflows, in the pinned actionlint image
 make actionlint ACTIONLINT=actionlint   # the same with an installed actionlint binary
 ```

@@ -31,7 +31,8 @@ concurrency:
 # Makefile's matrix_* variables.
 jobs:
   # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
-  # the Rust unit tests, and actionlint on these workflows - `make check`.
+  # the Rust unit tests, actionlint on these workflows and the documentation built in strict mode -
+  # `make check`.
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

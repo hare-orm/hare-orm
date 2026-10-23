@@ -45,7 +45,7 @@ poetry run pre-commit install
 ```
 
 При каждом коммите хуки выполняют `codespell`, `check-yaml`, `end-of-file-fixer` и `trailing-whitespace`,
-затем `make _check` — те же проверки ruff, mypy, bandit, Rust и actionlint тех же версий, что и
+затем `make _check` — те же проверки ruff, mypy, bandit, Rust, actionlint и документации тех же версий, что и
 `make check` и задание `check` в CI, — а для коммита, затрагивающего файлы Python, ещё и `make test`
 (весь набор SQLite). Проверкам Rust нужен инструментарий Rust, а
 actionlint запускается в Docker (см. [Стиль кода и проверки](#стиль-кода-и-проверки)).
@@ -340,7 +340,7 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 
 | Задание | Что делает | Цели Makefile |
 | --- | --- | --- |
-| `check` | проверка форматирования ruff, ruff, mypy и bandit на Python 3.12; cargo fmt, clippy и модульные тесты Rust; actionlint | `make deps`, `make check` |
+| `check` | проверка форматирования ruff, ruff, mypy и bandit на Python 3.12; cargo fmt, clippy и модульные тесты Rust; actionlint; строгая сборка документации | `make deps`, `make check` |
 | `build-native-linux` | `rust.native` для Python 3.12, 3.13 и 3.14 под Linux, в образе maturin (manylinux2014) | `make build_native_linux` |
 | `build-native` | `rust.native` для Python 3.12, 3.13 и 3.14 под Windows и под macOS (universal2), по заданию на систему | `make deps`, `make build_native_windows`, `make build_native_macos` |
 | `test-sqlite` | все версии SQLite и `sqlite-regexp`, на Linux, по заданию на версию Python | `make matrix_venvs`, `make sqlite_versions`, `make test_matrix` |
@@ -363,7 +363,7 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 ```bash
 make style   # автоформатирование (ruff format + ruff check --fix)
 make lint    # автоформатирование + проверка типов (mypy) + bandit
-make check   # проверка форматирования + ruff + mypy + bandit + rust_check + actionlint без исправлений — то, что выполняет CI
+make check   # проверка форматирования + ruff + mypy + bandit + rust_check + actionlint + строгая сборка документации без исправлений — то, что выполняет CI
 make actionlint                         # процессы GitHub Actions, в закреплённом образе actionlint
 make actionlint ACTIONLINT=actionlint   # то же установленным бинарником actionlint
 ```

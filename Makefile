@@ -126,6 +126,7 @@ _check:
 	"$(MAKE)" _codeqc
 	"$(MAKE)" rust_check
 	"$(MAKE)" actionlint
+	"$(MAKE)" _docs
 
 # actionlint checks the workflows of .github/workflows - their syntax, expressions, job dependencies,
 # and their shell scripts through shellcheck. The default runs the pinned actionlint image, which
@@ -562,7 +563,9 @@ testall: deps _testall
 
 ci: check _testall
 
-docs: deps
+docs: deps _docs
+# The documentation built in strict mode - a broken link or a docs style warning fails it.
+_docs:
 	poetry run mkdocs build --strict
 
 build: deps

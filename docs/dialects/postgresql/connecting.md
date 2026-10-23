@@ -96,7 +96,7 @@ request arriving late can never cancel the next statement instead.
 
 The cancelled query stops on the server as well, also behind a pooler such as PgBouncer: a pooler
 forwards a cancel request only while the client connection it names is still open, so a connection taken
-out of the pool for a timed-out query is closed only after its cancel request has been delivered - or,
+out of the pool for a timed-out query is closed only after its cancel request has been delivered — or,
 when no answer to it comes within another `command_timeout` (a network that stopped answering), closed
 then, so the call still ends after about twice `command_timeout`. See
 [Health checks and unresponsive servers](../../connections/connections.md#health-checks).
