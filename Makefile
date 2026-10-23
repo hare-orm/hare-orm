@@ -513,7 +513,7 @@ build_native:
 	cp rust/native/python/rust/native*.* rust/
 
 # The Linux extension of every matrix Python (rust/native.cpython-3XX-x86_64-linux-gnu.so), built in
-# the maturin image (manylinux2014, glibc 2.17+) - what CI commits for Linux, and how a Windows or
+# the maturin image (manylinux2014, glibc 2.17+) - what CI's Linux jobs run, and how a Windows or
 # macOS checkout gets it. Everything runs inside the container, which also takes the extensions out
 # of the wheels and removes them, so no file the container's root owns is left to delete outside it.
 build_native_linux:
@@ -527,8 +527,8 @@ build_native_linux:
 # every matrix Python; CI passes the runner's own Pythons.
 native_interpreters ?= $(foreach version,$(matrix_python_versions),.venv-$(version)/$(if $(filter Windows_NT,$(OS)),Scripts/python.exe,bin/python))
 
-# The Windows extension of every matrix Python (rust/native.cp3XX-win_amd64.pyd) - what CI commits for
-# Windows. Only the Windows files are replaced; the Linux and macOS ones stay. A build `maturin
+# The Windows extension of every matrix Python (rust/native.cp3XX-win_amd64.pyd) - what CI's Windows
+# jobs run. Only the Windows files are replaced; the Linux and macOS ones stay. A build `maturin
 # develop` left in rust/native/python is removed: on the venv's path it would shadow these for a
 # script run outside the repository.
 build_native_windows:
@@ -538,7 +538,7 @@ build_native_windows:
 	rm -rf rust/native/wheels
 
 # The macOS extension of every matrix Python (rust/native.cpython-3XX-darwin.so), one universal2 file
-# for Apple silicon and Intel Macs - what CI commits for macOS. Only the macOS files are replaced.
+# for Apple silicon and Intel Macs - what CI's macOS jobs run. Only the macOS files are replaced.
 build_native_macos:
 	rm -f rust/native*-darwin.so rust/native/python/rust/native*.so
 	rustup target add aarch64-apple-darwin x86_64-apple-darwin

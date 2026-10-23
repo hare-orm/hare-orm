@@ -207,10 +207,9 @@ make rust_check             # cargo fmt --check, clippy and the Rust unit tests 
 and the row readers/writers with the field codecs (`rust.native.rows`). It is optional at runtime:
 without it, use `postgresql+asyncpg://` URLs, and rows are read and written in pure Python. CI builds
 it on every run for Python 3.12, 3.13 and 3.14 on Linux, Windows and macOS (one universal2 file per
-Python for Apple silicon and Intel Macs), shares it with every job that needs it, and commits the
-nine files (`rust/native.cpython-3XX-x86_64-linux-gnu.so`, `rust/native.cp3XX-win_amd64.pyd` and
-`rust/native.cpython-3XX-darwin.so`) back to `dev` and `main` — a checkout on any of the three
-systems runs without a Rust toolchain, and you only need to rebuild after changing `rust/` source.
+Python for Apple silicon and Intel Macs) and shares it with every job that needs it. The built files
+aren't committed: a checkout has no `rust.native` until `make build_native` builds it with the Rust
+toolchain `rust-toolchain.toml` pins, and the wheels on PyPI carry it built.
 
 ## Test matrix and CI
 
@@ -347,10 +346,9 @@ part of it:
 | `test-clickhouse` | the ClickHouse dialect's tests on one ClickHouse version and on a cluster of it, both drivers: each version on Python 3.14, 25.8 also on 3.12 and 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | the outbox's wakeups and deliveries against the oldest and newest Redis, RabbitMQ and Kafka, one job per Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-poetry-add` | a new poetry project adding hare-orm from the checkout, one job per OS (Linux, Windows, macOS) and Python | `make deps`, `make test_poetry_add` |
-| `commit-native-binary` | on a push to `dev`/`main`, once every job of the run passed: commits the nine Linux, Windows and macOS `rust.native` files | — |
-| `deploy-docs` | on a push to `dev`: publishes the documentation | `make docs` |
+| `deploy-docs` | on a push to `main`: publishes the documentation | `make docs` |
 
-The test jobs run the `rust.native` this commit builds, not the committed files, and upload their
+The test jobs run the `rust.native` this commit builds, and upload their
 `.test-matrix/` logs as artifacts; a failed run's output is also printed in the job's log.
 
 ## Code style & checks
