@@ -75,6 +75,8 @@ target/
 
 # The wheels of a Docker build of rust/native/ (make build_native_linux)
 rust/native/wheels/
+# The shared libraries a release's build_wheel.py takes from maturin's wheel
+/hare_native.libs/
 
 # Jupyter Notebook
 .ipynb_checkpoints

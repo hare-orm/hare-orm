@@ -159,10 +159,12 @@ packages = [
 # `rust/native*.so`/`rust/native*.pyd` next to the `rust/native/` crate source is what `import
 # rust.native` resolves to, in a checkout (the repository root on sys.path) and in an installed wheel
 # alike. The explicit {path, format} form is what carries a file into the wheel; a bare string reaches
-# only the sdist.
+# only the sdist. hare_native.libs/ holds the shared libraries maturin's repair bundled with the
+# extension (libgcc_s on musllinux), which the extension loads from ../hare_native.libs.
 include = [
     {path = "rust/native*.so", format = ["wheel"]},
     {path = "rust/native*.pyd", format = ["wheel"]},
+    {path = "hare_native.libs/*", format = ["wheel"]},
 ]
 
 [tool.poetry.group.dev.dependencies]
