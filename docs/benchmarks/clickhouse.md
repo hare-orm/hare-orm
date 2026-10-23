@@ -92,6 +92,6 @@ run to the worst.
 - Every scenario is written the way that ORM's documentation writes it.
 
 The benchmark is
-[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) in the
-repository; its [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.md) lists
+[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py) in the
+repository; its [README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.md) lists
 every scenario and how to run it on your own machine.

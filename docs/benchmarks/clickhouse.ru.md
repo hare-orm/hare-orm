@@ -91,6 +91,6 @@ HTTP (более быстром драйвере hare-orm в этом прого
   новых версиях её асинхронный драйвер не запускается.
 - Каждый сценарий написан так, как его пишет документация этой ORM.
 
-Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) в
-репозитории; в его [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.ru.md)
+Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py) в
+репозитории; в его [README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.ru.md)
 перечислены все сценарии и описано, как повторить замер на своей машине.

@@ -31,7 +31,7 @@ class BenchmarkPages:
         "ru": BENCHMARK_DIRECTORY / "README.ru.md",
     }
     SITE_URL = "https://hare-orm.github.io/hare-orm/"
-    REPOSITORY_URL = "https://github.com/hare-orm/hare-orm/blob/dev/"
+    REPOSITORY_URL = "https://github.com/hare-orm/hare-orm/blob/main/"
     GENERATED_NOTICE = "<!-- Written by benchmarks/bench.py (`all` or `charts`): edit the text there, not here. -->"
     #: The page's heading and the name of each database's server in the version table.
     SERVER_NAMES: ClassVar[dict[str, str]] = {
