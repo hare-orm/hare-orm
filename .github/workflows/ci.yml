@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -45,7 +45,7 @@ jobs:
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -62,8 +62,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/cache@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -76,7 +76,7 @@ jobs:
           for version in 312 313 314; do
             test -f "rust/native.cpython-$version-x86_64-linux-gnu.so" || { echo "::error::rust.native for cp$version is missing."; exit 1; }
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: native-Linux
           path: rust/native.cpython-*-x86_64-linux-gnu.so
@@ -103,7 +103,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
       # `python` poetry runs on.
       - uses: actions/setup-python@v6
@@ -121,7 +121,7 @@ jobs:
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -144,7 +144,7 @@ jobs:
           for python in "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"; do
             "$python" -c "from rust.native import pg, rows; print(pg.__version__)"
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: native-${{ runner.os }}
           path: ${{ matrix.extension_files }}
@@ -163,12 +163,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -186,7 +186,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'sqlite-*' \
             --workers auto --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-sqlite-${{ matrix.python }}
@@ -210,12 +210,12 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-${{ runner.os }}
           path: rust/
@@ -225,7 +225,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent --workers auto \
             --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-database-independent-${{ runner.os }}-${{ matrix.python }}
@@ -247,12 +247,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -264,7 +264,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} \
             --suite rust_pg-${{ matrix.postgres }} --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-postgres-${{ matrix.postgres }}-${{ matrix.python }}
@@ -284,13 +284,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install uv
         run: pipx install uv==0.12.7
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -313,12 +313,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -330,7 +330,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' \
             --suite 'kafka-*' --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-brokers-${{ matrix.python }}
@@ -357,12 +357,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -374,7 +374,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}' \
             --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-clickhouse-${{ matrix.clickhouse }}-${{ matrix.python }}
@@ -401,12 +401,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -420,7 +420,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} \
             --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}' --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-pgbouncer-${{ matrix.pgbouncer }}-${{ matrix.postgres }}-${{ matrix.python }}
@@ -442,7 +442,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -471,17 +471,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: '3.14'
       - name: Build docs
         run: make docs
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: site
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

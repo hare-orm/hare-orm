@@ -17,7 +17,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v6
@@ -52,7 +52,7 @@ jobs:
             echo "::error::CHANGELOG.md has no section for $version."
             exit 1
           fi
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: release-notes.md
@@ -118,7 +118,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
       # `python` of the steps below.
       - uses: actions/setup-python@v6
@@ -217,7 +217,7 @@ jobs:
               -e "PYTHON_TAG=cp${version/./}" "python:$version-alpine" \
               sh -c 'pip install /dist/*-"$PYTHON_TAG"-"$PYTHON_TAG"-*.whl && python /scripts/check_wheel.py --platform-wheel'
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-wheels-${{ matrix.platform }}
           path: dist/*.whl
@@ -229,7 +229,7 @@ jobs:
   pure-wheel-and-sdist:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
@@ -254,7 +254,7 @@ jobs:
           cp .github/scripts/check_wheel.py "$RUNNER_TEMP/"
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/wheel-check/bin/python" check_wheel.py --pure-wheel
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-pure-wheel-and-sdist
           path: dist/
@@ -272,7 +272,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
@@ -287,12 +287,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: release-notes
       - name: Create the GitHub release
