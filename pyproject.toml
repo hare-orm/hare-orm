@@ -160,10 +160,6 @@ packages = [
 # rust.native` resolves to, in a checkout (the repository root on sys.path) and in an installed wheel
 # alike. The explicit {path, format} form is what carries a file into the wheel; a bare string reaches
 # only the sdist.
-#
-# A checkout also carries the Linux and Windows builds CI commits into rust/ on every push to
-# dev/main, so a git dependency on the repository has a working rust_pg driver on those platforms
-# without a Rust toolchain.
 include = [
     {path = "rust/native*.so", format = ["wheel"]},
     {path = "rust/native*.pyd", format = ["wheel"]},

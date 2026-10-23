@@ -9,12 +9,6 @@ __pycache__/
 *.so
 *.pyd
 *.pdb
-# rust/native*.so (Linux, macOS) and rust/native*.pyd (Windows) are the exception: CI builds them on
-# every push to dev/main and commits them back (.github/workflows/ci.yml's commit-native-binary job),
-# so a checkout or a service depending on hare-orm as a plain git dependency gets the rust_pg driver
-# without a Rust toolchain. Anchored flat under rust/, not rust/native/python/rust/, where `maturin develop` lands.
-!/rust/native*.so
-!/rust/native*.pyd
 .idea
 _static
 _build

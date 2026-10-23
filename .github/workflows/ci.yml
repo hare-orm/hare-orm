@@ -57,8 +57,7 @@ jobs:
         run: make check
 
   # rust.native of Python 3.12, 3.13 and 3.14 for Linux, built in the maturin image (manylinux2014)
-  # from this commit - `make build_native_linux`. Every Linux job below runs it, and
-  # commit-native-binary commits it.
+  # from this commit - `make build_native_linux`. Every Linux job below runs it.
   build-native-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -85,8 +84,7 @@ jobs:
 
   # rust.native of Python 3.12, 3.13 and 3.14 for Windows and for macOS (one universal2 file per Python,
   # for Apple silicon and Intel Macs), built on the runner on every run - `make build_native_windows`,
-  # `make build_native_macos`. commit-native-binary commits them with the Linux ones, so a checkout on
-  # any of the three systems runs without a Rust toolchain.
+  # `make build_native_macos`. The jobs testing on Windows and macOS run them.
   build-native:
     name: build-native (${{ matrix.os }})
     strategy:
@@ -456,78 +454,14 @@ jobs:
       - name: Add hare-orm to a new poetry project
         run: make test_poetry_add
 
-  # Commits the nine compiled rust.native files - rust/native.cpython-3XX-x86_64-linux-gnu.so,
-  # rust/native.cp3XX-win_amd64.pyd and rust/native.cpython-3XX-darwin.so for Python 3.12, 3.13 and
-  # 3.14 - back into dev/main, so a checkout or a plain git dependency on the repository gets the
-  # rust_pg driver and the codecs on Linux, Windows and macOS without a Rust toolchain. Runs only when
-  # every check and every test job of the run passed.
-  commit-native-binary:
-    needs:
-      - check
-      - build-native-linux
-      - build-native
-      - test-sqlite
-      - test-database-independent
-      - test-postgres
-      - test-brokers
-      - test-clickhouse
-      - test-pgbouncer
-      - test-lowest-dependencies
-      - test-poetry-add
-    if: >-
-      !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
-      && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.ref_name }}
-      - uses: actions/download-artifact@v5
-        with:
-          name: native-Linux
-          path: rust/
-      - uses: actions/download-artifact@v5
-        with:
-          name: native-Windows
-          path: rust/
-      - uses: actions/download-artifact@v5
-        with:
-          name: native-macOS
-          path: rust/
-      - name: Commit the compiled extensions if they changed
-        run: |
-          extension_files=()
-          for version in 312 313 314; do
-            extension_files+=(
-              "rust/native.cpython-$version-x86_64-linux-gnu.so"
-              "rust/native.cp$version-win_amd64.pyd"
-              "rust/native.cpython-$version-darwin.so"
-            )
-          done
-          for extension_file in "${extension_files[@]}"; do
-            test -f "$extension_file" || { echo "::error::$extension_file is missing."; exit 1; }
-          done
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f "${extension_files[@]}"
-          if git diff --cached --quiet; then
-            echo "rust.native unchanged - nothing to commit."
-            exit 0
-          fi
-          # [skip ci] - this push must not retrigger this workflow.
-          git commit -m "chore: update compiled rust.native extensions for linux/windows/macos [skip ci]"
-          git push origin "HEAD:${{ github.ref_name }}"
-
-  # Publishes docs/ to GitHub Pages on every push to dev (the repo's actual default branch) -
+  # Publishes docs/ to GitHub Pages on every push to main - the documentation of the released code, and
+  # the branch the github-pages environment deploys from -
   # gated on `check` so a build with broken formatting/types doesn't get published, but not on
   # the much slower test jobs, since a docs-only change shouldn't have to wait on those. Needs the
   # repo's Pages source set to "GitHub Actions" (Settings -> Pages) once - `make docs`.
   deploy-docs:
     needs: [check]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

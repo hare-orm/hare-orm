@@ -210,10 +210,9 @@ make rust_check             # cargo fmt --check, clippy и модульные т
 и чтение и запись строк с кодеками полей (`rust.native.rows`). Во время работы он необязателен: без него
 используйте адреса `postgresql+asyncpg://`, а строки читаются и пишутся на чистом Python. CI собирает его
 при каждом запуске для Python 3.12, 3.13 и 3.14 на Linux, Windows и macOS (под macOS — один файл
-universal2 на версию Python для Apple silicon и Intel), передаёт всем заданиям, которым он нужен, и
-коммитит девять файлов (`rust/native.cpython-3XX-x86_64-linux-gnu.so`, `rust/native.cp3XX-win_amd64.pyd`
-и `rust/native.cpython-3XX-darwin.so`) обратно в `dev` и `main` — checkout на любой из трёх систем
-работает без инструментария Rust, а пересобирать нужно, только если вы меняли исходники в `rust/`.
+universal2 на версию Python для Apple silicon и Intel) и передаёт всем заданиям, которым он нужен.
+Собранные файлы не коммитятся: в checkout `rust.native` нет, пока его не соберёт `make build_native`
+инструментарием Rust, который закрепляет `rust-toolchain.toml`; колёса на PyPI несут его собранным.
 
 ## Матрица тестов и CI
 
@@ -351,11 +350,9 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 | `test-clickhouse` | тесты диалекта ClickHouse на одной версии ClickHouse и на кластере из неё, оба драйвера: каждая версия на Python 3.14, 25.8 ещё и на 3.12 и 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | обработчики пробуждения и доставки outbox на самых старых и новейших Redis, RabbitMQ и Kafka, по заданию на версию Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-poetry-add` | новый проект poetry добавляет hare-orm из checkout, по заданию на ОС (Linux, Windows, macOS) и версию Python | `make deps`, `make test_poetry_add` |
-| `commit-native-binary` | при пуше в `dev`/`main`, когда все задания запуска прошли: коммитит девять файлов `rust.native` для Linux, Windows и macOS | — |
-| `deploy-docs` | при пуше в `dev`: публикует документацию | `make docs` |
+| `deploy-docs` | при пуше в `main`: публикует документацию | `make docs` |
 
-Задания тестов работают с `rust.native`, собранным из этого коммита, а не с файлами из репозитория,
-и выкладывают логи `.test-matrix/` как артефакты; вывод упавшего прогона печатается и в логе
+Задания тестов работают с `rust.native`, собранным из этого коммита, и выкладывают логи `.test-matrix/` как артефакты; вывод упавшего прогона печатается и в логе
 задания.
 
 ## Стиль кода и проверки
