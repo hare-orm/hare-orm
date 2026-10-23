@@ -96,7 +96,7 @@ class WheelCheck:
             scheme = db_url.split(":")[0]
             if list(titles) != ["written by the wheel"]:
                 raise SystemExit(f"{scheme}: read back {titles!r}")
-            client_class_name = type(WheelCheckNote._meta.db).__name__
+            client_class_name = type(WheelCheckNote._meta.connection).__name__
             if scheme == "postgresql" and not client_class_name.startswith("RustPg"):
                 raise SystemExit(f"postgresql:// ran on {client_class_name}, not the Rust driver")
             print(f"{scheme}: a row written and read back through {client_class_name}")
