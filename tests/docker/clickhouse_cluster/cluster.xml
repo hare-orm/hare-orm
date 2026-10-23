@@ -1,0 +1,45 @@
+<clickhouse>
+    <remote_servers>
+        <!-- One shard kept by both servers - a Replicated table has a copy on each. -->
+        <hare_replicated>
+            <secret>hare-orm-test-cluster</secret>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>hare-orm-test-clickhouse-node1</host>
+                    <port>9000</port>
+                </replica>
+                <replica>
+                    <host>hare-orm-test-clickhouse-node2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </hare_replicated>
+        <!-- Two shards, one server each - a Distributed table spreads its rows over them. -->
+        <hare_sharded>
+            <secret>hare-orm-test-cluster</secret>
+            <shard>
+                <replica>
+                    <host>hare-orm-test-clickhouse-node1</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <replica>
+                    <host>hare-orm-test-clickhouse-node2</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </hare_sharded>
+    </remote_servers>
+    <zookeeper>
+        <node>
+            <host>hare-orm-test-clickhouse-node1</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+    <listen_host>0.0.0.0</listen_host>
+</clickhouse>

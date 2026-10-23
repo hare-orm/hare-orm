@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from hare.migrations.exceptions import IncompatibleStateError
+from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS, MISSING_MODEL_MESSAGE
+from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
+from hare.migrations.operations.enums import DependencyType
+from hare.migrations.operations.hare_operation import HareOperation
+from hare.migrations.operations.models.model_table_operation import ModelTableOperation
+from hare.migrations.reports.operation_effect import OperationEffect
+from hare.migrations.state.state import State
+from hare.migrations.state.state_apps import StateApps
+
+if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
+    from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+
+
+class DeleteModel(ModelTableOperation, HareOperation):
+    """Deletes a model and drops its table."""
+
+    def __init__(self, name: str, state_only: bool = False) -> None:
+        """
+        Args:
+            name: The model's class name.
+            state_only: Only removes the model from the migration state and keeps its table, e.g.
+                for a model moved to another app.
+        """
+        self.name = name
+        self.state_only = state_only
+
+    def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
+        """The model deleted."""
+        return frozenset({self.get_model_label(self.name, app_label)})
+
+    def get_table_model_names(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def get_unmet_requirement_message(self, app_label: str, requirement: OperationDependency) -> str:
+        return (
+            f"Can't delete model {app_label}.{self.name}: {requirement.app_label}.{requirement.model_name}."
+            f"{requirement.name} still references it in app {requirement.app_label!r}'s migrations. Run "
+            f"makemigrations for {requirement.app_label!r} in the same run, so its migration removing the "
+            "reference is applied first."
+        )
+
+    def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
+        return [OperationDependency.of_model(app_label, self.name, DependencyType.REMOVED)]
+
+    def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
+        """Every relation of another model pointing at the model or going through it - removed or
+        repointed first."""
+        return [
+            OperationDependency.of_field(*model_key, field_name, DependencyType.CHANGED)
+            for model_key, field_name, _field in RelationDependencies.get_relations_to(state, app_label, self.name)
+        ]
+
+    def describe(self) -> str:
+        if self.state_only:
+            return f"Delete model {self.name} (state only, its table is kept)"
+        return f"Delete model {self.name}"
+
+    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect:
+        if self.state_only:
+            return OperationEffect(operation=self, reversible=self.reversible)
+        return OperationEffect(
+            operation=self,
+            reversible=self.reversible,
+            loses_data=True,
+            reason=f"drops the table of {self.name} with its rows",
+        )
+
+    def state_forward(self, app_label: str, state: State) -> None:
+        model_reference = f"{app_label}.{self.name}"
+        model_key = (app_label, self.name)
+
+        for state_key, model_state in state.models.items():
+            if state_key == model_key:
+                # The model's own self-referencing relation doesn't keep it.
+                continue
+            for field_name, field in model_state.fields.items():
+                if not isinstance(field, DIRECT_RELATION_FIELDS):
+                    continue
+
+                # A label, a model class or a swappable reference alike.
+                if StateApps.split_reference(field.model_name) == model_key:
+                    raise IncompatibleStateError(
+                        f"{model_reference} is still referenced from {model_state.app}.{model_state.name} "
+                        f"(field {field_name!r}) - the migration removing or repointing that field must "
+                        f"run before the one deleting {model_reference}."
+                    )
+
+        model_state_to_delete = state.models.pop((app_label, self.name), None)
+        if not model_state_to_delete:
+            raise IncompatibleStateError(MISSING_MODEL_MESSAGE.format(app_label=app_label, model_name=self.name))
+
+        state.mark_model_removed(app_label, self.name)
+        state.mark_models_changed(
+            StateApps.split_reference(field.model_name)
+            for field in model_state_to_delete.fields.values()
+            if isinstance(field, DIRECT_RELATION_FIELDS)
+        )
+
+    async def database_forward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+    ) -> None:
+        await self._delete_model_table(app_label, old_state, state_editor)
+
+    async def database_backward(
+        self,
+        app_label: str,
+        old_state: State,
+        new_state: State,
+        state_editor: BaseSchemaEditor | None = None,
+    ) -> None:
+        await self._create_model_table(app_label, new_state, state_editor)
