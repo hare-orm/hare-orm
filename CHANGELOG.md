@@ -1,0 +1,124 @@
+# Changelog
+
+[Русская версия](CHANGELOG.ru.md)
+
+Every user-visible change to hare-orm is recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the version numbers follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) as described in
+[Versioning and releases](README.md#versioning-and-releases).
+
+Each release lists its changes in these groups, in this order, leaving out empty ones:
+
+- **Breaking changes** - public API that was removed or renamed, or that now behaves differently.
+  Each entry says what to change in your code.
+- **Added** - new features and new public API.
+- **Changed** - changed behavior that needs no change in your code.
+- **Fixed** - bug fixes.
+- **Removed** - features dropped without a replacement.
+- **Security** - fixed vulnerabilities, with their advisory links.
+
+Changes merged into `dev` since the last release are collected under **Unreleased**, and a release
+renames that section to its version and date.
+
+## [Unreleased]
+
+## [0.9.0] - 2026-10-23
+
+The first public release of hare-orm - an async Python ORM for PostgreSQL, SQLite and ClickHouse. It
+brings the whole code base over from the project's earlier private development: hare-orm began as a
+fork of [Tortoise ORM](https://github.com/tortoise/tortoise-orm) and carries an adapted copy of
+[PyPika](https://github.com/kayak/pypika)'s query builder (see [NOTICE](NOTICE.md)), and most of both
+has since been rewritten. Every entry below is new in this release.
+
+It runs on CPython 3.12, 3.13 and 3.14, with PostgreSQL 14 and newer, SQLite 3.35.5 and newer and
+ClickHouse 25.8 and newer - see [Installation](https://hare-orm.github.io/hare-orm/getting-started/installation/).
+Wheels with the Rust extension are built for Linux (glibc and musl), macOS and Windows.
+
+### Added
+
+- **Models** - `Model` classes with typed fields, relations and `Meta` options: foreign keys,
+  one-to-one and many-to-many relations (through models included), generic relations made of real
+  foreign keys, composite primary keys everywhere - as foreign-key targets too - and models without
+  a primary key; validators, `db_default` and generated columns, encrypted fields with blind indexes
+  and sensitive fields hidden from errors and logs; models built at runtime from a table - see
+  [Field types](https://hare-orm.github.io/hare-orm/models/field-types/),
+  [Relations](https://hare-orm.github.io/hare-orm/models/relations/) and
+  [Meta options](https://hare-orm.github.io/hare-orm/models/meta-options/).
+- **Queries** - a lazy `QuerySet` with Django-style lookups across relations, `Q`/`F` expressions,
+  annotations, aggregation (grouping sets included), window functions, `Case`/`When`,
+  `Subquery`/`Exists`/`OuterReference`, set operations, CTEs and recursive queries over a tree,
+  keyset pagination, `values()`/`values_list()`, `select_related()`/`prefetch_related()` with
+  filters, bulk create and update, upserts, `MERGE`, `select_for_update()`, raw SQL through
+  `RawSQLTerm` and the query builder - and an error instead of an aggregate a to-many JOIN would
+  silently inflate - see [QuerySet methods](https://hare-orm.github.io/hare-orm/querying/queryset-methods/),
+  [Filters](https://hare-orm.github.io/hare-orm/querying/filters/) and
+  [Expressions](https://hare-orm.github.io/hare-orm/querying/expressions/).
+- **Statement plans** - a query of a shape seen before runs on the SQL built for the first one,
+  binding only its own values; repeated `get()`, filters, writes and instance saves skip building
+  SQL altogether - see [Query plan cache](https://hare-orm.github.io/hare-orm/querying/query-plan-cache/).
+- **The schema in `Meta`** - constraints (`EXCLUDE` included), partial and expression indexes,
+  triggers, views and materialized views, database functions, sequences, row level security
+  policies, grants, table partitioning and per-database table options, created and changed by
+  migrations - see [Constraints and triggers](https://hare-orm.github.io/hare-orm/models/constraints-and-triggers/),
+  [Indexes](https://hare-orm.github.io/hare-orm/models/indexes/) and
+  [Schema objects](https://hare-orm.github.io/hare-orm/models/schema-objects/).
+- **Behavior declared in `Meta`** - soft delete with restore, versioned rows, multi-tenancy by column,
+  by schema or by row level security, optimistic locking, dirty-field tracking and change capture
+  into a transactional outbox - see [Soft delete](https://hare-orm.github.io/hare-orm/soft-delete-versions-tenants/soft-delete/),
+  [Versioned models](https://hare-orm.github.io/hare-orm/soft-delete-versions-tenants/versioned-models/) and
+  [Multi-tenancy](https://hare-orm.github.io/hare-orm/soft-delete-versions-tenants/multi-tenancy/).
+- **Migrations** - migrations detected from the changes to the models, written as files or run
+  without them, squashed, checked for operations that lock a busy table (zero-downtime rules),
+  compared with the live database (`hare drift`) and generated from an existing one
+  (`hare inspectdb`); the `hare` CLI with its plugin commands - see
+  [Migrations](https://hare-orm.github.io/hare-orm/migrations/migrations/),
+  [Operations](https://hare-orm.github.io/hare-orm/migrations/operations/) and
+  [CLI](https://hare-orm.github.io/hare-orm/migrations/cli/).
+- **Connections and transactions** - pools with health checks, nested transactions with savepoints,
+  isolation levels, read-only transactions and statement timeouts, `on_commit()`/`on_rollback()`
+  callbacks, read replicas and routers with read-your-writes, several databases, distributed
+  transactions by two-phase commit, PgBouncer in transaction mode - see
+  [Transactions](https://hare-orm.github.io/hare-orm/connections/transactions/) and
+  [Multiple databases](https://hare-orm.github.io/hare-orm/connections/multiple-databases/).
+- **Pluggable dialects** - SQLite, PostgreSQL and ClickHouse are dialects built on the public
+  `hare.dialects` API a third-party package uses; a database lacking a feature raises a clear error
+  before any SQL is sent instead of returning a wrong result - see
+  [Dialects and features](https://hare-orm.github.io/hare-orm/dialects/dialects-and-features/) and
+  [Writing a dialect](https://hare-orm.github.io/hare-orm/extending/writing-a-dialect/).
+- **PostgreSQL** - a Rust driver (`rust_pg`), the default for `postgresql://` URLs, decoding rows and
+  converting values in Rust, and the `asyncpg` driver; arrays, ranges, hstore, ltree, network and
+  native enum types, the GIN/GiST/BRIN/Bloom/Hash/SP-GiST index family, trigram search and
+  `LISTEN`/`NOTIFY` - see [PostgreSQL fields](https://hare-orm.github.io/hare-orm/dialects/postgresql/fields/) and
+  [LISTEN/NOTIFY](https://hare-orm.github.io/hare-orm/dialects/postgresql/listen-notify/).
+- **SQLite** - through `aiosqlite`, with exact decimals, regular expressions and the date, text and
+  math functions SQLite lacks registered on the connection, attached databases standing for
+  schemas - see [SQLite: what runs differently](https://hare-orm.github.io/hare-orm/dialects/sqlite/differences/).
+- **ClickHouse** - over HTTP (`clickhouse-connect`) and the native protocol (`clickhouse-driver`):
+  MergeTree engines and their table options, clusters with `Distributed` tables, dictionaries,
+  projections, `ARRAY JOIN`, `ASOF JOIN`, `LIMIT BY` and ClickHouse's own aggregates and types - see
+  [ClickHouse models](https://hare-orm.github.io/hare-orm/dialects/clickhouse/models/) and
+  [ClickHouse: what runs differently](https://hare-orm.github.io/hare-orm/dialects/clickhouse/differences/).
+- **Search and geodata** - full-text search (PostgreSQL, SQLite FTS5), vector search (pgvector,
+  sqlite-vec) and GIS (PostGIS, SpatiaLite, ClickHouse geometry types) - see
+  [Full-text search](https://hare-orm.github.io/hare-orm/dialects/search-and-geodata/full-text-search/),
+  [Vector search](https://hare-orm.github.io/hare-orm/dialects/search-and-geodata/vector-search/) and
+  [GIS](https://hare-orm.github.io/hare-orm/dialects/search-and-geodata/gis/).
+- **Integrations** - request queries turning HTTP parameters into a validated, paginated query;
+  Litestar, FastAPI and Robyn integrations; Pydantic schemas of models; a transactional outbox with
+  Kafka, RabbitMQ, Redis Streams, webhook and taskiq deliveries - see
+  [Request queries](https://hare-orm.github.io/hare-orm/integrations/request-queries/),
+  [Web frameworks](https://hare-orm.github.io/hare-orm/integrations/web-frameworks/) and
+  [Outbox](https://hare-orm.github.io/hare-orm/integrations/outbox/).
+- **Observability** - observers of queries and writes, OpenTelemetry spans and metrics, SQL comment
+  tags, a repeated-query (N+1) detector and pool health - see
+  [Observers](https://hare-orm.github.io/hare-orm/observability/observers/) and
+  [OpenTelemetry](https://hare-orm.github.io/hare-orm/observability/opentelemetry/).
+- **Testing and type checking** - a pytest plugin with isolated test databases, factories and
+  query-count assertions; a mypy plugin rejecting misspelled filters and typing the rows of
+  `values()`, and stubs for pyright - see [Test setup](https://hare-orm.github.io/hare-orm/testing/setup/) and
+  [Type checking](https://hare-orm.github.io/hare-orm/querying/type-checking/).
+- **Documentation** in English and Russian, and benchmarks against SQLAlchemy, Tortoise ORM,
+  yara-orm and Django - see [Benchmarks](https://hare-orm.github.io/hare-orm/benchmarks/).
+
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...dev
+[0.9.0]: https://github.com/hare-orm/hare-orm/releases/tag/v0.9.0

@@ -1,0 +1,5 @@
+# The Rust toolchain of the native extension - the one CI and a local `make check` both use, so a
+# check passing on one passes on the other. A new version is an update of this file.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

@@ -1,0 +1,111 @@
+# Versioned models
+
+`VersionedModel` of `hare.contrib.versioning` is an append-only versioning base: every change creates a
+new row sharing the same `id` but a higher `version`, instead of mutating a row in place.
+
+```python
+class VersionedModel(Model):
+    id = fields.UUIDField(default=uuid4, db_index=True)
+    version = fields.PositiveSmallIntField(default=1)
+    pk = CompositePrimaryKey("id", "version")
+
+    class Meta:
+        abstract = True
+
+    @classmethod
+    async def get_last_version_or_exception(
+        cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
+    ) -> Self: ...
+
+    def get_new_version(self, **kwargs: Any) -> Self: ...      # raises QueryError if kwargs has "id"/"version"
+    async def create_new_version(self, **kwargs: Any) -> Self: ...
+```
+
+`id` and `version` together are the table's real primary key, not a surrogate one with a bolted-on
+uniqueness constraint — which means a foreign key can target a specific version with a real, enforced
+`FOREIGN KEY` (see [Relations — targeting a composite primary
+key](../models/relations.md#targeting-a-composite-primary-key)). Reading the state as of a version,
+diffing versions and cleaning old versions up aren't built in.
+
+## <a id="new-version"></a>Creating a version
+
+A library's catalog record, edited by its librarians version by version:
+
+```python
+from hare import fields
+from hare.contrib.versioning import VersionedModel
+
+
+class CatalogRecord(VersionedModel):
+    title = fields.CharField(max_length=200)
+    subjects = fields.JSONField(default=list)
+    published_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        new_version_excluded_fields = ("published_at",)
+
+
+current = await CatalogRecord.get_last_version_or_exception(id=record_id)
+revised = await current.create_new_version(title="Updated title")
+```
+
+`get_last_version_or_exception()` returns the highest version matching the filters — `DoesNotExist`, or
+the `exception` passed, when none does. `get_new_version`/`create_new_version` copy every direct field
+via `deepcopy`, except `id`, `version`, and anything listed in `Meta.new_version_excluded_fields`,
+bumping `version` by 1; `get_new_version()` builds the version without saving it. A database-computed
+column (`GeneratedField`, any `generated=True` field) and an `auto_now=True` column are never copied —
+they get a fresh value when the new version is written. A forward FK/O2O can be listed or overridden by
+its relation name (`author`) or by its shadow column (`author_id`) — either way the shadow column is not
+copied from the old version. An instance loaded with `.only()`/`.defer()` raises
+`IncompleteInstanceError` naming the unfetched fields, unless they are passed as overrides;
+database-computed and `auto_now` columns never need to be loaded.
+
+`create_new_version()` of a version that isn't the highest raises `IntegrityError` — the next number is
+taken.
+
+## <a id="soft-delete"></a>With soft delete
+
+With [`Meta.soft_delete_field`](soft-delete.md), a new version is never born deleted — the field is not
+copied — and `get_last_version_or_exception()` finds the highest version among the soft-deleted rows too,
+so the next version never collides with a deleted one. It reads the versions a custom `Meta.manager`
+hides as well (the manager's filters don't apply, the tenant scope does): the highest version may be one
+the manager hides.
+
+## <a id="clickhouse"></a>Writing versions (ClickHouse)
+
+ClickHouse keeps nothing unique: the key `(id, version)` isn't checked, and two `create_new_version()`
+of one version running at once both write, leaving two rows of one key (see
+[ClickHouse models](../dialects/clickhouse/models.md#uniqueness-and-relations)). Write the versions of one
+record from one task at a time there.
+
+## <a id="base-model"></a>With a project base model
+
+Combine `VersionedModel` with your project's base model through multiple inheritance:
+
+```python
+class AppVersionedModel(YourBaseModel, VersionedModel):
+    class Meta(YourBaseModel.Meta, VersionedModel.Meta):
+        pass
+```
+
+## <a id="unique-fields"></a>Unique fields
+
+Every version is a real, permanent row — `create_new_version()` never deletes or overwrites the previous
+one. A `unique=True` field (or a `UniqueConstraint` in `Meta.constraints`) that isn't reset via
+`Meta.new_version_excluded_fields` keeps its old value on the new row too, and the second version
+collides with the first at the database level:
+
+```python
+class CatalogRecord(VersionedModel):
+    slug = fields.CharField(max_length=200, unique=True)
+    title = fields.CharField(max_length=200)
+
+
+record = await CatalogRecord.objects.create(slug="moby-dick", title="Draft")
+await record.create_new_version(title="Revised")  # IntegrityError: slug already exists
+```
+
+A field meant to identify the same logical record across all its versions (a slug, an external key) needs
+a different scoping strategy than a bare `unique=True` — e.g. a column marking the current version and a
+partial `UniqueConstraint(fields=("slug",), condition=Q(is_current=True))`, or dropping uniqueness in the
+database and enforcing "one active slug" at the application level instead.
