@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time", "
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
 # array_to_sql/array_from_sql, which postgres-types uses internally but does not re-export.
 postgres-protocol = "0.6"
-fallible-iterator = "0.2"
+fallible-iterator = "0.3"
 deadpool-postgres = "0.14"
 # The pool deadpool-postgres builds on - its `Manager` trait, which `TimedManager` implements to
 # time every connect. The version deadpool-postgres uses.
@@ -36,9 +36,9 @@ itoa = "1"
 # JSON numbers kept as their text - compared as exact decimals.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 # The MD5 and SHA digests of the text functions.
-md-5 = "0.10"
-sha1 = "0.10"
-sha2 = "0.10"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
 # The allocator of every Rust allocation in the extension - a decoded row allocates several times,
 # and the system allocator (HeapAlloc on Windows) costs several times more per allocation.
 mimalloc = { version = "0.1", default-features = false }
