@@ -334,7 +334,7 @@ class Book(Model):
 ```
 
 A migration changing the type of a source field's column drops the vector's column before the change and
-adds it after - PostgreSQL refuses to change a column a generated column reads; the vectors are computed
+adds it after — PostgreSQL refuses to change a column a generated column reads; the vectors are computed
 again.
 
 ## <a id="ltreefield"></a>`LtreeField`

@@ -96,8 +96,9 @@ async def test_create_author(database):
 
 For a file-backed SQLite `db_url`, that isolation needs either a unique path per call (pytest's
 `tmp_path` fixture is already unique per worker) or the `{}` placeholder
-(`db_url="sqlite+aiosqlite://test-{}.sqlite"`, a file in the current directory), which is filled with a random UUID on each
-call. SQLite serializes writers even across separate connections to one file, so two xdist workers using
+(`db_url="sqlite+aiosqlite://test-{}.sqlite"`, a file in the current directory), which is filled with
+a random UUID on each call. SQLite serializes writers even across separate connections to one file, so
+two xdist workers using
 the same fixed path at once would get `database is locked`; under `-n` (`PYTEST_XDIST_WORKER` set) hare
 therefore appends the worker id to a fixed SQLite path. Outside `-n` the path is used exactly as given.
 
