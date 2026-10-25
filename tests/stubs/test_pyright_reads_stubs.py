@@ -22,6 +22,7 @@ pytestmark = [
 ]
 
 USAGE = """
+from hare.query.expressions import F
 from tests.contrib.factories_models import Member, Team
 
 
@@ -35,6 +36,8 @@ async def main() -> None:
     await Member.objects.filter(nme="x")
     await Member.objects.filter(is_staff="yes")
     await Member.objects.create(name=1)
+    await Member.objects.filter(team=team).update(name=F("email"))
+    await Member.objects.filter(team=team).update(name=1)
 """
 MANAGERS_USAGE = """
 from tests.stubs.stub_managers_models import Article
@@ -78,8 +81,14 @@ def test_pyright_checks_queries_through_the_stubs(tmp_path, stubs_path):
         if diagnostic["severity"] == "error"
     )
     revealed = [diagnostic["message"] for diagnostic in diagnostics if diagnostic["severity"] == "information"]
-    # The unknown key, the wrong value of a filter, the wrong value of a write - nothing else.
-    assert errors == [(11, "reportCallIssue"), (12, "reportArgumentType"), (13, "reportArgumentType")]
+    # The unknown key, the wrong value of a filter, the wrong values of a create and an update - an
+    # update's expression is taken.
+    assert errors == [
+        (12, "reportCallIssue"),
+        (13, "reportArgumentType"),
+        (14, "reportArgumentType"),
+        (16, "reportArgumentType"),
+    ]
     assert any("list[str]" in message for message in revealed)
     assert sum('"str"' in message for message in revealed) == 1
 

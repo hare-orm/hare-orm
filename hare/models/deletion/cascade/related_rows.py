@@ -248,11 +248,19 @@ class RelatedRows:
     def get_base_queryset(related_model: type[Model]) -> QuerySet[Any]:
         """The queryset every relation check starts from: every tenant's rows, through the base manager
         - a row referencing the deleted one exists whatever tenant is active and whatever a custom
-        manager hides.
+        manager hides. On a database keeping no key unique two tenants' rows share a key - the active
+        tenant's rows are the ones reached there.
         """
+        # Local import: the tenancy module imports the deletion package.
+        from hare.models.tenancy.tenancy import Tenancy
+
+        keeps_keys_unique = related_model.get_routed_connection(
+            for_write=True
+        ).dialect.features.supports_unique_constraints
+        all_tenants = keeps_keys_unique or Tenancy.get_scope(related_model) is None
         return cast(
             "QuerySet[Any]",
-            RowScopes.get_base_queryset(related_model, RowVisibility(all_tenants=True)),
+            RowScopes.get_base_queryset(related_model, RowVisibility(all_tenants=all_tenants)),
         )
 
     @staticmethod

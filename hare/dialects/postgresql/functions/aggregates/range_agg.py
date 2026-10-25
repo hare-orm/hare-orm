@@ -7,6 +7,7 @@ from hare.fields.field import Field
 from hare.query.expressions import (
     Aggregate,
 )
+from hare.query.expressions.expression_context import ExpressionContext
 
 
 class RangeAgg(Aggregate):
@@ -18,5 +19,5 @@ class RangeAgg(Aggregate):
     function_name = "RANGE_AGG"
     populate_field_object = True
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         return MultiRangeField.get_field_for_range_field(field_object)

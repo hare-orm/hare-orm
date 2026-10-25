@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.renderers.checked_term_renderers import CheckedTermRenderers
+from hare.dialects.clickhouse.fields.constants import UINT64_RANGE
 from hare.dialects.clickhouse.renderers.clickhouse_aggregate_renderers import ClickhouseAggregateRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_assigned_enum_number import ClickhouseAssignedEnumNumber
 from hare.dialects.clickhouse.renderers.clickhouse_cast_renderers import ClickhouseCastRenderers
-from hare.dialects.clickhouse.renderers.clickhouse_checked_integer_result import ClickhouseCheckedIntegerResult
 from hare.dialects.clickhouse.renderers.clickhouse_condition_renderers import ClickhouseConditionRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_container_renderers import ClickhouseContainerRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_json_renderers import ClickhouseJsonRenderers
@@ -16,22 +16,17 @@ from hare.dialects.clickhouse.renderers.clickhouse_temporal_renderers import Cli
 from hare.dialects.clickhouse.renderers.clickhouse_text_renderers import ClickhouseTextRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_window_renderers import ClickhouseWindowRenderers
 from hare.dialects.clickhouse.renderers.constants import (
-    CLICKHOUSE_DECIMAL_AGGREGATE_NAMES,
-    CLICKHOUSE_EXACT_INTEGER_TYPE,
     CLICKHOUSE_INTEGER_TYPE_PATTERN,
-    CLICKHOUSE_NULLABLE_EXACT_INTEGER_TYPE,
-    CLICKHOUSE_NUMERIC_OVERFLOW_MESSAGE,
-    CLICKHOUSE_NUMERIC_SCALE,
     CLICKHOUSE_ORDER_SQLS,
     CLICKHOUSE_VALUE_RANGE_KEY_TEMPLATE,
-    CLICKHOUSE_WIDE_DECIMAL_DIGITS,
+    DECIMAL_QUOTIENT_SCALE,
 )
 from hare.dialects.clickhouse.spatial.clickhouse_spatial_renderers import ClickhouseSpatialRenderers
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_JSON_COLUMN_TYPE
+from hare.fields.data.constants import INT64_MIN
 from hare.sql import functions
-from hare.sql.constants import DECIMAL_QUOTIENT_SCALE
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     import re
@@ -196,15 +191,6 @@ class ClickhouseRenderers(CheckedTermRenderers):
             return 0 <= value < 2**bits
         return -(2 ** (bits - 1)) <= value < 2 ** (bits - 1)
 
-    def get_assigned_decimal_term(
-        self, term: Term, max_digits: int, decimal_places: int, value_scale: int | None
-    ) -> Term:
-        # A float goes in by its text - converted as a double, 0.29 would be cut to 0.28. Local import:
-        # hare.sql's terms render through the dialect.
-        from hare.sql.terms.functions.function import Function
-
-        return Function("toDecimal256", Function("toString", term), CLICKHOUSE_NUMERIC_SCALE)
-
     def get_assigned_enum_term(self, term: Term, member_numbers: list[int]) -> Term:
         # A mutation writes a number no label has into an Enum8/Enum16 column, even through a CAST to
         # its type - the drivers then read it as NULL or fail; such a number is refused.
@@ -217,107 +203,49 @@ class ClickhouseRenderers(CheckedTermRenderers):
 
         return Function("toInt16", term)
 
-    def get_widened_integer_sum_argument(self, term: Term) -> Term:
-        # sum() of an Int64 is an Int64 that wraps around - summed as an Int128, which no sum of
-        # Int64 values overflows; widening never fails, and keeps a Nullable. Local import: hare.sql's
+    def get_same_type_math_result(self, term: Term, field: Field[Any] | None) -> Term:
+        # abs() of a signed integer is unsigned - no common type with a signed one in Coalesce()/Case();
+        # converted back to the argument's column type, as ClickHouse converts (the type's minimum
+        # stays itself). The conversion keeps a Nullable. Local imports: the fields and hare.sql's
         # terms render through the dialect.
+        from hare.fields.generated_field import GeneratedField
         from hare.sql.terms.functions.function import Function
 
-        return Function("toInt128", term)
+        effective_field = None if field is None else GeneratedField.get_effective_field(field)
+        if effective_field is None or effective_field.field_type is not int:
+            return term
+        server_type = ClickhouseTypeNames.get_server_type(effective_field.get_column_type(self.dialect))
+        # An enum's number is no integer column type.
+        if CLICKHOUSE_INTEGER_TYPE_PATTERN.fullmatch(server_type) is None:
+            return term
+        return Function(f"to{server_type}", term)
 
-    def get_exact_integer_operand(self, term: Term, may_be_null: bool) -> Term:
-        # ClickHouse wraps a 64-bit sum around - the operands are widened, so that the read result's
-        # range check sees the exact result; accurateCast() refuses a UInt256 too large for Int256. A NULL
-        # operand needs the Nullable type, which costs a sum of NOT NULL operands its speed. Local
-        # import: hare.sql's terms render through the dialect.
-        from hare.sql.terms.functions.function import Function
-        from hare.sql.terms.values.literal_value import LiteralValue
-
-        exact_type = CLICKHOUSE_NULLABLE_EXACT_INTEGER_TYPE if may_be_null else CLICKHOUSE_EXACT_INTEGER_TYPE
-        return Function("accurateCast", term, LiteralValue(exact_type))
-
-    def get_checked_integer_result(self, term: Term, minimum: int, maximum: int, type_name: str) -> Term:
-        # The result of widened operands, refused out of the type's range by a check the value
-        # carries. Local import: hare.sql's terms render through the dialect.
-        from hare.sql.terms.functions.function import Function
-        from hare.sql.terms.values.literal_value import LiteralValue
-        from hare.sql.terms.values.value_wrapper import ValueWrapper
-
-        # A result of other checked results is written once - the check below writes it three
-        # times, each level of arithmetic tripling the SQL.
-        nodes: list[Any] = list(term.nodes_())
-        if any(
-            isinstance(node, ClickhouseCheckedIntegerResult) or (isinstance(node, Function) and node.name == "throwIf")
-            for node in nodes
-        ):
-            return ClickhouseCheckedIntegerResult(term, minimum, maximum, type_name)
-        out_of_range = (term < LiteralValue(str(minimum))) | (term > LiteralValue(str(maximum)))
-        refusal = Function(
-            "throwIf",
-            Function("ifNull", out_of_range, ValueWrapper(0, allow_parametrize=False)),
-            ValueWrapper(f"{type_name} out of range", allow_parametrize=False),
-        )
-        return term + refusal
-
-    def get_float_operand(self, term: Term) -> Term:
-        # ClickHouse has no arithmetic of an Int128/Int256 - a checked integer result - and a
-        # Float64. Local import: hare.sql's terms render through the dialect.
+    def get_scaled_duration(self, term: Term) -> Term:
+        # The microseconds times a float are a Float64, which shares no type with a duration's Int64 in
+        # Coalesce()/Greatest()/Case() - read back as the column's integer, a half to the even one, as
+        # Python makes a timedelta of a fraction of microseconds. Local import: hare.sql's terms render
+        # through the dialect.
         from hare.sql.terms.functions.function import Function
 
-        return Function("toFloat64", term)
+        return Function("toInt64", Function("roundBankers", term))
 
-    def get_decimal_dividend(self, term: Term) -> Term:
-        # A Decimal quotient has the dividend's scale on ClickHouse - the dividend is widened, so that
-        # the quotient isn't cut. Local import: hare.sql's terms render through the dialect.
-        from hare.sql.terms.functions.function import Function
-
-        return Function("toDecimal256", term, DECIMAL_QUOTIENT_SCALE)
-
-    def get_decimal_operation_term(
-        self, operator_name: str, left: Term, right: Term, scales: list[int | None]
-    ) -> Term | None:
-        # A Decimal128 sum or product wraps around past its 38 digits without an error, and a Decimal
-        # beside an integer takes the Decimal's own narrow type - each operand is widened to a
-        # Decimal256 of its scale first. A quotient widens its dividend (get_decimal_dividend()).
-        # Local import: hare.sql's terms render through the dialect.
-        from hare.sql.terms.functions.function import Function
-        from hare.sql.terms.term import Term as SqlTerm
-        from hare.sql.terms.values.literal_value import LiteralValue
-        from hare.sql.terms.values.value_wrapper import ValueWrapper
-
-        if operator_name == "truediv" or None in scales:
-            return None
-        left_term, right_term = (
-            Function("toDecimal256", operand, ValueWrapper(scale, allow_parametrize=False))
-            for operand, scale in zip((left, right), scales, strict=True)
-        )
-        result = cast("Term", getattr(SqlTerm, f"__{operator_name}__")(left_term, right_term))
-        # A Decimal256 wraps around past its digits too - a result whose magnitude reaches them is
-        # refused, the magnitude worked out from the operands as doubles.
-        left_magnitude, right_magnitude = (Function("abs", Function("toFloat64", term)) for term in (left, right))
-        is_product = operator_name == "mul"
-        magnitude = left_magnitude * right_magnitude if is_product else left_magnitude + right_magnitude
-        result_scale = sum(cast("list[int]", scales)) if is_product else max(cast("list[int]", scales))
-        limit = LiteralValue(f"1e{CLICKHOUSE_WIDE_DECIMAL_DIGITS - result_scale}")
-        refusal = Function(
-            "throwIf",
-            Function("ifNull", magnitude >= limit, ValueWrapper(0, allow_parametrize=False)),
-            ValueWrapper(CLICKHOUSE_NUMERIC_OVERFLOW_MESSAGE, allow_parametrize=False),
-        )
-        return cast("Term", result + refusal)
-
-    def get_decimal_aggregate_argument(self, term: Term, scale: int) -> Term:
-        # Summed as Decimal256 - a Decimal128 sum wraps around past 38 digits.
-        # Local import: hare.sql's terms render through the dialect.
+    def get_float_operand(self, term: Term, field: Field[Any] | None) -> Term:
+        # ClickHouse has no arithmetic of an integer past 64 bits and a Float64 - such an operand, a
+        # column's or a literal's, is read as a float. Local imports: hare.sql's terms render through
+        # the dialect.
+        from hare.fields.generated_field import GeneratedField
         from hare.sql.terms.functions.function import Function
         from hare.sql.terms.values.value_wrapper import ValueWrapper
 
-        return Function("toDecimal256", term, ValueWrapper(scale, allow_parametrize=False))
+        if isinstance(term, ValueWrapper) and isinstance(term.value, int):
+            wide = not INT64_MIN <= term.value <= UINT64_RANGE[1]
+        else:
+            effective_field = None if field is None else GeneratedField.get_effective_field(field)
+            column_range = getattr(effective_field, "COLUMN_TYPE_RANGE", None)
+            wide = column_range is not None and (column_range[0] < INT64_MIN or column_range[1] > UINT64_RANGE[1])
+        return Function("toFloat64", term) if wide else term
 
-    def get_decimal_aggregate_name(self, function_name: str) -> str | None:
-        return CLICKHOUSE_DECIMAL_AGGREGATE_NAMES.get(function_name)
-
-    def get_integer_aggregate_as_float(self, term: Term) -> Term:
+    def get_statistic_as_float(self, term: Term) -> Term:
         # Local import: hare.sql's terms render through the dialect. toFloat64() keeps the NULL of an
         # aggregate over no rows, where a CAST to Float64 would fail on it.
         from hare.sql.terms.functions.function import Function

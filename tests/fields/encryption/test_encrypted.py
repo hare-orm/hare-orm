@@ -685,6 +685,28 @@ async def test_group_by_of_an_encrypted_field_is_refused_the_same_everywhere(db_
     for grouped in (
         lambda: EncryptedRecord.objects.group_by("secret"),
         lambda: EncryptedRecord.objects.group_by("secret").values_list("secret", flat=True),
+        # values() then an aggregate groups by the selected fields - each ciphertext was a group of one row.
+        lambda: EncryptedRecord.objects.values("secret").annotate(total=Count("id")),
+        lambda: EncryptedRecord.objects.values_list("config").annotate(total=Count("id")),
+        lambda: EncryptedRecord.objects.annotate(copied=F("secret")).values("copied").annotate(total=Count("id")),
+        lambda: EncryptedOwner.objects.values("records__secret").annotate(total=Count("id")),
     ):
         with pytest.raises(FieldError, match="GROUP BY can't use it"):
             await grouped()
+
+
+@pytest.mark.asyncio
+async def test_a_set_operation_comparing_encrypted_values_is_refused(db_encrypted_fields):
+    """Each ciphertext is random: a UNION kept equal values apart and an INTERSECT matched none."""
+    await EncryptedRecord.objects.create(secret="a")
+    await EncryptedRecord.objects.create(secret="a")
+    secrets = EncryptedRecord.objects.values("secret")
+    for combined, usage in (
+        (lambda: secrets.union(secrets), "UNION"),
+        (lambda: secrets.intersection(secrets), "INTERSECT"),
+        (lambda: secrets.difference(EncryptedRecord.objects.values("config")), "EXCEPT"),
+    ):
+        with pytest.raises(FieldError, match=f"{usage} can't use it"):
+            await combined()
+    # UNION ALL compares no rows.
+    assert len(await secrets.union(secrets, all=True)) == 4

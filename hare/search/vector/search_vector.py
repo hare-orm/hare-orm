@@ -6,11 +6,10 @@ from hare.exceptions import QueryError
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.search.constants import SEARCH_VECTOR_WEIGHT_LETTERS, TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
+from hare.search.constants import TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
 from hare.search.search_features import SearchFeatures
 from hare.search.types import ConfigInput, VectorInput, WeightInput
 from hare.search.vector.search_vector_combinable import SearchVectorCombinable
-from hare.sql.terms.term import Term
 
 
 class SearchVector(SearchVectorCombinable, Expression):
@@ -45,11 +44,6 @@ class SearchVector(SearchVectorCombinable, Expression):
     ):
         if not expressions:
             raise QueryError("SearchVector requires at least one expression.")
-        if isinstance(weight, str):
-            if weight.upper() not in SEARCH_VECTOR_WEIGHT_LETTERS:
-                raise QueryError(f"SearchVector weight must be one of A, B, C, D, got {weight!r}")
-        elif weight is not None and not isinstance(weight, (Expression, Term)):
-            raise QueryError(f"SearchVector weight must be a letter A-D or an expression giving one, got {weight!r}")
         self.expressions = expressions
         self.config = config
         self.weight = weight

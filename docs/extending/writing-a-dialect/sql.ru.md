@@ -39,6 +39,7 @@ class ColstoreDialect(Dialect):
 | Член класса | Что задаёт |
 |---|---|
 | `identifier_quote_char`, `alias_quote_char`, `quote_identifier(name)`, `qualify_table_name(table, schema)` | Кавычки для имён таблиц, колонок, индексов и ограничений и для псевдонимов в `SELECT`. |
+| `get_identifier_key(name)` | По чему различаются имена — два имени с одним ключом называют одну таблицу или колонку; по умолчанию имя как написано, в нижнем регистре — там, где база сравнивает имена без учёта регистра. |
 | `get_string_literal_sql(text)`, `get_literal_sql(value)`, `get_boolean_literal_sql(value)`, `get_bytes_literal_sql(value)`, `get_array_literal_sql(element_sqls)` | Литералы, записываемые в текст SQL, — строка, значение колонки по умолчанию, логическое значение запроса, байты, массив. |
 
 `SqlParameters` передаёт значения параметрами:
@@ -98,6 +99,7 @@ def build_types(self):
 | `inserted_by_select` | INSERT, записывающий колонку, пишет строки как `SELECT` из них, а не `VALUES`, — для значения, записанного выражением, которое `VALUES` диалекта не читает; или `(field) -> bool`, решающая это для каждого поля. |
 
 `Features` описывают поведение значений: `divides_integers_exactly` (`/` целых даёт и дробь),
+`computes_integer_statistics_exactly` (среднее целых — точное десятичное),
 `supports_virtual_generated_columns`. Там, где значение хранится или вычисляется
 иначе, SQL дают `TermRenderers` диалекта ([следующий раздел](#functions-and-lookups)). Функция, которая
 есть в базе только для части типов аргументов (`ROUND(numeric, int)` в PostgreSQL), — тоже забота
@@ -141,16 +143,23 @@ SQL нужно другое:
 | Член класса | Что задаёт |
 |---|---|
 | `is_distinct_from_operator` | Неравенство, правильное при `NULL` (`IS NOT` в SQLite). |
-| `get_decimal_compared_term()`, `get_decimal_value_term()`, `get_decimal_dividend()`, `get_assigned_decimal_term()` | Десятичные, хранящиеся текстом: при сравнении, в смеси с другими числами, при делении, при присваивании в `UPDATE`. |
+| `get_distinct_from_sql(left_sql, right_sql)` | Неравенство двух значений, правильное при `NULL`, — по умолчанию `left <is_distinct_from_operator> right`. |
 | `get_enum_number_term()` | Колонка целочисленного поля-перечисления там, где с её числом считают, — операнд арифметики, аргумент числовой функции — на базе, чей тип перечисления не принимает ни того, ни другого. |
-| `get_exact_integer_operand()` | Операнд целочисленной суммы, разности или произведения, которые читает запрос, расширенный там, где арифметика базы «заворачивается», — тогда проверка диапазона результата (`get_checked_integer_result()`) видит точный результат. Значение, которое записывает `UPDATE`, — собственное значение базы. |
+| `get_same_type_math_result()` | Результат математической функции типа её аргумента (`Abs`, `Ceil`, `Floor`) — приводится обратно к типу аргумента там, где функция базы даёт другой. |
 | `get_float_operand()` | Целый операнд арифметики с числом с плавающей точкой — приводится там, где в базе нет арифметики широкого целого и такого числа. |
 | `get_json_path_comparand()` | С чем сравнивается значение JSON по пути — JSON, хранящийся текстом. |
-| `get_integer_aggregate_as_float()` | Среднее или статистика по целым, читаемые как число с плавающей точкой. |
+| `get_statistic_as_float()` | Среднее или статистика, которые база считает числом с плавающей точкой, — читаются как оно. |
 | `get_datetime_part_comparand()` | Дата или время суток, сравниваемые с частью момента времени. |
 | `get_concatenated_argument_sql(sql, argument)` | Аргумент склейки текста — с приведением там, где база определяет его тип только по окружению. |
-| `get_ordering_term()` | По чему `ORDER BY` сортирует для выражения. |
-| `get_value_range_ordering_term()` | По чему упорядочивает окно, когда его рамка — `RANGE` на число значений от текущей строки: число там, где само значение колонки не принимает смещения (десятичное, хранящееся текстом). |
+| `get_order_sql(order)` | SQL направления сортировки — `ASC`, `DESC NULLS LAST`, ... — по умолчанию его собственный текст. |
+| `get_ordering_clause_sql(term, term_sql, order, sql_context)` | Один ключ `ORDER BY` — по умолчанию выражение и его направление. |
+| `get_window_ordering_clause_sql(function, term, term_sql, order, sql_context)` | Один ключ `ORDER BY` окна — по умолчанию `get_window_ordering_sql()`. |
+| `get_window_ordering_sql(function, term_sql, order)` | SQL одного упорядочения окна — по умолчанию выражение и его направление. |
+| `get_result_branch_term(term, output_field)` | Ветвь `CASE` или `COALESCE` в том виде, какой нужен типу всего результата. |
+| `get_assigned_integer_term(term)` | Что `UPDATE` записывает в целочисленную колонку для выражения с дробью — с приведением там, где тип колонки её не округляет. |
+| `get_assigned_enum_term(term, member_numbers)` | Что `UPDATE` записывает в колонку целочисленного перечисления для выражения — там, где колонка отклоняет число, не принадлежащее ни одному члену. |
+| `get_scaled_duration(term)` | Микросекунды длительности, умноженной или делённой на число. |
+| `get_duration_quotient(dividend, divisor)` | Микросекунды длительности, делённой на целое, — округлённые до ближайшего, половина — к чётному, как Python делит `timedelta`. |
 | `get_composite_distinct_key()` | По чему `COUNT(DISTINCT ...)` считает составной ключ. |
 | `get_never_null_column_count_argument(term)` | Что `COUNT` получает для колонки запрашиваемой таблицы, в которой нет NULL, — по умолчанию саму колонку; `*` там, где посчитать строки дешевле, чем читать колонку. |
 
@@ -213,6 +222,9 @@ PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite) и
 | `get_typed_placeholder_template()`, `get_values_table_columns_sql()`, `get_update_from_values_sql()`, `get_insert_rows_source_sql()` | Команды, которые hare пишет текстом: `UPDATE` из таблицы `VALUES` (`bulk_update()`), `INSERT` строк из источника. |
 | `get_upsert_inserted_flag_sql()` | Выражение `RETURNING`, отличающее строку, вставленную вставкой-или-обновлением, от изменённой. |
 | `get_explain_sql(sql, output_format, options, features)` | Команду `EXPLAIN`, которую используют `QuerySet.sql(explain=True)` и `explain()`. |
+| `join_keywords`, `get_join_keyword_sql(join_type)` | Ключевое слово соединения каждого типа — по умолчанию `JOIN` и `LEFT OUTER JOIN`; тип, которого нет в соответствии, даёт `UnSupportedError`. Диалект добавляет в соответствие свои соединения (`ASOF` и `ARRAY JOIN` ClickHouse). |
+| `get_select_all_except_sql(quoted_columns)` | Начало запроса, выбирающего все колонки источника, кроме некоторых, — производная таблица, в которой выполняется запрос с коррелированными подзапросами там, где база выполняет их так; по умолчанию `UnSupportedError`. |
+| `get_values_source_sql(row_sqls, column_names, alias_sql, *, matches_no_row)` | Подзапрос строк, заданных значениями, — источник `MERGE`. |
 
 Класс запроса только привязывает команды к диалекту:
 

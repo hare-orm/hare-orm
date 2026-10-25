@@ -4,7 +4,6 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
-from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -33,12 +32,7 @@ class CallableDelivery(OutboxDelivery):
 
         Returns:
             The delivery.
-
-        Raises:
-            ConfigurationError: It is neither.
         """
         if isinstance(delivery, OutboxDelivery):
             return delivery
-        if callable(delivery):
-            return CallableDelivery(delivery)
-        raise ConfigurationError(f"a delivery must be an OutboxDelivery or an async function, got {delivery!r}")
+        return CallableDelivery(delivery)

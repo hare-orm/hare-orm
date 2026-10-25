@@ -73,8 +73,9 @@ the manager hides.
 
 ## <a id="clickhouse"></a>Writing versions (ClickHouse)
 
-ClickHouse keeps nothing unique: the key `(id, version)` isn't checked, and two `create_new_version()`
-of one version running at once both write, leaving two rows of one key (see
+ClickHouse keeps nothing unique: the key `(id, version)` isn't checked, so `create_new_version()` of a
+version that isn't the highest raises nothing, and two `create_new_version()` of one version running
+at once both write — each leaves two rows of one key (see
 [ClickHouse models](../dialects/clickhouse/models.md#uniqueness-and-relations)). Write the versions of one
 record from one task at a time there.
 

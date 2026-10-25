@@ -127,7 +127,8 @@ class FieldNamesCheck:
     def check_only(
         mypy_types: MypyTypes, model: type[Model], annotations: TypedDictType | None, name: str, call: CallExpr
     ) -> None:
-        """Reports a field path of ``only()`` the model doesn't have.
+        """Reports a field path of ``only()`` the model doesn't have, or one ending at a relation
+        holding many rows - only a value of each row is loaded.
 
         Args:
             mypy_types: The types of the call.
@@ -142,6 +143,16 @@ class FieldNamesCheck:
             model._meta.get_lookup_info(name)
         except HareError:
             mypy_types.fail(UNKNOWN_NAME_MESSAGE.format(method="only", model=model.__name__, name=name), call)
+            return
+        lookup_path = LookupPath.parse(model, name, crosses_last=True)
+        if not lookup_path.rest and lookup_path.relations and lookup_path.relations[-1].is_multi_valued:
+            owner = lookup_path.relations[-2].related_model if len(lookup_path.relations) > 1 else model
+            mypy_types.fail(
+                RELATION_FIELD_NAME_MESSAGE.format(
+                    method="only", model=owner.__name__, name=lookup_path.relation_names[-1], action="loaded"
+                ),
+                call,
+            )
 
     @staticmethod
     def check_defer(mypy_types: MypyTypes, model: type[Model], name: str, call: CallExpr) -> None:

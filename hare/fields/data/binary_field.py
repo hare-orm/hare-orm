@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ValidationError
-from hare.fields.data.constants import BINARY_FIELD_SUPPORTED_LOOKUPS
+from hare.fields.data.constants import BINARY_FIELD_SUPPORTED_LOOKUPS, BINARY_VALUE_TYPE
 from hare.fields.field import Field
 
 if TYPE_CHECKING:
@@ -22,6 +22,8 @@ class BinaryField(Field[TBinary]):
     ``update()``, and takes ``unique=True`` / ``db_index=True`` - a B-tree index, which a database may
     refuse for a long value (index a hash of it instead).
     """
+
+    argument_value_type = BINARY_VALUE_TYPE
 
     field_type = bytes
 

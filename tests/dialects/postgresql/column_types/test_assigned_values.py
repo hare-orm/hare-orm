@@ -44,5 +44,5 @@ def test_postgis_refuses_text_that_isnt_a_point():
 
 
 def test_vector_refuses_a_value_that_isnt_a_list():
-    with pytest.raises(ValidationError, match="embedding: expected a list of floats"):
+    with pytest.raises(ValidationError, match="embedding: expected a list/tuple of floats"):
         named(VectorField(3), "embedding").to_python({1.0, 2.0})

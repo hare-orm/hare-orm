@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from decimal import Decimal
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.core.caching.cache import Cache
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
@@ -17,6 +17,9 @@ from hare.query.expressions.constants import DECIMAL_OUTPUT_FIELD_MAX_DIGITS
 from hare.query.expressions.enums import NumericValueType
 from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.unrounded_decimal_field import UnroundedDecimalField
+
+if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
 
 
 class NumericTyping:
@@ -38,25 +41,76 @@ class NumericTyping:
     )
 
     @classmethod
-    def get_quotient_output_field(cls, field: Field[Any] | None) -> Field[Any] | None:
+    def get_quotient_output_field(cls, field: Field[Any] | None, dialect: Dialect) -> Field[Any] | None:
         """The field an average or a statistic (a standard deviation, a variance) of a field's
-        values is decoded through: of integers a float on every backend, of Decimals a Decimal not
-        rounded to the field's scale, of anything else the field itself.
+        values is decoded through: of integers the exact Decimal the database computes
+        (``Features.computes_integer_statistics_exactly``), elsewhere a float, of Decimals a Decimal
+        not rounded to the field's scale, of anything else the field itself.
 
         Args:
             field: The field of the values, a generated one included - None when unknown.
+            dialect: The dialect of the database the query runs on.
 
         Returns:
             The field of the result.
         """
         if field is None:
             return None
-        effective_field = GeneratedField.get_effective_field(field)
-        if isinstance(effective_field, IntField):
+        if cls.is_integer_field(field):
+            if dialect.features.computes_integer_statistics_exactly:
+                return cls.DECIMAL_QUOTIENT_OUTPUT_FIELD
             return cls.FLOAT_OUTPUT_FIELD
+        effective_field = GeneratedField.get_effective_field(field)
         if isinstance(effective_field, DecimalField):
             return cls.DECIMAL_QUOTIENT_OUTPUT_FIELD
         return field
+
+    @classmethod
+    def get_statistic_output_field(cls, field: Field[Any] | None, dialect: Dialect) -> Field[Any] | None:
+        """The field an average or a statistic of a field's values is decoded through - a float where
+        the database computes it as one (``is_statistic_a_float()``), elsewhere as
+        ``get_quotient_output_field()`` gives it.
+
+        Args:
+            field: The field of the values, a generated one included - None when unknown.
+            dialect: The dialect of the database the query runs on.
+
+        Returns:
+            The field of the result.
+        """
+        if cls.is_statistic_a_float(field, dialect):
+            return cls.FLOAT_OUTPUT_FIELD
+        return cls.get_quotient_output_field(field, dialect)
+
+    @classmethod
+    def is_statistic_a_float(cls, field: Field[Any] | None, dialect: Dialect) -> bool:
+        """Whether the database computes an average or a statistic of a field's values as a float
+        - of integers without ``Features.computes_integer_statistics_exactly``, of Decimals without
+        ``Features.computes_decimal_statistics_exactly``.
+
+        Args:
+            field: The field of the values, None when unknown.
+            dialect: The dialect of the database the query runs on.
+
+        Returns:
+            Whether it does.
+        """
+        if cls.is_integer_field(field):
+            return not dialect.features.computes_integer_statistics_exactly
+        effective_field = None if field is None else GeneratedField.get_effective_field(field)
+        return isinstance(effective_field, DecimalField) and not dialect.features.computes_decimal_statistics_exactly
+
+    @staticmethod
+    def is_integer_field(field: Field[Any] | None) -> bool:
+        """Whether a field's values are integers - a generated field's by its own field.
+
+        Args:
+            field: The field, None when unknown.
+
+        Returns:
+            True for an integer field.
+        """
+        return field is not None and isinstance(GeneratedField.get_effective_field(field), IntField)
 
     @classmethod
     def get_sum_output_field(cls, field: Field[Any]) -> Field[Any]:

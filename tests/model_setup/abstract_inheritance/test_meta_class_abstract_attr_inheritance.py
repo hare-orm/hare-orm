@@ -126,6 +126,42 @@ def test_concrete_ancestors_meta_table_is_not_inherited():
 
 
 @pytest.mark.database_independent
+def test_a_concrete_model_with_the_meta_of_an_abstract_one_hands_none_of_it_down():
+    """A concrete model's ``class Meta(Base.Meta)`` inherited ``abstract = True`` from the abstract
+    model's - a model subclassing the concrete one took its constraints, indexes and ordering, two
+    tables then declaring constraints of one name."""
+
+    class AbstractBase(Model):
+        level = fields.IntField(default=0)
+
+        class Meta:
+            abstract = True
+            ordering = ["-level"]
+
+    class ConcreteParent(AbstractBase):
+        code = fields.CharField(max_length=10)
+
+        class Meta(AbstractBase.Meta):
+            indexes = [Index(fields=["level"], name="concrete_parent_level")]
+            constraints = [UniqueConstraint(fields=["code"], name="concrete_parent_code")]
+
+    class PlainParent(AbstractBase):
+        class Meta(AbstractBase.Meta):
+            pass
+
+    class ConcreteChild(ConcreteParent):
+        extra = fields.IntField(null=True)
+
+    assert not ConcreteParent._meta.abstract
+    assert not PlainParent._meta.abstract
+    assert [index.name for index in ConcreteParent._meta.indexes] == ["concrete_parent_level"]
+    assert list(ConcreteChild._meta.indexes) == []
+    assert list(ConcreteChild._meta.constraints) == []
+    # The abstract model's ordering still reaches it.
+    assert [field for field, __ in ConcreteChild._meta.ordering] == ["level"]
+
+
+@pytest.mark.database_independent
 def test_abstract_meta_indexes_not_aliased_across_sibling_concrete_models():
     """Every attribute value inherited from an abstract ancestor's Meta used to be copied by
     bare REFERENCE, not value - harmless for immutable content, but an Index(...) entry in

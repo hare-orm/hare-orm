@@ -55,12 +55,21 @@ PostgreSQL держит строки в копии, пока удаляет та
 и `TableComments.get_column_comment_sql()` записывают комментарий внутри `CREATE TABLE` и определения
 колонки; база, которая задаёт комментарии отдельными операторами, возвращает из них `""`, а операторы — из
 `get_table_comment_statements(table, comment)` и `get_column_comment_statements(table, column, comment)`;
-hare выполняет их сразу после таблицы или колонки. `ColumnNarrowingCheck.get_decimal_overflow_predicate_sql()`
-находит хранимые числа, которые
-не поместятся после `AlterField` на более узкий десятичный тип.
-`ColumnConversionCheck.check_alter_field_conversion()` выполняется перед сменой типа колонки и по умолчанию
-ничего не проверяет; база, которая преобразует хранимые значения уже после смены колонки (или превращает
-непреобразуемое значение в NULL либо в другое значение), отклоняет здесь такое значение.
+hare выполняет их сразу после таблицы или колонки.
+
+`AlterField` на более узкий тип отклоняется, пока хранимое значение в него не помещается: метод нового поля
+`get_narrowing_limit(old_field)` даёт `NarrowingLimit`, а ограничение запрашивает у `ColumnNarrowingCheck`
+редактора условие, находящее значения за его пределами (`NarrowingLimit.get_overflow_predicate_sql(check,
+quoted_column)`). Диалект переопределяет условия, которые его база пишет иначе:
+`get_integer_overflow_predicate_sql()`, `get_float_overflow_predicate_sql()`,
+`get_decimal_overflow_predicate_sql()`, `get_text_overflow_predicate_sql()`,
+`get_day_overflow_predicate_sql()` (вместе с `get_time_of_day_predicate_sql()`),
+`get_enum_overflow_predicate_sql()` и `get_held_value_overflow_predicate_sql()` для значения внутри
+контейнера. Ограничение, которое дают поля только одного диалекта, — адрес, суженный до сети в PostgreSQL,
+момент или длина в байтах в ClickHouse, — лежит в пакете этого диалекта и вызывает условие его собственной
+проверки. `ColumnConversionCheck.check_alter_field_conversion()` выполняется перед сменой типа колонки и по
+умолчанию ничего не проверяет; база, которая преобразует хранимые значения уже после смены колонки (или
+превращает непреобразуемое значение в NULL либо в другое значение), отклоняет здесь такое значение.
 
 ### <a id="names"></a>Имена и DDL только по состоянию миграций
 
@@ -113,6 +122,7 @@ hare выполняет их сразу после таблицы или кол�
 |---|---|
 | Неключевые колонки индекса (`include=`) | `IndexStatements.get_index_include_sql(quoted_columns)` — фраза после ключей индекса; по умолчанию `""`, и колонки в индекс не попадают. |
 | `UniqueConstraint(nulls_distinct=...)` | `ConstraintStatements.get_nulls_distinct_sql(nulls_distinct)` — фраза; ещё выставьте `Features.supports_nulls_distinct`. |
+| `CHECK` полей-перечислений (`EnumMembersCondition`) | `ConstraintStatements.get_enum_members_check_sql(quoted_column, value_sqls)` — условие: колонка хранит одно из значений членов; по умолчанию ISO `IN (...)`. |
 | Ограничения исключения | `ConstraintStatements.get_exclusion_constraint_extension(constraint, fields_by_name)` — расширение, которое нужно ограничению; `ConstraintStatements.exclusion_constraint_sql(model, constraint)` — его определение. |
 | `supports_concurrent_indexes` | `add_index(model, index, concurrently)` и `remove_index(...)` редактора; базовый редактор создаёт и удаляет индекс обычным способом. `IndexStatements.get_index_create_sql()` и `IndexStatements.get_index_drop_sql()` дают обычные команды, от которых можно оттолкнуться. |
 | `supports_not_valid_constraints` | `ConstraintStatements.add_check_constraint_not_valid()` и `validate_constraint()`; базовый редактор добавляет ограничение как обычно и ничего не проверяет отдельно. |

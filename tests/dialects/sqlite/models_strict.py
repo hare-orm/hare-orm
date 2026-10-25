@@ -19,7 +19,6 @@ class StrictRecord(Model):
     flag = fields.BooleanField(default=False)
     count = fields.SmallIntField(default=0)
     ratio = fields.FloatField(null=True)
-    amount = fields.DecimalField(max_digits=10, decimal_places=2, null=True)
     label = fields.CharField(max_length=20, null=True)
     text = fields.TextField(null=True)
     day = fields.DateField(null=True)

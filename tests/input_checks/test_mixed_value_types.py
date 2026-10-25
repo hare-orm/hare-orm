@@ -27,7 +27,8 @@ from hare.query.functions import (
     Upper,
     window,
 )
-from tests.shared_models.testmodels import BooleanFields, ExpressionTypeRow, JSONFields, Tournament
+from tests.shared_models.testmodels import BooleanFields, JSONFields, Tournament
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
 
 
 async def make_row():
@@ -44,6 +45,7 @@ async def make_row():
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_comparisons_of_types_that_go_together(db):
     await make_row()
@@ -52,6 +54,7 @@ async def test_comparisons_of_types_that_go_together(db):
     assert await ExpressionTypeRow.objects.filter(s=Cast(F("num"), fields.CharField(max_length=10))).count() == 1
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("values", "message"),
     [
@@ -69,6 +72,7 @@ async def test_setting_a_value_of_a_type_the_field_doesnt_take_is_refused(db, va
     assert (await ExpressionTypeRow.objects.get(id=row.id)).d == datetime.date(2020, 1, 2)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_text_field_takes_any_value_as_its_text(db):
     row = await make_row()
@@ -77,6 +81,7 @@ async def test_a_text_field_takes_any_value_as_its_text(db):
     assert await ExpressionTypeRow.objects.values_list("s", "d") == [("7", datetime.date(2020, 1, 2))]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("expression", "message"),
     [
@@ -97,6 +102,7 @@ async def test_arithmetic_and_functions_of_values_they_dont_apply_to_are_refused
         await ExpressionTypeRow.objects.annotate(value=expression).values_list("value", flat=True)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("aggregate", "message"),
     [
@@ -134,6 +140,7 @@ async def test_functions_of_text_and_numbers_refuse_a_json_value(db, expression,
     assert await JSONFields.objects.annotate(value=Abs(cast_key)).values_list("value", flat=True) == [2]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregates_and_functions_of_values_they_apply_to(db):
     await make_row()
@@ -152,6 +159,7 @@ async def test_aggregates_and_functions_of_values_they_apply_to(db):
     }
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("aggregate", "message"),
     [
@@ -176,6 +184,7 @@ async def test_a_text_lookup_reads_a_boolean_as_its_databases_text(db):
     assert await BooleanFields.objects.filter(boolean__startswith=false_text).values_list("id", flat=True) == [2]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_transformed_value_compares_with_a_value_of_its_own_type(db):
     row = await make_row()
@@ -187,7 +196,7 @@ async def test_a_transformed_value_compares_with_a_value_of_its_own_type(db):
     "value",
     [
         1.5,
-        Decimal("1.50"),
+        pytest.param(Decimal("1.50"), marks=pytest.mark.decimal_fields),
         2**63 - 1,
         datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC),
         datetime.time(12, 30, tzinfo=datetime.UTC),

@@ -12,7 +12,10 @@ from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.migrations.state.constants import TRACKED_MODEL_STATE_ATTRIBUTES
 from hare.migrations.state.state_apps import StateApps
+from hare.migrations.state.state_change_journal import StateChangeJournal
+from hare.migrations.state.tracked_dict import TrackedDict
 from hare.models import Model
 from hare.models.enums import ModelOption
 
@@ -32,6 +35,19 @@ class ModelState:
     pk_field_name: str | tuple[str, ...]
     fields: dict[str, Field[Any]]
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in TRACKED_MODEL_STATE_ATTRIBUTES:
+            if isinstance(value, TrackedDict) and value.owner is None:
+                value.owner = self
+            elif not isinstance(value, TrackedDict) or value.owner is not self:
+                value = TrackedDict(value, owner=self)
+        # Set up once the last field is - a change of a model state built already is recorded.
+        if "fields" in self.__dict__:
+            journal = StateChangeJournal.recording.get()
+            if journal is not None:
+                journal.record_change(self, None)
+        object.__setattr__(self, name, value)
+
     def clone(self) -> ModelState:
         """A copy of the state - its options and fields copied."""
         return self.__class__(
@@ -40,10 +56,10 @@ class ModelState:
             table=self.table,
             abstract=self.abstract,
             description=self.description,
-            options=dict(self.options),
+            options=TrackedDict(self.options),
             bases=self.bases,
             pk_field_name=self.pk_field_name,
-            fields={name: copy(field) for name, field in self.fields.items()},
+            fields=TrackedDict({name: copy(field) for name, field in self.fields.items()}),
         )
 
     def get_option_list(self, key: ModelOption) -> list[Any]:
@@ -145,12 +161,14 @@ class ModelState:
         return primary_key_attribute
 
     @classmethod
-    def make_from_model(cls, app_label: str, model: type[Model]) -> ModelState:
+    def make_from_model(cls, app_label: str, model: type[Model], *, with_schema_objects: bool = True) -> ModelState:
         """The state of a live model.
 
         Args:
             app_label: The app the model belongs to.
             model: The model class.
+            with_schema_objects: Whether the state lists the objects the model declares beside its indexes -
+                a view's query is built into SQL for it, which needs the connections.
 
         Returns:
             The state.
@@ -159,7 +177,7 @@ class ModelState:
         declared_pk_field_name = cls.get_declared_pk_field_name(model)
         options = {
             **cls.get_table_options(model),
-            **cls.get_schema_object_options(model),
+            **(cls.get_schema_object_options(model) if with_schema_objects else {}),
             **cls.get_index_options(model, fields),
             **cls.get_row_options(model, declared_pk_field_name),
         }

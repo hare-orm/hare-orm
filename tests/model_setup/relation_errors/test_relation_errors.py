@@ -217,7 +217,7 @@ async def test_m2m_through_on_delete_set_default_with_db_default_init():
                 },
             }
         )
-        membership = Hare.apps.get_model("models", "DbDefaultMembership")
+        membership = Hare.apps.get_model("models.DbDefaultMembership")
         assert membership._meta.fields_map["parent"].on_delete == "SET DEFAULT"
     finally:
         await _teardown_hare()

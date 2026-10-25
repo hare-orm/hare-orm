@@ -16,8 +16,10 @@ class RemovePartition(PartitionOperation):
     Args:
         model_name: The model.
         partition: The partition as it was declared - a ``ListPartition``, ``RangePartition`` or
-            ``DefaultPartition`` on PostgreSQL.
+            ``DefaultPartition`` of the dialect's partitioning.
     """
+
+    backward_reads_state_left = False
 
     def describe(self) -> str:
         return f"Remove partition {self.partition.name} of {self.model_name} with its rows"

@@ -69,7 +69,6 @@ class SqliteForeignKeyRebuild(ForeignKeyRebuild):
         self,
         model: type[Model],
         field: ManyToManyFieldInstance[Model],
-        old_field: ManyToManyFieldInstance[Model] | None = None,
     ) -> None:
         """Rebuilds the auto-managed through table from the field's current metadata, keeping
         its rows."""

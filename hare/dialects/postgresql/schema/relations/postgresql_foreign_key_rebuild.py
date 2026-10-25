@@ -95,15 +95,12 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
         self,
         model: type[Model],
         field: ManyToManyFieldInstance[Model],
-        old_field: ManyToManyFieldInstance[Model] | None = None,
     ) -> None:
         """Replaces the FK constraints of an auto-managed through table with the field's current ON
-        DELETE action - the old field's dropped first - and aligns the key columns' nullability with it
+        DELETE action and aligns the key columns' nullability with it
         (only ON DELETE SET NULL needs nullable columns)."""
         from hare.query.key_columns import KeyColumns
 
-        if old_field is not None:
-            await self.drop_relation_foreign_keys(model, old_field)
         schema = model._meta.schema
         through_table = field.through
         qualified_through = self.editor.qualify_table_name(through_table, schema)

@@ -228,6 +228,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
     #: Whether the field's value is an array, a range or a JSON value - an annotation of such a
     #: field takes the value's own lookups (``__contains``, ``__overlap``, ``__len``, ...).
     holds_container_value: ClassVar[bool] = False
+    #: Whether the column is of the database's interval type - a duration added to a moment as the database
+    #: adds it, not a count of microseconds (``TimeDeltaField``).
+    holds_intervals: ClassVar[bool] = False
     #: The type of date/time value ``Extract()`` and ``Trunc()`` read the field's value as - None for
     #: a field holding none.
     date_function_source: ClassVar[DateTruncSource | None] = None
@@ -909,6 +912,38 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """
         return None
 
+    def get_accepted_value_types(self) -> tuple[Any, ...]:
+        """The types a value of the field is taken as besides ``field_type`` - an address field's
+        ``ipaddress`` objects, a range field's ``(lower, upper)`` tuple. The typing tools read them.
+
+        Returns:
+            The types - none by default.
+        """
+        return ()
+
+    def get_lookup_value_alternatives(self, lookup: str) -> tuple[Any, ...]:
+        """The types a lookup's filter value may be instead, whole - besides the value, list or range
+        ``get_lookup_value_description()`` describes: a range field's ``Range``. The typing tools read
+        them.
+
+        Args:
+            lookup: The lookup's name, ``""`` for plain equality.
+
+        Returns:
+            The types - none by default.
+        """
+        return ()
+
+    def get_path_segments(self) -> tuple[str, ...]:
+        """The segments a filter key reads inside the field's value by name (a range's ``startswith``,
+        a point's ``x``) - none where a segment is any value (an array's index, a key). Read where every
+        key of a field is listed (``hare stubs``).
+
+        Returns:
+            The segments.
+        """
+        return ()
+
     def get_generated_from_field_names(self) -> tuple[str, ...]:
         """The model's other fields a generated column is computed from, where the field names them (a
         ``TSVectorField``'s ``source_fields``) - a migration refuses to remove one while this field
@@ -1020,9 +1055,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             # An expression's output field has no name of its own.
             named = f" field '{self.model_field_name}'" if self.model_field_name else ""
             dialect_names = sorted(
-                str(declared_dialect.name)
-                for declared_dialect in DialectRegistry.get_declared_dialects()
-                if declared_dialect.types.get_column_type(self) is not None
+                str(connected_dialect.name)
+                for connected_dialect in DialectRegistry.get_connected_dialects()
+                if connected_dialect.types.get_column_type(self) is not None
             )
             supported = f" only exists on {', '.join(dialect_names)} -" if dialect_names else ":"
             raise UnSupportedError(

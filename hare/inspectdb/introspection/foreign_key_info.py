@@ -16,10 +16,10 @@ class ForeignKeyInfo:
     #: The target column when it isn't the target's single-column primary key - rendered as
     #: to_field=.
     to_field: str | None = None
-    #: Postgres schema of the target table - None on SQLite, which has one namespace.
+    #: The schema of the target table - None where the database has one namespace of tables.
     target_schema: str | None = None
     #: The ON UPDATE action, as the database spells it.
     on_update: str = FOREIGN_KEY_NO_ACTION
     #: ``DEFERRABLE INITIALLY IMMEDIATE``/``DEFERRABLE INITIALLY DEFERRED``, ``""`` for a constraint
-    #: checked at once - None where the database doesn't tell (SQLite).
+    #: checked at once - None where the database doesn't tell.
     deferral: str | None = None

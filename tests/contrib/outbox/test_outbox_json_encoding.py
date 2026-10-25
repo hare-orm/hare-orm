@@ -64,4 +64,11 @@ async def test_enqueue_writes_and_refuses_through_it(db_outbox):
         await DemoOutboxEvent.enqueue("widget.created", {"value": object()})
     with pytest.raises(ValidationError):
         await DemoOutboxEvent.enqueue("widget.created", {}, headers={"value": object()})
+    # A float JSON has no number for - the body would be no JSON.
+    with pytest.raises(ValidationError, match="not a finite number"):
+        await DemoOutboxEvent.enqueue("widget.created", {"value": float("nan")})
+    with pytest.raises(ValidationError, match="not a finite number"):
+        await DemoOutboxEvent.enqueue("widget.created", [float("-inf")])
+    with pytest.raises(ValidationError, match="not a finite number"):
+        await DemoOutboxEvent.enqueue("widget.created", {}, headers={"value": float("inf")})
     assert await DemoOutboxEvent.objects.all().count() == 1

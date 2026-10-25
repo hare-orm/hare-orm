@@ -72,14 +72,21 @@ Other reconstruction rules:
 - A foreign key to a table of another schema than the inspected one stays a plain column with a `# TODO`
   naming its target — a relation can only point at a model of the same run.
 - A partition of a partitioned PostgreSQL table is not listed (the partitioned table stands for it),
-  unless named explicitly; `drift` doesn't report partitions as untracked tables either.
+  unless named explicitly; `drift` doesn't report partitions as untracked tables either. A table
+  partitioned in a way no `PostgresqlTableOptions(partitioning=...)` declares — a key over an
+  expression, a partition partitioned itself — gets a `# TODO` naming its `PARTITION BY`: a migration of
+  the model creates the table unpartitioned.
 - A view or a materialized view is no model: `inspectdb` of a whole schema names each one in a `# NOTE`
   at the end of the module — to be declared in `Meta.views`/`Meta.materialized_views` of the model it
   reads — with the triggers on it (`INSTEAD OF`), which a `RunSQL` migration adds.
 - A PostgreSQL identity column (`GENERATED ... AS IDENTITY`, not the primary key) becomes an integer
   field with `generated=True` and a `# TODO`: hare never writes it and reads the assigned value back, but
-  has no identity-column DDL of its own. A quoted numeric default (`'-1.5'::double precision`) comes back
-  as a number.
+  has no identity-column DDL of its own — a migration creating it and `hare drift`, which creates the
+  models' tables in its shadow, refuse such a field; declare its model `Meta.managed = False` to keep
+  drift for the rest of the schema. A quoted numeric default (`'-1.5'::double precision`) comes back
+  as a number. A literal default is the value its field reads it as (`'7'` of an integer column `7`,
+  `1` or `'t'` of a boolean one `True`); one no value of the field holds — `'NaN'` of a float,
+  `'infinity'` of a date, `'1 day'` of an interval — comes back as its text, `SqlDefault("'NaN'")`.
 - An integer primary key the database gives no value — on PostgreSQL one without a sequence or an
   identity, on SQLite one of another type than `INTEGER` (only that one is the row id) — comes back with
   `generated=False`, so `create()` sends the key.
@@ -94,14 +101,17 @@ Other reconstruction rules:
   without one, and without another index starting with its columns, gets `db_index=False`.
 - An array column's default (`'{1,2}'::integer[]`) comes back as the list (`db_default=[1, 2]`), its
   elements read by the array's element type.
+- A PostgreSQL array column comes back with the dimensions it was declared with: `integer[][]` as
+  `ArrayField(base_field=ArrayField(base_field=IntField()))`. A column made with no declaration (by
+  `CREATE TABLE ... AS`) has none recorded and comes back one-dimensional.
 - A column of a type no hare field writes exactly (`real`, `json`, an unconstrained `numeric`, SQLite's
-  `BOOLEAN`/`NUMERIC`) comes back as the nearest field with a `# TODO` naming both types: `drift` reports
+  `BOOLEAN`/`NUMERIC`/`DECIMAL` — a SQLite decimal column holds an integer or a float, so it comes back as
+  a `FloatField`) comes back as the nearest field with a `# TODO` naming both types: `drift` reports
   the difference until the column is altered to the field's type. So does a column of a PostgreSQL
   domain, which comes back as the field of the domain's type, and an identity primary key
   (`GENERATED ... AS IDENTITY`), which comes back as the generated key hare declares from a sequence.
-- On SQLite hare declares a `BooleanField` column `INT` and a `DecimalField` column `VARCHAR(40)` (the
-  decimal's exact text), as an `IntField` and a `CharField(max_length=40)` are declared: such a column
-  comes back as the plain field with a `# TODO` saying which other field it may be.
+- On SQLite hare declares a `BooleanField` column `INT`, as an `IntField` is declared: such a column
+  comes back as an `IntField` with a `# TODO` saying it may be a `BooleanField`.
 - A many-to-many through table — two columns, each a foreign key to the primary key of a table of the
   same run — comes back as a `ManyToManyField` on the model of its first column's table:
   `through=` naming the table, `forward_key`/`backward_key` its columns, the field named after the
@@ -124,7 +134,9 @@ Other reconstruction rules:
   of its labels with a `# TODO`.
 - PostgreSQL `timestamp` and `time` without a time zone, `interval` and `character(n)` come back as
   [`NaiveDatetimeField`, `NaiveTimeField`, `IntervalField` and
-  `FixedCharField(max_length=n)`](../dialects/postgresql/fields.md#wall-clock-fields); ClickHouse `Date`,
+  `FixedCharField(max_length=n)`](../dialects/postgresql/fields.md#wall-clock-fields), an array of them
+  (and of `inet`, `cidr`, `macaddr`) as an `ArrayField` of that field — elements of a precision no field
+  keeps (`timestamptz(2)[]`) get a `# TODO`; ClickHouse `Date`,
   `DateTime` and a `DateTime64` other than `DatetimeField`'s `DateTime64(6, 'UTC')` as
   [`ClickhouseDateField` and `ClickhouseDatetimeField`](../dialects/clickhouse/types.md#fields) of the
   column's precision and time zone.
@@ -135,10 +147,12 @@ Other reconstruction rules:
   `Meta.policies` (each condition a `RawSQLTerm` of the text the server keeps), the privileges granted
   on it and on its columns to roles other than its owner as `Meta.grants` (one `Grant` per role and grant
   option; a column grant per set of columns given the same privileges; a privilege no `Privilege` names
-  gets a `# TODO`), and the sequences a column of it owns (`OWNED BY`) as `Meta.sequences` — the
-  sequence of a primary key column's `SERIAL` or identity isn't one: the generated key takes its own. A
-  `SERIAL` column outside the primary key keeps its sequence there and its
-  `db_default=SqlDefault("nextval(...)")`.
+  gets a `# TODO`), and the sequences a column of it owns (`OWNED BY`) or, owned by none, takes its
+  default from as `Meta.sequences` — the sequence of the `SERIAL` or identity of a primary key of one
+  column isn't one: the generated key takes its own. Another `SERIAL` column — outside the primary key,
+  or a column of a composite one — keeps its sequence there and its
+  `db_default=SqlDefault("nextval(...)")`. A sequence no column owns that defaults of several tables read
+  is declared by the model of the first of them by name; the others get a `# TODO` naming that table.
 - A ClickHouse `Distributed` engine reading tables of the inspected database names it
   `currentDatabase()`, as hare writes it — the model creates it over the tables of the database it is
   migrated in.
@@ -190,15 +204,15 @@ class SchemaInspector:
     ) -> str: ...
 ```
 
-`inspect()` generates one importable module for the tables (every table of `schema` when `tables` is
-omitted; `schema` is the connection's default schema when `None` — an attached database on SQLite, a
-database of the server on ClickHouse; a table of another schema than the default one gets its
-`Meta.schema`). It raises `UnsupportedDialectError` for a dialect without an introspector,
-`SchemaNotFoundError`/`TableNotFoundError` for a missing schema or table and
+`inspect()` generates one importable module for the tables (every table of `schema` when `tables` is omitted,
+but hare's own `hare_migrations` and `hare_distributed_decisions`; `schema` is the connection's default schema
+when `None` — an attached database on SQLite, a database of the server on ClickHouse; a table of another
+schema than the default one gets its `Meta.schema`). It raises `UnsupportedDialectError` for a dialect without
+an introspector, `SchemaNotFoundError`/`TableNotFoundError` for a missing schema or table and
 `DuplicateModelClassNameError` for two tables deriving one class name. `render_module()` renders tables
 already read with `DatabaseCatalog` (see [Reading a table:
-`DatabaseCatalog`](../models/runtime-models.md#reading-a-table)); `views` — each view's name, whether it
-is materialized and its triggers — are the views it names in the `# NOTE` at the end.
+`DatabaseCatalog`](../models/runtime-models.md#reading-a-table)); `views` — each view's name, whether it is
+materialized and its triggers — are the views it names in the `# NOTE` at the end.
 
 Each table is first turned into the same model state a declared model has
 (`hare.inspectdb.InspectedModelBuilder(table_info, ModelGenerationOptions(dialect, app_label)).build()`

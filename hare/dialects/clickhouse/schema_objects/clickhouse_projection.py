@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.dialects.clickhouse.schema.constants import CLICKHOUSE_PROJECTION_ORDERS
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -120,6 +121,11 @@ class ClickhouseProjection:
                 "projection keeps every row of the table (a model's default filter, a soft delete's too: take a "
                 "queryset without it)"
             )
+        if any(order not in CLICKHOUSE_PROJECTION_ORDERS for _term, order in builder._orderbys):
+            raise ConfigurationError(
+                f"{model.__name__}: ClickhouseProjection {self.name!r} orders its rows otherwise than ascending - "
+                "ClickHouse sorts a projection ascending only, NULL last"
+            )
 
     @staticmethod
     def get_query_builder(queryset: QuerySet[Any, Any], client: DatabaseClient | None = None) -> Any:
@@ -150,7 +156,10 @@ class ClickhouseProjection:
         queryset = self.get_queryset()
         if queryset is None:
             return cast("RawSQLTerm", self.query).sql.strip()
-        return str(self.get_query_builder(queryset, client).without_from().get_sql())
+        builder = self.get_query_builder(queryset, client).without_from()
+        # A projection's ORDER BY is a sorting key - ascending, written without a direction.
+        builder._orderbys = [(term, None) for term, _order in builder._orderbys]
+        return str(builder.get_sql())
 
     def get_read_columns(self) -> tuple[str, ...]:
         """The columns of the table the query reads - a queryset's own, else ``read_columns``."""

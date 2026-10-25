@@ -327,3 +327,25 @@ def test_an_equality_with_a_geometry_of_another_srid_is_refused_on_sqlite():
     with pytest.raises(ValidationError, match="SRID 3857 isn't the column's 4326"):
         SqliteGeometryValues.to_lookup(PointField(), Point(1, 2, srid=3857), None)
     assert SqliteGeometryValues.to_lookup(PointField(), Point(1, 2), None) is not None
+    # Another type or other dimensions likewise - a write refused them, PostgreSQL did in a filter too.
+    for field, value, message in (
+        (PointField(), LineString([(0, 0), (1, 1)]), "expected a POINT, got a LINESTRING"),
+        (PointField(), Point(1, 2, 3), "expected 2 coordinates, got 3"),
+        (PointField(dimensions=3), Point(1, 2), "expected 3 coordinates, got 2"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            SqliteGeometryValues.to_lookup(field, value, None)
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("distance", [10**400, -1, float("nan"), float("inf"), True, "1"], ids=repr)
+def test_a_distance_that_is_no_finite_number_of_zero_or_more_is_refused(distance):
+    """An int past the float range raised OverflowError out of float() - not the promised ValidationError."""
+    from hare.gis.lookups.spatial_field_lookups import SpatialFieldLookups
+
+    field = PointField(srid=4326)
+    field.model_field_name = "spot"
+    with pytest.raises(ValidationError, match="a distance is a finite number of zero or more"):
+        SpatialFieldLookups.encode_geometry_with_distance(
+            (Point(1, 1, srid=4326), distance), None, field, DialectRegistry.get_dialect("sqlite")
+        )

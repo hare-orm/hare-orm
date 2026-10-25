@@ -12,7 +12,7 @@ from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.query.expressions import Expression, F, Ordering
 from hare.sql.constants import INDEX_KEY_SQL_CONTEXT
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.terms.field import Field as HareSqlField
 from hare.sql.terms.term import Term
 

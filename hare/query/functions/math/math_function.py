@@ -81,6 +81,18 @@ class MathFunction(Function):
             for term in terms
         ]
 
+    def _get_result_term(
+        self,
+        term: Any,
+        function_arg: ExpressionResult,
+        default_results: list[ExpressionResult],
+        expression_context: ExpressionContext,
+    ) -> Term:
+        """A result of the argument's type as the dialect keeps it."""
+        if self.output is MathResultType.SAME:
+            return expression_context.dialect.renderers.get_same_type_math_result(term, function_arg.output_field)
+        return term
+
     def _get_output_field(
         self, function_arg: ExpressionResult, default_results: list[ExpressionResult]
     ) -> Field[Any] | None:

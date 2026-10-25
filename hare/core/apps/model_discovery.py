@@ -7,9 +7,10 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from hare.core.apps.cross_connection_checks import CrossConnectionChecks
+from hare.core.apps.enum_member_checks import EnumMemberChecks
 from hare.core.apps.swappable_models import SwappableModels
 from hare.core.constants import DEFAULT_CONNECTION_NAME
-from hare.exceptions import ConfigurationError
+from hare.exceptions import ConfigurationError, HareError
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -48,11 +49,16 @@ class ModelDiscovery:
                 ):
                     raise ConfigurationError(f"Module {models_path!r} not found") from error
                 raise ConfigurationError(f"Module {models_path!r} failed to import: {error}") from error
-            except (NameError, AttributeError, SyntaxError) as error:
+            except HareError:
+                # A model of the module declared wrongly - hare's own error says which.
+                raise
+            except Exception as error:
                 # The module exists but raised while its body executed (typo, bad reference,
-                # broken syntax) - a different failure mode than "not found" above, so the
-                # message says what actually happened instead of implying a missing module.
-                raise ConfigurationError(f"Module {models_path!r} failed to import: {error}") from error
+                # broken syntax, any error of its own) - a different failure mode than "not found"
+                # above, so the message says what actually happened instead of implying a missing module.
+                raise ConfigurationError(
+                    f"Module {models_path!r} failed to import: {type(error).__name__}: {error}"
+                ) from error
         discovered_models: list[type[Model]] = []
         # The models skipped as another app's - for the error below when every candidate is one.
         models_excluded_for_other_app: list[type[Model]] = []
@@ -137,6 +143,9 @@ class ModelDiscovery:
         SwappableModels.init_swapped_models(apps)
         CrossConnectionChecks.check_cross_connection_constraints(apps)
         apps.init_relations()
+        EnumMemberChecks.add_to_models(
+            (model for app in apps.apps.values() for model in app.values()), apps._connections
+        )
         CrossConnectionChecks.check_change_capture_connections(apps)
         if apps._validate_connections:
             apps.build_initial_querysets()

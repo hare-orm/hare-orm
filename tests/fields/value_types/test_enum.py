@@ -3,8 +3,11 @@ from enum import Enum, IntEnum
 
 import pytest
 
-from hare.exceptions import ConfigurationError, ValidationError
+from hare.contrib.test import requires_features
+from hare.exceptions import ConfigurationError, IntegrityError, ValidationError
 from hare.fields import CharEnumField, IntEnumField
+from hare.query.expressions import F
+from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
 
 
@@ -352,3 +355,23 @@ def test_a_value_of_no_number_names_its_type():
     """The message read "Value must be a numeric value and is required" for a text given."""
     with pytest.raises(ValidationError, match="expected an int, got str"):
         IntEnumField(testmodels.Service).to_db_value("1", testmodels.EnumFields)
+
+
+@requires_features(keeps_enum_columns=False)
+@pytest.mark.asyncio
+async def test_a_value_of_no_member_written_around_the_field_is_refused_by_the_database(db):
+    """The column held any integer or text - a value of no member written by raw SQL, or computed by an
+    update, was stored and failed every read. A CHECK keeps the column to the members' values."""
+    connection = db.get_connection()
+    row = await testmodels.EnumFields.objects.create(service=testmodels.Service.database_design)
+    table = connection.dialect.literals.quote_identifier(testmodels.EnumFields._meta.db_table)
+    for column, value in (("service", "999"), ("currency", "'XXX'")):
+        with pytest.raises(IntegrityError):
+            async with Transactions.atomic():
+                await connection.execute_script(f'UPDATE {table} SET "{column}" = {value} WHERE "id" = {row.id}')
+    with pytest.raises(IntegrityError):
+        async with Transactions.atomic():
+            await testmodels.EnumFields.objects.filter(id=row.id).update(service=F("service") + 100)
+    assert await testmodels.EnumFields.objects.values_list("service", "currency") == [
+        (testmodels.Service.database_design, testmodels.Currency.HUF)
+    ]

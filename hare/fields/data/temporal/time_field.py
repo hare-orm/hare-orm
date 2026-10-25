@@ -24,7 +24,7 @@ TTime = TypeVar("TTime", datetime.time, datetime.time | None)
 
 
 class TimeField(Field[TTime]):
-    """A time of day - a column of the database's time type with a UTC offset (``TIMETZ`` on PostgreSQL),
+    """A time of day - a column of the database's time type with a UTC offset where the database has one,
     else its text. Under ``use_timezone=True`` a naive time takes the configured zone's fixed offset, and
     without it an offset is dropped."""
 

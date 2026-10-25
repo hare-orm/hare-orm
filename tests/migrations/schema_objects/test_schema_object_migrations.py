@@ -381,6 +381,45 @@ def test_a_view_reading_a_changed_column_is_dropped_before_the_change_and_create
 
 
 @pytest.mark.database_independent
+def test_a_policy_reading_a_changed_column_is_dropped_before_the_change_and_created_after():
+    """A policy whose Q read a column the migration changed was left in place - PostgreSQL refused the
+    change of a column a policy reads."""
+    policy = Policy("schema_migration_amount_rows", using=Q(amount__gt=0))
+    old = get_state(policies=[policy])
+    new = get_state(get_fields_with_amount(fields.BigIntField(null=True)), policies=[policy])
+    assert get_types(OperationGenerator(old, new).generate()) == ["RemovePolicy", "AlterField", "AddPolicy"]
+    # A raw SQL condition is the user's own - left as written.
+    raw_policy = Policy("schema_migration_amount_rows", using=RawSQLTerm("amount > 0"))
+    old = get_state(policies=[raw_policy])
+    new = get_state(get_fields_with_amount(fields.BigIntField(null=True)), policies=[raw_policy])
+    assert get_types(OperationGenerator(old, new).generate()) == ["AlterField"]
+
+
+@pytest.mark.database_independent
+def test_a_view_reading_a_materialized_view_is_created_after_it():
+    """A view reading a materialized view was created before it - views come before materialized views -
+    and failed; drift's shadow then read it against the real database's materialized view."""
+    from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
+
+    totals = MaterializedView(
+        "schema_migration_totals_mv", query=RawSQLTerm(f"SELECT sum(amount) AS total FROM {TABLE}")
+    )
+    over_totals = View(
+        "schema_migration_over_totals",
+        query=RawSQLTerm("SELECT total FROM schema_migration_totals_mv"),
+        read_columns=[("schema_migration_totals_mv", "total")],
+    )
+    operations = OperationGenerator(
+        get_state(), get_state(views=[over_totals], materialized_views=[totals])
+    ).generate()
+    assert get_types(operations) == ["AddMaterializedView", "AddView"]
+    # An object naming none keeps its place - views first.
+    plain = View("schema_migration_plain", query=RawSQLTerm(f"SELECT id FROM {TABLE}"))
+    ordered = ViewCreationOrder.get_ordered([plain, over_totals, totals], lambda view: view)
+    assert ordered == [plain, totals, over_totals]
+
+
+@pytest.mark.database_independent
 def test_a_materialized_view_dropped_and_created_around_a_column_change_replaces_itself():
     view = MaterializedView(
         "schema_migration_amount_totals",
@@ -391,9 +430,9 @@ def test_a_materialized_view_dropped_and_created_around_a_column_change_replaces
     new = get_state(get_fields_with_amount(fields.BigIntField(null=True)), materialized_views=[view])
     operations = OperationGenerator(old, new).generate()
     assert get_types(operations) == ["RemoveMaterializedView", "AlterField", "AddMaterializedView"]
-    assert operations[0].replacing and operations[2].replacing
+    assert operations[2].replacing
     source = MigrationWriter("0002_totals", "models", operations).as_string()
-    assert source.count("replacing=True") == 2
+    assert source.count("replacing=True") == 1
     added = OperationGenerator(get_state(), get_state(materialized_views=[view])).generate()
     assert get_types(added) == ["AddMaterializedView"]
     assert not added[0].replacing
@@ -1091,3 +1130,78 @@ async def test_a_database_without_them_refuses_every_operation_before_any_sql(db
         ).apply(State(), schema_editor=editor)
     tables = await connection.execute_dicts(f"SELECT name FROM sqlite_master WHERE name = '{TABLE}'")
     assert tables == []
+
+
+@pytest.mark.database_independent
+def test_a_view_reading_another_is_removed_before_it():
+    """Two views removed together were dropped in their declared order - PostgreSQL refused to drop the
+    view the other one still read."""
+    amounts = View(AMOUNT_VIEW.name, query=AMOUNT_VIEW.query)
+    over_amounts = View(
+        "schema_migration_over_amounts",
+        query=RawSQLTerm(f"SELECT amount FROM {AMOUNT_VIEW.name}"),
+        read_columns=[(AMOUNT_VIEW.name, "amount")],
+    )
+    totals = MaterializedView(
+        "schema_migration_totals_mv",
+        query=RawSQLTerm(f"SELECT sum(amount) AS total FROM {AMOUNT_VIEW.name}"),
+        read_columns=[(AMOUNT_VIEW.name, "amount")],
+    )
+    operations = OperationGenerator(
+        get_state(views=[amounts, over_amounts], materialized_views=[totals]), get_state()
+    ).generate()
+    assert [(type(operation).__name__, operation.name) for operation in operations] == [
+        ("RemoveMaterializedView", totals.name),
+        ("RemoveView", over_amounts.name),
+        ("RemoveView", amounts.name),
+    ]
+
+
+@pytest.mark.database_independent
+def test_a_view_reading_a_view_made_again_is_made_again_with_it():
+    """A view reading a changed column was dropped and created again, but the view reading it was left -
+    PostgreSQL refused to drop the view another one read."""
+    amounts = View(AMOUNT_VIEW.name, query=AMOUNT_VIEW.query, read_columns=[(TABLE, "amount")])
+    over_amounts = View(
+        "schema_migration_over_amounts",
+        query=RawSQLTerm(f"SELECT amount FROM {AMOUNT_VIEW.name}"),
+        read_columns=[(AMOUNT_VIEW.name, "amount")],
+    )
+    old = get_state(views=[amounts, over_amounts])
+    new = get_state(get_fields_with_amount(fields.BigIntField(null=True)), views=[amounts, over_amounts])
+    operations = OperationGenerator(old, new).generate()
+    assert [(type(operation).__name__, getattr(operation, "name", None)) for operation in operations] == [
+        ("RemoveView", over_amounts.name),
+        ("RemoveView", amounts.name),
+        ("AlterField", "amount"),
+        ("AddView", None),
+        ("AddView", None),
+    ]
+    assert [operation.schema_object.name for operation in operations[3:]] == [amounts.name, over_amounts.name]
+
+
+def test_a_view_reading_a_view_whose_query_changes_is_made_again_with_it():
+    """A view whose query changed was made again, but the view reading it was left - PostgreSQL refused to
+    drop the view another one read."""
+    amounts = View(AMOUNT_VIEW.name, query=AMOUNT_VIEW.query, read_columns=[(TABLE, "amount")])
+    changed_amounts = View(
+        AMOUNT_VIEW.name,
+        query=RawSQLTerm(f"SELECT amount FROM {TABLE} WHERE amount > 0"),
+        read_columns=[(TABLE, "amount")],
+    )
+    over_amounts = View(
+        "schema_migration_over_amounts",
+        query=RawSQLTerm(f"SELECT amount FROM {AMOUNT_VIEW.name}"),
+        read_columns=[(AMOUNT_VIEW.name, "amount")],
+    )
+    old = get_state(views=[amounts, over_amounts])
+    new = get_state(views=[changed_amounts, over_amounts])
+    operations = OperationGenerator(old, new).generate()
+    assert [
+        (type(operation).__name__, getattr(operation, "name", None) or operation.schema_object.name)
+        for operation in operations
+    ] == [
+        ("RemoveView", over_amounts.name),
+        ("AlterView", amounts.name),
+        ("AddView", over_amounts.name),
+    ]

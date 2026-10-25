@@ -25,6 +25,10 @@ FIRST_MIGRATION = "__first__"
 #: followed by ``<app_label>.<migration_name>``.
 RUNTIME_MIGRATION_MODULE_PREFIX = "hare_runtime_migration."
 
+#: The modules of hare's own migration operations - each changes a state only through its models' items and
+#: attributes, which the state change journal records.
+OPERATIONS_MODULE_PREFIX = "hare.migrations.operations."
+
 
 #: Model options each changed by an operation of its own (AlterModelTable, AlterModelSchema,
 #: AddIndex, AddConstraint, AddTrigger, ...) - every other option is changed by AlterModelOptions,

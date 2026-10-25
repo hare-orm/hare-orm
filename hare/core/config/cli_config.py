@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from hare.core.config.config_section import ConfigSection
-from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from typing import Self
@@ -30,9 +29,7 @@ class CliConfig(ConfigSection):
             section: What the mapping is, for error messages.
 
         Raises:
-            ConfigurationError: ``data`` isn't a mapping, or holds an unknown key.
+            ConfigurationError: ``data`` holds an unknown key.
         """
-        if not isinstance(data, Mapping):
-            raise ConfigurationError('Config "cli" must be a mapping')
         cls.check_known_keys(data, section)
         return cls(commands=data.get("commands", []))

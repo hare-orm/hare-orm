@@ -5,19 +5,13 @@ The detector's observer is a plain function: it runs in the task that issued the
 query call returns, so nothing has to be waited for.
 """
 
-import math
 from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 
 from hare.contrib.repeated_queries import RepeatedQueryDetector
-from hare.contrib.repeated_queries.constants import (
-    REPEATED_QUERY_MAX_THRESHOLD,
-    REPEATED_QUERY_MAX_WINDOW_SECONDS,
-)
 from hare.contrib.test import capture_queries
-from hare.exceptions import ConfigurationError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.time import Timezone
@@ -204,34 +198,6 @@ async def test_an_action_that_raises_is_logged_and_never_breaks_the_query(db, ca
                 assert await Book.objects.filter(author_id=author.id).count() == 0
 
     assert any("raised on" in record.getMessage() for record in caplog.records)
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"threshold": 0},
-        {"threshold": -1},
-        {"threshold": REPEATED_QUERY_MAX_THRESHOLD + 1},
-        {"threshold": 2.5},
-        {"threshold": True},
-        {"window_seconds": 0},
-        {"window_seconds": -1.0},
-        {"window_seconds": math.inf},
-        {"window_seconds": math.nan},
-        {"window_seconds": REPEATED_QUERY_MAX_WINDOW_SECONDS + 1},
-        {"window_seconds": "1"},
-    ],
-)
-def test_detector_rejects_out_of_range_options(options):
-    with pytest.raises(ConfigurationError, match=next(iter(options))):
-        RepeatedQueryDetector(**({"threshold": 2, "window_seconds": 1.0} | options))
-
-
-@pytest.mark.database_independent
-def test_detector_rejects_an_unknown_action_name():
-    with pytest.raises(ConfigurationError, match="Unknown action 'raise'"):
-        RepeatedQueryDetector(action="raise")
 
 
 @pytest.mark.asyncio

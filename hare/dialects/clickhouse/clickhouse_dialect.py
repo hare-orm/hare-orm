@@ -4,10 +4,10 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.dialect import Dialect
-from hare.dialects.base.features import Features
 from hare.dialects.clickhouse.clauses.constants import CLICKHOUSE_MAX_BULK_UPDATE_ROWS
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.cluster.constants import CLICKHOUSE_REPLICATED_JOURNAL_ENGINE
+from hare.dialects.clickhouse.declarations import ClickhouseFeatures
 from hare.dialects.clickhouse.enums import ClickhouseDialectName
 from hare.dialects.clickhouse.server_versions import CLICKHOUSE_MINIMUM_SERVER_VERSION
 from hare.transactions.enums import IsolationLevel
@@ -38,7 +38,7 @@ class ClickhouseDialect(Dialect):
 
     name = ClickhouseDialectName.CLICKHOUSE
     otel_system_name = "clickhouse"
-    features = Features(
+    features = ClickhouseFeatures(
         supports_transactions=False,
         supports_savepoints=False,
         # A transaction reads the snapshot it began with.
@@ -57,6 +57,10 @@ class ClickhouseDialect(Dialect):
         # But not in a join's ON, a mutation or under DISTINCT, where the server has none - an EXISTS is a
         # membership test there - nor a subquery ordering its own rows, which it refuses.
         supports_correlated_subqueries=True,
+        # avg(), varPop() and the other statistics of a Decimal are Float64.
+        computes_decimal_statistics_exactly=False,
+        # An enum field's column is an Enum8 or an Enum16 of its members.
+        keeps_enum_columns=True,
         rewrites_correlated_exists=True,
         supports_ordered_correlated_subqueries=False,
         orders_by_correlated_subqueries=False,
@@ -116,7 +120,7 @@ class ClickhouseDialect(Dialect):
         """
         Args:
             stores_json_natively: Whether a ``JSONField`` is a ``JSON`` column - the dialect of a
-                connection whose driver reads one (``Features.supports_json_type``); else the column
+                connection whose driver reads one (``ClickhouseFeatures.supports_json_type``); else the column
                 holds the JSON text.
         """
         self.stores_json_natively = stores_json_natively
@@ -234,7 +238,7 @@ class ClickhouseDialect(Dialect):
 
     def build_schema_editor_class(self) -> type[BaseSchemaEditor]:
         # Local import: the schema editor works on hare's models, whose modules import this one.
-        from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+        from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
 
         return ClickhouseSchemaEditor
 

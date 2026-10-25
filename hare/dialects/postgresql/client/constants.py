@@ -326,3 +326,9 @@ POSTGRESQL_SCHEMA_EXISTS_SQL = "SELECT 1 AS found FROM pg_catalog.pg_namespace W
 POSTGRESQL_MISSING_TENANT_SCHEMA_MESSAGE = (
     "The tenant schema {schema!r} doesn't exist - create it with TenantSchemas.create()"
 )
+
+#: The start of Python's own error of an int with more digits than it writes as text - the client reports it
+#: with ``SQL_LONG_INT_MESSAGE``.
+PYTHON_LONG_INT_ERROR_START = "Exceeds the limit ("
+#: The text of a PoolTimeoutError - waiting for a connection of a pool ran out of ``pool_acquire_timeout``.
+POOL_TIMEOUT_MESSAGE = "Timed out after {seconds}s waiting for a free connection of the pool of {connection_alias!r}"

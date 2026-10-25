@@ -90,6 +90,12 @@ async def test_delete_needs_a_filter_and_keeps_to_the_access_condition(library):
         await BookQuery(tag_count_at_least=0).delete()
     with pytest.raises(InvalidRequestQuery, match="needs a filter"):
         await BookQuery(tag_count_at_least=0).update(title="changed")
+    # An empty text a pattern lookup matches every row with filters nothing - as a blank search does.
+    with pytest.raises(InvalidRequestQuery, match="needs a filter"):
+        await BookQuery.from_query_string("title__icontains=").delete()
+    with pytest.raises(InvalidRequestQuery, match="needs a filter"):
+        await BookQuery(title__icontains="").update(title="changed")
+    assert await BookQuery(title__icontains="").count() == 5
     assert await Book.objects.filter(title="changed").count() == 0
     assert await Book.objects.all().count() == 5
     assert await PublishedBookQuery(author=1).delete() == 1

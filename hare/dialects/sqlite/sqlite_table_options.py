@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from hare.ddl.table_options import TableOptions
 from hare.dialects.sqlite.server_versions import SQLITE_STRICT_SERVER_VERSION
@@ -15,6 +15,7 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.dialects.sqlite.declarations import SqliteFeatures
     from hare.models import Model
 
 
@@ -66,7 +67,7 @@ class SqliteTableOptions(TableOptions):
                 f"database doesn't generate - declare {primary_key_attribute!r} with generated=False, or use another "
                 "primary key."
             )
-        if self.strict and not features.supports_strict_tables:
+        if self.strict and not cast("SqliteFeatures", features).supports_strict_tables:
             minimum_version = ".".join(map(str, SQLITE_STRICT_SERVER_VERSION))
             raise UnSupportedError(
                 f"{model.__name__}: SqliteTableOptions(strict=True) needs SQLite {minimum_version} or later - "

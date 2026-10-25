@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from taskiq.kicker import AsyncKicker
 
@@ -17,13 +17,14 @@ from hare.contrib.taskiq.constants import (
     OUTBOX_TASK_NAME_KEY,
 )
 from hare.contrib.taskiq.hare_taskiq_middleware import HareTaskiqMiddleware
-from hare.exceptions import ConfigurationError
+from hare.core.hare_context import HareContext
 
 if TYPE_CHECKING:
     from taskiq import AsyncBroker
     from taskiq.decor import AsyncTaskiqDecoratedTask
 
     from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+    from hare.fields.relations.swappable_model_reference import SwappableModelReference
 
 TOutboxEvent = TypeVar("TOutboxEvent", bound=OutboxEvent)
 
@@ -40,31 +41,41 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
 
     Args:
         broker: The broker the tasks are sent through.
-        model: The concrete ``OutboxEvent`` model the tasks are written to.
+        model: The concrete ``OutboxEvent`` model the tasks are written to - its class, its
+            ``"app.Model"`` label or a ``swappable()`` setting; a label is looked up in the current context
+            when the model is first needed.
         topic: The outbox topic of the tasks - the relay delivers only these events.
         using: The connection the tasks are written on - the model's when None.
         wakeup: The wakeup of the relay - an ``InProcessWakeup`` of its own by default.
-
-    Raises:
-        ConfigurationError: ``topic`` isn't a non-empty string.
     """
 
     def __init__(
         self,
         broker: AsyncBroker,
         *,
-        model: type[TOutboxEvent],
+        model: type[TOutboxEvent] | str | SwappableModelReference,
         topic: str = DEFAULT_TASKIQ_OUTBOX_TOPIC,
         using: str | None = None,
         wakeup: OutboxWakeup | None = None,
     ) -> None:
-        if not isinstance(topic, str) or not topic:
-            raise ConfigurationError(f"topic must be a non-empty string, got {topic!r}")
         self.broker = broker
-        self.model = model
+        #: The model as it was given - a label is looked up on first use.
+        self.model_reference = model
+        self._model: type[TOutboxEvent] | None = model if isinstance(model, type) else None
         self.topic = topic
         self.using = using
         self.wakeup = wakeup if wakeup is not None else InProcessWakeup()
+
+    @property
+    def model(self) -> type[TOutboxEvent]:
+        """The ``OutboxEvent`` model - a label given looked up in the current context once.
+
+        Raises:
+            ConfigurationError: The label names no model of the current context.
+        """
+        if self._model is None:
+            self._model = cast("type[TOutboxEvent]", HareContext.require_current().get_model(self.model_reference))
+        return self._model
 
     async def kiq_on_commit(
         self,
@@ -114,4 +125,4 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
         Returns:
             The relay, delivering only this delivery's topic, woken by its wakeup.
         """
-        return OutboxRelay(self.model, self, topics=[self.topic], wakeup=self.wakeup, **relay_options)
+        return OutboxRelay(self.model_reference, self, topics=[self.topic], wakeup=self.wakeup, **relay_options)

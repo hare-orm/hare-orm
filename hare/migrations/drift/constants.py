@@ -20,6 +20,7 @@ from hare.migrations.operations import (
     RemoveSequence,
     RemoveTrigger,
 )
+from hare.models.enums import ModelOption
 
 #: The objects a model declares by name, compared part by part: the ``MetaInfo`` attribute listing them,
 #: and the operations adding one the database lacks, removing one it has of its own (None where only the
@@ -40,4 +41,20 @@ DRIFT_SCHEMA_OBJECT_PART_TYPES = (
     SchemaPartType.MATERIALIZED_VIEW,
     SchemaPartType.FUNCTION,
     SchemaPartType.DICTIONARY,
+)
+#: What an unmanaged model declares beside its table that the shadow leaves out - the shadow holds its
+#: table only for the relations pointing at it, and the table of a model over a view takes no INSTEAD OF
+#: trigger, nor anything else made for the view.
+DRIFT_UNMANAGED_LEFT_OUT_OPTIONS = frozenset(
+    {
+        ModelOption.TRIGGERS,
+        ModelOption.VIEWS,
+        ModelOption.MATERIALIZED_VIEWS,
+        ModelOption.DICTIONARIES,
+        ModelOption.FUNCTIONS,
+        ModelOption.SEQUENCES,
+        ModelOption.POLICIES,
+        ModelOption.GRANTS,
+        ModelOption.ROW_LEVEL_SECURITY,
+    }
 )

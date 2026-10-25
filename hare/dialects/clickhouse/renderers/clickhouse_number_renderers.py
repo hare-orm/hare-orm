@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING
 from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_MATH_FUNCTION_NAMES,
     CLICKHOUSE_MATH_FUNCTION_TEMPLATES,
+    DECIMAL_QUOTIENT_SCALE,
 )
 from hare.sql import functions
-from hare.sql.constants import DECIMAL_QUOTIENT_SCALE
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
 

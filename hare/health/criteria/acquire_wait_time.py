@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.health.constants import ACQUIRE_WAIT_TIME_REASON, MAX_ACQUIRE_WAIT_SECONDS
+from hare.health.constants import ACQUIRE_WAIT_TIME_REASON
 from hare.health.criteria.health_criterion import HealthCriterion
 
 if TYPE_CHECKING:
@@ -14,13 +14,13 @@ class AcquireWaitTime(HealthCriterion):
     since the last check. Reads the measured waits - ``PoolMetrics`` must be enabled.
 
     Args:
-        max_seconds: The longest wait that passes - above 0, at most 3600.
+        max_seconds: The longest wait that passes.
     """
 
     requires_pool_metrics: bool = True
 
     def __init__(self, max_seconds: float) -> None:
-        self.max_seconds = HealthCriterion.get_checked_amount("max_seconds", max_seconds, MAX_ACQUIRE_WAIT_SECONDS)
+        self.max_seconds = max_seconds
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         for pool in connection_check.pools:

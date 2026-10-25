@@ -9,6 +9,7 @@ from hare.sql.terms.functions.window_frame_analytic_function import WindowFrameA
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
+    from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.functions.window.field_window_function import FieldWindowFunction
 
 
@@ -19,5 +20,7 @@ class Sum(FieldWindowFunction):
     analytic_class = WindowFrameAnalyticFunction
     aggregate_class = functions.Sum
 
-    def _coerce_output_field(self, field_object: Field[Any] | None) -> Field[Any] | None:
+    def _coerce_output_field(
+        self, field_object: Field[Any] | None, expression_context: ExpressionContext
+    ) -> Field[Any] | None:
         return None if field_object is None else NumericTyping.get_sum_output_field(field_object)

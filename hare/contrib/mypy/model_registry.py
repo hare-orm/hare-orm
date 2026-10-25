@@ -12,7 +12,6 @@ from hare.contrib.mypy.constants import (
     CONFIG_NOT_SET_MESSAGE,
     MODELS_NOT_LOADED_MESSAGE,
     MYPY_IMPORTS_SETTING,
-    MYPY_IMPORTS_TYPE_MESSAGE,
     PYPROJECT_FILE_NAME,
 )
 from hare.core.config import HareConfig
@@ -102,10 +101,7 @@ class ModelRegistry:
         if not pyproject_path.exists():
             return []
         hare_section = tomllib.loads(pyproject_path.read_text("utf-8")).get("tool", {}).get("hare", {})
-        module_names = hare_section.get(MYPY_IMPORTS_SETTING, [])
-        if not isinstance(module_names, list) or not all(isinstance(name, str) for name in module_names):
-            raise ValueError(MYPY_IMPORTS_TYPE_MESSAGE.format(file=pyproject_path, value=module_names))
-        return module_names
+        return hare_section.get(MYPY_IMPORTS_SETTING, [])
 
     @staticmethod
     def _get_fingerprint(config_source: str, bound_models: BoundModels) -> str:

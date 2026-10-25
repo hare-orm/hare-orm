@@ -30,9 +30,6 @@ class DeletedConfig(RequestOption):
 
     parameter: str = DEFAULT_DELETED_PARAMETER
 
-    def __post_init__(self) -> None:
-        self.check_parameter_name(type(self).__name__, self.parameter)
-
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         description = "Deleted rows: exclude (by default), include or only"
         return (

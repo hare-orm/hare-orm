@@ -140,19 +140,23 @@ class MigrationAutodetector:
             app_label = split_migration.app_label
             previous_position = previous_positions[position]
             dependencies: set[tuple[str, str]] = set(split_migration.existing_dependencies)
-            dependencies.update(
-                (split_migrations[needed].app_label, names[needed]) for needed in split_migration.split_dependencies
-            )
             if previous_position is None:
                 dependencies.update(self.get_leaf_migration_keys(app_label))
-                dependencies.update(
-                    self.get_swappable_dependencies_of_app(
-                        app_label, new_state, self.get_later_added_fields(split_migrations, split_migration)
-                    )
+                swappable_dependencies = self.get_swappable_dependencies_of_app(
+                    app_label, new_state, self.get_later_added_fields(split_migrations, split_migration)
                 )
             else:
                 dependencies.add((app_label, names[previous_position]))
-                dependencies.update(self._get_operations_swappable_dependencies(split_migration.operations))
+                swappable_dependencies = self._get_operations_swappable_dependencies(split_migration.operations)
+            dependencies.update(swappable_dependencies)
+            swappable_app_labels = {dependency[0] for dependency in swappable_dependencies}
+            dependencies.update(
+                (split_migrations[needed].app_label, names[needed])
+                for needed in split_migration.split_dependencies
+                # The first migration of the app a swappable setting points into is the swappable dependency
+                # itself - named by the setting, so the migration loads where the setting points elsewhere.
+                if not (split_migrations[needed].app_label in swappable_app_labels and initial_flags[needed])
+            )
             writers.append(
                 MigrationWriter(
                     names[position],

@@ -6,7 +6,8 @@ from hare.exceptions import FieldError
 from hare.query.expressions import F, Window
 from hare.query.functions import Avg, Length
 from hare.query.functions.window import Avg as WindowAvg
-from tests.shared_models.testmodels import Author, Book, DecimalFields
+from tests.shared_models.testmodels import Author, Book
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 @pytest.mark.asyncio
@@ -33,6 +34,7 @@ async def test_values_renaming_a_field_is_still_allowed(db):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_average_is_not_rounded_to_the_fields_scale(db):
     for value in ("1.0000", "0.0000", "0.0000"):

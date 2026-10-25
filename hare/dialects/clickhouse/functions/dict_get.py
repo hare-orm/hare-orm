@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.class_path import ClassPath
@@ -40,8 +40,8 @@ class DictGet(Expression):
     Args:
         dictionary: The dictionary's name.
         attribute: The attribute read - a field the dictionary names, or that field's column.
-        key: The key looked up - a field name or an expression; a sequence of them for a dictionary
-            keyed by several fields.
+        key: The key looked up - a field name, an expression or a literal; a list or a tuple of them for a
+            dictionary keyed by several fields.
         output_field: The field the value is read as.
         default: The value of a key the dictionary doesn't hold - a literal or an expression
             (``dictGetOrDefault``); without one the server gives the attribute type's own default.
@@ -69,7 +69,7 @@ class DictGet(Expression):
         self,
         dictionary: str,
         attribute: str,
-        key: str | Expression | Sequence[str | Expression],
+        key: Any,
         *,
         output_field: Field[Any],
         default: Any = None,
@@ -84,13 +84,18 @@ class DictGet(Expression):
             raise QueryError(
                 f"DictGet(output_field=...) takes a field, got {ValueDescriptions.get_shown_value(output_field)}"
             )
-        key_parts = [key] if isinstance(key, str | Expression) else list(key)
+        key_parts = list(key) if isinstance(key, list | tuple) else [key]
         if not key_parts:
-            raise QueryError("DictGet(key=...) takes a field name, an expression, or a sequence of them")
+            raise QueryError("DictGet(key=...) takes a field name, an expression, a literal, or a list of them")
         self.dictionary = dictionary
         self.attribute = attribute
         self.keys: tuple[Expression, ...] = tuple(
-            F(key_part) if isinstance(key_part, str) else key_part for key_part in key_parts
+            F(key_part)
+            if isinstance(key_part, str)
+            else key_part
+            if isinstance(key_part, Expression)
+            else Value(key_part)
+            for key_part in key_parts
         )
         self.output_field = output_field
         self.default: Expression | None = (
@@ -172,6 +177,25 @@ class DictGet(Expression):
                 key_field.validate(types.get_db_value(key_field, key.value, model))
         return column or self.attribute
 
+    def get_qualified_name(self, expression_context: ExpressionContext) -> str:
+        """The dictionary's name with its database - the database of the model declaring it, else the
+        connection's: the shards a distributed table's query runs on look a bare name up in their default
+        database.
+
+        Args:
+            expression_context: The context the query is built in.
+
+        Returns:
+            The name - as given when it names a database already, or none is known.
+        """
+        if "." in self.dictionary:
+            return self.dictionary
+        declaration = self.get_declaration()
+        database = declaration[0]._meta.schema if declaration is not None else None
+        if database is None and expression_context.connection is not None:
+            database = getattr(expression_context.connection, "database", None)
+        return self.dictionary if database is None else f"{database}.{self.dictionary}"
+
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         literals = expression_context.dialect.literals
         attribute_column = self.get_attribute_column(expression_context.dialect.types)
@@ -183,7 +207,7 @@ class DictGet(Expression):
             else Function(CLICKHOUSE_TUPLE_FUNCTION, *(key_result.term for key_result in key_results))
         )
         arguments = [
-            LiteralValue(literals.get_string_literal_sql(self.dictionary)),
+            LiteralValue(literals.get_string_literal_sql(self.get_qualified_name(expression_context))),
             LiteralValue(literals.get_string_literal_sql(attribute_column)),
             key_term,
         ]

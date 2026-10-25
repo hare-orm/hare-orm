@@ -25,6 +25,8 @@ class AlterRowLevelSecurity(ModelBoundOperation):
         ConfigurationError: The setting is neither a ``RowLevelSecurity`` nor None.
     """
 
+    backward_reads_state_left = False
+
     def __init__(self, model_name: str, row_level_security: RowLevelSecurity | None) -> None:
         if row_level_security is not None and (
             not isinstance(row_level_security, str) or row_level_security not in set(RowLevelSecurity)
@@ -59,6 +61,11 @@ class AlterRowLevelSecurity(ModelBoundOperation):
         else:
             model_state.options[ModelOption.ROW_LEVEL_SECURITY] = self.row_level_security
         state.mark_models_changed([(app_label, self.model_name)])
+
+    def raise_if_unsupported(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> None:
+        PolicyObjectType.raise_if_unsupported(schema_editor)
 
     async def database_forward(
         self,

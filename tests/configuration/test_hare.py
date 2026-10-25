@@ -84,6 +84,26 @@ async def test_register_live_model_single_call_replaces_manual_steps():
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
+async def test_a_live_model_is_unregistered_and_looked_up_by_its_label():
+    async with HareContext() as ctx:
+        await Hare.init(
+            HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
+        )
+
+        class LabelledWidget(Model):
+            id = fields.IntField(primary_key=True)
+
+        Hare.register_live_models([LabelledWidget], app_label="dynamic")
+        assert ctx.get_model("dynamic.LabelledWidget") is LabelledWidget
+        assert ctx.get_model(LabelledWidget) is LabelledWidget
+        Hare.unregister_live_models(["dynamic.LabelledWidget"])
+        assert "LabelledWidget" not in ctx.apps.apps.get("dynamic", {})
+        with pytest.raises(ConfigurationError, match="No (app|model) with name"):
+            ctx.get_model("dynamic.LabelledWidget")
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
 async def test_register_live_model_requires_active_context():
     class Orphan(Model):
         id = fields.IntField(primary_key=True)

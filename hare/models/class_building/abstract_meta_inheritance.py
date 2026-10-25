@@ -26,13 +26,17 @@ class AbstractMetaInheritance:
             canonical_mro: The C3 order of the ancestors, nearest first.
 
         Returns:
-            The merged ``Meta``, the class's own when it inherits nothing.
+            The merged ``Meta``, the class's own when it inherits nothing. It is abstract only when
+            its own body says so - a ``Meta`` subclassing an abstract model's (``class
+            Meta(Base.Meta)``) isn't.
         """
         inherited_meta_attributes = {
             **AbstractMetaInheritance.get_overridden_attributes(canonical_mro),
             **AbstractMetaInheritance.get_additive_attributes(bases),
         }
         if not inherited_meta_attributes:
+            if ModelOption.ABSTRACT not in vars(meta_class) and getattr(meta_class, ModelOption.ABSTRACT, False):
+                return type("Meta", (meta_class,), {ModelOption.ABSTRACT: False})
             return meta_class
         declared_meta_attributes = {
             option_name: option_value
@@ -42,16 +46,23 @@ class AbstractMetaInheritance:
         return type("Meta", (), {**inherited_meta_attributes, **declared_meta_attributes})
 
     @staticmethod
-    def is_abstract_meta(ancestor_meta: Any) -> bool:
+    def is_abstract_ancestor(ancestor: type) -> bool:
         """Whether an ancestor's ``Meta`` is inherited.
 
         Args:
-            ancestor_meta: The ancestor's own ``Meta``, None when it declares none.
+            ancestor: The ancestor - a model, or a class mixed into one.
 
         Returns:
-            True for the ``Meta`` of an abstract model.
+            True for an abstract model, as it was built - not a concrete one whose ``Meta``
+            subclasses an abstract model's.
         """
-        return ancestor_meta is not None and bool(getattr(ancestor_meta, ModelOption.ABSTRACT, False))
+        ancestor_meta = ancestor.__dict__.get("Meta")
+        if ancestor_meta is None:
+            return False
+        model_meta = ancestor.__dict__.get("_meta")
+        if model_meta is not None:
+            return bool(model_meta.abstract)
+        return bool(getattr(ancestor_meta, ModelOption.ABSTRACT, False))
 
     @staticmethod
     def get_overridden_attributes(canonical_mro: tuple[type, ...]) -> dict[str, Any]:
@@ -69,10 +80,9 @@ class AbstractMetaInheritance:
         """
         inherited_meta_attributes: dict[str, Any] = {}
         for ancestor in canonical_mro:
-            ancestor_meta = ancestor.__dict__.get("Meta")
-            if not AbstractMetaInheritance.is_abstract_meta(ancestor_meta):
+            if not AbstractMetaInheritance.is_abstract_ancestor(ancestor):
                 continue
-            for key, value in vars(ancestor_meta).items():
+            for key, value in vars(ancestor.__dict__["Meta"]).items():
                 if key.startswith("__") or key in ("abstract", *ADDITIVE_ABSTRACT_META_KEYS):
                     continue
                 # The nearest ancestor comes first: a name already there is a nearer ancestor's.
@@ -95,11 +105,12 @@ class AbstractMetaInheritance:
         for base in bases:
             base_meta_attributes: dict[str, Any] = {}
             for ancestor in reversed(base.__mro__):
-                ancestor_meta = ancestor.__dict__.get("Meta")
-                if not AbstractMetaInheritance.is_abstract_meta(ancestor_meta):
+                if not AbstractMetaInheritance.is_abstract_ancestor(ancestor):
                     continue
                 base_meta_attributes.update(
-                    (key, value) for key, value in vars(ancestor_meta).items() if key in ADDITIVE_ABSTRACT_META_KEYS
+                    (key, value)
+                    for key, value in vars(ancestor.__dict__["Meta"]).items()
+                    if key in ADDITIVE_ABSTRACT_META_KEYS
                 )
             for key, value in base_meta_attributes.items():
                 if not value:

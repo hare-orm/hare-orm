@@ -63,12 +63,9 @@ async def handle_job():
 
 ## <a id="options"></a>Настройки
 
-`threshold` должен быть `int` в диапазоне `1..REPEATED_QUERY_MAX_THRESHOLD` (1 000 000), а
-`window_seconds` — конечным числом в `(0, REPEATED_QUERY_MAX_WINDOW_SECONDS]` (одни сутки). Иначе
-(`threshold=0`, который никогда не сработает, или нулевое/отрицательное окно, при котором счёт начинается
-заново на каждом запросе) при создании детектора поднимается `ConfigurationError`. Оба предела лежат в
-`hare.contrib.repeated_queries.constants`. `action="warn"` (по умолчанию) пишет предупреждение через
-`hare.core.log.logger.warning`; вместо этого можно передать функцию
+`threshold` — сколько запросов одной формы за `window_seconds` считаются повторами; форма, не набравшая
+порога за это время после первого запроса, считается заново. `action="warn"` (по умолчанию) пишет
+предупреждение через `hare.core.log.logger.warning`; вместо этого можно передать функцию
 (`Callable[[RepeatedQueryReport], None]`) — метрику или структурированное событие журнала. Исключение из
 неё записывается в журнал и до запроса не доходит — чтобы тест падал на N+1, проверяйте
 [`collect()`](#collect). Любая другая строка — `ConfigurationError`.

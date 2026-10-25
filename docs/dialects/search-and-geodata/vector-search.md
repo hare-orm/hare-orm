@@ -39,7 +39,8 @@ class VectorField:
 A fixed-length list of floats. `dimensions` is an `int` from 1 to 16000 (`ConfigurationError` otherwise);
 a dialect taking fewer — SQLite takes 8192 — raises `UnSupportedError` when the column is created or a
 value written. The Python value is a plain `list[float]`; each element must be finite and fit a float32
-(`float4` on PostgreSQL), and a value of another length raises `ValidationError` too.
+(`float4` on PostgreSQL), and a value of another length raises `ValidationError` too. An element is
+stored as the nearest float32: `1e-50`, below the smallest one, as `0.0`.
 
 On PostgreSQL a value reads back as the shortest decimal of its `float4` (`0.1`, not
 `0.10000000149011612`) on both drivers. On SQLite values are written and read without the extension —
@@ -66,6 +67,11 @@ results = (
 ```
 
 A query vector is converted the way the dialect stores the field it is compared with.
+
+A distance is the extension's own float32 arithmetic (pgvector, sqlite-vec). Elements whose squares
+or products leave the float32 range — near its limits, such as `3e38` or `1e-30` — give a wrong
+distance: `NaN`, an infinity or a negative one, even between two equal vectors. The cosine distance
+to a zero vector is `NaN` on PostgreSQL and `None` on SQLite.
 
 The three are `VectorDistanceExpression`s (`hare.vectors`), each declaring its `VectorDistanceType`
 (`L2`, `COSINE`, `NEGATIVE_INNER_PRODUCT`) — what a dialect turns into its own operator or function.

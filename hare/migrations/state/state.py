@@ -16,11 +16,13 @@ from hare.migrations.reports.operation_plan import OperationPlan
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state_apps import StateApps
 from hare.migrations.state.state_rendering import StateRendering
+from hare.migrations.state.tracked_dict import TrackedDict
 from hare.models import Model
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.migrations.autodetection.rename_questions import RenameQuestions
+    from hare.migrations.state.declarations import OperationUndo
 
 
 @dataclass
@@ -44,6 +46,7 @@ class State:
     rendering: StateRendering = dataclasses.field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        self.models = TrackedDict(self.models, owner=self)
         self.rendering = StateRendering(self.default_connections)
 
     @property
@@ -92,6 +95,28 @@ class State:
             model_name: The model's name.
         """
         self.rendering.mark_removed((app_label, model_name))
+
+    def undo(self, undo: OperationUndo) -> None:
+        """Takes the state back to before an operation - its model states, extensions, schemas and enum
+        types as the state change journal recorded them; the rendered classes follow when next asked for.
+
+        Args:
+            undo: What the journal recorded of the operation.
+        """
+        for key, model_state in undo.model_states.items():
+            if model_state is None:
+                if key in self.models:
+                    del self.models[key]
+                    self.mark_model_removed(*key)
+            elif key in self.models:
+                self.models[key] = model_state
+                self.mark_models_changed([key])
+            else:
+                self.models[key] = model_state
+                self.mark_model_added(*key)
+        self.extensions = set(undo.extensions)
+        self.schemas = set(undo.schemas)
+        self.enum_types = dict(undo.enum_types)
 
     @classmethod
     def from_models(

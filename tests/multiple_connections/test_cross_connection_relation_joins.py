@@ -21,6 +21,7 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.models import Model
+from hare.query.expressions import Exists, OuterReference, Subquery
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 OWNER_MODULE_NAME = "tests._cross_conn_owner_models"
@@ -83,6 +84,18 @@ async def test_fetch_related_works_across_connections(cross_conn_fk):
     assert owner.target.name == "Target"
 
 
+@pytest.mark.asyncio
+async def test_a_prefetch_under_using_reads_a_related_model_of_another_database_on_that_database(cross_conn_fk):
+    """The connection the parent query pinned with using() was offered to the related model of another
+    default connection too - its rows were looked for in the parent's database, "no such table"."""
+    CrossConnOwner, CrossConnTarget = cross_conn_fk
+    target = await CrossConnTarget.objects.create(name="Target")
+    await CrossConnOwner.objects.create(name="Owner", target=target)
+
+    owners = await CrossConnOwner.objects.using("ccj_owner").prefetch_related("target")
+    assert [owner.target.name for owner in owners] == ["Target"]
+
+
 @pytest.mark.parametrize(
     "make_query",
     [
@@ -139,3 +152,31 @@ async def test_union_across_connections_raises_configuration_error(cross_conn_fk
 
     with pytest.raises(QueryError, match="different database connection"):
         await CrossConnOwner.objects.all().only("id", "name").union(CrossConnTarget.objects.all().only("id", "name"))
+
+
+@pytest.mark.parametrize(
+    "make_query",
+    [
+        pytest.param(
+            lambda owner, target: owner.objects.annotate(
+                name_of_target=Subquery(target.objects.filter(id=OuterReference("target_id")).values("name"))
+            ),
+            id="subquery",
+        ),
+        pytest.param(
+            lambda owner, target: owner.objects.filter(Exists(target.objects.filter(id=OuterReference("target_id")))),
+            id="exists",
+        ),
+        pytest.param(
+            lambda owner, target: owner.objects.filter(target_id__in=target.objects.values("id")), id="in_queryset"
+        ),
+        pytest.param(lambda owner, target: owner.objects.with_cte("picked", target.objects.all()), id="with_cte"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_query_of_a_model_on_another_connection_embedded_is_refused(cross_conn_fk, make_query):
+    """Only a query pinned by .using() was refused - one of a model living on another connection was bound to
+    the outer one and read that connection's table of its name, or failed on no such table."""
+    CrossConnOwner, CrossConnTarget = cross_conn_fk
+    with pytest.raises(QueryError, match="different database connection"):
+        await make_query(CrossConnOwner, CrossConnTarget).values_list("id", flat=True)

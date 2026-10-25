@@ -69,8 +69,8 @@ class ModelDefinitionChecks:
 
     @staticmethod
     def raise_if_option_values_mistyped(meta: type[Model.Meta] | None) -> None:
-        """Refuses a Meta option naming something given no text - it would fail far from the model,
-        in the DDL.
+        """Refuses a Meta option the DDL writes given no text - it would fail far from the model, in the
+        DDL.
 
         Args:
             meta: The model's ``Meta`` class.

@@ -18,7 +18,6 @@ from hare.contrib.notify.constants import (
 from hare.core.connections.connections import Connections
 from hare.core.log import logger
 from hare.exceptions import ConfigurationError, UnSupportedError
-from hare.numbers.finite_numbers import FiniteNumbers
 
 
 class NotificationListener:
@@ -40,9 +39,8 @@ class NotificationListener:
         max_backoff_seconds: The longest delay; None for no bound.
 
     Raises:
-        ConfigurationError: ``channel`` is empty, not a text or holds a null byte - no reconnect
-            would ever listen on it; ``reconnect_attempts``, ``backoff`` or ``max_backoff_seconds`` is
-            out of range.
+        ConfigurationError: ``channel`` is empty, not a text or holds a null byte - no reconnect would ever
+            listen on it.
     """
 
     def __init__(
@@ -55,7 +53,6 @@ class NotificationListener:
         backoff: float | Sequence[float] = DEFAULT_RECONNECT_BACKOFF_SECONDS,
         max_backoff_seconds: float | None = DEFAULT_MAX_BACKOFF_SECONDS,
     ) -> None:
-        self._validate_options(reconnect_attempts, backoff, max_backoff_seconds)
         if not isinstance(channel, str) or not channel or "\x00" in channel:
             raise ConfigurationError(
                 f"NotificationListener channel must be a non-empty text without a null byte, got "
@@ -85,35 +82,6 @@ class NotificationListener:
         #: Tasks running async callbacks - held so they can't be garbage-collected mid-flight.
         self._callback_tasks: set[asyncio.Future[Any]] = set()
 
-    @staticmethod
-    def _validate_options(
-        reconnect_attempts: int | None, backoff: float | Sequence[float], max_backoff_seconds: float | None
-    ) -> None:
-        """Checks the constructor's retry options for type and range.
-
-        Raises:
-            ConfigurationError: If any option is out of range.
-        """
-        if reconnect_attempts is not None and (
-            isinstance(reconnect_attempts, bool) or not isinstance(reconnect_attempts, int) or reconnect_attempts < 0
-        ):
-            raise ConfigurationError(
-                f"reconnect_attempts must be None or an int >= 0, got "
-                f"{ValueDescriptions.get_shown_value(reconnect_attempts)}"
-            )
-        delays = [backoff] if isinstance(backoff, int | float) else list(backoff)
-        if not delays or any(not FiniteNumbers.is_finite_number(delay) or delay < 0 for delay in delays):
-            raise ConfigurationError(
-                f"backoff must be a finite number >= 0 or a non-empty sequence of them, got "
-                f"{ValueDescriptions.get_shown_value(backoff)}"
-            )
-        if max_backoff_seconds is not None and (
-            not FiniteNumbers.is_finite_number(max_backoff_seconds) or max_backoff_seconds <= 0
-        ):
-            raise ConfigurationError(
-                f"max_backoff_seconds must be None or a finite number > 0, got {max_backoff_seconds!r}"
-            )
-
     @property
     def is_listening(self) -> bool:
         """Whether a LISTEN connection is currently open and alive."""
@@ -125,6 +93,9 @@ class NotificationListener:
 
         Raises:
             UnSupportedError: The database has no LISTEN.
+            ConfigurationError: The channel's name is longer than the database's names, or the
+                connection's configuration takes no LISTEN - behind a transaction pooler without
+                ``direct_host``.
         """
         if self._run_task is not None and not self._run_task.done():
             return
@@ -141,6 +112,9 @@ class NotificationListener:
             await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
         finally:
             waiter.cancel()
+        if task.done():
+            # Raises what ended the loop at once - a configuration no LISTEN runs on.
+            task.result()
 
     async def stop(self) -> None:
         """Stops listening: ends the listening loop, closes the LISTEN connection and cancels
@@ -180,12 +154,20 @@ class NotificationListener:
 
         Raises:
             UnSupportedError: The database has no LISTEN.
+            ConfigurationError: The channel's name is longer than the database's names.
         """
         connection = Connections.current().get_non_transactional(self.connection_alias)
         if not connection.features.supports_listen_notify:
             raise UnSupportedError(
                 f"NotificationListener listens on channel {self.channel!r} - {connection.dialect.name} has no "
                 "notification channels"
+            )
+        max_channel_bytes = connection.features.max_identifier_length
+        if max_channel_bytes is not None and len(self.channel.encode()) > max_channel_bytes:
+            # A longer name is cut to a channel no notification of the full name reaches.
+            raise ConfigurationError(
+                f"NotificationListener channel takes at most {max_channel_bytes} bytes on "
+                f"{connection.dialect.name}, got {len(self.channel.encode())}"
             )
         return cast("Callable[..., Awaitable[Any]]", cast("Any", connection).listen)
 
@@ -206,6 +188,7 @@ class NotificationListener:
 
         Raises:
             UnSupportedError: The database has no LISTEN.
+            ConfigurationError: The connection's configuration takes no LISTEN.
         """
         listen = self._get_listen_method()
         self._run_task = asyncio.current_task()
@@ -239,7 +222,8 @@ class NotificationListener:
                         attempt = 0
                         continue
                     failure = "listener closed before becoming healthy"
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, ConfigurationError):
+                    # No retry fixes the configuration.
                     raise
                 except Exception as error:
                     failure = f"listening setup failed: {error}"

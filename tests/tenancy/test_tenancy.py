@@ -10,7 +10,7 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib import test as hare_test
 from hare.contrib.test import requires_features
-from hare.dialects.enums import DialectName
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.exceptions import (
     IntegrityError,
     QueryError,
@@ -453,6 +453,25 @@ async def test_all_tenants_bulk_create_bypasses_the_facade_and_still_succeeds(db
 
     names = {w.name for w in await TenantScopedWidget.objects.all_tenants()}
     assert names == {"A1", "B1"}
+
+
+@pytest.mark.asyncio
+async def test_all_tenants_bulk_writes_check_their_objects_under_the_active_scope(db):
+    """all_tenants() widens the rows a query reads, not the rows an object points at - under a scope,
+    bulk_update() overwrote and bulk_create() created a row of another tenant, though create() refuses it."""
+    other_tenant = await TenantScopedWidget.objects.create(name="B1", company_id=2)
+    other_tenant.name = "B1-renamed"
+
+    with Tenancy.scope(1):
+        with pytest.raises(QueryError, match="of a tenant other than the active one"):
+            await TenantScopedWidget.objects.all_tenants().bulk_update([other_tenant], fields=["name"])
+        with pytest.raises(QueryError, match="of a tenant other than the active one"):
+            await TenantScopedWidget.objects.all_tenants().bulk_create([TenantScopedWidget(name="B2", company_id=2)])
+    with Tenancy.scope(Tenancy.ALL):
+        await TenantScopedWidget.objects.all_tenants().bulk_create([TenantScopedWidget(name="B3", company_id=2)])
+
+    names = {w.name for w in await TenantScopedWidget.objects.all_tenants()}
+    assert names == {"B1", "B3"}
 
 
 @pytest.mark.asyncio
@@ -1425,7 +1444,7 @@ async def test_bulk_create_upsert_does_not_overwrite_another_tenants_row(db):
 
 @pytest.mark.asyncio
 async def test_bulk_create_upsert_returning_skips_another_tenants_row(db):
-    if TenantScopedWidget.get_connection().dialect.name != DialectName.POSTGRESQL:
+    if TenantScopedWidget.get_connection().dialect.name != PostgresqlDialectName.POSTGRESQL:
         pytest.skip("bulk_create(returning=True) is Postgres-only")
     with Tenancy.scope(2):
         foreign = await TenantScopedWidget.objects.create(name="foreign")

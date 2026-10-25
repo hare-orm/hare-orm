@@ -4,9 +4,12 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import QueryError
+from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.instrumentation.observers.observer import Observer, ObserverCallback
 
 if TYPE_CHECKING:
+    from hare.core.apps.apps import Apps
+    from hare.core.apps.declarations import ModelReference
     from hare.models import Model
 
 
@@ -20,51 +23,59 @@ class ObserverSet:
     def __init__(self) -> None:
         self.observers_by_event_type: dict[type, dict[ObserverCallback, Observer]] = {}
 
-    def add(self, event_type: type, callback: ObserverCallback, models: Iterable[type[Model]] | None) -> None:
+    def add(self, event_type: type, callback: ObserverCallback, models: Iterable[ModelReference] | None) -> None:
         """Adds an observer. Adding a callback again adds the models to the ones it observes; an
         observer of every event stays one, and adding it without models makes it one.
 
         Args:
             event_type: The event type.
             callback: The callback.
-            models: The models whose events it gets, None for every event.
+            models: The models whose events it gets - classes, ``"app.Model"`` labels or
+                ``swappable()`` settings; None for every event.
 
         Raises:
             QueryError: ``event_type`` isn't an event narrowed by model.
-            TypeError: ``models`` isn't a collection of model classes.
+            ConfigurationError: A label names no model of the current context, when one is set up.
         """
-        model_set = ObserverSet.get_model_set(event_type, models)
+        observed = ObserverSet.get_observed_models(event_type, models)
         observers = self.observers_by_event_type.setdefault(event_type, {})
         existing = observers.get(callback)
         if existing is None:
-            observers[callback] = Observer(callback, model_set)
+            observers[callback] = (
+                Observer(callback, None) if observed is None else Observer(callback, observed[0], observed[1])
+            )
             ObserverSet.total_count += 1
         elif existing.models is not None:
-            existing.models = None if model_set is None else existing.models | model_set
+            if observed is None:
+                existing.models, existing.model_labels = None, frozenset()
+            else:
+                existing.models |= observed[0]
+                existing.model_labels |= observed[1]
 
-    def remove(self, event_type: type, callback: ObserverCallback, models: Iterable[type[Model]] | None) -> None:
+    def remove(self, event_type: type, callback: ObserverCallback, models: Iterable[ModelReference] | None) -> None:
         """Stops a callback observing the events of ``models`` - removes it entirely without them,
         or once it observes no model; nothing when it doesn't observe the event type.
 
         Args:
             event_type: The event type.
             callback: The callback.
-            models: The models it stops observing, None to remove it.
+            models: The models it stops observing - classes, ``"app.Model"`` labels or ``swappable()``
+                settings; None to remove it.
 
         Raises:
             QueryError: The callback observes every event - it can only be removed entirely.
-            TypeError: ``models`` isn't a collection of model classes.
         """
-        model_set = ObserverSet.get_model_set(event_type, models)
+        observed = ObserverSet.get_observed_models(event_type, models)
         observers = self.observers_by_event_type.get(event_type, {})
         existing = observers.get(callback)
         if existing is None:
             return
-        if model_set is not None:
+        if observed is not None:
             if existing.models is None:
                 raise QueryError(f"{callback!r} observes every event - unobserve it without models to remove it")
-            existing.models -= model_set
-            if existing.models:
+            existing.models -= observed[0]
+            existing.model_labels -= observed[1]
+            if existing.models or existing.model_labels:
                 return
         del observers[callback]
         ObserverSet.total_count -= 1
@@ -106,33 +117,56 @@ class ObserverSet:
         return any(observer.observes_model(model) for observer in observers.values())
 
     @staticmethod
-    def get_model_set(event_type: type, models: Iterable[type[Model]] | None) -> frozenset[type[Model]] | None:
-        """The models an observer is narrowed to.
+    def get_observed_models(
+        event_type: type, models: Iterable[ModelReference] | None
+    ) -> tuple[frozenset[type[Model]], frozenset[str]] | None:
+        """The models an observer is narrowed to - its classes apart from its labels. A ``swappable()``
+        setting is the label it points at in the current context; a label is looked up in the current
+        context when one is set up, else when a context binds its models.
 
         Args:
             event_type: The event type.
             models: The models, None for every event.
 
         Returns:
-            The models, None for every event.
+            The classes and the labels, None for every event.
 
         Raises:
             QueryError: ``event_type`` isn't an event narrowed by model.
-            TypeError: ``models`` isn't a collection of model classes.
+            ConfigurationError: A label names no model of the current context.
         """
         if models is None:
             return None
-        # Checked as passed - a model class or a name given in place of a collection of them.
-        given: object = models
-        if isinstance(given, (type, str)):
-            raise TypeError(f"Observers are narrowed to a list of model classes, got {models!r}")
-        model_set = frozenset(models)
         if not getattr(event_type, "observed_by_model", False):
             raise QueryError(f"{event_type.__name__} observers can't be narrowed to models")
-        # Deferred: the models import the instrumentation package.
-        from hare.models import Model
+        # Local import: the context imports the observers.
+        from hare.core.hare_context import HareContext
 
-        for model in model_set:
-            if not (isinstance(model, type) and issubclass(model, Model)):
-                raise TypeError(f"Observers are narrowed to model classes, got {model!r}")
-        return model_set
+        context = HareContext.get_current()
+        apps = context.apps if context is not None else None
+        classes: set[type[Model]] = set()
+        labels: set[str] = set()
+        for reference in models:
+            if isinstance(reference, type):
+                classes.add(reference)
+                continue
+            if isinstance(reference, SwappableModelReference):
+                reference = HareContext.require_current().swappable_label(reference.setting)
+            if apps is not None:
+                apps.get_model(reference)
+            labels.add(reference)
+        return frozenset(classes), frozenset(labels)
+
+    def find_model_labels(self, apps: Apps) -> None:
+        """Looks up the labels the observers name in a registry binding its models.
+
+        Args:
+            apps: The registry.
+
+        Raises:
+            ConfigurationError: A label names no model of the registry.
+        """
+        for observers in self.observers_by_event_type.values():
+            for observer in observers.values():
+                for label in observer.model_labels:
+                    apps.get_model(label)

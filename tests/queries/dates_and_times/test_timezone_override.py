@@ -49,6 +49,23 @@ async def test_date_parts_follow_the_current_zone(db):
 
 
 @pytest.mark.asyncio
+async def test_a_date_part_in_f_follows_the_current_zone(db):
+    """F() read no part of a datetime - F("datetime__hour") named no field."""
+    from hare.query.expressions import F
+
+    await create_rows()
+    with Timezone.override("Europe/Moscow"):
+        assert await DatetimeFields.objects.order_by("id").annotate(
+            next_hour=F("datetime__hour") + 1, day=F("datetime__date")
+        ).values_list("next_hour", "day") == [
+            (2, datetime.date(2026, 3, 29)),
+            (4, datetime.date(2026, 3, 29)),
+            (5, datetime.date(2026, 3, 29)),
+        ]
+        assert await DatetimeFields.objects.filter(id__lt=F("datetime__hour")).values_list("id", flat=True) == [2, 3]
+
+
+@pytest.mark.asyncio
 async def test_an_expression_takes_its_own_zone(db):
     await create_rows()
     rows = (

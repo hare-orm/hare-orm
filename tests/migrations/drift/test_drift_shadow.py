@@ -12,12 +12,14 @@ import pytest
 
 from hare import fields
 from hare.ddl.constraints import CheckConstraint, ExclusionConstraint
-from hare.ddl.enums import ExclusionConstraintUsing
+from hare.ddl.enums import ExclusionConstraintUsing, TriggerEvent, TriggerTiming
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.ddl.schema_objects.trigger import Trigger
 from hare.ddl.schema_objects.view import View
 from hare.migrations.drift import detect_drift
 from hare.migrations.drift.shadow.schema_comparison import SchemaComparison
+from hare.migrations.state.model_state import ModelState
 from hare.query.expressions import Q
 from hare.query.functions import Lower
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
@@ -214,3 +216,35 @@ async def test_the_shadow_is_removed_when_the_comparison_fails(db_isolated_no_sc
         "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'hare\\_shadow\\_%'"
     )
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_unmanaged_model_over_a_view_is_a_bare_table_in_the_shadow(db_isolated_no_schema):
+    """The shadow made the table of an unmanaged model over a view and put its INSTEAD OF trigger on it -
+    PostgreSQL takes none on a table, and drift failed."""
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    skip_unless_dialect(round_trip, "postgresql")
+    row = build_model("ShadowViewRow", "shadow_view_row", {"val": fields.IntField()})
+    await round_trip.migrate_to(row)
+    await round_trip.connection.execute_script(
+        'CREATE VIEW "shadow_view_rows" AS SELECT "id", "val" FROM "shadow_view_row"'
+    )
+    trigger = Trigger(
+        name="shadow_view_rows_insert",
+        on=TriggerEvent.INSERT,
+        timing=TriggerTiming.INSTEAD_OF,
+        body=RawSQLTerm('INSERT INTO "shadow_view_row" ("id", "val") VALUES (NEW."id", NEW."val"); RETURN NEW;'),
+    )
+    over_view = build_model(
+        "ShadowViewRows", "shadow_view_rows", {"val": fields.IntField()}, {"managed": False, "triggers": [trigger]}
+    )
+
+    result = await detect_drift(
+        round_trip.connection,
+        build_live_state(row),
+        [APP_LABEL],
+        unmanaged_model_states=[ModelState.make_from_model(APP_LABEL, over_view)],
+    )
+
+    assert result.operations == []
+    assert result.untracked_tables == []

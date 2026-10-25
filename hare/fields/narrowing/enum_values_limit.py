@@ -3,11 +3,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from hare.fields.narrowing.narrowing_limit import NarrowingLimit
+
+if TYPE_CHECKING:
+    from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
 
 
 @dataclass(frozen=True)
-class EnumValuesLimit:
+class EnumValuesLimit(NarrowingLimit):
     """A value is one of an enum's stored values - a member dropped from it may not be stored."""
 
     values: frozenset[Any]
@@ -30,3 +35,6 @@ class EnumValuesLimit:
         if {stored_value(member.value) for member in old_enum_type} <= stored_values:
             return None
         return cls(stored_values)
+
+    def get_overflow_predicate_sql(self, check: ColumnNarrowingCheck, quoted_column: str) -> str:
+        return check.get_enum_overflow_predicate_sql(self, quoted_column)

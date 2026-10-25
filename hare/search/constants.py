@@ -15,8 +15,3 @@ SEARCH_HEADLINE_MAX_MARKER_LENGTH = 1000
 
 #: The largest word or fragment count of ``SearchHeadline``.
 SEARCH_HEADLINE_MAX_COUNT = 100_000
-
-#: The weight letters of a search vector's lexemes, the heaviest first.
-SEARCH_VECTOR_WEIGHT_LETTERS = frozenset({"A", "B", "C", "D"})
-#: How many label weights ``SearchRank(weights=[...])`` takes - one per letter, D first.
-SEARCH_RANK_LABEL_WEIGHT_COUNT = 4

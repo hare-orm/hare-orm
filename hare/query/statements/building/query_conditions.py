@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,7 +60,7 @@ class QueryConditions:
             aggregated_multi_valued_paths=aggregated_multi_valued_paths,
         )
 
-        modifier = QueryModifier()
+        node_modifiers: list[QueryModifier] = []
         # Built once, not once per node - every field here is identical across the whole loop, and
         # Q.get_result() never mutates a ExpressionContext (frozen dataclass) it's handed.
         expression_context = ExpressionContext(
@@ -92,9 +93,11 @@ class QueryConditions:
                 window_filter_criterion = (
                     node_criterion if window_filter_criterion is None else window_filter_criterion & node_criterion
                 )
-                modifier &= QueryModifier(joins=node_modifier.joins)
+                node_modifiers.append(QueryModifier(joins=node_modifier.joins))
             else:
-                modifier &= node_modifier
+                node_modifiers.append(node_modifier)
+        # Joined in pairs - a chain of thousands of filter() calls is as deep as their logarithm.
+        modifier = QueryModifier.get_paired(node_modifiers, operator.and_)
 
         # A non-distinct aggregate is inflated by every other to-many JOIN of the query - rejected,
         # unless only the query's truthiness is read.

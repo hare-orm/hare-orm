@@ -39,6 +39,16 @@ class ManyToManyThroughTables(SchemaEditorPart):
         if old_field.through_model is not None or new_field.through_model is not None:
             await self.move_many_to_many_rows_between_through_tables(model, old_field, new_field)
             return
+        foreign_key_rebuild = self.editor.foreign_key_rebuild
+        # A database without foreign keys has none to make again.
+        rebuilds_foreign_keys = self.editor.client.features.supports_foreign_keys and (
+            foreign_key_rebuild.foreign_key_changed(old_field, new_field)
+            or self.target_table_changed(old_field, new_field)
+        )
+        if rebuilds_foreign_keys:
+            # Dropped while the table and its key columns still have the names the constraints are named
+            # after; made again against the target as it is now once they are renamed.
+            await foreign_key_rebuild.drop_relation_foreign_keys(model, old_field)
         schema = model._meta.schema
         if old_field.through != new_field.through:
             await self.editor.run_sql(
@@ -72,12 +82,24 @@ class ManyToManyThroughTables(SchemaEditorPart):
         # Before the rebuild below: a table rebuild recreates the table with the new definition's
         # indexes, which a later diff against the old ones would drop and create a second time.
         await self.alter_many_to_many_through_indexes(schema, old_field, new_field)
-        if self.editor.foreign_key_rebuild.foreign_key_changed(old_field, new_field):
-            await self.editor.foreign_key_rebuild.rebuild_many_to_many_through_foreign_keys(
-                model, new_field, old_field
-            )
+        if rebuilds_foreign_keys:
+            await foreign_key_rebuild.rebuild_many_to_many_through_foreign_keys(model, new_field)
         else:
             await self.rename_many_to_many_through_foreign_keys(qualified_through, model, old_field, new_field)
+
+    @staticmethod
+    def target_table_changed(
+        old_field: ManyToManyFieldInstance[Model], new_field: ManyToManyFieldInstance[Model]
+    ) -> bool:
+        """Whether a many-to-many relation points at another table than before - its foreign key to the
+        target references the old one otherwise, and goes with it when that table is dropped.
+
+        Args:
+            old_field: The relation as declared before.
+            new_field: The relation as declared now.
+        """
+        old_meta, new_meta = old_field.related_model._meta, new_field.related_model._meta
+        return (old_meta.schema, old_meta.db_table) != (new_meta.schema, new_meta.db_table)
 
     async def rename_many_to_many_through_foreign_keys(
         self,

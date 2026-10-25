@@ -5,7 +5,7 @@ import concurrent.futures
 import contextvars
 import warnings
 from collections.abc import Coroutine, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 from hare.core.log import logger
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
@@ -16,6 +16,7 @@ from hare.warnings import HareLoopSwitchWarning
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
 
     DBConfigType = dict[str, Any]
 from hare.core.connections.connection_token import ConnectionToken
@@ -79,10 +80,7 @@ class ConnectionHandler:
 
     @staticmethod
     def _get_client_class(db_info: dict[str, Any]) -> type[DatabaseClient]:
-        engine = db_info.get("engine")
-        if not isinstance(engine, str) or not engine:
-            raise ConfigurationError(f"Connection engine must be a non-empty driver name, got {engine!r}")
-        return DialectRegistry.get_driver(engine).get_client_class(db_info["credentials"])
+        return DialectRegistry.get_driver(cast("str", db_info.get("engine"))).get_client_class(db_info["credentials"])
 
     def _get_db_info(self, connection_alias: str) -> str | dict[str, Any]:
         try:
@@ -112,9 +110,18 @@ class ConnectionHandler:
             self._db_config = None
             raise
 
-    def _create_connection(
-        self, connection_alias: str, credential_overrides: Mapping[str, Any] | None = None
-    ) -> DatabaseClient:
+    def _get_connection_settings(self, connection_alias: str) -> dict[str, Any]:
+        """The settings of a connection - its engine and credentials - a URL expanded.
+
+        Args:
+            connection_alias: The connection alias.
+
+        Returns:
+            The settings.
+
+        Raises:
+            ConfigurationError: The alias doesn't exist, or its settings are no settings.
+        """
         db_info = self._get_db_info(connection_alias)
         if isinstance(db_info, Mapping) and "db_url" in db_info:
             db_info = db_info["db_url"]
@@ -122,7 +129,26 @@ class ConnectionHandler:
             db_info = DbUrlConfigGenerator.expand(db_info)
         if not isinstance(db_info, Mapping) or not isinstance(db_info.get("credentials", {}), Mapping):
             raise ConfigurationError(f"Invalid connection settings for alias {connection_alias!r}")
-        db_info = {**db_info, "credentials": dict(db_info.get("credentials", {}))}
+        return {**db_info, "credentials": dict(db_info.get("credentials", {}))}
+
+    def get_dialect(self, connection_alias: str) -> Dialect:
+        """The dialect of a connection, read off its settings - no client is created.
+
+        Args:
+            connection_alias: The connection alias.
+
+        Returns:
+            The dialect.
+
+        Raises:
+            ConfigurationError: The alias doesn't exist, or its settings name no engine.
+        """
+        return self._get_client_class(self._get_connection_settings(connection_alias)).dialect
+
+    def _create_connection(
+        self, connection_alias: str, credential_overrides: Mapping[str, Any] | None = None
+    ) -> DatabaseClient:
+        db_info = self._get_connection_settings(connection_alias)
         client_class = self._get_client_class(db_info)
         db_parameters = db_info["credentials"].copy()
         db_parameters.update(credential_overrides or {})

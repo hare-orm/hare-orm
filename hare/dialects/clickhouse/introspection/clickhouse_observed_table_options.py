@@ -98,7 +98,9 @@ class ClickhouseObservedTableOptions:
                     if str(row["compression_codec"]).startswith(CLICKHOUSE_CODEC_PREFIX)
                 ),
                 "column_ttls": tuple(column_ttls),
-                "projections": tuple(projections),
+                # The server keeps its projections in the order they were added - a migration changing one adds it
+                # last; they are told apart by their names.
+                "projections": tuple(sorted(projections, key=lambda projection: projection.name)),
                 "lightweight_updates": lightweight_updates,
             }
         )

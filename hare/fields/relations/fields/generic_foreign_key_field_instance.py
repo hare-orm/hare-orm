@@ -92,15 +92,14 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             raise ConfigurationError("GenericForeignKeyField with on_delete=SET_NULL must be null=True")
         if on_delete == OnDelete.SET_DEFAULT and default is None:
             raise ConfigurationError("GenericForeignKeyField with on_delete=SET_DEFAULT needs a default=")
-        if lazy is not None and lazy not in set(RelationLoadStrategy):
-            raise ConfigurationError("lazy can only be 'joined', 'select', or None")
         self.to = to
         self.related_name = related_name
         self.on_delete = on_delete
         self.db_constraint = db_constraint
         self.null = null
         self.default = default
-        self.lazy = lazy
+        # The strategy is looked up - an unknown one raises ValueError.
+        self.lazy = RelationLoadStrategy(lazy) if lazy is not None else None
         self.branch_kwargs = kwargs
         #: The name of the field on its model - set when the model class is built.
         self.model_field_name = ""

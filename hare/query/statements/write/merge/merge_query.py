@@ -564,12 +564,12 @@ class MergeQuery:
         meta = model._meta
         dialect = connection.dialect
         rows = source
-        empty_source_sql = ""
+        matches_no_row = False
         if not rows:
             # A branch of rows no source row matches runs over a source of no row - one row of the
             # matched columns, typed as their fields, that the source leaves out.
             rows = ({source_column: None for _, source_column in self.on_columns},)
-            empty_source_sql = " WHERE 1 = 0"
+            matches_no_row = True
         columns = list(rows[0])
         fields: list[Field[Any] | None] = []
         fields_by_on_column = {
@@ -592,7 +592,7 @@ class MergeQuery:
                     values_sql.append(ValueWrapper(value).get_sql(sql_context))
                     continue
                 # The row of a source of no rows is left out - its NULL is no value of the field.
-                db_value = None if empty_source_sql else dialect.types.get_db_value(field, value, None)
+                db_value = None if matches_no_row else dialect.types.get_db_value(field, value, None)
                 value_wrapper = ValueWrapper(db_value)
                 # A sensitive field's value is never shown (QueryParameters).
                 value_wrapper.sensitive = field.sensitive
@@ -603,12 +603,13 @@ class MergeQuery:
                     )
                 )
             rows_sql.append(f"({', '.join(values_sql)})")
-        columns_sql = dialect.clauses.get_values_table_columns_sql([sql_context.quote(column) for column in columns])
-        values_table_sql = f"(VALUES {', '.join(rows_sql)}) AS {sql_context.quote(MERGE_VALUES_ALIAS)}"
-        return (
-            f"(SELECT {columns_sql} FROM {values_table_sql}{empty_source_sql})",  # nosec B608
-            dict(zip(columns, fields, strict=True)),
+        source_sql = dialect.clauses.get_values_source_sql(
+            rows_sql,
+            [sql_context.quote(column) for column in columns],
+            sql_context.quote(MERGE_VALUES_ALIAS),
+            matches_no_row=matches_no_row,
         )
+        return source_sql, dict(zip(columns, fields, strict=True))
 
     def get_source_value(self, name: str, value: Any) -> Any:
         """A source row's value as its column holds it - a related instance of a forward relation as the key it

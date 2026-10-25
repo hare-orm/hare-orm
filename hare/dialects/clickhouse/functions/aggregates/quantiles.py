@@ -8,6 +8,7 @@ from hare.exceptions import QueryError
 from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.field import Field
 from hare.query.expressions import Aggregate
+from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -51,8 +52,10 @@ class Quantiles(ParametricAggregate):
     def get_function_name(self) -> str:
         return f"{self.function_name}Exact" if self.exact else str(self.function_name)
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         quantile_field = (
-            field_object if self.exact else cast("Field[Any]", NumericTyping.get_quotient_output_field(field_object))
+            field_object
+            if self.exact
+            else cast("Field[Any]", NumericTyping.get_quotient_output_field(field_object, expression_context.dialect))
         )
         return ArrayField(base_field=quantile_field)

@@ -112,6 +112,25 @@ class F(CombinableExpression):
 
         return GenericForeignKeyTypes.get_type_aliases(expression_context.model, (self.name,)).get(self.name)
 
+    @staticmethod
+    def get_date_part_expression(value_path: str, part: str) -> Expression:
+        """The expression reading a part of a date, time or datetime value - its date or time as a
+        ``Trunc``, a calendar or clock part as an ``Extract``.
+
+        Args:
+            value_path: The path of the value - a field, or a path inside a range or array.
+            part: The part.
+
+        Returns:
+            The expression.
+        """
+        # Local import: the functions build on this package.
+        from hare.query.filters.constants import DATETIME_CAST_SEGMENTS
+        from hare.query.functions.datetime.extract import Extract
+        from hare.query.functions.datetime.trunc import Trunc
+
+        return Trunc(value_path, part) if part in DATETIME_CAST_SEGMENTS else Extract(value_path, part)
+
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         term: Term
         joins: list[TableCriterionTuple] = []
@@ -122,6 +141,13 @@ class F(CombinableExpression):
         if isinstance(relation_alias, NamedJoin):
             # A path through a named JOIN - a FilteredRelation's related field, a Lateral's column.
             return relation_alias.get_path_result(rest_name_parts, expression_context)
+        if (
+            rest_name_parts
+            and self.name not in expression_context.annotations
+            and (date_part_split := ValuePaths.get_date_part_split(expression_context.model, self.name)) is not None
+        ):
+            # A part of a date, time or datetime - F("created__year"), F("during__startswith__hour").
+            return self.get_date_part_expression(*date_part_split).get_result(expression_context)
         if main_name_part in expression_context.model._meta.fetch_fields:
             # field in the format of "related_field__field" or "related_field__another_rel_field__field"
             if (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None:
@@ -146,6 +172,7 @@ class F(CombinableExpression):
             term, output_field = ValuePaths.get_value_path_term(
                 column, path_field, path_segments, self.name, expression_context.dialect
             )
+            LookupPaths.mark_sensitive_column(term, path_field)
         elif (
             rest_name_parts
             and main_name_part in expression_context.annotations
@@ -209,4 +236,5 @@ class F(CombinableExpression):
                 raise FieldError(
                     f"There is no non-virtual field {self.name} on Model {expression_context.model.__name__}"
                 ) from None
+        LookupPaths.mark_sensitive_column(term, output_field)
         return ExpressionResult(term=term, output_field=output_field, joins=joins)

@@ -46,6 +46,8 @@ hooks:
   - mkdocs_hooks/callout_titles.py
   - mkdocs_hooks/heading_anchors.py
   - mkdocs_hooks/docs_standard_checks.py
+  - mkdocs_hooks/not_found_page.py
+  - mkdocs_hooks/search_index_languages.py
 
 plugins:
   - search

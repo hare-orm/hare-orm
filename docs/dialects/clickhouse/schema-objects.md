@@ -60,13 +60,19 @@ sorted storage is created with `allow_nullable_key = 1`: its columns are its que
 may hold NULL.
 
 - **Filling.** A view created `with_data` is filled by an `INSERT ... SELECT` of its query right after it
-  is created, never by `POPULATE` — which loses the rows inserted while it runs.
+  is created, never by `POPULATE` — which loses the rows inserted while it runs. On a cluster the fill
+  runs on the server the connection is to, over that server's rows: a view whose query reads a table
+  that isn't distributed — or reads tables hare doesn't know, raw SQL without `read_columns` — raises
+  `UnSupportedError` before anything is created. Read distributed tables (named in `read_columns`), or
+  declare the view `with_data=False` and fill it on every server yourself.
 - **`refresh_materialized_view()`** refreshes a view of `refresh` at once and waits for it, its rows
   replaced in one go. Any other view is emptied and filled again — its rows missing in between, so
   `concurrently=True` raises `UnSupportedError` for it.
 - **Changes.** A migration changes the query of a view writing `to` a table (`MODIFY QUERY`) and the
   schedule of a refreshed one (`MODIFY REFRESH`) in place; any other change drops the view and creates it
-  again — a storage of its own filled by the new query, a table written to keeping its rows.
+  again — a storage of its own filled by the new query, a table written to keeping its rows. Rolling
+  back the removal of a view writing `to` a table creates it again over the rows its drop left there,
+  not filled again; only adding a view fills the table with the rows its query gives.
 - **A table remade** by a migration takes its views with it: they are dropped before the copy of its rows
   and created again after — a view would otherwise take the copied rows a second time.
 
@@ -92,14 +98,15 @@ class Meta:
 ```
 
 The query is a queryset of the table's model — `ModelQuery()` in the model's own `Meta` — written as a
-`SELECT` without `FROM` in ClickHouse's SQL; it selects, groups and orders, and a filter, a join or a
-limit raises `ConfigurationError` (a projection keeps every row: take a queryset without a model's default
-filter, a soft delete's too). hare knows the columns it reads: a migration changing one drops the
-projection before and adds it after, and renaming one remakes the table. Or `RawSQLTerm` of a `SELECT`
-without `FROM`, with `GROUP BY` or `ORDER BY`, written as it is — its columns are the ones you name in
-`read_columns=(...)`. A migration file keeps a queryset's projection as its SQL with its `read_columns`. A
-migration adds a projection with `ADD PROJECTION` and builds it for the stored rows with
-`MATERIALIZE PROJECTION`, which finishes before the migration goes on; it drops one with `DROP PROJECTION`.
+`SELECT` without `FROM` in ClickHouse's SQL; it selects, groups and orders, and a filter, a join or a limit
+raises `ConfigurationError` (a projection keeps every row: take a queryset without a model's default filter, a
+soft delete's too). Its order is a sorting key: ascending, written without a direction — an order by `-field`
+raises `ConfigurationError`. hare knows the columns it reads: a migration changing one drops the projection
+before and adds it after, and renaming one remakes the table. Or `RawSQLTerm` of a `SELECT` without `FROM`,
+with `GROUP BY` or `ORDER BY`, written as it is — its columns are the ones you name in `read_columns=(...)`. A
+migration file keeps a queryset's projection as its SQL with its `read_columns`. A migration adds a projection
+with `ADD PROJECTION` and builds it for the stored rows with `MATERIALIZE PROJECTION`, which finishes before
+the migration goes on; it drops one with `DROP PROJECTION`.
 
 A table with projections gets the settings rebuilding them as rows are deleted and merged away — a
 lightweight `DELETE` and a `ReplacingMergeTree` merge then keep the projections right.
@@ -144,15 +151,15 @@ fields; `"HASHED()"`, `"FLAT()"` a key of one unsigned 64-bit integer — for an
 keeps it as its `COMPLEX_KEY_` layout (`"HASHED()"` as `COMPLEX_KEY_HASHED()`), which `hare drift` takes
 as the declared one. `"DIRECT()"`/`"COMPLEX_KEY_DIRECT()"` keep no rows: each lookup reads the source.
 
-The dictionary is loaded from the model's table by the connection's own user and password, so a row
-written to the table is read through the dictionary after its next load — `reload_dictionary()` loads it
-at once. `DictGet(..., default=...)` gives a value for a key the dictionary doesn't hold
-(`dictGetOrDefault`); without, the server gives the attribute type's own default. A key of several fields
-is looked up by a sequence of them. A dictionary a model declares is checked when the query is built: the
-attribute is the name of a field it gives (or that field's column — `name` reads the column `title` of
-`CharField(source_field="title")`), the keys are as many as its key fields, and a key literal is checked
-as a value of its field; anything else raises `QueryError`/`ValidationError`. A dictionary declared
-elsewhere is read as named.
+The dictionary is loaded from the model's table by the connection's own user and password, so a row written to
+the table is read through the dictionary after its next load — `reload_dictionary()` loads it at once.
+`DictGet(..., default=...)` gives a value for a key the dictionary doesn't hold (`dictGetOrDefault`); without,
+the server gives the attribute type's own default. A key is a field name, an expression or a literal (a text
+in `Value(...)` — a bare one names a field); a key of several fields is looked up by a list or a tuple of
+them. A dictionary a model declares is checked when the query is built: the attribute is the name of a field
+it gives (or that field's column — `name` reads the column `title` of `CharField(source_field="title")`), the
+keys are as many as its key fields, and a key literal is checked as a value of its field; anything else raises
+`QueryError`/`ValidationError`. A dictionary declared elsewhere is read as named.
 
 A password never reaches the migration file: the connection's own is put into the statement when the
 dictionary is created (`[HIDDEN]` in `hare sqlmigrate`), and a `{env:NAME}` in a `source` is replaced by
@@ -174,6 +181,11 @@ A connection with `cluster=<name>` belongs to a cluster of servers:
   its own on each server is refused, as only the rows of one server would be copied. So is a replicated
   table on a cluster of several shards whose replica path names the shard (`{shard}`, as the server's
   default path does): each shard keeps rows of its own — distribute it over its shards instead.
+- A remade replicated table — on a cluster or on one server — needs a replica path of its own: the new
+  table is created beside the old one, so an engine declaring a path without `{uuid}` (a fixed one, or
+  one by `{table}`, which keeps the name the table was created with) is refused before anything
+  changes. Declare the engine without arguments (the server's `default_replica_path`), or with a path
+  naming `{uuid}`.
 
 `ClickhouseTableOptions(distributed_over=...)` spreads a model's rows over the servers:
 
@@ -190,9 +202,16 @@ class Hit(Model):
 ```
 
 A migration creates the local table `hit_local` of the engine and the options on every server, and the
-model's table `hit` as a `Distributed` table over it. Rows are read and written through `hit`, each
+model's table `hit` as a `Distributed` table over it — a `distributed_over` naming the model's table
+itself raises `ConfigurationError`. Rows are read and written through `hit`, each
 written to the shard its `sharding_key` picks (any shard without one). A mutation, a lightweight `DELETE`
-and a change of the storage go to `hit_local` on every server; a change of columns to both tables. A
+and a change of the storage go to `hit_local` on every server; a change of columns to both tables. Each
+server runs an `update()` or a `delete()` over its own rows, reading there its own rows of every table its
+condition or values name, and no `GLOBAL` exists for a mutation — so one reading a table that isn't
+distributed (a relation, a subquery, `Exists()`; a replicated table too: a replica path by `{shard}` keeps
+rows per shard) raises `UnSupportedError` instead of leaving the rows of the other servers unchanged.
+Distribute that table, or read the keys first and change the rows by `pk__in`. A `delete()` running the
+cascade of `Model.delete()` (a model other models point at) reads the keys of its rows first itself. A
 table remade is copied through a distributed table over the new local ones, each row to its shard.
 `mutations_sync=2` waits for every replica. A `ReplicatedMergeTree` local table keeps its replicas by the
 server's `{shard}` and `{replica}` macros — the servers of each shard need a `{shard}` of their own:
@@ -206,7 +225,9 @@ and in `generate_schemas()` alike, before any table is created.
 doesn't report as untracked, and the `Distributed` table `hit` — with the shadow's; a column the two
 tables hold another way (`ALTER TABLE hit_local MODIFY COLUMN ...` alone) comes back as an `AlterField`. A
 replicated engine declared without its replica path and name (`engine="ReplicatedMergeTree"`) is the same as
-the one the server gave the table from its `default_replica_path` and `default_replica_name`.
+the one the server gave the table from its `default_replica_path` and `default_replica_name`; one declared
+with a path naming `{database}` or `{table}`, which the server fills with the names on creating the table,
+is the same as it too.
 
 A query reading `hit` runs on every shard, each over its own rows — so every table it joins (a relation,
 a many-to-many link, `annotate(Count(...))`) and every subquery of its `__in`, `exclude()` and `Exists()`

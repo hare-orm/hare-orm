@@ -233,7 +233,7 @@ async def test_an_asof_join_needs_its_database(db):
     ).values("last__name")
     if Event._meta.connection.features.supports_asof_join:
         pytest.skip("the database joins ASOF")
-    with pytest.raises(UnSupportedError, match="needs an ASOF JOIN"):
+    with pytest.raises(UnSupportedError, match="needs a join of the closest row"):
         await queryset
 
 
@@ -242,5 +242,5 @@ async def test_an_array_join_needs_its_database(db):
     queryset = Tournament.objects.alias(letter=ArrayJoin("name")).values("letter")
     if Tournament._meta.connection.features.supports_array_join:
         pytest.skip("the database joins an array's elements")
-    with pytest.raises(UnSupportedError, match="needs an ARRAY JOIN"):
+    with pytest.raises(UnSupportedError, match="needs a join of an array.s elements"):
         await queryset

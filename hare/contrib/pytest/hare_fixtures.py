@@ -25,7 +25,7 @@ from hare.core.hare_context import HareContext
 
 class HareFixtures:
     """The fixtures of hare's pytest plugin and its ``hare_requires`` marker. The test databases are
-    made from ``hare_db_url`` (in-memory SQLite by default) for every connection of the
+    made from ``hare_db_url`` (an in-memory database by default) for every connection of the
     configuration - the configured databases themselves are never opened."""
 
     @staticmethod

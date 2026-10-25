@@ -389,7 +389,9 @@ documentation](https://www.postgresql.org/docs/current/ltree.html).
 
 `path__depth` is the number of labels (an int) in filters, `values()`, `F()` and `order_by()`:
 `filter(path__depth=2)`. `Subpath(field, offset, length=None)` reads a part of the path as a path — the
-labels from the 0-based `offset` (negative from the end), `length` of them or up to the end:
+labels from the 0-based `offset` (negative from the end), `length` of them or up to the end. A position
+past the path is PostgreSQL's own `subpath()`: a positive one raises `OperationalError`, a negative one
+gives a part of the path rather than an error:
 
 ```python
 from hare.dialects.postgresql.functions import Subpath

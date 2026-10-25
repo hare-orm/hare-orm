@@ -48,8 +48,9 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     Its fields are the model's fields: each value, a relation's key column (``author_id``), and
     each relation as the related rows - ``null`` unless the query loaded them
     (``select_related()``, ``prefetch_related()``, a request query's ``include``), so a response
-    never runs a query of its own. Relations, the values the database generates and the
-    ``auto_now``/``auto_now_add`` stamps are read-only:
+    never runs a query of its own. Relations, the values the database generates, the
+    ``auto_now``/``auto_now_add`` stamps and ``Meta.soft_delete_field`` (written by ``delete()`` and
+    ``restore()`` alone) are read-only:
     a request's data sets the key column (``author_id``), not the relation. ``DTOConfig`` shapes
     it as for any Litestar DTO - ``exclude``, ``include``, ``rename_fields``,
     ``rename_strategy``, ``max_nested_depth`` (1 by default: the related rows without their own
@@ -167,7 +168,10 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
         default: Any = Empty
         default_factory: Callable[[], Any] | None = None
         read_only = (
-            relation_type is not None or field.generated or field.constraints.get(DTO_READ_ONLY_CONSTRAINT) is True
+            relation_type is not None
+            or field.generated
+            or field.constraints.get(DTO_READ_ONLY_CONSTRAINT) is True
+            or name == model_type._meta.soft_delete_field
         )
         annotation = field.get_annotation()
         if relation_type is not None:

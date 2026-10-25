@@ -20,11 +20,14 @@ class Observer:
     Attributes:
         callback: The callback.
         models: The models whose events it gets - their subclasses' too; None for every event.
+        model_labels: The ``"app.Model"`` labels of more models whose events it gets - the model
+            registered under the label in any context, its subclasses too.
         is_async: Whether calling it gives a coroutine.
     """
 
     callback: ObserverCallback
     models: frozenset[type[Model]] | None
+    model_labels: frozenset[str] = frozenset()
     is_async: bool = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
@@ -51,6 +54,10 @@ class Observer:
             model: The model.
 
         Returns:
-            True for an observer of every event, or of ``model`` or a base of it.
+            True for an observer of every event, or of ``model`` or a base of it - by class or by label.
         """
-        return self.models is None or any(issubclass(model, observed) for observed in self.models)
+        if self.models is None or any(issubclass(model, observed) for observed in self.models):
+            return True
+        return bool(self.model_labels) and any(
+            getattr(getattr(base, "_meta", None), "full_name", None) in self.model_labels for base in model.__mro__
+        )

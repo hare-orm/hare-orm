@@ -54,7 +54,6 @@ from tests.shared_models.testmodels import (
     Currency,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     EnumFields,
     FloatFields,
     IntFields,
@@ -65,6 +64,7 @@ from tests.shared_models.testmodels import (
     TimeFields,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.timezone_context import override_timezone
 
 pytestmark = pytest.mark.database_independent

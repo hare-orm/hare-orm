@@ -1,32 +1,27 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
-from hare.fields.field import Field
-from hare.query.expressions import Aggregate, CombinedExpression, Exists, F, Q
+from hare.query.expressions import CombinedExpression, Exists, F, Q
 from hare.query.expressions.compatibility.constants import NON_NUMBER_VALUE_TYPES
-from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.functions.aggregates.statistic_result_aggregate import StatisticResultAggregate
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import functions
 
 
-class StatisticAggregate(Aggregate):
-    """A population or sample statistic of the values - of integers a float on every backend, of
-    Decimals an unrounded Decimal - by the database's own function, or a function of hare where the
-    database has none."""
+class StatisticAggregate(StatisticResultAggregate):
+    """A population or sample statistic of the values - by the database's own function, or a function
+    of hare where the database has none."""
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
-        *Aggregate.plan_parts,
+        *StatisticResultAggregate.plan_parts,
         ("sample", PlanPartType.NONE),
     )
 
     #: The SQL function of the population and of the sample statistic.
     function_names: tuple[str, str]
-    populate_field_object = True
     refused_argument_value_types = NON_NUMBER_VALUE_TYPES
 
     def __init__(
@@ -54,14 +49,3 @@ class StatisticAggregate(Aggregate):
         if self.distinct:
             function = function.distinct()
         return function
-
-    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        # The statistic of integers is a decimal.
-        return self._cast_integer_result_to_float(
-            super().get_result(expression_context),
-            NumericTyping.FLOAT_OUTPUT_FIELD,
-            expression_context,
-        )
-
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
-        return cast("Field[Any]", NumericTyping.get_quotient_output_field(field_object))

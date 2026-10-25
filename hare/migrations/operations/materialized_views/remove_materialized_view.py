@@ -9,20 +9,16 @@ from hare.migrations.operations.schema_objects.remove_schema_object import Remov
 
 
 class RemoveMaterializedView(RemoveSchemaObject):
-    """Drops a materialized view of a model; going back creates it again from the state.
+    """Drops a materialized view of a model; going back creates it again from the state - a storage of its
+    own filled by its query, a table it writes into keeping the rows the drop left in it, not filled again.
 
     Args:
         model_name: The model.
         name: The view's name.
-        replacing: The migration adds a view of the name in its place - going back, a table the view
-            writes into keeps its rows, not filled again.
     """
 
     object_type: ClassVar[type[MaterializedViewObjectType]] = MaterializedViewObjectType
 
-    def __init__(self, model_name: str, name: str, *, replacing: bool = False) -> None:
-        super().__init__(model_name, name)
-        self.replacing = replacing
-
     def get_type_options(self) -> dict[str, Any]:
-        return {"replacing": self.replacing}
+        # The drop left a table the view writes into with its rows.
+        return {"replacing": True}

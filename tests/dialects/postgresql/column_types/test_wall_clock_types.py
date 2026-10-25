@@ -254,3 +254,127 @@ async def test_a_naive_literal_beside_a_wall_clock_is_that_wall_clock(zone):
                 assert values == [expected], name
             assert await WallClockEntry.objects.update(at=Coalesce(F("at"), Value(literal))) == 1
             assert (await WallClockEntry.objects.get(id=1)).at == literal
+
+
+@pytest.mark.asyncio
+async def test_interval_arithmetic_a_duration_has_no_result_of_is_refused():
+    """A number added to an interval, a product of two intervals reached PostgreSQL (or the driver), which
+    refused them with its own error."""
+    from decimal import Decimal
+
+    from hare.exceptions import FieldError
+    from hare.query.expressions import F
+
+    async with wall_clock_context():
+        await WallClockEntry.objects.create(id=1, lasts=datetime.timedelta(hours=2))
+        refused = (
+            F("lasts") + 3,
+            3 - F("lasts"),
+            Decimal("2.5") + F("lasts"),
+            3 / F("lasts"),
+            F("lasts") * F("lasts"),
+        )
+        for expression in refused:
+            with pytest.raises(FieldError, match="duration"):
+                await WallClockEntry.objects.annotate(value=expression).values_list("value", flat=True)
+        computed = await WallClockEntry.objects.annotate(
+            doubled=F("lasts") * 2, halved=F("lasts") / 2, summed=F("lasts") + F("lasts")
+        ).values_list("doubled", "halved", "summed")
+        assert computed == [(datetime.timedelta(hours=4), datetime.timedelta(hours=1), datetime.timedelta(hours=4))]
+
+
+@pytest.mark.asyncio
+async def test_an_interval_takes_a_timedelta_and_a_numeric_column():
+    """An interval plus a timedelta, and an interval scaled by a numeric column, were refused with a
+    FieldError - PostgreSQL computes them, as hare does a TimeDeltaField's."""
+    from hare.exceptions import FieldError
+    from hare.query.expressions import F
+
+    async with wall_clock_context():
+        await WallClockEntry.objects.create(id=3, lasts=datetime.timedelta(hours=2))
+        minute = datetime.timedelta(minutes=1)
+        lasts = datetime.timedelta(hours=2)
+        # A second shift runs the cached plan with the other value.
+        for shift in (minute, minute * 2):
+            computed = await WallClockEntry.objects.annotate(
+                later=F("lasts") + shift, earlier=F("lasts") - shift, turned=shift - F("lasts")
+            ).values_list("later", "earlier", "turned")
+            assert computed == [(lasts + shift, lasts - shift, shift - lasts)]
+        scaled = await WallClockEntry.objects.annotate(
+            tripled=F("lasts") * F("id"), turned=F("id") * F("lasts"), third=F("lasts") / F("id")
+        ).values_list("tripled", "turned", "third")
+        assert scaled == [(datetime.timedelta(hours=6), datetime.timedelta(hours=6), datetime.timedelta(minutes=40))]
+        await WallClockEntry.objects.filter(id=3).update(lasts=F("lasts") + minute)
+        assert (await WallClockEntry.objects.get(id=3)).lasts == datetime.timedelta(hours=2, minutes=1)
+        assert await WallClockEntry.objects.filter(lasts__gt=F("lasts") - minute).count() == 1
+        with pytest.raises(FieldError, match="duration"):
+            await WallClockEntry.objects.annotate(value=F("lasts") * minute).values_list("value", flat=True)
+
+
+@pytest.mark.asyncio
+async def test_a_timedelta_beside_an_interval_in_a_function_is_an_interval():
+    """A timedelta beside an interval column in Coalesce/Greatest/Least/NullIf/Case was bound as its
+    microseconds - a raw error of PostgreSQL or of the driver."""
+    from hare.query.expressions import Case, F, Q, When
+    from hare.query.functions import Coalesce, Greatest, Least, NullIf
+
+    async with wall_clock_context():
+        await WallClockEntry.objects.create(id=4, lasts=datetime.timedelta(hours=1))
+        await WallClockEntry.objects.create(id=5)
+        hour = datetime.timedelta(hours=1)
+        # A second value runs the cached plan with the other literal.
+        for other in (datetime.timedelta(hours=4), datetime.timedelta(minutes=30)):
+            computed = (
+                await WallClockEntry.objects.order_by("id")
+                .annotate(
+                    first=Coalesce(F("lasts"), other),
+                    most=Greatest(F("lasts"), other),
+                    least=Least(F("lasts"), other),
+                    unless=NullIf(F("lasts"), hour),
+                    chosen=Case(When(Q(id=4), then=other), default=F("lasts")),
+                )
+                .values_list("first", "most", "least", "unless", "chosen")
+            )
+            assert computed == [
+                (hour, max(hour, other), min(hour, other), None, other),
+                (other, other, other, None, None),
+            ]
+
+
+@pytest.mark.asyncio
+async def test_a_moment_is_shifted_by_an_interval_column():
+    """A datetime or a date plus an interval column was refused - PostgreSQL adds them."""
+    from hare.query.expressions import F
+
+    async with wall_clock_context():
+        at = datetime.datetime(2024, 1, 31, 10, 0)
+        await WallClockEntry.objects.create(id=1, at=at, lasts=datetime.timedelta(days=1, hours=2))
+        shifted = await WallClockEntry.objects.annotate(
+            later=F("at") + F("lasts"), earlier=F("at") - F("lasts"), turned=F("lasts") + F("at")
+        ).values_list("later", "earlier", "turned")
+        assert shifted == [
+            (
+                datetime.datetime(2024, 2, 1, 12, 0),
+                datetime.datetime(2024, 1, 30, 8, 0),
+                datetime.datetime(2024, 2, 1, 12, 0),
+            )
+        ]
+        await WallClockEntry.objects.filter(id=1).update(at=F("at") + F("lasts"))
+        assert (await WallClockEntry.objects.get(id=1)).at == datetime.datetime(2024, 2, 1, 12, 0)
+        assert await WallClockEntry.objects.filter(at__lt=F("at") + F("lasts")).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_an_interval_is_aggregated_by_array_agg_not_jsonb_agg():
+    """JSONB_AGG wrote an interval as text of the server's IntervalStyle - the field read none of it."""
+    from hare.dialects.postgresql.functions import JSONBAgg
+    from hare.exceptions import FieldError
+    from hare.query.functions import ArrayAgg
+
+    async with wall_clock_context():
+        await WallClockEntry.objects.create(id=1, lasts=datetime.timedelta(days=1, microseconds=5))
+        with pytest.raises(FieldError, match=r"JSONBAgg\(\) can't aggregate IntervalField"):
+            await WallClockEntry.objects.aggregate(lasts=JSONBAgg("lasts"))
+        assert await WallClockEntry.objects.aggregate(lasts=ArrayAgg("lasts")) == {
+            "lasts": [datetime.timedelta(days=1, microseconds=5)]
+        }

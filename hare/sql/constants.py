@@ -3,12 +3,11 @@ from __future__ import annotations
 import re
 
 from hare.dialects.base.constants import SQL_DIALECT
-from hare.sql.enums import JoinType, SetOperation
+from hare.sql.enums import SetOperation
 from hare.sql.sql_context import SqlContext
 
 #: Microsecond counts of the time units a timedelta is split into.
 MICROSECONDS_PER_SECOND = 1_000_000
-MICROSECONDS_PER_HOUR = 3_600 * MICROSECONDS_PER_SECOND
 MICROSECONDS_PER_DAY = 86_400 * MICROSECONDS_PER_SECOND
 
 
@@ -30,10 +29,6 @@ LIKE_ESCAPE_MAP = (
     ("%", "\\%"),
     ("_", "\\_"),
 )
-
-#: The digits after the point of a quotient, an average or a statistic of Decimals a dialect works out
-#: through hare where the database's own gives a double or cuts the quotient to the dividend's scale.
-DECIMAL_QUOTIENT_SCALE = 20
 
 #: The most bytes a name hare generates - a table, column, through table, index, constraint or
 #: alias name - takes: 63, the shortest limit among hare's own dialects. A longer name is
@@ -60,8 +55,6 @@ QUERY_WITHOUT_INSERT_MESSAGE = "'Query' object has no attribute 'insert'"
 
 #: The set operations a row is in the result of where it is in one of the queries.
 UNION_SET_OPERATIONS = frozenset({SetOperation.UNION, SetOperation.UNION_ALL})
-#: The joins unfolding a row's own array - they read no other table.
-ARRAY_JOIN_TYPES = frozenset({JoinType.ARRAY, JoinType.LEFT_ARRAY})
 
 #: How deep a criterion of criteria of one connector is written in brackets - a chain of
 #: thousands of conditions joined level by level in pairs stays as deep as their logarithm where a

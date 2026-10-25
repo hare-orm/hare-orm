@@ -218,7 +218,7 @@ class ManyToManyPrefetch:
                 *batch_query.get_parameterized_sql(), returns_rows=True, rows_by_position=reads_natively
             )
             through_batches.append(batch_rows)
-        # One batch is read as the driver gave it - rust_pg's rows are then read without a Python
+        # One batch is read as the driver gave it - a native driver's rows are then read without a Python
         # object per row.
         if len(through_batches) == 1:
             return through_batches[0]

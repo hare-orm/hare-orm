@@ -54,7 +54,9 @@ A value, `Tenancy.any_of(...)` and `Tenancy.ALL` given directly apply to every m
 `Meta.tenant_field` only names *which* column a given model uses (`company_id` on one model, `org_id` on
 another), and the scope is compared with whatever column each model names. That fits models split by the
 same tenants. Models split by different fields with different sets of values (orders by `store` —
-`"msk"`/`"kzn"`, sales summaries by `store_id` — `1`/`2`, FAQ entries by `group`) take a dict.
+`"msk"`/`"kzn"`, sales summaries by `store_id` — `1`/`2`, FAQ entries by `group`) take a dict. Its
+keys are model classes or their `"app.Model"` labels (`{"shop.Order": "msk"}`), looked up in the current
+context.
 
 `Tenancy.any_of()` needs at least one value and takes no `None` — `QueryError` (a `ValueError`)
 otherwise: no value at all neither means every tenant nor no rows. A value repeated is kept once, and
@@ -175,7 +177,9 @@ scope's value" below is the one value of that scope, and "inside the scope" mean
   with no scope at all (seed data, trusted like an explicit `tenant_field` there). The writes of objects —
   `create()`, `bulk_create()`, `bulk_update()` and the rest — are checked under the active scope even
   through `.all_tenants()`, which widens the rows a query reads, not the rows an object points at. A key
-  naming no row is left to the database.
+  naming no row is left to the database. On ClickHouse, which keeps no key unique, two tenants' rows may
+  share a key: a key passes when one of its rows is in the scope, M2M `add()` alike, and a delete under a
+  scope cascades to the rows of the scope only.
 - **M2M `add()` fills a through model's own `tenant_field`** with the value of the through model's scope,
   and needs it in `through_defaults` under a scope of several values (see
   [A `Model` as `through`](../models/relations.md#a-model-as-through)).

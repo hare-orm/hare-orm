@@ -20,15 +20,20 @@ CLICKHOUSE_MOMENT_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC)
 #:   a long ``__in`` list or a large JSON document an UPDATE writes;
 #: - a JSON text is read by the parser taking an integer beyond 64 bits as a number - the default one
 #:   reads no path of a document holding one (a JSON column writes 1e20 as 100000000000000000000);
-#: - a JSON boolean stays a boolean - an array holding numbers and booleans would hold true as 1;
+#: - a JSON boolean stays a boolean - an array holding numbers and booleans would hold true as 1, a
+#:   document a filter compares with would hold true beside a text as the text 'true';
 #: - a JSON string looking like a date or a moment stays a string - a JSON column would hold it as a
 #:   date, read back as one, its offset lost;
 #: - a lightweight DELETE finishes before the statement returns;
 #: - a text cast to a ``Dynamic`` or a ``Variant`` value stays a text - the server would read ``'5'``
 #:   as a number;
 #: - a dot in a key of a JSON value is part of the key, not a nested path;
+#: - a ``Dynamic`` value - a JSON path's - orders rows, and groups them where a grouping takes the ordering;
 #: - an error's text is the server's message without the server's own stack trace, which the native
-#:   protocol sends with it.
+#:   protocol sends with it;
+#: - a DISTINCT over ordered rows reads them as any rows - the optimization of ordered input kept
+#:   duplicates of a UNION, INTERSECT or EXCEPT of ordered branches, also inside a subquery, whose own
+#:   SETTINGS the set operation doesn't read.
 CLICKHOUSE_SESSION_SETTINGS = {
     "join_use_nulls": 1,
     "mutations_sync": 2,
@@ -38,6 +43,7 @@ CLICKHOUSE_SESSION_SETTINGS = {
     "max_expanded_ast_elements": 100_000_000,
     "allow_simdjson": 0,
     "input_format_json_read_bools_as_numbers": 0,
+    "input_format_json_read_bools_as_strings": 0,
     "input_format_try_infer_dates": 0,
     "input_format_try_infer_datetimes": 0,
     "lightweight_deletes_sync": 2,
@@ -45,7 +51,9 @@ CLICKHOUSE_SESSION_SETTINGS = {
     "cast_string_to_variant_use_inference": 0,
     "json_type_escape_dots_in_keys": 1,
     "allow_suspicious_types_in_order_by": 1,
+    "allow_suspicious_types_in_group_by": 1,
     "calculate_text_stack_trace": 0,
+    "optimize_distinct_in_order": 0,
 }
 
 

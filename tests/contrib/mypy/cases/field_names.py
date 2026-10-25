@@ -20,6 +20,8 @@ async def accepted_names(volumes: list[Volume], notes: list[Note]) -> None:
 async def reported_names(volumes: list[Volume]) -> None:
     Volume.objects.order_by("-titel")  # E: titel
     Volume.objects.only("nope")  # E: only(): Volume has no field 'nope'
+    Volume.objects.only("labels")  # E: only(): Volume.labels is a relation holding many rows - it can't be loaded
+    Volume.objects.only("writer__volumes")  # E: only(): Writer.volumes is a relation holding many rows - it can't be loaded
     Volume.objects.defer("nope")  # E: defer(): Volume has no field 'nope'
     Volume.objects.defer("labels")  # E: defer(): Volume.labels is a relation holding many rows - only direct fields and forward relations can be deferred
     Note.objects.order_by("subject")  # E: Unknown field subject for ordering: Note has no field 'subject'

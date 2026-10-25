@@ -77,8 +77,7 @@ class ReverseRelationPrefetch:
                     related_query, relation_fields, parent_condition
                 ).values(*key_names)
                 key_path = "pk" if len(key_names) > 1 else key_names[0]
-                # Subquery() takes a queryset as it takes the query a queryset builds.
-                unsliced = unsliced.filter(**{f"{key_path}__in": Subquery(numbered_keys)})  # type: ignore[arg-type]
+                unsliced = unsliced.filter(**{f"{key_path}__in": Subquery(numbered_keys)})
             related_query = unsliced
 
         if len(relation_fields) == 1:

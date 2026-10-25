@@ -42,7 +42,9 @@ class Count(FieldWindowFunction):
                 return FieldWindowFunction._get_field_result(counted, expression_context)
         return super()._get_field_result(expression_context)
 
-    def _coerce_output_field(self, field_object: Field[Any] | None) -> Field[Any] | None:
+    def _coerce_output_field(
+        self, field_object: Field[Any] | None, expression_context: ExpressionContext
+    ) -> Field[Any] | None:
         """A count is an integer whatever the counted field's type.
 
         Args:

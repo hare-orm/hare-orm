@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import dataclasses
 
-from hare.exceptions import ConfigurationError
 from hare.query.enums import Lookup
 
 
@@ -21,12 +20,6 @@ class Filter:
 
     key: str
     lookup: Lookup | str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.key, str) or not self.key:
-            raise ConfigurationError(f"Filter key must be a non-empty string, got {self.key!r}")
-        if self.lookup is not None and (not isinstance(self.lookup, str) or not self.lookup):
-            raise ConfigurationError(f"Filter lookup must be a non-empty string or None, got {self.lookup!r}")
 
     @property
     def filter_key(self) -> str:

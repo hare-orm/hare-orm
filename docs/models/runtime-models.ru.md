@@ -58,9 +58,10 @@ class Hare:
 ```python
 class Hare:
     @classmethod
-    def unregister_live_models(cls, models: Iterable[type[Model]]) -> None: ...
+    def unregister_live_models(cls, models: Iterable[type[Model] | str]) -> None: ...
 ```
 
+Модель задаётся классом или меткой `"app.Model"` (`Hare.unregister_live_models(["content.Notice"])`).
 Отменяет регистрацию: модель уходит из реестра, обратные связи (обратные ссылки внешних ключей и
 «один-к-одному», созданные поля «многие-ко-многим»), которые она добавила моделям, на которые указывают
 её связи, удаляются, и все кэши, построенные для неё или для этих моделей, сбрасываются. Колонки её

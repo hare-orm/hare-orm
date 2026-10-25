@@ -75,11 +75,8 @@ async def test_F_branch(db, intfields_data, then_field, default_field):
 
 
 def get_intnum_plus_one_sql(db) -> str:
-    """``"intnum"+1`` as read - SQLite checks the sum is in the integer's range, as PostgreSQL does."""
-    plus_one_sql = '"intnum"+1'
-    if db.get_connection().dialect.name == "sqlite":
-        return f"hare_integer_in_range({plus_one_sql},-9223372036854775808,9223372036854775807,'integer')"
-    return plus_one_sql
+    """``"intnum"+1`` as read - the database's own arithmetic."""
+    return '"intnum"+1'
 
 
 @requires_features(identifier_quote_char='"')
@@ -397,6 +394,7 @@ async def test_repeated_case_aggregate_with_a_different_default_type(db):
         assert result["top"] == pytest.approx(default)
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_case_value_wrapped_literals_keep_their_type(db):
     for value in (1, 2, 3):

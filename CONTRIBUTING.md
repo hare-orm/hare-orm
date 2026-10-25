@@ -326,9 +326,12 @@ test tools (`pytest` and its plugins, `pytz`, `ruff` — which formats the migra
 
 ### CI
 
-CI (`.github/workflows/ci.yml`) runs on every pull request, every push to `dev` and `main`, every
-night, on demand (*Run workflow*) and before a release (the `release` workflow calls it). Every run
-tests the whole matrix.
+CI (`.github/workflows/ci.yml`) runs on every pull request, every week, on demand (*Run workflow*) and
+before a release (the `release` workflow calls it). Every run tests the whole matrix, but for a pull
+request from `dev` into `main`: every pull request into `dev` ran it, and the release runs it again on
+the tag. A push to `dev` or `main` runs no tests — the squashed commit is the tree its pull request
+tested: the rulesets require the `ci-passed` status on a branch up to date with its base. A push to
+`main` publishes the documentation (`.github/workflows/docs.yml`, `make docs`).
 
 Each job runs the Makefile targets above — the test jobs together are `make test_matrix`, each one
 part of it:
@@ -346,7 +349,7 @@ part of it:
 | `test-clickhouse` | the ClickHouse dialect's tests on one ClickHouse version and on a cluster of it, both drivers: each version on Python 3.14, 25.8 also on 3.12 and 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | the outbox's wakeups and deliveries against the oldest and newest Redis, RabbitMQ and Kafka, one job per Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-poetry-add` | a new poetry project adding hare-orm from the checkout, one job per OS (Linux, Windows, macOS) and Python | `make deps`, `make test_poetry_add` |
-| `deploy-docs` | on a push to `main`: publishes the documentation | `make docs` |
+| `ci-passed` | passes when every job above passed, or was skipped for a pull request from `dev` into `main` — the status the rulesets require | — |
 
 The test jobs run the `rust.native` this commit builds, and upload their
 `.test-matrix/` logs as artifacts; a failed run's output is also printed in the job's log.
@@ -532,7 +535,8 @@ Signed-off-by: Jane Doe <jane@example.com>
 ```
 
 `git commit -s` adds the line for you. The `dco` workflow checks every commit of a pull request
-and fails when a line is missing or names someone other than the commit's author. To sign off
+and fails when a line is missing or names someone other than the commit's author; Dependabot's
+commits are exempt. To sign off
 commits you already made:
 
 ```bash

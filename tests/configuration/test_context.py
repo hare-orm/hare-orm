@@ -414,7 +414,7 @@ class TestGetModel:
         ctx = HareContext()
 
         with pytest.raises(ConfigurationError) as exc_info:
-            ctx.get_model("models", "User")
+            ctx.get_model("models.User")
 
         assert "Context not initialized" in str(exc_info.value)
 
@@ -440,7 +440,7 @@ class TestInit:
         async with HareContext() as ctx:
             await ctx.init(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": models}))
 
-            assert ctx.get_model("models", "Tournament") is not None
+            assert ctx.get_model("models.Tournament") is not None
 
     @pytest.mark.asyncio
     async def test_init_before_the_context_is_entered(self):
@@ -568,8 +568,8 @@ class TestInit:
     @pytest.mark.asyncio
     async def test_hare_reinit_with_an_invalid_config_does_not_tear_down_working_context(self):
         """Same as above, but exercised through Hare.init() (which re-inits whatever context is
-        currently active) and the rejected call's problem is a configuration without connections
-        rather than a bad module."""
+        currently active) and the rejected call's problem is a configuration without apps rather
+        than a bad module."""
         from hare import Hare
         from tests.shared_models.testmodels import Tournament
 
@@ -580,8 +580,8 @@ class TestInit:
             await ctx.generate_schemas()
             tournament = await Tournament.objects.create(name="Original")
 
-            with pytest.raises(ConfigurationError, match="connections"):
-                await Hare.init({"connections": {}, "apps": {}})
+            with pytest.raises(ConfigurationError, match='"apps" section'):
+                await Hare.init({"connections": {}})
 
             assert ctx.inited is True
             assert await Tournament.objects.get(id=tournament.id) == tournament
@@ -658,7 +658,7 @@ class TestHareTestContext:
                 # the inner context re-registered the same module - same class object, mutated
                 assert (
                     IntFields._meta.basequery.query_class
-                    is inner_ctx.get_model("models", "IntFields")._meta.basequery.query_class
+                    is inner_ctx.get_model("models.IntFields")._meta.basequery.query_class
                 )
 
             # back to the outer context - its own dialect must be reclaimed, not left as the
@@ -786,7 +786,7 @@ class TestHareTestContext:
 
         try:
             async with hare_test_context([module_name], app_label="appA") as ctx1:
-                assert ctx1.get_model("appA", "RelabelConflictModel") is RelabelConflictModel
+                assert ctx1.get_model("appA.RelabelConflictModel") is RelabelConflictModel
 
             with pytest.raises(
                 ConfigurationError,
@@ -822,7 +822,7 @@ class TestInitIntegration:
             # Apps should be populated
             assert ctx.apps is not None
             # Should be able to get a model
-            Author = ctx.get_model("models", "Author")
+            Author = ctx.get_model("models.Author")
             assert Author.__name__ == "Author"
 
     @pytest.mark.asyncio

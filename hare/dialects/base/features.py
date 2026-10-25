@@ -4,7 +4,7 @@ import dataclasses
 import itertools
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self, cast
 
 from hare.core.caching.cache import Cache
 from hare.dialects.constants import DEFAULT_MAX_BIND_PARAMETERS, REPLACED_FEATURES_CACHE_SIZE
@@ -50,7 +50,7 @@ class Features:
         orders_by_correlated_subqueries: A correlated subquery runs in ``ORDER BY``, and selected beside
             a ``WHERE`` - without, such a query selects its rows in a derived table of no ``WHERE``, its
             conditions and sort keys hidden columns of it, and filters, sorts and slices the rows of that
-            (the database runs neither); a mutation runs no correlated subquery there.
+            (the database runs neither); an ``UPDATE`` or a ``DELETE`` runs no correlated subquery there.
         supports_ordered_correlated_subqueries: A correlated subquery orders and limits its own rows
             (``Subquery(... .order_by(...)[:1])``).
         supports_correlated_aggregates: A correlated subquery selecting a ``COUNT``, ``SUM`` or another
@@ -95,10 +95,6 @@ class Features:
             and ``delete()`` of a model with a cascade cycle retries such a DELETE with a
             Python-side cascade walk, deleting fewer levels than this at a time.
         supports_nulls_distinct: A unique constraint takes ``NULLS [NOT] DISTINCT``.
-        supports_partitioned_exclusion_constraints: A partitioned table takes an exclusion constraint.
-        supports_unhex: ``unhex()`` decodes hex text to bytes.
-        supports_drop_column: ``ALTER TABLE ... DROP COLUMN`` drops a plain column in place - without,
-            a removed field's table is rebuilt.
         explain_options: The options ``EXPLAIN`` takes, upper-case.
         supports_schemas: Migrations create and drop the schemas of ``Meta.schema`` (``CREATE SCHEMA``);
             without, a model's schema - another attached database, another database of the server - is
@@ -115,9 +111,6 @@ class Features:
             closest to it by an inequality (``AsofJoin``).
         supports_array_join: Each row is repeated with each element of an array of it - ``ARRAY JOIN``
             (``ArrayJoin``).
-        supports_json_type: A JSON value is stored by a type of its own holding its paths typed
-            (a ``JSON`` type), not as its text - an object alone, its NULL values and empty
-            objects dropped.
         orders_json_values_in_aggregates: ``MAX``/``MIN`` of a JSON value compare it as the database orders
             it - without, the database orders a typed JSON value but takes none in an aggregate.
         reads_trailing_comment_of_insert: A comment ending an ``INSERT ... VALUES`` statement is a
@@ -135,6 +128,15 @@ class Features:
         sorts_nulls_first: NULL sorts before every value in ascending order by default.
         divides_integers_exactly: ``/`` of two integers gives their exact quotient, a fraction - the result
             is read as a float; without, the database truncates it to an integer.
+        computes_integer_statistics_exactly: The average, standard deviation and variance of integers are
+            exact decimals the database computes - read as a ``Decimal``; without, the database computes them
+            as floats.
+        keeps_enum_columns: An ``IntEnumField``'s and a ``CharEnumField``'s column is of an enum type holding
+            only the members. Without, the column holds any integer or text, and a ``CHECK``
+            (``EnumMembersCondition``) keeps it to the members' values.
+        computes_decimal_statistics_exactly: The average, standard deviation and variance of Decimals are
+            exact decimals the database computes - read as a ``Decimal``; without, the database computes
+            them as floats.
         reports_written_row_count: The database reports how many rows an ``UPDATE`` or a ``DELETE``
             changed. Without, ``update()``, ``delete()`` and ``bulk_update()`` return None, a write
             matching no row goes unnoticed, and a model with ``Meta.optimistic_lock_field`` is refused
@@ -208,8 +210,6 @@ class Features:
         supports_sequences: ``Meta.sequences`` - sequences and reading their next value.
         supports_row_level_security: ``Meta.row_level_security`` and ``Meta.policies``.
         supports_grants: ``Meta.grants`` - privileges granted to and revoked from roles.
-        supports_strict_tables: A table is created ``STRICT`` - each column holds values of its
-            declared type only.
         supports_text_search_configurations: Text search beyond matching a model's fields: text search
             configurations, ``SearchVector`` values, lexemes, rank weights by label, rank length
             normalization and ``SearchHeadline``'s fragment options.
@@ -222,8 +222,6 @@ class Features:
         supports_spatial: Spatial lookups, functions and aggregates of ``hare.gis`` - a spatial
             extension of the database.
         supports_geography: A ``GeometryField(geography=True)`` measured on the ellipsoid.
-        supports_spatial_index: A spatial index kept in a table of its own (``SpatialiteIndex``) -
-            registered in the spatial metadata.
         spatial_reference_ids: The SRIDs the database's spatial metadata knows - a geography is
             measured, and a spatial index registered, in one of them; None for no limit.
         supports_ordered_aggregates: An aggregate orders the rows it reads - ``ORDER BY`` inside its
@@ -266,9 +264,6 @@ class Features:
     max_bulk_update_rows: int | None = None
     cascade_depth_limit: int | None = None
     supports_nulls_distinct: bool = False
-    supports_partitioned_exclusion_constraints: bool = False
-    supports_unhex: bool = False
-    supports_drop_column: bool = True
     explain_options: frozenset[str] = frozenset()
     supports_schemas: bool = True
     references_other_schemas: bool = True
@@ -278,7 +273,6 @@ class Features:
     supports_table_sample: bool = False
     supports_asof_join: bool = False
     supports_array_join: bool = False
-    supports_json_type: bool = False
     orders_json_values_in_aggregates: bool = True
     reads_trailing_comment_of_insert: bool = True
     supports_merge: bool = False
@@ -291,6 +285,9 @@ class Features:
     supports_enum_types: bool = False
     sorts_nulls_first: bool = False
     divides_integers_exactly: bool = False
+    computes_integer_statistics_exactly: bool = False
+    computes_decimal_statistics_exactly: bool = True
+    keeps_enum_columns: bool = False
     reports_written_row_count: bool = True
     supports_insert_conflicts: bool = True
     supports_conflict_constraint_names: bool = False
@@ -327,14 +324,12 @@ class Features:
     supports_sequences: bool = False
     supports_row_level_security: bool = False
     supports_grants: bool = False
-    supports_strict_tables: bool = False
     supports_text_search_configurations: bool = False
     supports_full_text_index: bool = False
     supports_vector_search: bool = False
     supports_tenant_schemas: bool = False
     supports_spatial: bool = False
     supports_geography: bool = False
-    supports_spatial_index: bool = False
     spatial_reference_ids: frozenset[int] | None = None
     supports_ordered_aggregates: bool = False
     #: The number of these features in the key of a statement plan - a plan built for a connection of
@@ -353,7 +348,7 @@ class Features:
     def __post_init__(self) -> None:
         object.__setattr__(self, "plan_key", next(Features.plan_keys))
 
-    def replace(self, **overrides: Any) -> Features:
+    def replace(self, **overrides: Any) -> Self:
         """A copy with the given features changed.
 
         Args:
@@ -366,4 +361,4 @@ class Features:
         kept = Features.replaced_features.get((replaced,))
         if kept is None:
             Features.replaced_features[(replaced,)] = kept = replaced
-        return kept
+        return cast("Self", kept)

@@ -11,11 +11,11 @@ from hare.dialects.sqlite.schema.constants import (
     SQLITE_INVALID_INPUT_MESSAGE,
     SQLITE_NUMBER_TEXT_PATTERN,
     SQLITE_TEMPORAL_READER_FUNCTIONS,
+    SQLITE_UNFIT_VALUE_MESSAGE,
 )
-from hare.exceptions import OperationalError
+from hare.exceptions import OperationalError, ValidationError
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.numeric.big_int_field import BigIntField
-from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.numeric.small_int_field import SmallIntField
@@ -25,6 +25,8 @@ from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.data.text.char_field import CharField
 from hare.fields.data.text.text_field import TextField
 from hare.fields.field import Field
+from hare.gis.fields.geometry_field import GeometryField
+from hare.vectors.vector_field import VectorField
 
 
 class SqliteColumnConversionCheck(ColumnConversionCheck):
@@ -41,7 +43,6 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             SqliteConvertedValueType.BIGINT,
             SqliteConvertedValueType.SMALLINT,
             SqliteConvertedValueType.DOUBLE_PRECISION,
-            SqliteConvertedValueType.NUMERIC,
             SqliteConvertedValueType.BOOLEAN,
         }
     )
@@ -60,6 +61,9 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
         Raises:
             OperationalError: A stored value is no value of the new type.
         """
+        if isinstance(new_field, (GeometryField, VectorField)):
+            await self.check_kept_values(qualified_table, new_field, quoted_column)
+            return
         old_type = self.get_value_type(old_field)
         new_type = self.get_value_type(new_field)
         if new_type is None and type(old_field) is not type(new_field):
@@ -92,6 +96,52 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
                     SQLITE_INVALID_INPUT_MESSAGE.format(new_type=type(new_field).__name__, value=unread_value)
                 )
 
+    async def check_kept_values(self, qualified_table: str, new_field: Field[Any], quoted_column: str) -> None:
+        """Refuses a change of a geometry or a vector field whose column holds a value the new field refuses -
+        the column holds any geometry or vector, and one of another type, SRID, dimensions or length would
+        stay there, which the field reads no more.
+
+        Args:
+            qualified_table: The already schema-qualified, quoted table name.
+            new_field: The field's new definition.
+            quoted_column: The already-quoted column.
+
+        Raises:
+            OperationalError: The new field refuses a stored value.
+        """
+        if not isinstance(new_field, (GeometryField, VectorField)):
+            return
+        refusal = await self.get_unfit_value_refusal(qualified_table, quoted_column, new_field)
+        if refusal is not None:
+            raise OperationalError(SQLITE_UNFIT_VALUE_MESSAGE.format(refusal=refusal))
+
+    async def get_unfit_value_refusal(
+        self, qualified_table: str, quoted_column: str, new_field: Field[Any]
+    ) -> str | None:
+        """Why the new field refuses a stored value it reads - a geometry of another type or SRID, a vector of
+        another length.
+
+        Args:
+            qualified_table: The already schema-qualified, quoted table name.
+            quoted_column: The already-quoted column.
+            new_field: The field's new definition.
+
+        Returns:
+            The field's refusal of one such value, None when every one fits.
+        """
+        read_value = self.editor.client.dialect.types.get_python_reader(new_field)
+        _, rows = await self.editor.client.execute(
+            f"SELECT DISTINCT {quoted_column} AS value FROM {qualified_table} "  # nosec B608
+            f"WHERE {quoted_column} IS NOT NULL"
+        )
+        for row in rows:
+            stored_value = dict(row)["value"]
+            try:
+                self.editor.client.dialect.types.get_db_value(new_field, read_value(stored_value), None)
+            except (ValidationError, ValueError, TypeError) as error:
+                return str(error)
+        return None
+
     @staticmethod
     def get_value_type(field: Field[Any]) -> SqliteConvertedValueType | None:
         """The type of a field's values a type change converts.
@@ -112,8 +162,6 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
             return SqliteConvertedValueType.INTEGER
         if isinstance(field, FloatField):
             return SqliteConvertedValueType.DOUBLE_PRECISION
-        if isinstance(field, DecimalField):
-            return SqliteConvertedValueType.NUMERIC
         if isinstance(field, (CharField, TextField)):
             return SqliteConvertedValueType.TEXT
         if isinstance(field, DatetimeField):
@@ -176,6 +224,6 @@ class SqliteColumnConversionCheck(ColumnConversionCheck):
         """
         if new_type == SqliteConvertedValueType.BOOLEAN:
             return value.strip().lower() in SQLITE_BOOLEAN_TEXT_SPELLINGS
-        if new_type in (SqliteConvertedValueType.DOUBLE_PRECISION, SqliteConvertedValueType.NUMERIC):
+        if new_type == SqliteConvertedValueType.DOUBLE_PRECISION:
             return re.fullmatch(SQLITE_NUMBER_TEXT_PATTERN, value) is not None
         return re.fullmatch(SQLITE_INTEGER_TEXT_PATTERN, value) is not None

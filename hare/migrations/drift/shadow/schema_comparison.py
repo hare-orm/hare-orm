@@ -10,6 +10,7 @@ from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
 from hare.ddl.security.grant import Grant
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.index_info import IndexInfo
@@ -68,6 +69,9 @@ class SchemaComparison:
         self.editor = editor
         self.real_parts = {part.key: part for part in real_parts}
         self.shadow_parts = {part.key: part for part in shadow_parts}
+        # The parts of each type of each table, looked up for every table instead of walking every part.
+        self.real_parts_by_table = SchemaComparison.get_parts_by_table(self.real_parts)
+        self.shadow_parts_by_table = SchemaComparison.get_parts_by_table(self.shadow_parts)
         self.operations: list[HareOperation] = []
         self.untracked_columns: list[tuple[str, str, str, str]] = []
         self.mismatched_columns: list[ColumnMismatch] = []
@@ -87,10 +91,8 @@ class SchemaComparison:
         Returns:
             (only the shadow's, only the database's, the shadow's of the differing ones).
         """
-        shadow_parts = {
-            key: part for key, part in self.shadow_parts.items() if key[0] == part_type and key[1] == table
-        }
-        real_parts = {key: part for key, part in self.real_parts.items() if key[0] == part_type and key[1] == table}
+        shadow_parts = self.shadow_parts_by_table.get((part_type, table), {})
+        real_parts = self.real_parts_by_table.get((part_type, table), {})
         shadow_only = [part for key, part in shadow_parts.items() if key not in real_parts]
         real_only = [part for key, part in real_parts.items() if key not in shadow_parts]
         changed = [
@@ -102,7 +104,24 @@ class SchemaComparison:
 
     def has_table(self, table: str) -> bool:
         """Whether the database has a table - named as among every schema, its part by its own name."""
-        return any(key[0] is SchemaPartType.TABLE and key[1] == table for key in self.real_parts)
+        return (SchemaPartType.TABLE, table) in self.real_parts_by_table
+
+    @staticmethod
+    def get_parts_by_table(
+        parts: dict[tuple[Any, ...], SchemaPart],
+    ) -> dict[tuple[SchemaPartType, str], dict[tuple[Any, ...], SchemaPart]]:
+        """Parts grouped by their type and table.
+
+        Args:
+            parts: The parts by their keys.
+
+        Returns:
+            ``(type, table)`` -> the parts by their keys.
+        """
+        parts_by_table: dict[tuple[SchemaPartType, str], dict[tuple[Any, ...], SchemaPart]] = {}
+        for key, part in parts.items():
+            parts_by_table.setdefault((key[0], key[1]), {})[key] = part
+        return parts_by_table
 
     def compare_model(
         self, key: tuple[str, str], model_state: ModelState, tables: Iterable[str], prefix: str = ""
@@ -353,7 +372,7 @@ class SchemaComparison:
     @staticmethod
     def get_remove_index_operation(model_name: str, part: SchemaPart) -> RemoveIndex:
         """The removal of an index the database has of its own - by its name, or by its columns for one the
-        database names itself (SpatiaLite's spatial index is a table of its own).
+        database names itself (a spatial index kept in a table of its own).
 
         Args:
             model_name: The model of its table.
@@ -467,10 +486,14 @@ class SchemaComparison:
                         self.operations.append(AddPartition(model_name=model_name, partition=partition))
             else:
                 self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
-        comment_key = (SchemaPartType.COMMENT, table, table)
-        if comment_key in self.shadow_parts and comment_key in self.real_parts:
-            if self.shadow_parts[comment_key].definition != self.real_parts[comment_key].definition:
-                self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
+        # A partitioning hare declares no such one of, or another comment - the options aren't the table's.
+        for options_key in (
+            (SchemaPartType.UNPARSED_PARTITIONING, table, table),
+            (SchemaPartType.COMMENT, table, table),
+        ):
+            if options_key in self.shadow_parts and options_key in self.real_parts:
+                if self.shadow_parts[options_key].definition != self.real_parts[options_key].definition:
+                    self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
         security_key = (SchemaPartType.ROW_LEVEL_SECURITY, table, table)
         if security_key in self.shadow_parts and security_key in self.real_parts:
             if self.shadow_parts[security_key].definition != self.real_parts[security_key].definition:
@@ -493,6 +516,22 @@ class SchemaComparison:
             if not self.has_table(through_table):
                 self.add_field_operation(key, model_state, field_name, added=True)
                 continue
+            if isinstance(field.model_name, SwappableModelReference):
+                foreign_key_targets = {
+                    part.name.split(",")[0]: part.value.target_table
+                    for part in self.real_parts_by_table.get((SchemaPartType.FOREIGN_KEY, through_table), {}).values()
+                    if hasattr(part.value, "target_table")
+                }
+                swappable_mismatches = SwappableSettingCheck.get_through_table_mismatches(
+                    model, field, foreign_key_targets
+                )
+                if swappable_mismatches:
+                    # The table of the model the setting pointed at before - no operation moves the rows.
+                    self.mismatched_columns.extend(
+                        ColumnMismatch(key[0], key[1], through_table, column, detail)
+                        for column, detail in swappable_mismatches
+                    )
+                    continue
             column_differences = [
                 part for parts in self.get_differences(SchemaPartType.COLUMN, through_table) for part in parts
             ]

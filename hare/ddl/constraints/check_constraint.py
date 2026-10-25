@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
+from hare.ddl.conditions.enum_members_condition import EnumMembersCondition
 from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
 from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -19,14 +20,14 @@ class CheckConstraint:
 
     Args:
         check: The condition every row has to meet - a ``Q`` over the model's own fields,
-            ``RawSQLTerm`` of a raw SQL predicate, or an ``ExclusiveArcCondition``.
+            ``RawSQLTerm`` of a raw SQL predicate, an ``ExclusiveArcCondition`` or an ``EnumMembersCondition``.
         name: The constraint's name.
 
     Raises:
         ConfigurationError: The condition is none of them, or the name isn't a non-empty text.
     """
 
-    check: Q | RawSQLTerm | ExclusiveArcCondition
+    check: Q | RawSQLTerm | ExclusiveArcCondition | EnumMembersCondition
     name: str
 
     def __post_init__(self) -> None:

@@ -7,8 +7,9 @@ from hare.sql.builder.tables.cte import Cte
 from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
-from hare.sql.enums import Order, SetOperation
+from hare.sql.enums import SetOperation
 from hare.sql.exceptions import SetOperationException
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.field import Field
 from hare.sql.terms.term import Term

@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.node import TNode

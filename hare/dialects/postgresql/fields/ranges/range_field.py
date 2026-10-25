@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.constants import (
     RANGE_BOUND_PATH_FUNCTIONS,
     RANGE_FLAG_PATH_FUNCTIONS,
@@ -16,7 +17,6 @@ from hare.fields import Field
 from hare.fields.data.boolean_field import BooleanField
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions.compatibility.constants import RANGE_VALUE_TYPE
-from hare.query.rows.enums import RangeBoundType
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
@@ -84,6 +84,27 @@ class RangeField(Field[Range[Any]]):
             return LookupValueShape.VALUE, bound_type
         return None
 
+    def get_bounds_type(self) -> Any:
+        """The type of a range given as its ``(lower, upper)`` bounds - None for an unbounded side."""
+        bound_type = self.get_bound_field().field_type
+        return cast("Any", tuple)[bound_type | None, bound_type | None]
+
+    def get_accepted_value_types(self) -> tuple[Any, ...]:
+        return (self.get_bounds_type(),)
+
+    def get_lookup_value_alternatives(self, lookup: str) -> tuple[Any, ...]:
+        """Equality, containment and position take a ``Range`` too; ``contains`` a ``Range`` or its
+        ``(lower, upper)`` bounds."""
+        if lookup in RANGE_VALUE_LOOKUPS:
+            return (cast("Any", Range)[self.get_bound_field().field_type],)
+        if lookup == Lookup.CONTAINS:
+            return (cast("Any", Range)[self.get_bound_field().field_type], self.get_bounds_type())
+        return ()
+
+    def get_path_segments(self) -> tuple[str, ...]:
+        """The bounds (``startswith``, ``endswith``) and the flags (``isempty``, ``lower_inc``, ...)."""
+        return (*RANGE_BOUND_PATH_FUNCTIONS, *sorted(RANGE_FLAG_PATH_FUNCTIONS))
+
     #: The distance between two neighbouring values of a discrete range (int/date) - Postgres
     #: stores such a range canonically as ``[lower, upper)``. None for a continuous range.
     DISCRETE_STEP: Any = None
@@ -133,6 +154,9 @@ class RangeField(Field[Range[Any]]):
         upper = self.coerce_bound(value.upper)
         lower_inc = value.lower_inc and lower is not None
         upper_inc = value.upper_inc and upper is not None
+        if lower is not None and upper is not None:
+            # The bounds as given - (1, 1) of a discrete range is empty, though its step makes it [2, 1).
+            self.raise_if_bounds_reversed(lower, upper)
         validation_error = None
         try:
             if self.DISCRETE_STEP is not None:
@@ -144,10 +168,12 @@ class RangeField(Field[Range[Any]]):
             validation_error = self.get_validation_error(error, value)
         if validation_error is not None:
             raise validation_error
-        if lower is not None and upper is not None:
-            self.raise_if_bounds_reversed(lower, upper)
-            if lower == upper and not (lower_inc and upper_inc):
-                return Range(lower=None, upper=None, lower_inc=False, upper_inc=False, is_empty=True)
+        if (
+            lower is not None
+            and upper is not None
+            and (lower > upper or (lower == upper and not (lower_inc and upper_inc)))
+        ):
+            return Range(lower=None, upper=None, lower_inc=False, upper_inc=False, is_empty=True)
         return Range(lower=lower, upper=upper, lower_inc=lower_inc, upper_inc=upper_inc)
 
     def raise_if_bounds_reversed(self, lower: Any, upper: Any) -> None:

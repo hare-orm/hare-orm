@@ -128,7 +128,7 @@ class SoftDeletion:
                 concurrently.
         """
         # The UPDATE matching no row raises - a concurrent version bump would otherwise leave the
-        # row live while the cascade's mutations commit, its related rows cascaded as if the delete
+        # row live while the cascade's writes commit, its related rows cascaded as if the delete
         # had gone through.
         await SoftDeletion.write_soft_delete_field(
             obj,

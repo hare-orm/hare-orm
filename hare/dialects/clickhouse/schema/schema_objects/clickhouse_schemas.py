@@ -8,7 +8,7 @@ from hare.dialects.clickhouse.constants import CLICKHOUSE_CURRENT_DATABASE_SQL
 from hare.exceptions import UnSupportedError
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.models import Model
 
 

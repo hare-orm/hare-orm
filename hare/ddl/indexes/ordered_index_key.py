@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.term import Term
 

@@ -72,6 +72,7 @@ class HareFastAPI(FastAPI):
   | `ValidationError` (значение, которое поле не принимает: вне диапазона, слишком длинное, нулевой байт, который отвергает PostgreSQL) | `422 Unprocessable Content`, сообщение поля в `detail` |
   | `InvalidRequestQuery` | `422 Unprocessable Content`, как FastAPI сам отвечает на неверные параметры: `{"detail": [{"type", "loc": ["query", name], "msg", "input"}]}`; у ошибки всего запроса (от проверки модели) `"loc": ["query"]`, а в `input` — параметры запроса |
   | `RequestQueryForbidden` (параметр просит то, что запросу видеть нельзя: удалённые строки без разрешения `may_see_deleted()`) | `403 Forbidden`, причина — в `detail` |
+  | `ApiGetterError` (не загрузилось значение другого сервиса, которое требует `Meta.api_getter` запроса) | `502 Bad Gateway` без текста ошибки — он называет сервис и запрошенные значения |
 
   Смонтированное в него приложение (`app.mount("/v1", sub_app)`) отвечает на свои ошибки само: те же
   ответы ему дают `FastAPI(exception_handlers=HareExceptionHandlers.get_handlers())`.

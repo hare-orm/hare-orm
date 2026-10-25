@@ -29,9 +29,4 @@ class ConfigLocator:
             tool_section = doc.get("tool", {})
             hare_section = tool_section.get("hare", {}) if isinstance(tool_section, dict) else {}
             config = hare_section.get("hare_orm", "") if isinstance(hare_section, dict) else ""
-            if not isinstance(config, str):
-                raise CLIError(
-                    f"[tool.hare] hare_orm in {file} must be a string like 'module.VARIABLE', "
-                    f"got {type(config).__name__}"
-                )
         return config

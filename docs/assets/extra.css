@@ -16,7 +16,8 @@
 
   --hare-sidebar-bg: #f2efe6;
   --hare-border: #e7e1d1;
-  --hare-code-bg: #1c221f;
+  /* Light, as Material's light-scheme code text and highlighting are dark. */
+  --hare-code-bg: #efebdf;
 }
 
 [data-md-color-scheme="slate"] {

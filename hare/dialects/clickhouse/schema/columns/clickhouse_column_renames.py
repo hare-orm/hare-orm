@@ -7,7 +7,7 @@ from hare.fields.field import Field
 from hare.models import Model
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
 
 
 class ClickhouseColumnRenames(ColumnRenames):

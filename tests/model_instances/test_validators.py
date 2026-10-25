@@ -26,7 +26,7 @@ from hare.fields.validators import (
     validate_email,
     validate_url,
 )
-from tests.shared_models.testmodels import ValidatorModel
+from tests.shared_models.testmodels_postgres import ValidatorModel
 
 
 @pytest.mark.database_independent
@@ -81,6 +81,7 @@ def test_field_validate_wraps_non_validation_error_exception_from_custom_validat
     assert isinstance(exc_info.value.__cause__, TypeError)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("field_name", "bad_value", "good_values", "message"),
     [
@@ -114,6 +115,7 @@ async def test_a_field_validator_refuses_a_bad_value_on_create(db, field_name, b
         await ValidatorModel.objects.create(**{field_name: good_value})
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_validator_min_max_value_enforced_by_bulk_create_and_bulk_update(db):
     """IntField.__init__ always appends its own int32-range MinValueValidator/MaxValueValidator
@@ -140,6 +142,7 @@ async def test_validator_min_max_value_enforced_by_bulk_create_and_bulk_update(d
         await ValidatorModel.objects.bulk_update([record], fields=["max_value"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_prevent_saving(db):
     with pytest.raises(ValidationError):
@@ -148,6 +151,7 @@ async def test_prevent_saving(db):
     assert await ValidatorModel.objects.all().count() == 0
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_save(db):
     with pytest.raises(ValidationError):
@@ -158,6 +162,7 @@ async def test_save(db):
     await record.save()
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_save_with_update_fields(db):
     record = await ValidatorModel.objects.create(min_value_decimal=Decimal("2"))
@@ -167,6 +172,7 @@ async def test_save_with_update_fields(db):
         await record.save(update_fields=["min_value_decimal"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update(db):
     record = await ValidatorModel.objects.create(min_value_decimal=Decimal("2"))

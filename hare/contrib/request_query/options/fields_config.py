@@ -17,19 +17,17 @@ from hare.contrib.request_query.options.request_option import RequestOption
 class FieldsConfig(RequestOption):
     """The fields a request may ask to load: ``?fields=title,published_at`` loads only them
     (``QuerySet.only()``), the primary key and the fields the ordering reads - reading another
-    field of such a row raises ``AttributeError``.
+    field of such a row raises ``AttributeError``. A target of ``Meta.api_getter`` named loads the
+    fields it is filled from; one not named isn't asked for.
 
     Args:
-        fields: The names a request may name - the model's own fields, not relations to follow.
+        fields: The names a request may name - the model's own fields, not relations to follow, and the
+            targets of ``Meta.api_getter``.
         parameter: The name of the parameter.
     """
 
     fields: tuple[str, ...]
     parameter: str = DEFAULT_FIELDS_PARAMETER
-
-    def __post_init__(self) -> None:
-        self.check_allowed_names(type(self).__name__, self.fields)
-        self.check_parameter_name(type(self).__name__, self.parameter)
 
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         return self.get_name_list_parameter_fields(self.parameter, self.fields, "Fields to load", ParameterType.FIELDS)
@@ -37,7 +35,13 @@ class FieldsConfig(RequestOption):
     def check_request(self, values: Mapping[str, Any]) -> None:
         self.check_names_allowed(values, self.parameter, self.fields, "fields")
 
-    def apply(self, queryset: QuerySet[Any], values: Mapping[str, Any], always_loaded: Iterable[str]) -> QuerySet[Any]:
+    def apply(
+        self,
+        queryset: QuerySet[Any],
+        values: Mapping[str, Any],
+        always_loaded: Iterable[str],
+        api_target_fields: Mapping[str, tuple[str, ...]],
+    ) -> QuerySet[Any]:
         """Loads only the fields a request names.
 
         Args:
@@ -45,6 +49,7 @@ class FieldsConfig(RequestOption):
             values: The request query's values by parameter.
             always_loaded: The fields loaded whatever the request names - the primary key, the
                 fields the ordering reads.
+            api_target_fields: The fields each target of ``Meta.api_getter`` is filled from, by name.
 
         Returns:
             The queryset - unchanged when the request names no field.
@@ -52,4 +57,18 @@ class FieldsConfig(RequestOption):
         names = self.split_names(values.get(self.parameter))
         if not names:
             return queryset
-        return queryset.only(*dict.fromkeys([*always_loaded, *names]))
+        loaded_names: list[str] = []
+        for name in names:
+            loaded_names.extend(api_target_fields.get(name, (name,)))
+        return queryset.only(*dict.fromkeys([*always_loaded, *loaded_names]))
+
+    def get_requested_names(self, values: Mapping[str, Any]) -> tuple[str, ...]:
+        """The names a request asks to load.
+
+        Args:
+            values: The request query's values by parameter.
+
+        Returns:
+            The names, empty when the request names none.
+        """
+        return self.split_names(values.get(self.parameter))

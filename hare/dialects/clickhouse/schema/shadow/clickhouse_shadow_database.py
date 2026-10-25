@@ -146,10 +146,11 @@ class ClickhouseShadowDatabase(ShadowDatabase):
 
     def replace_shadow_names(self, text: str) -> str:
         # The shadows of the other databases first, the longest first - the shadow of the connection's database
-        # begins their names; then the Keeper paths - its name begins each of them.
+        # begins their names; then the Keeper paths - its name begins each of them, and a path's {database} the
+        # server filled with it stays the database's.
         for shadow_database, database in sorted(
             self.real_database_by_shadow_database.items(), key=lambda item: -len(item[0])
         ):
             if shadow_database != self.prefix:
                 text = text.replace(shadow_database, database)
-        return text.replace(f"/{self.prefix}", "").replace(self.prefix, self.database)
+        return text.replace(f"'/{self.prefix}/", "'/").replace(self.prefix, self.database)

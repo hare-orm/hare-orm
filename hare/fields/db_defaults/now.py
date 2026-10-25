@@ -71,18 +71,6 @@ class Now(SqlDefault):
         return f"{text}:{seconds:02d}" if seconds else text
 
     @staticmethod
-    def get_quoted_text(text: str) -> str:
-        """A SQL string literal.
-
-        Args:
-            text: The text.
-
-        Returns:
-            The text in single quotes, embedded quotes doubled.
-        """
-        return "'" + text.replace("'", "''") + "'"
-
-    @staticmethod
     def get_constant_utc_offset(zone: datetime.tzinfo) -> datetime.timedelta | None:
         """The UTC offset of a zone that doesn't observe DST this year.
 

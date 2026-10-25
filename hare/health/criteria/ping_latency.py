@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.health.constants import MAX_PING_LATENCY_MS, PING_LATENCY_REASON
+from hare.health.constants import PING_LATENCY_REASON
 from hare.health.criteria.health_criterion import HealthCriterion
 
 if TYPE_CHECKING:
@@ -13,11 +13,11 @@ class PingLatency(HealthCriterion):
     """Holds when the connection's ping took longer than ``max_ms``.
 
     Args:
-        max_ms: The longest ping that passes, in milliseconds - above 0, at most 60000.
+        max_ms: The longest ping that passes, in milliseconds.
     """
 
     def __init__(self, max_ms: float) -> None:
-        self.max_ms = HealthCriterion.get_checked_amount("max_ms", max_ms, MAX_PING_LATENCY_MS)
+        self.max_ms = max_ms
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         ping = connection_check.ping

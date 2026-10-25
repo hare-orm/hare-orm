@@ -5,6 +5,7 @@ from hare.contrib.outbox import ChangeCapture, ChangeExtension, ChangePayload, O
 from hare.fields.enums import OnDelete
 from hare.instrumentation.enums import RowOperation
 from hare.models import Model
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class CaptureOutboxEvent(OutboxEvent):
@@ -30,7 +31,8 @@ class CapturedCustomer(Model):
 class CapturedOrder(Model):
     id = fields.IntField(primary_key=True)
     status = fields.CharField(max_length=20, default="new")
-    total = fields.DecimalField(max_digits=10, decimal_places=2, default=0)
+    if DatabaseUnderTest.holds_decimal_fields():
+        total = fields.DecimalField(max_digits=10, decimal_places=2, default=0)
     secret = fields.CharField(max_length=50, null=True, sensitive=True)
     customer = fields.ForeignKeyField(
         "models.CapturedCustomer", related_name="orders", on_delete=OnDelete.CASCADE, null=True
@@ -181,10 +183,10 @@ class UncapturedRow(Model):
 
 
 class CapturedMeasurement(Model):
-    """A float a row holds that JSON has no number for."""
+    """A float a row holds that JSON has no number for - its outbox named by its label."""
 
     id = fields.IntField(primary_key=True)
     value = fields.FloatField()
 
     class Meta:
-        change_capture = ChangeCapture(CaptureOutboxEvent)
+        change_capture = ChangeCapture("models.CaptureOutboxEvent")

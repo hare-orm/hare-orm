@@ -506,6 +506,9 @@ class LookupInfoBuilder:
             lookup_name = remaining[0] if remaining else ""
             lookup_field = output_field
             suffix = lookup_name
+            if lookup_name in DATE_TRANSFORM_VALUE_TYPES:
+                # A date part of what the path reads (``during__startswith__year``) - compared as its number.
+                date_value_type = DATE_TRANSFORM_VALUE_TYPES[lookup_name]
         field_lookup = FieldLookups.get(lookup_field).get(suffix)
         if field_lookup is None:
             raise FieldError(
@@ -714,8 +717,44 @@ class LookupInfoBuilder:
                     f"{model.__name__} has no field path {path!r}: "
                     f"{current_model.__name__}.{segment} is not a relation"
                 )
-            return cls._get_field_filter_suffixes(field_object)
+            return [
+                *cls._get_field_filter_suffixes(field_object),
+                *cls._get_path_suffixes(model, path, field_object, ""),
+            ]
         return []
+
+    @classmethod
+    def _get_path_suffixes(cls, model: type[Model], path: str, field_object: Field[Any], prefix: str) -> list[str]:
+        """The suffixes reading inside a field's value by a named segment (``startswith__year``,
+        ``isempty``, ``span__upper_inf``) - the lookups of what each segment reads, and of its own
+        segments.
+
+        Args:
+            model: The model the path starts at.
+            path: The path to the field.
+            field_object: The field.
+            prefix: The segments read before - ``""`` at the field itself.
+
+        Returns:
+            The suffixes after ``path`` a filter key takes.
+        """
+        suffixes: list[str] = []
+        for segment in field_object.get_path_segments():
+            path_transform = field_object.get_path_transform(segment)
+            if path_transform is None:
+                continue
+            output_field = path_transform[1]
+            segment_path = f"{prefix}{segment}"
+            for lookup_suffix in ["", *cls._get_field_filter_suffixes(output_field)]:
+                suffix = f"{segment_path}__{lookup_suffix}" if lookup_suffix else segment_path
+                try:
+                    cls.get_lookup_info(model, f"{path}__{suffix}")
+                except FieldError:
+                    # A lookup the segment's value doesn't take after a path (``year__gte``).
+                    continue
+                suffixes.append(suffix)
+            suffixes.extend(cls._get_path_suffixes(model, path, output_field, f"{segment_path}__"))
+        return suffixes
 
     @staticmethod
     def _get_field_filter_suffixes(field_object: Field[Any], exclude: Mapping[str, Any] | None = None) -> list[str]:

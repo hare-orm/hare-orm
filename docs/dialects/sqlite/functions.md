@@ -1,6 +1,6 @@
 # SQLite: functions
 
-SQLite has no `DATE_TRUNC()`, no statistics aggregates and no exact decimal type. hare registers
+SQLite has no `DATE_TRUNC()` and no statistics aggregates. hare registers
 functions of its own on every SQLite connection it opens for its functions SQLite has no SQL of, so a
 function of `hare.query.functions` works. Where SQLite has a function or an operator, hare writes it and
 its result is SQLite's own — `UPPER()` folds ASCII letters only, `CAST` truncates a fraction — see
@@ -19,17 +19,15 @@ await Book.objects.annotate(month=Trunc("published", "month"), key=Lower("title"
 Every name starts with `hare_`, except `regexp` and `match`, which SQLite's `REGEXP` and `MATCH`
 operators call.
 
-| Area | Functions and collations | What they give |
+| Area | Functions | What they give |
 |---|---|---|
 | Dates and times | `hare_trunc_date_part`, `hare_extract_date_part`, `hare_date_timestamp` | `Trunc()`, `Extract()` and the date part lookups; a date compared with a datetime by its first moment. |
 | Dates and times | `hare_datetime_shift`, `hare_date_shift`, `hare_datetime_difference`, `hare_date_difference` | Date and datetime arithmetic with a `timedelta`, exact to the microsecond — see [Date/time arithmetic](../../querying/expressions.md#date-time-arithmetic). |
 | Dates and times | `hare_local_now` | A `Now()` default of a `DateField` or `TimeField` in a zone with daylight saving rules. |
 | Numbers | `hare_math_<name>`: `abs`, `ceil`, `floor`, `sign`, `mod`, `power`, `log`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, `atan2`, `degrees`, `radians`, `pi` | The math functions — see [Math functions](#math-functions). |
-| Numbers | `hare_integer_in_range` | An integer result of arithmetic past 64 bits is refused; SQLite would make a `REAL` of it. |
 | Numbers | `hare_greatest`, `hare_least` | `Greatest()`/`Least()` comparing numbers as numbers; like SQLite's `max()`/`min()`, they give NULL for any NULL argument. |
-| Numbers | `hare_cast` | `Cast()` as SQLite's `CAST` converts, refusing what it would silently turn into another value — see [Casts](#casts). |
+| Dates and times | `hare_cast` | `Cast()` to a date, a datetime or a time of day, read from its stored text in UTC — see [Casts](#casts). |
 | Numbers | `hare_stddev_pop`, `hare_stddev_samp`, `hare_var_pop`, `hare_var_samp` | `StdDev()` and `Variance()` as aggregates and window functions. |
-| Decimals | collation `hare_decimal`, `hare_decimal_text`, `hare_decimal_sort_key`, `hare_decimal_overflows`, `hare_decimal_stored_text`, `hare_decimal_add`, `hare_decimal_subtract`, `hare_decimal_multiply`, `hare_decimal_divide`, `hare_decimal_mod`, `hare_decimal_sum`, `hare_decimal_avg` | A `DecimalField` stored as text, compared, ordered and computed with by its exact value — see [Decimals](#decimals). |
 | Text | `hare_text_<name>`: `left`, `right`, `lpad`, `rpad`, `repeat`, `reverse`, `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` | The text and hash functions SQLite lacks — see [Text functions](#text-functions). |
 | JSON | `hare_json_path`, `hare_json_datetime` | A path with a digit segment and a date compared with a JSON value — see [JSON](#json). |
 | Full-text search | `hare_full_text_query` | The search text as an FTS5 query whose words are never read as FTS5 syntax — see [Full-text search](../search-and-geodata/full-text-search.md). |
@@ -46,37 +44,20 @@ checks neither. `Round()` is SQLite's own rounding: half away from zero for a fl
 
 ## <a id="casts"></a>Casts
 
-SQLite's own `CAST` truncates a fraction, turns text that isn't a number into 0 and has no date types.
-`Cast()` on SQLite converts as `CAST` does and refuses only what `CAST` would silently turn into another
-value:
+`Cast()` to a number is SQLite's own `CAST` — to an `INTEGER` or a `REAL`:
 
 - a fraction is cut off when a number becomes an integer, where PostgreSQL rounds;
-- text that isn't a value of the type raises, and so does a `NaN`;
-- an integer past the range of the target integer field (16, 32 or 64 bits) raises;
-- a decimal target rounds half away from zero to its places, and a float becomes a decimal by its
-  shortest digits;
-- a boolean is read from `true`, `false`, `1` or `0`, in any case, trimmed;
-- a date or time is read in UTC;
-- a JSON null of a `JSONField` path (`Cast(F("data__n"), IntField())`) is `NULL`; a JSON string, array
-  or object that isn't a value of the type raises.
+- text that isn't a number is `0`, a number padded with spaces its number (`' 42 '` is `42`);
+- an integer is kept whatever the target field's range.
+
+SQLite has no boolean type: a cast to a boolean reads the value as a number (`CAST(... AS NUMERIC)`),
+true when it isn't `0` — `'true'` is false. SQLite has no date types either: a date or a time is read
+from its stored text in UTC by hare's `hare_cast`. A JSON null of a `JSONField` path
+(`Cast(F("data__n"), IntField())`) is `NULL`.
 
 A cast to text is SQLite's own: a float is `2.0`, with 15 significant digits (17 from SQLite 3.53), and a
 boolean is `1` or `0`. A `CharField`'s `max_length` cuts nothing. Any other cast, such as a boolean to a
 float, is SQLite's own conversion.
-
-## <a id="decimals"></a>Decimals
-
-A `DecimalField` is stored as text, so no digit is lost to a double. The `hare_decimal` collation
-compares that text by its exact value; text that isn't a number sorts after every number. An `UPDATE`
-that sets a `DecimalField` from an expression stores the same text a plain write of the value stores.
-Arithmetic, `Abs`/`Ceil`/`Floor`/`Mod`, `Case`, `Coalesce`, `Sum`, `Avg` and `StdDev`/`Variance` of
-Decimals are worked out from that text exactly by `hare_decimal_add`,
-`hare_decimal_subtract`, `hare_decimal_multiply`, `hare_decimal_divide`, `hare_decimal_mod`,
-`hare_decimal_sum` and `hare_decimal_avg`. A quotient (a division, `Avg()`, `StdDev()`, `Variance()`) is
-cut, not rounded, to 20 digits after the point; PostgreSQL's numeric has scale rules of its own. `Round()`
-of a decimal rounds its exact text half away from zero. `AlterField` to fewer digits reads the stored text
-exactly through `hare_decimal_overflows` to find a value that no longer fits — see
-[`AlterField`](../../migrations/operations.md#alter-field).
 
 ## <a id="case-mapping"></a>Case mapping
 
@@ -119,7 +100,7 @@ The rest is SQLite's own:
   text and a `Concat()` of it; a text lookup of a path matches the text `json_extract()` gives;
 - `JSONObject()` and `JSONArray()` are written by `json_object()`: a boolean as 1 or 0, a float with 15
   significant digits (17 from SQLite 3.53), a moment or a time as its stored text, bytes as uppercase hex, a
-  decimal as a number, a JSON value nested;
+  JSON value nested;
 - a null byte inside a JSON value is stored as it is.
 
 See [`JSONField`](../../querying/filters.md#jsonfield) for the lookups themselves.
@@ -141,7 +122,7 @@ keeps the function's own message and raises `OperationalError` with it.
 ## <a id="compiled-functions"></a>Compiled versions
 
 The `rust.native` extension (see [Wheels](../../getting-started/installation.md#wheels)) holds compiled
-versions of the functions and the collation SQLite calls once per row. Where it is installed, hare registers
+versions of the functions SQLite calls once per row. Where it is installed, hare registers
 them in place of the Python ones; the results are the same.
 
 ## <a id="in-constraints-and-indexes"></a>In constraints and indexes
@@ -164,10 +145,4 @@ class Book(Model):
 ```
 
 The same goes for `Extract()`, `Cast()`, the `JSONField` path lookups and the regular expression lookups.
-Some expressions are written with SQLite's own SQL there instead:
-
-| Expression | In a constraint or an index |
-|---|---|
-| A `DecimalField` compared | Compared as a number (`CAST(... AS NUMERIC)`), not by its exact text. |
-| `Round()` of a decimal | SQLite's `ROUND()` of a double. |
-| Date and time arithmetic | Raises `ConfigurationError`: SQLite has no SQL for it. |
+Date and time arithmetic there raises `ConfigurationError`: SQLite has no SQL for it.

@@ -69,7 +69,8 @@ class SensitiveFilterKeys:
     @staticmethod
     @ModelCache.fact(depends_on_other_models=True)
     def reaches_sensitive_fields(model: type[Model]) -> bool:
-        """Whether a sensitive field is on the model or on a model its relations lead to.
+        """Whether a sensitive field is on the model or on a model its relations lead to - answered for
+        every model the walk meets at once, so the models of one relation graph are walked once.
 
         Args:
             model: The model.
@@ -79,13 +80,28 @@ class SensitiveFilterKeys:
         """
         seen = {model}
         pending = [model]
+        referring_models: dict[type[Model], list[type[Model]]] = {}
+        reaching: set[type[Model]] = set()
         while pending:
-            meta = pending.pop()._meta
+            current_model = pending.pop()
+            meta = current_model._meta
             if meta.sensitive_fields:
-                return True
+                reaching.add(current_model)
             for field in meta.fields_map.values():
                 related_model = getattr(field, "related_model", None)
-                if related_model is not None and related_model not in seen:
+                if related_model is None:
+                    continue
+                referring_models.setdefault(related_model, []).append(current_model)
+                if related_model not in seen:
                     seen.add(related_model)
                     pending.append(related_model)
-        return False
+        pending = list(reaching)
+        while pending:
+            for referring_model in referring_models.get(pending.pop(), ()):
+                if referring_model not in reaching:
+                    reaching.add(referring_model)
+                    pending.append(referring_model)
+        cache = SensitiveFilterKeys.reaches_sensitive_fields.cache  # type: ignore[attr-defined]
+        for seen_model in seen:
+            cache[seen_model] = seen_model in reaching
+        return model in reaching

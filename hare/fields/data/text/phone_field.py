@@ -47,17 +47,10 @@ class PhoneField(CharField[TStr]):
 
     def __init__(self, *, region: str | None = None, **kwargs: Any) -> None:
         phonenumbers = type(self).import_phonenumbers()
-        if region is not None:
-            if phonenumbers is None:
-                raise ConfigurationError(
-                    "PhoneField: region= needs the 'phonenumbers' package - install it with "
-                    "`pip install hare-orm[phone]`."
-                )
-            if not isinstance(region, str) or region not in phonenumbers.SUPPORTED_REGIONS:
-                raise ConfigurationError(
-                    f"PhoneField: region must be an ISO 3166-1 region code phonenumbers knows, such as 'US', "
-                    f"got {region!r}"
-                )
+        if region is not None and phonenumbers is None:
+            raise ConfigurationError(
+                "PhoneField: region= needs the 'phonenumbers' package - install it with `pip install hare-orm[phone]`."
+            )
         self.region = region
         # CharField's overloads bind self to CharField[str] or CharField[str | None] - TStr is one of them.
         super().__init__(PHONE_FIELD_MAX_LENGTH, **kwargs)  # type: ignore[misc]

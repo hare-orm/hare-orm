@@ -49,6 +49,8 @@ class QueryGrouping:
                     namespaced_context,
                 )
             aggregates_per_model_row = query._aggregates_per_model_row()
+            if not aggregates_per_model_row and not query.group_by_must_include_primary_key:
+                QueryGrouping.raise_if_grouped_by_encrypted(query)
             QueryGrouping.add_group_by_terms(
                 group_by_terms, grouped_sql, QueryGrouping.get_orderby_group_by_terms(query), namespaced_context
             )
@@ -90,6 +92,23 @@ class QueryGrouping:
                     aliasless_term.alias = None
                 aliasless_terms.append(aliasless_term)
             query.query = query.query.groupby(*aliasless_terms)
+
+    @staticmethod
+    def raise_if_grouped_by_encrypted(query: AwaitableQuery[Any]) -> None:
+        """Refuses rows grouped by the fields ``values()`` selects when one is encrypted - each ciphertext is
+        random, so every row was a group of its own, the aggregate counting one row each.
+
+        Args:
+            query: The query.
+
+        Raises:
+            FieldError: A selected field is encrypted.
+        """
+        # An annotation of a bare F() of an encrypted field groups by its ciphertext too.
+        for field_name in getattr(query, "_selected_fields_by_alias", {}).values():
+            EncryptedFieldBase.raise_if_encrypted(
+                QueryAnnotations.get_field_object_by_path(query, field_name), "GROUP BY"
+            )
 
     @staticmethod
     def get_select_group_by_terms(select_term: Term) -> list[Term]:

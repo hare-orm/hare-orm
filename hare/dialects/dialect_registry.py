@@ -248,6 +248,16 @@ class DialectRegistry:
         return driver
 
     @classmethod
+    def get_url_schemes(cls) -> list[str]:
+        """The DB_URL schemes of the registered drivers.
+
+        Returns:
+            The schemes, sorted.
+        """
+        cls.load()
+        return sorted(cls.drivers_by_url_scheme)
+
+    @classmethod
     def get_driver_for_url_scheme(cls, scheme: str) -> Driver:
         """The driver a DB_URL scheme picks.
 
@@ -263,7 +273,7 @@ class DialectRegistry:
         driver = cls.find_driver_for_url_scheme(scheme)
         if driver is None:
             raise ConfigurationError(
-                f"Unknown database URL scheme {scheme!r}: expected one of {sorted(cls.drivers_by_url_scheme)}"
+                f"Unknown database URL scheme {scheme!r}: expected one of {cls.get_url_schemes()}"
                 f"{cls.get_installed_driver_errors_note()}"
             )
         return driver

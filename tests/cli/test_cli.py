@@ -2265,7 +2265,7 @@ from hare.migrations import operations as ops
 
 
 async def seed_widget(apps, schema_editor):
-    Widget = apps.get_model("app", "Widget")
+    Widget = apps.get_model("app.Widget")
     await Widget.objects.create(id=1, name="seeded-by-runpython")
 
 
@@ -3308,13 +3308,6 @@ async def test_config_file_with_non_ascii_content_is_read_as_utf8(tmp_path: Path
     [
         # ConfigLoader.locate() let tomllib.TOMLDecodeError escape as a raw traceback.
         pytest.param("x = \n", "Cannot read pyproject.toml", id="malformed_pyproject_toml_maps_to_cli_error"),
-        # [tool.hare] hare_orm = 5 used to reach ConfigLoader.load() as an int and crash with a raw
-        # AttributeError ('int' object has no attribute 'strip').
-        pytest.param(
-            "[tool.hare]\nhare_orm = 5\n",
-            "must be a string",
-            id="pyproject_toml_hare_orm_of_wrong_type_maps_to_cli_error",
-        ),
     ],
 )
 @pytest.mark.database_independent
@@ -3901,3 +3894,42 @@ def test_a_driver_librarys_warnings_stay_out_of_the_output_unless_logging_is_con
     monkeypatch.setattr(logging.getLogger(), "handlers", [logging.StreamHandler()])
     ClickhouseDriverClient.quiet_driver_loggers()
     assert library_logger.handlers == []
+
+
+@pytest.mark.sqlite_only
+def test_shell_runs_timeouts_in_its_cells_and_closes_the_connections(tmp_path: Path) -> None:
+    """nest_asyncio runs the cells in tasks asyncio's C current_task() didn't see - asyncio.timeout() and
+    wait_for() failed in a cell and as the SQLite connection closed on leaving the shell."""
+    import subprocess
+
+    pytest.importorskip("IPython")
+    pytest.importorskip("nest_asyncio")
+    package = tmp_path / "shell_app"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="ascii")
+    (package / "models.py").write_text(
+        "from hare import fields\nfrom hare.models import Model\n\n\n"
+        "class Note(Model):\n    id = fields.IntField(primary_key=True)\n\n    class Meta:\n        app = 'app'\n",
+        encoding="ascii",
+    )
+    database = (tmp_path / "shell.sqlite3").as_posix()
+    (tmp_path / "shell_settings.py").write_text(
+        f"HARE_ORM = {{'connections': {{'default': 'sqlite+aiosqlite://{database}'}}, "
+        "'apps': {'app': {'models': ['shell_app.models'], 'default_connection': 'default'}}}\n",
+        encoding="ascii",
+    )
+    environment = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    cells = "import asyncio\nprint(await asyncio.wait_for(asyncio.sleep(0, 'waited'), 5))\n"
+    completed = subprocess.run(
+        [sys.executable, "-m", "hare", "-c", "shell_settings.HARE_ORM", "shell"],
+        input=cells.encode(),
+        capture_output=True,
+        cwd=tmp_path,
+        env=environment,
+        timeout=120,
+        check=False,
+    )
+    output = (completed.stdout + completed.stderr).decode(errors="replace")
+    assert completed.returncode == 0, output
+    assert "waited" in output
+    assert "Timeout should be used inside a task" not in output

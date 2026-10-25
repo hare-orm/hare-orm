@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ValidationError
+from hare.fields.data.constants import IP_ADDRESS_VALUE_TYPE
 from hare.fields.data.network.constants import IPV6_ADDRESS_TEXT_LENGTH
 from hare.fields.field import Field
 from hare.sql.functions.address_text import AddressText
@@ -20,6 +21,8 @@ class IPAddressField(Field[Any]):
     type holds IPv6 alone, read back as IPv4 - any other as its text.
     """
 
+    argument_value_type = IP_ADDRESS_VALUE_TYPE
+
     field_type = str
     keeps_native_db_values = False
 
@@ -29,6 +32,9 @@ class IPAddressField(Field[Any]):
 
     def get_python_type(self) -> Any:
         return ipaddress.IPv4Address | ipaddress.IPv6Address
+
+    def get_accepted_value_types(self) -> tuple[Any, ...]:
+        return (ipaddress.IPv4Address, ipaddress.IPv6Address)
 
     def parse(self, value: Any) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
         """The address of a value.

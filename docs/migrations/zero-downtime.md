@@ -30,8 +30,7 @@ exits with 1 while a risk isn't exempted — run it in CI before deploying.
 config = {**HARE_CONFIG, "migrations": {"safety": {"large_table_rows": 1_000_000}}}
 ```
 
-`large_table_rows` is a whole number from 0 (every table is large) to 10<sup>12</sup>; anything else
-raises `ConfigurationError` when the config is loaded.
+`large_table_rows` is a whole number of rows — 0 makes every table large.
 
 The same check from code:
 
@@ -220,13 +219,14 @@ its column field (`"author_id"`); `value` is then the related row's primary key 
 accepted too). A name without a single database column raises `ConfigurationError`. A batch picks its
 rows by the primary key — every column of a composite one — and, for a model without one, by the row's
 own name in the database (`ctid` on PostgreSQL, `rowid` on SQLite); a database with no such name raises
-`ConfigurationError` for a model without a primary key.
+`ConfigurationError` for a model without a primary key. In a migration run outside a transaction both
+refusals come before any of its operations runs.
 
 `AlterColumnNotNullSafe` makes a column NOT NULL after checking that no row holds `NULL` there: a row
 that does raises `hare.exceptions.ConfigurationError` naming the model and field and suggesting
 `BackfillColumn`, instead of the database's NOT NULL violation — in a migration with `atomic = False`
-as the cause (`__cause__`) of the `PartiallyAppliedMigrationError` any failure of such a migration
-raises. How it does it:
+as the cause (`__cause__`) of the `PartiallyAppliedMigrationError` a failure of such a migration raises
+once a statement of it has run, as it is when it is refused before the first one. How it does it:
 
 - **PostgreSQL, migration with `atomic = False`** — the table is never scanned while it is locked: a
   `CHECK (column IS NOT NULL)` is added `NOT VALID` (no scan), validated with `VALIDATE CONSTRAINT` (a
@@ -332,6 +332,12 @@ class Migration(Migration):
         AddIndex("Loan", Index(fields=("status",), name="loan_status"), concurrently=True),
     ]
 ```
+
+A build that fails — a duplicate under a unique index, a cancelled statement — leaves the index in the
+database `INVALID`: kept, used by no query, enforcing nothing. `hare drift` reports it as differing from
+the declared index and `inspectdb` flags it with a `# TODO`; the migration's `AddIndex` run again fails
+on its name. Drop it first (`RunSQL("DROP INDEX CONCURRENTLY IF EXISTS loan_status")` in a
+non-atomic migration, or by hand), then migrate again.
 
 ## <a id="adding-a-constraint"></a>Pattern 4: adding a constraint
 

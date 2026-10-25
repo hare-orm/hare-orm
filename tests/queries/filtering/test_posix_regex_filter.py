@@ -255,8 +255,11 @@ async def test_regex_reads_a_number_as_postgres_writes_it():
     async with hare_test_context(["tests.shared_models.typed_row_models"], db_url=db_url) as context:
         if not context.get_connection().features.supports_posix_regex:
             pytest.skip("The database has no POSIX regular expressions")
-        await TypedRow.objects.create(id=1, ratio=2.0, amount=Decimal("1.20"))
-        await TypedRow.objects.create(id=2, ratio=1e20, amount=Decimal("100"))
+        amounts = ({"amount": Decimal("1.20")}, {"amount": Decimal("100")})
+        if not DatabaseUnderTest.holds_decimal_fields():
+            amounts = ({}, {})
+        await TypedRow.objects.create(id=1, ratio=2.0, **amounts[0])
+        await TypedRow.objects.create(id=2, ratio=1e20, **amounts[1])
         await TypedRow.objects.create(id=3, ratio=0.1 + 0.2)
 
         async def matching(**lookups):
@@ -271,5 +274,6 @@ async def test_regex_reads_a_number_as_postgres_writes_it():
             assert await matching(ratio__posix_regex="^2$") == [1]
             assert await matching(ratio__posix_regex=r"^0\.30000000000000004$") == [3]
         assert await matching(ratio__iposix_regex=r"E\+20") == [2]
-        assert await matching(amount__posix_regex=r"^1\.20$") == [1]
-        assert await matching(amount__posix_regex=r"^100\.00$") == [2]
+        if DatabaseUnderTest.holds_decimal_fields():
+            assert await matching(amount__posix_regex=r"^1\.20$") == [1]
+            assert await matching(amount__posix_regex=r"^100\.00$") == [2]

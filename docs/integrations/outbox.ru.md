@@ -78,7 +78,8 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | член перечисления | его значение |
 
 Любое другое значение даёт `ValidationError` (с причиной `TypeError`) при записи события — оно никогда
-молча не превращается в свой `str()`.
+молча не превращается в свой `str()`. Число с плавающей точкой NaN или бесконечность в `enqueue()` тоже
+даёт `ValidationError`: в JSON для него нет числа.
 
 ## <a id="enqueue"></a>`enqueue()`
 
@@ -122,11 +123,10 @@ async with Transactions.atomic():
 > открытой транзакции, а у другого подключения есть, `enqueue()` даёт `ConfigurationError` вместо того,
 > чтобы зафиксировать событие отдельно. Передайте `using=`, если так и задумано.
 
-Аргументы проверяются до записи (`ValidationError`): `topic`, `idempotency_key` и `ordering_key` — строки
-от 1 до 255 символов, `headers` — отображение с непустыми текстовыми именами, `extra_field_values` не
-задаёт ни поля самого `enqueue()`, ни поля, которые ведут ORM и relay (`sequence`, `created_at`,
-`next_attempt_at`, `published_at`, `dead_lettered_at`, `attempts`, `last_error`, `lease_until`,
-`leased_by`).
+Аргументы проверяются до записи (`ValidationError`): `headers` — отображение с непустыми текстовыми
+именами, `extra_field_values` не задаёт ни поля самого `enqueue()`, ни поля, которые ведут ORM и relay
+(`sequence`, `created_at`, `next_attempt_at`, `published_at`, `dead_lettered_at`, `attempts`,
+`last_error`, `lease_until`, `leased_by`).
 
 ### <a id="idempotency-key"></a>`idempotency_key=`
 
@@ -218,7 +218,7 @@ class ChangeCapture:
 
 | Аргумент | Что задаёт |
 |---|---|
-| `outbox` | Конкретная модель `OutboxEvent` — на подключении захватываемой модели, это проверяет `Hare.init()` |
+| `outbox` | Конкретная модель `OutboxEvent` — класс или метка `"app.Model"`, которая ищется при связывании моделей; на подключении захватываемой модели, это проверяет `Hare.init()` |
 | `operations` | Захватываемые `RowOperation` |
 | `payload` | Что событие держит от своей строки — ниже |
 | `fields` | Поля, которые держит событие; связь — своим ключом (`reader_id`). По умолчанию все поля, записанные в таблице, кроме `sensitive` и шифрованных — их только если они названы здесь |
@@ -231,7 +231,8 @@ class ChangeCapture:
 составного ключа через `:`), `{app}`, `{model}` и `{table}` или функция изменения; по умолчанию ключ
 самой строки, поэтому события одной строки доставляются по порядку. `None` — без порядка. Ключ длиннее
 255 символов, собранный по шаблону (длинный текстовый первичный ключ), сохраняет начало и заканчивается
-на `#` и SHA-256 всего ключа; ключ функции длиннее этого вызывает `ValidationError`
+на `#` и SHA-256 всего ключа; ключ функции длиннее этого обрывает запись ошибкой `ValidationError` поля
+события
 
 Объявление проверяется, когда модель готова (`ConfigurationError`): имя поля, которое не записано в
 таблице, шаблон с неизвестным именем, `BEFORE_AND_AFTER` без `Meta.track_dirty_fields`, абстрактная
@@ -330,7 +331,10 @@ class CapturedModel(Model):
 
 У изменения — `CapturedChange` (`hare.contrib.outbox`) — есть `model`, `operation`, `pk`, `changed`,
 `before`, `after`, `occurred_at` и `tenant` (`Meta.tenant_field` строки). Если у модели outbox тоже есть
-поле арендатора, в него пишется арендатор строки, если его не задал `extra_field_values`.
+поле арендатора, в него пишется арендатор строки, если его не задал `extra_field_values`. В строках
+модели с `Meta.tenant_schema` арендатора нет — `tenant` равен `None`, и её события не называют
+арендатора (ключ одной строки у двух арендаторов — один ключ порядка): объявите её outbox тоже с
+`Meta.tenant_schema = True`, чтобы события каждого арендатора оставались в его схеме.
 
 ## <a id="outboxrelay"></a>`OutboxRelay`
 
@@ -354,11 +358,10 @@ async with relay:
     ...
 ```
 
-Опции проверяются при создании relay — тип и диапазон (`ConfigurationError`): длительности — конечные
-числа до 86400 (`poll_interval_seconds`, `lease_seconds` и `delivery_timeout_seconds` больше 0, паузы
-повтора — от 0, `retry_max_seconds` не меньше `retry_base_seconds`, `delivery_timeout_seconds` меньше
-`lease_seconds`), `batch_size` и `max_delivery_attempts` — целые от 1 до 10000, `concurrency` — от 1 до
-1000, `topics` — `None` или непустой список тем, `name` — от 1 до 255 символов.
+`batch_size` — `LIMIT` захвата — целое от 1 до 10000 (иначе `ConfigurationError`).
+`delivery_timeout_seconds` держите меньше `lease_seconds` — аренда, истёкшая посреди доставки, позволяет
+другому relay доставить событие ещё раз. Модель можно задать меткой `"app.Model"`
+(`OutboxRelay("shop.MyOutboxEvent", ...)`) — она ищется в текущем контексте, когда понадобится relay.
 
 `start()`/`stop()` можно вызывать повторно; `stop()` дожидается relay и закрывает соединения доставки.
 `Hare.close_connections()` relay не останавливает — остановите его сами или используйте `async with` на
@@ -438,7 +441,9 @@ Observers.observe(OutboxDeadLettered, alert_on_call)
 Будильник запускает опрос сразу после записи событий, чтобы relay не ждал `poll_interval_seconds`. Один
 объект передаётся и модели outbox (`Meta.outbox_wakeup` или `enqueue(wakeup=)`), и relay — ничего не надо
 согласовывать вручную. Сигналы одной транзакции склеиваются, по одному на тему, и уходят после её
-фиксации — никогда для отката. Потерянный сигнал безопасен: relay всё равно опрашивают таблицу. Подписка,
+фиксации — никогда для отката. Потерянный сигнал безопасен: relay всё равно опрашивают таблицу. Таким может
+оказаться первый сигнал после перезапуска брокера: клиент Redis отправляет его по соединению, закрытому
+сервером, и не повторяет. Подписка,
 которая оборвалась, восстанавливается с паузами, а после пяти неудач подряд бросается с ERROR — relay
 продолжает опрос.
 
@@ -474,7 +479,7 @@ Observers.observe(OutboxDeadLettered, alert_on_call)
 | `KafkaDelivery(bootstrap_servers, topic=None)` или `KafkaDelivery(producer=...)` | `kafka` | в `topic` или тему события, с ключом порядка как ключом сообщения — события одного ключа остаются в одном разделе; партия уходит целиком, `acks="all"` |
 | `RabbitMQDelivery(url, exchange="", routing_key=None)` | `rabbitmq` | постоянные сообщения через существующий exchange (при пустом — стандартный), ключ маршрутизации по умолчанию — тема события; каждое подтверждается брокером (publisher confirms) |
 | `RedisStreamsDelivery(url, stream=None, max_length=None)` или `(client=...)` | `redis` | `XADD` в `stream` или тему события — id, тема, ключ порядка, заголовки и payload события в JSON; партия — одним конвейером, потоки подрезаются до `max_length` |
-| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | `POST`; с `secret` — `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; любой ответ, кроме 2xx, — неудача |
+| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | `POST`; с `secret` — `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; значения заголовков — байты UTF-8; любой ответ, кроме 2xx, — неудача |
 | [`TaskiqDelivery`](taskiq.ru.md#kiq-on-commit) | `taskiq` | задача taskiq |
 
 ### <a id="topicrouter"></a>`TopicRouter`

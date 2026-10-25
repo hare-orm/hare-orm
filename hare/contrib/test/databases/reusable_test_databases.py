@@ -1,4 +1,4 @@
-"""Per-process pool of Postgres test databases that are reset and reused instead of dropped."""
+"""Per-process pool of test databases of a server that are reset and reused instead of dropped."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 class ReusableTestDatabases:
-    """Leases Postgres test databases out of a per-process pool of slots.
+    """Leases test databases of a server out of a per-process pool of slots.
 
     A slot is a database whose name is the test URL's "{}" placeholder filled with a stable id of
     the slot's number. A leased slot belongs to one hare_test_context() until its db_delete()

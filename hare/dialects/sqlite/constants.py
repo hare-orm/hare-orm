@@ -8,6 +8,7 @@ from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.enums import ConnectionOptionType
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
 from hare.lazy_loading.lazy_pattern import LazyPattern
+from hare.sql.enums import CastType
 from hare.vectors.enums import VectorDistanceType
 
 #: The file name SQLite opens as a private in-memory database instead of a file.
@@ -107,22 +108,6 @@ SQLITE_DIALECT = SqliteDialect()
 SQLITE_EXTRACT_FUNCTION_NAME = "hare_extract_date_part"
 
 
-#: Name of the UDF rounding a Decimal, kept as text, exactly - ``Round()`` of a Decimal; SQLite's own
-#: ``ROUND()`` rounds a double.
-SQLITE_DECIMAL_ROUND_FUNCTION_NAME = "hare_decimal_round"
-
-
-#: Name of the Python collation registered on every SQLite connection to compare a
-#: `DecimalField` column's stored text as exact decimals - SQLite has no decimal type, and
-#: `CAST(... AS NUMERIC)` turns a value into a double, which keeps only ~15 significant digits.
-SQLITE_DECIMAL_COLLATION_NAME = "hare_decimal"
-
-
-#: Name of the Python UDF registered on every SQLite connection that tells whether a stored
-#: number doesn't fit `DECIMAL(max_digits, decimal_places)` - read as its exact decimal text.
-SQLITE_DECIMAL_OVERFLOWS_FUNCTION_NAME = "hare_decimal_overflows"
-
-
 #: The Python functions registered on every connection for date and datetime arithmetic - SQLite
 #: stores them as ISO text and has no interval type; its own date functions lose microseconds and
 #: offsets.
@@ -141,11 +126,6 @@ SQLITE_DATE_DIFFERENCE_FUNCTION_NAME = "hare_date_difference"
 #: The SQLite function giving the current date/time in a zone with DST rules, which SQLite's own
 #: date functions can't apply - (zone name, "date" or "time").
 SQLITE_LOCAL_NOW_FUNCTION_NAME = "hare_local_now"
-
-
-#: SQLite UDF refusing an integer result of arithmetic out of the range of its column type.
-SQLITE_INTEGER_IN_RANGE_FUNCTION_NAME = "hare_integer_in_range"
-
 
 #: SQLite UDF walking a JSON path holding a digit segment, which is an object's key or an array's
 #: index, whichever the value at that point is.
@@ -168,8 +148,16 @@ SQLITE_TEXT_FUNCTION_PREFIX = "hare_text_"
 #: Name of the SQLite UDF ``DateTrunc`` renders a call to - SQLite has no ``DATE_TRUNC()``.
 SQLITE_TRUNC_FUNCTION_NAME = "hare_trunc_date_part"
 
-#: Name of the SQLite UDF ``CastTo`` renders a call to - SQLite's own ``CAST`` has other rules.
+#: Name of the SQLite UDF ``CastTo`` to a date, a datetime or a time of day renders a call to - SQLite
+#: has no such types.
 SQLITE_CAST_FUNCTION_NAME = "hare_cast"
+
+#: The SQLite type ``CastTo`` to a number writes SQLite's own ``CAST`` to, by its target.
+SQLITE_CAST_TYPE_NAMES = {CastType.INTEGER: "INTEGER", CastType.FLOAT: "REAL"}
+
+#: ``CastTo`` to a boolean - SQLite has no boolean type: the value read as a number, true when it
+#: isn't 0.
+SQLITE_BOOLEAN_CAST_TEMPLATE = "(CAST({0} AS NUMERIC) <> 0)"
 
 #: Names of the SQLite UDFs ``GreatestLeast`` renders calls to - numbers compared as numbers.
 SQLITE_GREATEST_FUNCTION_NAME = "hare_greatest"
@@ -186,11 +174,6 @@ SQLITE_STATISTICS_FUNCTION_NAMES = {
 
 #: Name of the SQLite UDF ``DateAsTimestamp`` renders a call to - the stored text of a day's first moment.
 SQLITE_DATE_TIMESTAMP_FUNCTION_NAME = "hare_date_timestamp"
-
-
-#: Name of the SQLite UDF giving the byte key ``ORDER BY`` sorts a decimal value by - in the order of
-#: its collation, one call per row instead of a comparison per pair of rows.
-SQLITE_DECIMAL_SORT_KEY_FUNCTION_NAME = "hare_decimal_sort_key"
 
 
 #: Now() as a db_default, in the format a DatetimeField value is written in: a " " separator, a
@@ -224,8 +207,10 @@ SQLITE_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
     ("real", "hare.fields.data.numeric.FloatField", {}),
     ("double", "hare.fields.data.numeric.FloatField", {}),
     ("float", "hare.fields.data.numeric.FloatField", {}),
-    ("numeric", "hare.fields.data.numeric.DecimalField", {"max_digits": 20, "decimal_places": 6}),
-    ("decimal", "hare.fields.data.numeric.DecimalField", {"max_digits": 20, "decimal_places": 6}),
+    # SQLite stores no exact decimal: a column declared DECIMAL or NUMERIC takes the NUMERIC affinity,
+    # holding an integer or a REAL.
+    ("numeric", "hare.fields.data.numeric.FloatField", {}),
+    ("decimal", "hare.fields.data.numeric.FloatField", {}),
     ("timestamp", "hare.fields.data.temporal.DatetimeField", {}),
     ("datetime", "hare.fields.data.temporal.DatetimeField", {}),
     ("date", "hare.fields.data.temporal.DateField", {}),
@@ -286,9 +271,9 @@ SQLITE_TABLE_OPTIONS_PATTERN = LazyPattern(
 )
 
 
-#: A declared SQLite type string can carry its own size, e.g. "VARCHAR(255)" or
-#: "DECIMAL(10,2)" - SQLite has no separate metadata for this (its columns are dynamically
-#: typed), so the declared type string itself is the only place to read it from.
+#: A declared SQLite type string can carry its own size, e.g. "VARCHAR(255)" - SQLite has no
+#: separate metadata for this (its columns are dynamically typed), so the declared type string itself
+#: is the only place to read it from.
 SQLITE_SIZE_RE = LazyPattern(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)")
 
 SQLITE_INDEX_ON_RE = LazyPattern(rf"\bON\s+(?:{SQLITE_IDENTIFIER_PATTERN}|[\w.]+)\s*\(", re.IGNORECASE)
@@ -444,8 +429,4 @@ SQLITE_DATABASE_PRAGMA_TEMPLATE = "PRAGMA {database}.{pragma}({name})"
 #: plain field and says which other field the column may hold, by the type, lowercased.
 SQLITE_SHARED_COLUMN_TYPE_NOTES = {
     "int": "hare declares BooleanField columns INT on SQLite too - a column of 0/1 may be a BooleanField",
-    "varchar(40)": (
-        "hare declares DecimalField columns VARCHAR(40) on SQLite too (the decimal's exact text) - a column "
-        "of decimal text may be a DecimalField"
-    ),
 }

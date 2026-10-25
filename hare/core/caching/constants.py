@@ -11,3 +11,7 @@ DEFAULT_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL = 512
 MIN_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL = 1
 
 MAX_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL = 1_000_000
+
+#: The most entries a model's plain bucket of a cache (``Cache.get_model_bucket()``) keeps before it is
+#: emptied - its keys may come from data (a key inside a JSON value).
+MAX_PLAIN_BUCKET_ENTRIES = 4096

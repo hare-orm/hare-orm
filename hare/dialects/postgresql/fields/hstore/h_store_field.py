@@ -4,7 +4,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from hare.dialects.postgresql.fields.constants import HSTORE_ARRAY_PATH_FUNCTIONS
+from hare.dialects.postgresql.fields.constants import HSTORE_ARRAY_PATH_FUNCTIONS, HSTORE_VALUE_TYPE
 from hare.exceptions import ValidationError
 from hare.fields import Field
 from hare.fields.data.containers.constants import LOOKUP_NAMES
@@ -22,6 +22,8 @@ class HStoreField(Field[dict[str, str | None]]):
     Needs the ``hstore`` extension; the migration autodetector adds ``CreateExtension("hstore")``
     wherever the field is used. A key or value that isn't a string is written as its ``str()``.
     """
+
+    argument_value_type = HSTORE_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
 

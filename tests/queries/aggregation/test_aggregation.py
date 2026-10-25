@@ -15,18 +15,13 @@ from hare.query.functions.window import RowNumber
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
-    AggregationOrder,
-    AggregationProduct,
-    AggregationReview,
     AggregationShop,
     AggregationTag,
     Author,
     Book,
     CompositePkOwningFK,
-    DecimalFields,
     EnumFields,
     Event,
-    ExpressionTypeParity,
     FloatFields,
     IntFields,
     JSONFields,
@@ -37,8 +32,17 @@ from tests.shared_models.testmodels import (
     UniqueName,
     UniqueTogetherFields,
     UniqueTogetherFieldsWithFK,
+)
+from tests.shared_models.testmodels_postgres import (
+    AggregationOrder,
+    AggregationProduct,
+    AggregationReview,
+    DecimalFields,
+    ExpressionTypeParity,
     ValidatorModel,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.integer_statistic import IntegerStatistic
 from tests.utils.sqlite_library_faults import SKIP_ON_AUTOMATIC_INDEX_COLLATION_FAULT
 
 
@@ -94,6 +98,7 @@ async def test_annotate_colliding_with_real_field_raises_on_full_fetch(db):
         await Team.objects.all().annotate(name=Count("events__event_id"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     "make_queryset",
     [
@@ -461,25 +466,25 @@ async def test_group_aggregation(db):
     await Book.objects.create(name="Third!", author=author, rating=3)
 
     authors = await Author.objects.all().annotate(average_rating=Avg("books__rating"))
-    assert authors[0].average_rating == pytest.approx(3.3333333333, rel=1e-5)
+    assert float(authors[0].average_rating) == pytest.approx(3.3333333333, rel=1e-5)
 
     authors = await Author.objects.all().annotate(average_rating=Avg("books__rating")).values()
-    assert authors[0]["average_rating"] == pytest.approx(3.3333333333, rel=1e-5)
+    assert float(authors[0]["average_rating"]) == pytest.approx(3.3333333333, rel=1e-5)
 
     authors = (
         await Author.objects.all().annotate(average_rating=Avg("books__rating")).values("id", "name", "average_rating")
     )
-    assert authors[0]["average_rating"] == pytest.approx(3.3333333333, rel=1e-5)
+    assert float(authors[0]["average_rating"]) == pytest.approx(3.3333333333, rel=1e-5)
 
     authors = await Author.objects.all().annotate(average_rating=Avg("books__rating")).values_list()
-    assert authors[0][2] == pytest.approx(3.3333333333, rel=1e-5)
+    assert float(authors[0][2]) == pytest.approx(3.3333333333, rel=1e-5)
 
     authors = (
         await Author.objects.all()
         .annotate(average_rating=Avg("books__rating"))
         .values_list("id", "name", "average_rating")
     )
-    assert authors[0][2] == pytest.approx(3.3333333333, rel=1e-5)
+    assert float(authors[0][2]) == pytest.approx(3.3333333333, rel=1e-5)
 
 
 @pytest.mark.asyncio
@@ -548,24 +553,16 @@ async def test_concat_non_string_literal(db):
     Postgres describe the bind parameter as text while the bound value stayed a non-str
     Python type. Confirmed live; must give the identical result on all three backends."""
     author = await Author.objects.create(name="Some One")
-    ret = (
-        await Author.objects.filter(id=author.id)
-        .annotate(
-            concat_int=Concat("name", Value(123)),
-            concat_decimal=Concat("name", Value(Decimal("4.50"))),
-            concat_date=Concat("name", Value(date(2024, 1, 1))),
-        )
-        .values("concat_int", "concat_decimal", "concat_date")
-    )
-    assert ret == [
-        {
-            "concat_int": "Some One123",
-            "concat_decimal": "Some One4.50",
-            "concat_date": "Some One2024-01-01",
-        }
-    ]
+    concats = {"concat_int": Concat("name", Value(123)), "concat_date": Concat("name", Value(date(2024, 1, 1)))}
+    expected = {"concat_int": "Some One123", "concat_date": "Some One2024-01-01"}
+    if DatabaseUnderTest.holds_decimal_fields():
+        concats["concat_decimal"] = Concat("name", Value(Decimal("4.50")))
+        expected["concat_decimal"] = "Some One4.50"
+    ret = await Author.objects.filter(id=author.id).annotate(**concats).values(*concats)
+    assert ret == [expected]
 
 
+@pytest.mark.skipif(not DatabaseUnderTest.holds_decimal_fields(), reason="SQLite stores no exact decimals")
 @pytest.mark.asyncio
 async def test_coalesce_incompatible_default_literal_skips_field_coercion(db):
     """Coalesce()'s output_field used to always come from its main field argument alone -
@@ -582,6 +579,7 @@ async def test_coalesce_incompatible_default_literal_skips_field_coercion(db):
     assert Decimal(str(rows[0]["coalesced"])) == Decimal("5.55")
 
 
+@pytest.mark.skipif(not DatabaseUnderTest.holds_decimal_fields(), reason="SQLite stores no exact decimals")
 @pytest.mark.asyncio
 async def test_coalesce_incompatible_value_default_skips_field_coercion(db):
     """The same bug as above for a default wrapped in Value(...) - an Expression whose own
@@ -597,6 +595,7 @@ async def test_coalesce_incompatible_value_default_skips_field_coercion(db):
     assert [Decimal(str(row)) for row in rows] == [Decimal("5.55"), Decimal("9")]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_coalesce_wider_numeric_default_keeps_decimal_field_decoding(db):
     """A DecimalField main field decodes an int/Decimal default itself (and keeps decoding its own
@@ -626,7 +625,10 @@ async def test_coalesce_wider_numeric_default_keeps_decimal_field_decoding(db):
 async def test_coalesce_wider_numeric_default_keeps_float_field_decoding(db):
     await FloatFields.objects.create(floatnum=1.0, floatnum_null=1.5)
     await FloatFields.objects.create(floatnum=2.0, floatnum_null=None)
-    for default, expected_default in ((0, 0.0), (2.5, 2.5), (Decimal("2.5"), 2.5), (Value(Decimal("2.5")), 2.5)):
+    defaults = [(0, 0.0), (2.5, 2.5)]
+    if DatabaseUnderTest.holds_decimal_fields():
+        defaults += [(Decimal("2.5"), 2.5), (Value(Decimal("2.5")), 2.5)]
+    for default, expected_default in defaults:
         rows = (
             await FloatFields.objects.all()
             .order_by("id")
@@ -754,6 +756,7 @@ async def test_count_without_matching(db) -> None:
     assert result == 0
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_int_sum_on_models_with_validators(db) -> None:
     await ValidatorModel.objects.create(max_value=2)
@@ -764,6 +767,7 @@ async def test_int_sum_on_models_with_validators(db) -> None:
     assert result == [{"sum": 4}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_int_sum_math_on_models_with_validators(db) -> None:
     await ValidatorModel.objects.create(max_value=4)
@@ -776,6 +780,7 @@ async def test_int_sum_math_on_models_with_validators(db) -> None:
     assert result == [{"sum": 32}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_sum_on_models_with_validators(db) -> None:
     await ValidatorModel.objects.create(min_value_decimal=2.0)
@@ -785,6 +790,7 @@ async def test_decimal_sum_on_models_with_validators(db) -> None:
     assert result == [{"sum": Decimal("2.0")}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_sum_with_math_on_models_with_validators(db) -> None:
     await ValidatorModel.objects.create(min_value_decimal=2.0)
@@ -821,7 +827,7 @@ async def test_avg_of_int_field_keeps_fractional_part(db):
 
     res = await IntFields.objects.all().values("intnum_null").annotate(avg=Avg("intnum")).values("avg")
 
-    assert res == [{"avg": pytest.approx(5 / 3)}]
+    assert [{"avg": float(row["avg"])} for row in res] == [{"avg": pytest.approx(5 / 3)}]
 
 
 @pytest.mark.asyncio
@@ -930,6 +936,7 @@ async def test_coalesce_of_json_field_decodes_through_the_fields_own_type(db):
     assert isinstance(row_set[0]["x"], dict)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_combined_expression_arithmetic_decodes_through_the_operands_field_type(db):
     """CombinedExpression (F("decimal") + F("decimal")) computes an output_field internally
@@ -949,6 +956,7 @@ async def test_combined_expression_arithmetic_decodes_through_the_operands_field
     assert isinstance(second[0]["total"], Decimal)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_annotate_referencing_an_earlier_annotation_keeps_its_decoded_type(db):
     """.annotate(total=Sum("decimal")).annotate(bumped=Coalesce(F("total"), 0)) - "bumped"
@@ -1092,8 +1100,8 @@ async def test_conditional_aggregate_over_integer_literal_case_returns_the_same_
 
     assert summed == [{"total": 2}]
     assert type(summed[0]["total"]) is int
-    assert type(averaged[0]["mean"]) is float
-    assert averaged[0]["mean"] == pytest.approx(2 / 3)
+    assert type(averaged[0]["mean"]) is IntegerStatistic.get_type(IntFields)
+    assert float(averaged[0]["mean"]) == pytest.approx(2 / 3)
 
 
 @pytest.mark.asyncio
@@ -1207,6 +1215,7 @@ async def create_aggregation_shops() -> None:
         await AggregationReview.objects.create(product=product, stars=stars)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_alias_matching_field_name_resolves_the_real_field(db):
     """aggregate(price=Sum("price")) used to recurse forever - the argument name found the
@@ -1217,6 +1226,7 @@ async def test_aggregate_alias_matching_field_name_resolves_the_real_field(db):
     assert await AggregationOrder.objects.all().aggregate(total=Sum("total")) == {"total": Decimal("180.00")}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_annotation_named_like_a_field_or_relation_raises(db):
     with pytest.raises(FieldError, match="conflict with field"):
@@ -1225,6 +1235,7 @@ async def test_annotation_named_like_a_field_or_relation_raises(db):
         AggregationShop.objects.all().annotate(products=Count("products"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_annotation_named_like_a_field_raises_before_filter_or_order_by(db):
     with pytest.raises(FieldError, match="conflict with field"):
@@ -1233,6 +1244,7 @@ async def test_annotation_named_like_a_field_raises_before_filter_or_order_by(db
         AggregationProduct.objects.all().annotate(qty=Sum("qty")).order_by("-qty")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_circular_aggregate_argument_raises_configuration_error(db):
     """A real cycle (no model field of that name to fall back to) used to end in a bare
@@ -1245,6 +1257,7 @@ async def test_circular_aggregate_argument_raises_configuration_error(db):
         await AggregationShop.objects.all().annotate(cycle=Count("cycle")).values_list("cycle", flat=True)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_argument_naming_an_earlier_annotation_still_uses_it(db):
     """The lookup that made Function() prefer an annotation over a field must keep working when
@@ -1272,6 +1285,7 @@ def fan_out_shops():
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_fan_out_guard_ignores_a_later_distinct_aggregate_over_the_same_relation(db):
     """A later Count(distinct=True) over "products" used to overwrite the flag of the earlier
@@ -1304,6 +1318,7 @@ async def test_fan_out_guard_ignores_a_later_distinct_aggregate_over_the_same_re
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_fan_out_guard_does_not_depend_on_aggregate_order(db):
     await create_aggregation_shops()
@@ -1320,6 +1335,7 @@ async def test_fan_out_guard_does_not_depend_on_aggregate_order(db):
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_distinct_aggregates_over_several_relations_still_work(db):
     await create_aggregation_shops()
@@ -1333,6 +1349,7 @@ async def test_distinct_aggregates_over_several_relations_still_work(db):
     assert rows == [("A", 3, 2), ("B", 1, 1), ("C", 0, 0)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregates_over_one_relation_do_not_trip_the_guard(db):
     """Several aggregates (with or without distinct) over the SAME relation, and a single
@@ -1372,6 +1389,7 @@ async def test_aggregates_over_one_relation_do_not_trip_the_guard(db):
     assert one_chain == [("A", 3, 12), ("B", 3, 8), ("C", 0, None)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_filter_over_another_relation_raises(db):
     """Count("products", _filter=Q(orders__total__gt=0)) joins orders too - shop A's 3 products
@@ -1394,6 +1412,7 @@ async def test_aggregate_filter_over_another_relation_raises(db):
     assert distinct_rows == [("A", 3), ("B", 1), ("C", 0)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_filter_over_the_same_relation_or_negated_is_fine(db):
     await create_aggregation_shops()
@@ -1416,6 +1435,7 @@ async def test_aggregate_filter_over_the_same_relation_or_negated_is_fine(db):
     assert negated == [("A", 0), ("B", 1), ("C", 0)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregates_over_a_relation_and_one_of_its_deeper_hops_raise(db):
     """Count("products__reviews") joins reviews below products - a Sum over products alone used
@@ -1428,6 +1448,7 @@ async def test_aggregates_over_a_relation_and_one_of_its_deeper_hops_raise(db):
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_expression_over_two_relations_raises(db):
     """The relations crossed through F()/expressions count as well, not only a plain name."""
@@ -1449,6 +1470,7 @@ async def test_aggregate_expression_over_two_relations_raises(db):
         await AggregationShop.objects.all().annotate(mixed=Sum(F("products__price") * F("orders__total")))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_over_another_relation_after_or_before_annotate_raises(db):
     """annotate(Count("products")).filter(orders__total__gt=5) joins orders, repeating every
@@ -1474,6 +1496,7 @@ async def test_filter_over_another_relation_after_or_before_annotate_raises(db):
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_over_another_relation_is_fine_for_distinct_or_negated_filters(db):
     await create_aggregation_shops()
@@ -1497,6 +1520,7 @@ async def test_filter_over_another_relation_is_fine_for_distinct_or_negated_filt
     assert excluded_rows == [("B", 1), ("C", 0)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_over_the_aggregated_relation_constrains_the_aggregate_in_either_order(db):
     """The current, deliberate semantics: annotate(Count("rel")).filter(rel__x=...) reuses the
@@ -1523,6 +1547,7 @@ async def test_filter_over_the_aggregated_relation_constrains_the_aggregate_in_e
         assert annotate_first == filter_first == expected_rows
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_exists_ignores_the_fan_out_guard(db):
     await create_aggregation_shops()
@@ -1535,6 +1560,7 @@ async def test_exists_ignores_the_fan_out_guard(db):
     ) is True
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_annotation_named_pk_is_rejected_for_full_model_fetch(db):
     """annotate(pk=...) used to be hydrated through the pk property, replacing each instance's
@@ -1569,6 +1595,7 @@ async def test_aggregates_over_int_field_times_int_literal_stay_integers(db):
     assert isinstance(result["biggest"], int)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_sum_of_decimal_field_times_float_literal_is_not_requantized(db):
     """Decoding the float result through the DecimalField requantized 2.625 to Decimal("2.62")."""
@@ -1577,6 +1604,7 @@ async def test_sum_of_decimal_field_times_float_literal_is_not_requantized(db):
     assert result["total"] == pytest.approx(2.625)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_sum_of_decimal_field_times_decimal_literal_is_still_a_decimal(db):
     await DecimalFields.objects.create(decimal=Decimal("5.25"), decimal_nodec=Decimal("0"))
@@ -1604,6 +1632,7 @@ async def test_avg_and_max_over_arithmetic_with_a_float_literal_keep_the_fractio
     assert result["biggest"] == pytest.approx(4.5)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_on_sum_annotation_compares_numerically(db):
     """A Decimal filter value against an aggregate result (which has no column affinity on
@@ -1624,6 +1653,7 @@ async def test_decimal_filter_on_sum_annotation_compares_numerically(db):
     assert await names_matching(sums.filter(total__not=Decimal("7.00"))) == ["A", "C"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_on_annotation_repeated_with_other_value_uses_the_new_value(db):
     """The same annotation filter re-run with a different Decimal value must not reuse the
@@ -1635,6 +1665,7 @@ async def test_decimal_filter_on_annotation_repeated_with_other_value_uses_the_n
         assert sorted(shop.name for shop in shops) == expected_names
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_on_avg_count_and_int_sum_annotations(db):
     await create_aggregation_shops()
@@ -1657,6 +1688,7 @@ async def test_decimal_filter_on_avg_count_and_int_sum_annotations(db):
     assert sorted(shop.name for shop in await quantity_shops) == ["A"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_on_arithmetic_and_coalesce_annotations(db):
     await create_aggregation_shops()
@@ -1677,6 +1709,7 @@ async def test_decimal_filter_on_arithmetic_and_coalesce_annotations(db):
     assert sorted(product.name for product in await defaulted_products) == ["p1", "p2", "p4"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_on_subquery_annotation(db):
     await create_aggregation_shops()
@@ -1694,6 +1727,7 @@ async def test_decimal_filter_on_subquery_annotation(db):
     assert sorted(shop.name for shop in await shops) == ["A"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_literal_inside_case_and_coalesce_aggregates(db):
     """Max(Case(... default=Value(Decimal("0")))) / Max(Coalesce("col", Decimal("0"))) compared the
@@ -1714,6 +1748,7 @@ async def test_decimal_literal_inside_case_and_coalesce_aggregates(db):
     assert wide_maximum == {"top": Decimal("1234567.1234")}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_order_by_case_and_coalesce_with_decimal_literal(db):
     await create_aggregation_shops()
@@ -1737,6 +1772,7 @@ async def test_order_by_case_and_coalesce_with_decimal_literal(db):
     assert coalesce_ordered == ["p1", "p3", "p4", "p2"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_coalesce_value_decimal_default_compares_numerically(db):
     await DecimalFields.objects.create(decimal=Decimal("1"), decimal_nodec=0, decimal_null=None)
@@ -1749,6 +1785,7 @@ async def test_coalesce_value_decimal_default_compares_numerically(db):
     assert minimum == {"bottom": Decimal("5.5000")}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_column_write_and_read_keep_the_exact_text_representation(db):
     """A Decimal written to a DecimalField column is still bound as its exact text, not cast: only
@@ -1955,7 +1992,8 @@ async def test_aggregate_with_a_literal_argument_needs_no_column(db):
     assert await Event.objects.all().aggregate(rows=Count(Value(1)), total=Sum(Value(1))) == {"rows": 4, "total": 4}
     assert await Event.objects.all().aggregate(rows=Count(Value("x")), most=Max(Value(7))) == {"rows": 4, "most": 7}
     assert await Event.objects.all().aggregate(total=Sum(Value(1.5))) == {"total": 6.0}
-    assert await Event.objects.all().aggregate(total=Sum(Value(Decimal("1.25")))) == {"total": Decimal("5.00")}
+    if DatabaseUnderTest.holds_decimal_fields():
+        assert await Event.objects.all().aggregate(total=Sum(Value(Decimal("1.25")))) == {"total": Decimal("5.00")}
     assert await Event.objects.all().aggregate(rows=Count(Value(date(2020, 1, 1)))) == {"rows": 4}
     assert await Event.objects.all().aggregate(rows=Count(1)) == {"rows": 4}
 
@@ -2034,9 +2072,9 @@ async def test_aggregate_over_count_annotation_has_count_types(db):
         total=Sum("book_count"), mean=Avg("book_count"), most=Max("book_count")
     )
 
-    assert result == {"total": 4, "mean": pytest.approx(4 / 3), "most": 3}
+    assert {**result, "mean": float(result["mean"])} == {"total": 4, "mean": pytest.approx(4 / 3), "most": 3}
     assert type(result["total"]) is int
-    assert type(result["mean"]) is float
+    assert type(result["mean"]) is IntegerStatistic.get_type(Book)
     assert type(result["most"]) is int
 
 
@@ -2275,6 +2313,26 @@ async def test_values_with_a_correlated_subquery_groups_by_its_outer_reference(d
     assert await with_case.order_by("name").values_list("name", "x") == [("A", 3), ("B", ids["B"]), ("C", ids["C"])]
 
 
+@pytest.mark.postgresql_models
+@pytest.mark.asyncio
+async def test_average_of_integers_keeps_the_database_exact_decimal(db):
+    """PostgreSQL's numeric average of integers was read as a float - 9007199254740993 came back
+    9007199254740992.0, in an aggregate and in a window alike."""
+    if IntegerStatistic.get_type(ExpressionTypeParity) is not Decimal:
+        pytest.skip("the database computes an average of integers as a float")
+    big = 2**53 + 1
+    for _ in range(2):
+        await ExpressionTypeParity.objects.create(
+            num=1, big=big, dec=Decimal(1), flag=True, grp="a", ts=datetime(2020, 1, 1, tzinfo=UTC)
+        )
+    result = await ExpressionTypeParity.objects.all().aggregate(average=Avg("big"))
+    windowed = await ExpressionTypeParity.objects.all().annotate(c=Window(Avg("big"))).values_list("c", flat=True)
+    assert result == {"average": Decimal(big)}
+    assert type(result["average"]) is Decimal
+    assert windowed == [Decimal(big), Decimal(big)]
+
+
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_avg_min_max_accept_distinct(db):
     for num in (1, 1, 4):
@@ -2294,7 +2352,7 @@ async def test_avg_min_max_accept_distinct(db):
         .values_list("c", flat=True)
     )
     assert rows == [2.5]
-    assert type(rows[0]) is float
+    assert type(rows[0]) is IntegerStatistic.get_type(ExpressionTypeParity)
 
 
 @pytest.mark.asyncio
@@ -2325,6 +2383,7 @@ async def test_annotate_rejects_a_value_that_is_not_an_expression(db):
         Tournament.objects.all().alias(label=5)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_fan_out_guard_counts_to_many_joins_outside_aggregates(db):
     """A second to-many JOIN made by a non-aggregate annotation, a values() field or the ordering
@@ -2363,6 +2422,7 @@ async def test_fan_out_guard_counts_to_many_joins_outside_aggregates(db):
     assert same_relation == [("p1", 1), ("p2", 1), ("p3", 1)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_fan_out_error_names_the_single_joined_relation(db):
     await create_aggregation_shops()
@@ -2378,6 +2438,7 @@ async def test_fan_out_error_names_the_single_joined_relation(db):
     assert "over the base table rows is combined with a JOIN over the to-many relation products" in message
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_after_group_by_runs_over_the_grouped_rows(db):
     await create_aggregation_shops()
@@ -2404,6 +2465,7 @@ async def test_aggregate_after_group_by_runs_over_the_grouped_rows(db):
         await grouped_products.aggregate(total_price=Sum("price"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_filter_accepts_an_exists_condition(db):
     await create_aggregation_shops()
@@ -2433,6 +2495,7 @@ async def create_tagged_products() -> None:
     await products["p4"].tags.add(second_tag)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_by_a_to_many_field_partitions_instead_of_fanning_out(db):
     """Grouping by a to-many relation's field splits the rows by it - an aggregate over the base
@@ -2472,6 +2535,7 @@ async def test_group_by_a_to_many_field_partitions_instead_of_fanning_out(db):
     ) == sorted([("p1", 1), ("p2", 1), ("p3", 1), ("p4", 1), (None, 1)], key=repr)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_by_a_to_many_field_still_rejects_another_to_many_aggregate(db):
     """The key's relation only partitions the rows when no non-distinct aggregate reads another
@@ -2492,6 +2556,7 @@ async def test_group_by_a_to_many_field_still_rejects_another_to_many_aggregate(
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_by_a_to_many_primary_key_allows_another_to_many_aggregate(db):
     """A key identifying one related row pins it per group, so an aggregate over another to-many
@@ -2516,6 +2581,7 @@ async def test_group_by_a_to_many_primary_key_allows_another_to_many_aggregate(d
         await AggregationProduct.objects.all().values("tags__id").annotate(total_qty=Sum("qty"), n=Count("reviews"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_key_identifies_a_related_row_only_by_its_primary_key_or_a_unique_field(db):
     def lookup_ends_on_unique_field(model, lookup):
@@ -2531,6 +2597,7 @@ async def test_group_key_identifies_a_related_row_only_by_its_primary_key_or_a_u
     assert not lookup_ends_on_unique_field(AggregationProduct, "name")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_by_a_to_many_field_rejects_a_separate_filter_join_of_that_relation(db):
     """A second .filter() call on the key's relation builds its own JOIN, which repeats the rows
@@ -2570,6 +2637,7 @@ async def test_group_by_a_to_many_field_rejects_a_separate_filter_join_of_that_r
             await queryset
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_fan_out_error_only_suggests_distinct_for_count(db):
     """distinct=True dedupes values, not repeated rows - it fixes Count() of the relation itself,
@@ -2585,6 +2653,7 @@ async def test_fan_out_error_only_suggests_distinct_for_count(db):
         await AggregationShop.objects.annotate(n=Count("products")).filter(orders__total__gt=1).values_list("id", "n")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_max_and_min_ignore_rows_another_to_many_join_repeats(db):
     """A repeated row can't change MAX/MIN, so another to-many JOIN doesn't need distinct=True."""
@@ -2594,6 +2663,7 @@ async def test_max_and_min_ignore_rows_another_to_many_join_repeats(db):
     ).distinct().order_by("id").values_list("name", "top", "low") == [("A", Decimal("20.00"), Decimal("5.25"))]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_outer_ref_through_a_to_many_relation_counts_as_a_fan_out_join(db):
     """OuterReference("products__id") joins products into the outer query, repeating its rows."""
@@ -2608,6 +2678,7 @@ async def test_outer_ref_through_a_to_many_relation_counts_as_a_fan_out_join(db)
         await AggregationShop.objects.annotate(n=Count("id"), stars=first_stars).values_list("id", "n", "stars")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_to_an_aggregate_is_rejected(db):
     await create_aggregation_shops()
@@ -2633,6 +2704,7 @@ async def test_update_to_an_aggregate_is_rejected(db):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_group_by_an_aggregate_annotation_is_rejected(db):
     """Model rows, count() and exists() read no group, so an aggregate group name was grouped by silently."""
@@ -2673,6 +2745,7 @@ async def test_group_by_an_unknown_name_is_refused_by_every_read(db):
     assert await Tournament.objects.annotate(lowered=Lower("name")).group_by("lowered").exists()
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @test.requires_features(supports_select_for_update=True)
 async def test_select_for_update_with_an_aggregate_is_rejected(db):
@@ -2834,6 +2907,7 @@ async def test_filter_after_values_annotate_reuses_the_aggregate_join(db):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @test.requires_features(supports_select_for_update=True)
 async def test_select_for_update_with_distinct_a_window_or_a_set_operation_is_rejected(db):
@@ -2889,6 +2963,7 @@ async def test_unordered_slice_aggregate_takes_the_first_rows_by_primary_key(db)
     assert (await Book.objects.all()[1:3].last()).pk == third_book.pk
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_distinct_slice_aggregate_over_a_to_many_filter(db):
     """A sliced .distinct() queryset filtering over a to-many relation raised the fan-out
@@ -2948,6 +3023,7 @@ async def test_null_keeping_conditions_dont_make_a_group_key_unique(db):
     ) == {"events__event_id"}
 
 
+@pytest.mark.postgresql_models
 @SKIP_ON_AUTOMATIC_INDEX_COLLATION_FAULT
 @pytest.mark.asyncio
 async def test_separate_filter_calls_get_their_own_join_past_a_forward_relation(db):

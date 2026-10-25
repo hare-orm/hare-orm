@@ -330,9 +330,12 @@ make test_lowest_dependencies   # набор на SQLite и на PostgreSQL че
 
 ### CI
 
-CI (`.github/workflows/ci.yml`) запускается для каждого пул-реквеста, каждого пуша в `dev` и `main`,
-каждую ночь, по запросу (*Run workflow*) и перед выпуском (его вызывает процесс `release`).
-Каждый запуск проверяет всю матрицу.
+CI (`.github/workflows/ci.yml`) запускается для каждого пул-реквеста, каждую неделю, по запросу
+(*Run workflow*) и перед выпуском (его вызывает процесс `release`). Каждый запуск проверяет всю
+матрицу, кроме пул-реквеста из `dev` в `main`: её прошёл каждый пул-реквест в `dev`, и выпуск снова
+проверяет её на теге. Пуш в `dev` или `main` тестов не запускает — сжатый коммит и есть дерево,
+которое проверил его пул-реквест: правила веток требуют статус `ci-passed` на ветке, не отстающей от
+базовой. Пуш в `main` публикует документацию (`.github/workflows/docs.yml`, `make docs`).
 
 Каждое задание выполняет цели Makefile, описанные выше, — задания тестов вместе и есть
 `make test_matrix`, каждое — его часть:
@@ -350,7 +353,7 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 | `test-clickhouse` | тесты диалекта ClickHouse на одной версии ClickHouse и на кластере из неё, оба драйвера: каждая версия на Python 3.14, 25.8 ещё и на 3.12 и 3.13 | `make test_clickhouse_matrix_up`, `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-brokers` | обработчики пробуждения и доставки outbox на самых старых и новейших Redis, RabbitMQ и Kafka, по заданию на версию Python | `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix` |
 | `test-poetry-add` | новый проект poetry добавляет hare-orm из checkout, по заданию на ОС (Linux, Windows, macOS) и версию Python | `make deps`, `make test_poetry_add` |
-| `deploy-docs` | при пуше в `main`: публикует документацию | `make docs` |
+| `ci-passed` | проходит, когда каждое задание выше прошло или пропущено для пул-реквеста из `dev` в `main`, — статус, который требуют правила веток | — |
 
 Задания тестов работают с `rust.native`, собранным из этого коммита, и выкладывают логи `.test-matrix/` как артефакты; вывод упавшего прогона печатается и в логе
 задания.
@@ -534,7 +537,8 @@ Signed-off-by: Jane Doe <jane@example.com>
 ```
 
 `git commit -s` добавляет эту строку сам. Процесс `dco` проверяет каждый коммит пул-реквеста и
-падает, если строки нет или в ней указан не автор коммита. Чтобы подписать уже сделанные коммиты:
+падает, если строки нет или в ней указан не автор коммита; коммиты Dependabot не проверяются. Чтобы
+подписать уже сделанные коммиты:
 
 ```bash
 git rebase --signoff origin/dev

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
-from hare.ddl.conditions.tenant_condition import TenantCondition
+from hare.ddl.conditions.field_condition import FieldCondition
 from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
@@ -90,6 +88,6 @@ class ModelBoundOperation(HareOperation):
         Returns:
             True when it names the field.
         """
-        if isinstance(condition, (Q, ExclusiveArcCondition, TenantCondition)):
+        if isinstance(condition, FieldCondition):
             return field_name in condition.get_referenced_field_names()
         return False

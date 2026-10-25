@@ -1,8 +1,10 @@
+import datetime
+
 import pytest
 import pytest_asyncio
 
 from hare.query.expressions import F, OuterReference, RawSQL, Subquery
-from tests.shared_models.testmodels import Author, Book
+from tests.shared_models.testmodels import Author, Book, IntFields, TimeDeltaFields
 
 
 @pytest_asyncio.fixture
@@ -94,3 +96,18 @@ async def test_update_to_rawsql(library):
     updated_count = await Book.objects.all().update(rating=RawSQL('"rating" + %s', [10]))
     assert updated_count == 3
     assert await Book.objects.all().order_by("id").values_list("rating", flat=True) == [11.0, 12.0, 15.0]
+
+
+@pytest.mark.asyncio
+async def test_a_subquery_divides_integers_and_durations(db):
+    """An integer quotient, a duration's sum and a duration's quotient of a subquery operand were built by the
+    subquery's own operators - a query expression where an SQL term belongs."""
+    await IntFields.objects.create(id=1, intnum=7)
+    await TimeDeltaFields.objects.create(id=1, timedelta=datetime.timedelta(minutes=10))
+    number = Subquery(IntFields.objects.filter(id=1).values("intnum"))
+    duration = Subquery(TimeDeltaFields.objects.filter(id=1).values("timedelta"))
+
+    assert await IntFields.objects.annotate(value=number / 2).values_list("value", flat=True) == [3]
+    assert await TimeDeltaFields.objects.annotate(later=duration + F("timedelta"), half=duration / 2).values_list(
+        "later", "half"
+    ) == [(datetime.timedelta(minutes=20), datetime.timedelta(minutes=5))]

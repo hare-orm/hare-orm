@@ -13,13 +13,17 @@ if TYPE_CHECKING:
 
 
 class ValidateConstraint(ModelBoundOperation):
-    """Checks the existing rows against a constraint added ``NOT VALID`` (Postgres ``VALIDATE
-    CONSTRAINT``) - with a lock that doesn't block writes. Nothing to do on SQLite, or going back.
+    """Checks the existing rows against a constraint added ``NOT VALID`` (``VALIDATE CONSTRAINT``) - with
+    a lock that doesn't block writes. Nothing to do without ``Features.supports_not_valid_constraints``,
+    or going back.
 
     Args:
         model_name: The constrained model.
         name: The constraint's name.
     """
+
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
 
     def __init__(self, model_name: str, name: str) -> None:
         self.model_name = model_name

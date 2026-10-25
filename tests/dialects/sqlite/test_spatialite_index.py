@@ -315,6 +315,25 @@ async def test_a_row_the_column_cant_be_registered_with_fails_the_migration(runn
 
 
 @pytest.mark.asyncio
+async def test_a_field_change_its_stored_geometries_dont_fit_is_refused(runner):
+    """A point column made 3D, or a geometry column made a point column over a line, kept the rows the
+    field then read no more - PostgreSQL refuses such a change, SQLite kept any geometry."""
+    from hare.gis import GeometryField, LineString
+
+    await create_shops(runner)
+    for changed_field in (PointField(srid=4326, dimensions=3), PointField(srid=4269)):
+        with pytest.raises(OperationalError, match="the changed field refuses"):
+            await runner.run(AlterField("Shop", "location", changed_field))
+    await runner.run(AlterField("Shop", "location", GeometryField(srid=4326)))
+    await runner.client.execute(
+        f'INSERT INTO "{TABLE}" ("id", "name", "location") VALUES (?, ?, ?)',  # nosec B608
+        [9, "a road", SpatialiteBlobWriter.write(LineString([(0, 0), (1, 1)], srid=4326))],
+    )
+    with pytest.raises(OperationalError, match="expected a POINT, got a LINESTRING"):
+        await runner.run(AlterField("Shop", "location", PointField(srid=4326)))
+
+
+@pytest.mark.asyncio
 async def test_an_srid_the_metadata_hasnt_is_refused_before_any_sql(runner):
     with pytest.raises(UnSupportedError, match="has no reference system 3857"):
         await create_shops(runner, [SpatialiteIndex(fields=("location",))], srid=3857)

@@ -37,7 +37,3 @@ SQLITE_NOW_LOCAL_MOMENT = "'now', 'localtime'"
 
 #: SQLite's RandomHex() db_default: 16 random bytes as 32 lower-case hex digits.
 SQLITE_RANDOM_HEX_SQL = "(lower(hex(randomblob(16))))"
-
-#: Largest Decimal scale SQLite computes an exact remainder for - both operands are scaled to
-#: 64-bit integers by ``10 ** scale`` first.
-SQLITE_DECIMAL_MOD_MAX_SCALE = 15

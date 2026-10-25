@@ -3,14 +3,16 @@ from __future__ import annotations
 import math
 import struct
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import FLOAT32_MAX_DIGITS, FLOAT32_MIN_DIGITS
 from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
+from hare.fields.narrowing.float_precision_limit import FloatPrecisionLimit
 
 if TYPE_CHECKING:
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
 
 TFloat = TypeVar("TFloat", float, float | None)
@@ -23,6 +25,28 @@ class FloatField(Field[TFloat]):
     field_type = float
 
     SQL_TYPE = "DOUBLE PRECISION"
+    #: The bits of a value's mantissa - an integer past two to their power isn't held exactly.
+    MANTISSA_BITS: ClassVar[int] = 53
+    #: The significant digits of which every decimal is held back exactly.
+    EXACT_DECIMAL_DIGITS: ClassVar[int] = 15
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        # Imported here: the modules import each other.
+        from hare.fields.data.numeric.decimal_field import DecimalField
+        from hare.fields.data.numeric.int_field import IntField
+
+        decimal_places = None
+        if isinstance(old_field, FloatField):
+            holds_exactly = old_field.MANTISSA_BITS <= self.MANTISSA_BITS
+        elif isinstance(old_field, IntField):
+            holds_exactly = max(map(abs, old_field.COLUMN_TYPE_RANGE)) <= 2**self.MANTISSA_BITS
+        elif isinstance(old_field, DecimalField):
+            holds_exactly = old_field.max_digits <= self.EXACT_DECIMAL_DIGITS
+            decimal_places = old_field.decimal_places
+        else:
+            return None
+        # A number the float rounds would be lost.
+        return None if holds_exactly else FloatPrecisionLimit(self.MANTISSA_BITS, decimal_places)
 
     @staticmethod
     def get_shortest_float32(value: float) -> float:

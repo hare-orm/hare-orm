@@ -16,11 +16,15 @@ from hare.sql import SqlContext
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from hare.fields.field import Field as ModelField
     from hare.models import Model
+    from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements import AwaitableQuery
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.selectable import Selectable
+    from hare.sql.terms.node import Node
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 
 
@@ -48,9 +52,11 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         ("_built_query", PlanPartType.NONE),
         ("is_aggregate", PlanPartType.NONE),
         ("outer_reference_terms", PlanPartType.NONE),
+        # Read from the query, which the plan holds.
+        ("sensitive", PlanPartType.NONE),
     )
 
-    def __init__(self, query: AwaitableQuery[Any], *, shares_outer_scope: bool = False) -> None:
+    def __init__(self, query: QuerySpecification[Any], *, shares_outer_scope: bool = False) -> None:
         """
         Args:
             query: The queryset or query embedded.
@@ -95,6 +101,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
                 if value_wrapper_references is not None:
                     value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))
         self._built_query = built_query
+        self.sensitive = self.selects_sensitive_value()
         if scope is None:
             self.is_aggregate = False
             self.outer_reference_terms = ()
@@ -102,6 +109,23 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         self.is_aggregate = bool(scope.aggregate_references)
         self.outer_reference_terms = tuple(scope.reference_terms)
         return ExpressionResult(term=self, joins=scope.extra_joins, output_field=self.get_output_field())
+
+    def selects_sensitive_value(self) -> bool:
+        """Whether the value the subquery selects is a sensitive field's, or computed from one - a
+        filter comparing it binds its values hidden, as one on the field does.
+
+        Returns:
+            True for such a value.
+        """
+        output_field = self.get_output_field()
+        if output_field is not None and output_field.sensitive:
+            return True
+        nested_query = self.get_nested_query()
+        return nested_query is not None and any(
+            node.sensitive
+            for selected_term in nested_query._selects
+            for node in cast("Iterator[Node]", selected_term.nodes_())
+        )
 
     def get_selected_names(self) -> list[str] | None:
         """The output names of the columns a values()/values_list() subquery selects.

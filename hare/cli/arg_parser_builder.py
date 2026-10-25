@@ -24,6 +24,23 @@ class ArgParserBuilder:
     its command class's `run_*` method."""
 
     @staticmethod
+    def parse_name(raw_value: str) -> str:
+        """Parses a name given on the command line - of an app, a migration, a connection, a schema.
+
+        Args:
+            raw_value: The raw command-line text.
+
+        Returns:
+            The name.
+
+        Raises:
+            argparse.ArgumentTypeError: The name is empty or blank - which would read as no name given.
+        """
+        if not raw_value.strip():
+            raise argparse.ArgumentTypeError(f"takes a name, got {raw_value!r}")
+        return raw_value
+
+    @staticmethod
     def parse_older_than_seconds(raw_value: str) -> int:
         """Parses the `--older-than` argument.
 
@@ -77,7 +94,9 @@ class ArgParserBuilder:
         )
         makemigrations_parser.add_argument("app_labels", nargs="*")
         makemigrations_parser.add_argument("--empty", action="store_true", help="Create an empty migration.")
-        makemigrations_parser.add_argument("-n", "--name", help="Use this name for the migration file.")
+        makemigrations_parser.add_argument(
+            "-n", "--name", type=ArgParserBuilder.parse_name, help="Use this name for the migration file."
+        )
         makemigrations_parser.add_argument(
             "--check",
             action="store_true",
@@ -120,11 +139,14 @@ class ArgParserBuilder:
         squashmigrations_parser.add_argument(
             "migration_names",
             nargs="+",
+            type=ArgParserBuilder.parse_name,
             metavar="MIGRATION",
             help="[START] END - the first and last migration squashed, by name or a unique prefix of it.",
         )
         squashmigrations_parser.add_argument(
-            "--squashed-name", help="The squashed migration's name after its number (squashed_<END> by default)."
+            "--squashed-name",
+            type=ArgParserBuilder.parse_name,
+            help="The squashed migration's name after its number (squashed_<END> by default).",
         )
         squashmigrations_parser.set_defaults(func=MigrationCommands.run_squashmigrations)
 
@@ -133,7 +155,7 @@ class ArgParserBuilder:
         """The positional app_label/migration pair - ``zero`` unapplies every migration of the
         app - plus --fake/--dry-run."""
         parser.add_argument("app_label", nargs="?")
-        parser.add_argument("migration", nargs="?")
+        parser.add_argument("migration", nargs="?", type=ArgParserBuilder.parse_name)
         parser.add_argument("--fake", action="store_true", help="Record migrations without executing SQL.")
         parser.add_argument("--dry-run", action="store_true", help="Show what would run without changing DB state.")
 
@@ -174,13 +196,15 @@ class ArgParserBuilder:
             "--connection",
             dest="connection_alias",
             default=None,
+            type=ArgParserBuilder.parse_name,
             help="Connection alias to inspect (default: the first one configured).",
         )
         inspectdb_parser.add_argument(
             "--schema",
             default=None,
-            help="Schema to inspect - an attached database on SQLite, a database of the server where "
-            "databases are the schemas (default: the connection's default schema).",
+            type=ArgParserBuilder.parse_name,
+            help="Schema to inspect - a schema, an attached database or a database of the server: the "
+            "namespace of tables the database has (default: the connection's default schema).",
         )
         inspectdb_parser.set_defaults(func=SchemaCommands.run_inspectdb)
 
@@ -193,6 +217,7 @@ class ArgParserBuilder:
             "--connection",
             dest="connection_alias",
             default=None,
+            type=ArgParserBuilder.parse_name,
             help="Connection alias to open (default: the first one configured).",
         )
         dbshell_parser.set_defaults(func=DatabaseShellCommands.run_dbshell)
@@ -230,7 +255,9 @@ class ArgParserBuilder:
     def _add_sqlmigrate_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
         sqlmigrate_parser = subparsers.add_parser("sqlmigrate", help="Print the SQL for a migration.")
         sqlmigrate_parser.add_argument("app_label", nargs="?", help="App label.")
-        sqlmigrate_parser.add_argument("migration_name", nargs="?", help="Migration name.")
+        sqlmigrate_parser.add_argument(
+            "migration_name", nargs="?", type=ArgParserBuilder.parse_name, help="Migration name."
+        )
         sqlmigrate_parser.add_argument(
             "--backward",
             action="store_true",
@@ -249,13 +276,15 @@ class ArgParserBuilder:
             "--connection",
             dest="connection_alias",
             default=None,
+            type=ArgParserBuilder.parse_name,
             help="Connection alias to check (default: the first one configured).",
         )
         drift_parser.add_argument(
             "--schema",
             default=None,
-            help="Schema swept for untracked tables - an attached database on SQLite, a database of the "
-            "server where databases are the schemas (default: the connection's current schema).",
+            type=ArgParserBuilder.parse_name,
+            help="Schema swept for untracked tables - a schema, an attached database or a database of the "
+            "server: the namespace of tables the database has (default: the connection's current schema).",
         )
         drift_parser.add_argument(
             "--journal-table",
@@ -281,7 +310,7 @@ class ArgParserBuilder:
         distributed_recover_parser.add_argument(
             "--finish",
             action="store_true",
-            help="Actually issue COMMIT PREPARED/ROLLBACK PREPARED, instead of only reporting.",
+            help="Actually commit or roll back the prepared transactions, instead of only reporting.",
         )
         distributed_recover_parser.add_argument(
             "--older-than",

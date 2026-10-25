@@ -10,7 +10,11 @@ from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.migrations.autodetection.required_extensions import RequiredExtensions
-from hare.migrations.drift.constants import DRIFT_NAMED_OBJECT_OPERATIONS, DRIFT_SCHEMA_OBJECT_PART_TYPES
+from hare.migrations.drift.constants import (
+    DRIFT_NAMED_OBJECT_OPERATIONS,
+    DRIFT_SCHEMA_OBJECT_PART_TYPES,
+    DRIFT_UNMANAGED_LEFT_OUT_OPTIONS,
+)
 from hare.migrations.drift.drift_result import DriftResult
 from hare.migrations.drift.shadow.schema_comparison import SchemaComparison
 from hare.migrations.drift.shadow.shadow_state import ShadowState
@@ -134,8 +138,8 @@ class ShadowDrift:
             await shared_client.close()
 
     def get_model_schema(self, model_state: ModelState) -> str:
-        """The schema a model's table is in - its ``Meta.schema`` (an attached database on SQLite, a
-        database of the server where databases are the schemas), else the connection's default one, the
+        """The schema a model's table is in - its ``Meta.schema`` (a schema, an attached database or
+        a database of the server - the namespace of tables the database has), else the connection's default one, the
         shared one for a model without ``Meta.tenant_schema`` on a connection to a tenant's schema."""
         if schema := model_state.options.get(ModelOption.SCHEMA):
             return schema
@@ -197,15 +201,22 @@ class ShadowDrift:
                 continue
             compared.append((key, model_state))
         for unmanaged_model_state in self.unmanaged_model_states:
-            known_tables.add((self.get_model_schema(unmanaged_model_state), unmanaged_model_state.table))
+            schema = self.get_model_schema(unmanaged_model_state)
+            known_tables.add((schema, unmanaged_model_state.table))
+            # The automatic through tables of its many-to-many relations are its own too.
+            known_tables.update(
+                (schema, field.through)
+                for field in unmanaged_model_state.fields.values()
+                if isinstance(field, ManyToManyFieldInstance) and field.through_model is None and field.through
+            )
         return compared, known_tables
 
     def get_built_model_states(self) -> list[tuple[ModelKey, ModelState]]:
-        """The models the shadow is built of - every model of the state, and the unmanaged ones a
-        relation may point at."""
+        """The models the shadow is built of - every model of the state, and the tables of the unmanaged
+        ones a relation may point at, without the objects they declare beside them."""
         built = list(self.new_state.models.items())
         built.extend(
-            ((model_state.app, model_state.name), model_state)
+            ((model_state.app, model_state.name), self.get_table_only(model_state))
             for model_state in self.unmanaged_model_states
             if (model_state.app, model_state.name) not in self.new_state.models
         )
@@ -220,6 +231,22 @@ class ShadowDrift:
                 model_state.options[ModelOption.SCHEMA] = schema
             placed.append((key, model_state))
         return placed
+
+    @staticmethod
+    def get_table_only(model_state: ModelState) -> ModelState:
+        """An unmanaged model's state without the objects it declares beside its table.
+
+        Args:
+            model_state: The model's state.
+
+        Returns:
+            The state, its table alone.
+        """
+        table_state = model_state.clone()
+        table_state.options = {
+            name: value for name, value in model_state.options.items() if name not in DRIFT_UNMANAGED_LEFT_OUT_OPTIONS
+        }
+        return table_state
 
     async def read_parts(
         self,

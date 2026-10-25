@@ -107,21 +107,3 @@ async def test_ping_does_not_report_a_slow_but_successful_query_as_unhealthy(db_
     monkeypatch.setattr(conn, "execute", slow_query)
 
     assert await conn.ping(timeout=2.0) is True
-
-
-@pytest.mark.parametrize(
-    ("timeout", "error"),
-    [
-        (float("nan"), ValueError),
-        (float("inf"), ValueError),
-        (0, ValueError),
-        (-1, ValueError),
-        (10**9, ValueError),
-    ],
-)
-@pytest.mark.asyncio
-async def test_a_timeout_of_no_positive_finite_number_is_refused(db_simple, timeout, error):
-    """A NaN timeout reached asyncio.wait_for() and stopped the event loop itself."""
-    with pytest.raises(error, match="A ping timeout must be"):
-        await Connections.get("models").ping(timeout=timeout)
-    assert await Connections.get("models").ping() is True

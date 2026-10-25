@@ -3,6 +3,12 @@ from __future__ import annotations
 from enum import StrEnum
 
 
+class SqliteDialectName(StrEnum):
+    """The name SQLite's dialect is registered under."""
+
+    SQLITE = "sqlite"
+
+
 class SqliteRegexMatching(StrEnum):
     POSIX_REGEX = " REGEXP "
     IPOSIX_REGEX = " MATCH "
@@ -29,7 +35,6 @@ class SqliteConvertedValueType(StrEnum):
     BIGINT = "bigint"
     SMALLINT = "smallint"
     DOUBLE_PRECISION = "double precision"
-    NUMERIC = "numeric"
     BOOLEAN = "boolean"
     TEXT = "text"
     DATE = "date"

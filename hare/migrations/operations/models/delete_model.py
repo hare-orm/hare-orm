@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 class DeleteModel(ModelTableOperation, HareOperation):
     """Deletes a model and drops its table."""
 
+    backward_reads_state_left = False
+
     def __init__(self, name: str, state_only: bool = False) -> None:
         """
         Args:

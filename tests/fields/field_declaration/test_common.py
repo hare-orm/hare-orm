@@ -21,13 +21,14 @@ def test_the_required_flag_of_a_field(field_class, options, required):
     assert field_class(**options).required is required
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("model_class", "exception_class"),
     [
         pytest.param(testmodels.BinaryFields, IntegrityError, id="binary_empty"),
         pytest.param(testmodels.BooleanFields, IntegrityError, id="bool_empty"),
         pytest.param(testmodels.CharFields, ValidationError, id="char_empty"),
-        pytest.param(testmodels.DecimalFields, ValidationError, id="decimal_empty"),
+        pytest.param(testmodels_postgres.DecimalFields, ValidationError, id="decimal_empty"),
         pytest.param(testmodels.EnumFields, ValidationError, id="int_enum_empty"),
         pytest.param(testmodels.MinRelation, ValidationError, id="fk_empty"),
         pytest.param(testmodels.Student, ValidationError, id="student__empty"),

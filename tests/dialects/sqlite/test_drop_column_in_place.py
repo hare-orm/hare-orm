@@ -22,9 +22,7 @@ TABLE = "drop_book"
 class RecordingEditor:
     """Runs the migration operations against an in-memory SQLite database and records the SQL."""
 
-    def __init__(self, client: AiosqliteClient, *, supports_drop_column: bool = True) -> None:
-        if not supports_drop_column:
-            client.features = client.features.replace(supports_drop_column=False)
+    def __init__(self, client: AiosqliteClient) -> None:
         self.editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
         self.statements: list[str] = []
         run_sql = self.editor.run_sql
@@ -44,11 +42,11 @@ class RecordingEditor:
         return any(f"new__{TABLE}" in statement for statement in self.statements)
 
 
-async def remove_pages(*, pages_field=None, options=None, database_sql: str = "", supports_drop_column=True):
+async def remove_pages(*, pages_field=None, options=None, database_sql: str = ""):
     client = AiosqliteClient(file_path=":memory:", connection_alias="drop_column")
     await client.create_connection(with_db=True)
     try:
-        recorder = RecordingEditor(client, supports_drop_column=supports_drop_column)
+        recorder = RecordingEditor(client)
         state = State()
         await apply_operations(
             "models",
@@ -138,10 +136,3 @@ async def test_objects_only_in_the_database_leave_the_column_dropped_in_place(da
 async def test_an_object_only_in_the_database_naming_the_column_makes_the_database_refuse(database_sql):
     with pytest.raises(OperationalError, match="pages"):
         await remove_pages(database_sql=database_sql)
-
-
-@pytest.mark.asyncio
-async def test_an_old_sqlite_rebuilds_the_table():
-    recorder = await remove_pages(supports_drop_column=False)
-    assert recorder.rebuilt
-    assert not recorder.dropped_in_place

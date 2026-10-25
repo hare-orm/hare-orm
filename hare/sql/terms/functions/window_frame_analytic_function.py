@@ -49,11 +49,6 @@ class WindowFrameAnalyticFunction(AnalyticFunction):
         self._set_frame_and_bounds("RANGE", bound, and_bound)
         return self
 
-    def _orderby_field(self, field: Any, orient: Any, sql_context: SqlContext) -> str:
-        if self.has_value_offsets():
-            field = sql_context.dialect.renderers.get_value_range_ordering_term(field)
-        return super()._orderby_field(field, orient, sql_context)
-
     def has_value_offsets(self) -> bool:
         """Whether the frame is a ``RANGE`` with an edge a number of values away from the current
         row's."""

@@ -14,12 +14,12 @@ from hare.instrumentation import Observers, QueryExecuted
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from tests.shared_models.testmodels import (
     DatetimeFields,
-    DecimalFields,
     IntFields,
     JSONFields,
     LazySelectSoftDeleteParent,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 pg = pytest.importorskip("rust.native.pg")
 
@@ -29,6 +29,7 @@ def skip_unless_written_parameters(model) -> None:
         pytest.skip("for a driver that binds written parameters")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_bulk_create_binds_written_parameters_and_round_trips(db):
     skip_unless_written_parameters(JSONFields)

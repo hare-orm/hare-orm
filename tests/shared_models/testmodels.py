@@ -5,11 +5,9 @@ This is the testing Models
 from __future__ import annotations
 
 import binascii
-import datetime
 import functools
 import json
 import os
-import re
 import uuid
 from contextvars import ContextVar
 from decimal import Decimal
@@ -27,16 +25,6 @@ from hare.exceptions import NoValuesFetched, ValidationError
 from hare.fields import CASCADE, NO_ACTION, PROTECT, RESTRICT, SET_DEFAULT, SET_NULL
 from hare.fields.db_defaults import Now, RandomHex, SqlDefault
 from hare.fields.generated_field import GeneratedField
-from hare.fields.validators import (
-    CommaSeparatedIntegerListValidator,
-    MaxValueValidator,
-    MinLengthValidator,
-    MinValueValidator,
-    RegexValidator,
-    validate_ipv4_address,
-    validate_ipv6_address,
-    validate_ipv46_address,
-)
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions.conditions.q import Q
@@ -44,7 +32,6 @@ from hare.query.expressions.f import F
 from hare.query.functions import Coalesce, Lower
 from hare.query.managers.manager import Manager
 from hare.query.queryset import QuerySet
-from hare.time import UTC
 
 
 def generate_token():
@@ -345,22 +332,6 @@ class IndexedBinaryFields(Model):
     id = fields.IntField(primary_key=True)
     digest = fields.BinaryField(unique=True)
     tag = fields.BinaryField(db_index=True, null=True)
-
-
-class DecimalFields(Model):
-    id = fields.IntField(primary_key=True)
-    decimal = fields.DecimalField(max_digits=18, decimal_places=4)
-    decimal_nodec = fields.DecimalField(max_digits=18, decimal_places=0)
-    decimal_null = fields.DecimalField(max_digits=18, decimal_places=4, null=True)
-
-
-class HighPrecisionDecimalFields(Model):
-    """max_digits above decimal's own default context precision (28) - Postgres NUMERIC itself
-    supports far higher precision than that, so DecimalField must not rely on the ambient
-    decimal.getcontext() when quantizing a value."""
-
-    id = fields.IntField(primary_key=True)
-    big = fields.DecimalField(max_digits=38, decimal_places=18)
 
 
 class DatetimeFields(Model):
@@ -2146,16 +2117,6 @@ class DefaultUpdate(Model):
     updated_at = fields.DatetimeField(auto_now=True)
 
 
-class DefaultModel(Model):
-    int_default = fields.IntField(db_default=1)
-    float_default = fields.FloatField(db_default=1.5)
-    decimal_default = fields.DecimalField(max_digits=8, decimal_places=2, db_default=Decimal(1))
-    bool_default = fields.BooleanField(db_default=True)
-    char_default = fields.CharField(max_length=20, db_default="hare")
-    date_default = fields.DateField(db_default=datetime.date(year=2020, month=5, day=21))
-    datetime_default = fields.DatetimeField(db_default=datetime.datetime(year=2020, month=5, day=20, tzinfo=UTC))
-
-
 class SqlDefaultModel(Model):
     """Model with SqlDefault expressions for db_default."""
 
@@ -2192,32 +2153,6 @@ class NoFetchDefaultModel(Model):
 class RequiredPKModel(Model):
     id = fields.CharField(primary_key=True, max_length=100)
     name = fields.CharField(max_length=255)
-
-
-class ValidatorModel(Model):
-    regex = fields.CharField(max_length=100, null=True, validators=[RegexValidator("abc.+", re.I)])
-    max_length = fields.CharField(max_length=5, null=True)
-    min_length = fields.CharField(max_length=5, null=True, validators=[MinLengthValidator(3)])
-    ipv4 = fields.CharField(max_length=100, null=True, validators=[validate_ipv4_address])
-    ipv6 = fields.CharField(max_length=100, null=True, validators=[validate_ipv6_address])
-    ipv46 = fields.CharField(max_length=100, null=True, validators=[validate_ipv46_address])
-    max_value = fields.IntField(null=True, validators=[MaxValueValidator(20.0)])
-    min_value = fields.IntField(null=True, validators=[MinValueValidator(10.0)])
-    max_value_decimal = fields.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        null=True,
-        validators=[MaxValueValidator(Decimal("2.0"))],
-    )
-    min_value_decimal = fields.DecimalField(
-        max_digits=12,
-        decimal_places=3,
-        null=True,
-        validators=[MinValueValidator(Decimal("1.0"))],
-    )
-    comma_separated_integer_list = fields.CharField(
-        max_length=100, null=True, validators=[CommaSeparatedIntegerListValidator()]
-    )
 
 
 class NumberSourceField(Model):
@@ -2647,42 +2582,9 @@ class AggregationShop(Model):
     name = fields.CharField(max_length=50)
     rank = fields.IntField(default=0)
 
-    products: fields.ReverseRelation["AggregationProduct"]
-    orders: fields.ReverseRelation["AggregationOrder"]
-
 
 class AggregationTag(Model):
     name = fields.CharField(max_length=50)
-
-
-class AggregationProduct(Model):
-    shop: fields.ForeignKeyRelation[AggregationShop] = fields.ForeignKeyField(
-        "models.AggregationShop", related_name="products"
-    )
-    name = fields.CharField(max_length=50)
-    price = fields.DecimalField(max_digits=10, decimal_places=2)
-    qty = fields.IntField()
-    weight = fields.FloatField(null=True)
-    score = fields.IntField(null=True)
-    tags: fields.ManyToManyRelation[AggregationTag] = fields.ManyToManyField(
-        "models.AggregationTag", related_name="products"
-    )
-
-    reviews: fields.ReverseRelation["AggregationReview"]
-
-
-class AggregationReview(Model):
-    product: fields.ForeignKeyRelation[AggregationProduct] = fields.ForeignKeyField(
-        "models.AggregationProduct", related_name="reviews"
-    )
-    stars = fields.IntField()
-
-
-class AggregationOrder(Model):
-    shop: fields.ForeignKeyRelation[AggregationShop] = fields.ForeignKeyField(
-        "models.AggregationShop", related_name="orders"
-    )
-    total = fields.DecimalField(max_digits=10, decimal_places=2)
 
 
 class WidgetTagMembership(Model):
@@ -3361,26 +3263,6 @@ class TemporalBatch(Model):
 
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=20)
-    records: fields.ReverseRelation["TemporalRecord"]
-
-
-class TemporalRecord(Model):
-    """One of every date/time field type, for date/time arithmetic tests."""
-
-    id = fields.IntField(primary_key=True)
-    started_at = fields.DatetimeField()
-    finished_at = fields.DatetimeField(null=True)
-    day = fields.DateField()
-    other_day = fields.DateField(null=True)
-    at_time = fields.TimeField(null=True)
-    duration = fields.TimeDeltaField(null=True)
-    other_duration = fields.TimeDeltaField(null=True)
-    quantity = fields.IntField(null=True)
-    amount = fields.DecimalField(max_digits=10, decimal_places=2, null=True)
-    updated_at = fields.DatetimeField(auto_now=True)
-    batch: fields.ForeignKeyNullableRelation[TemporalBatch] = fields.ForeignKeyField(
-        "models.TemporalBatch", related_name="records", null=True
-    )
 
 
 class AutoNowThing(Model):
@@ -3547,44 +3429,6 @@ class DeletePreviewTenantTask(Model):
 
     class Meta:
         tenant_field = "company_id"
-
-
-class ExpressionTypeParity(Model):
-    """Mixed-type row for checking annotation result types match across backends."""
-
-    num = fields.IntField()
-    big = fields.BigIntField()
-    dec = fields.DecimalField(max_digits=10, decimal_places=2)
-    flag = fields.BooleanField()
-    grp = fields.CharField(max_length=20)
-    ts = fields.DatetimeField()
-
-
-class ExpressionTypeRow(Model):
-    """Row of every numeric/temporal field type for checking mixed-type expression results."""
-
-    num = fields.IntField()
-    fl = fields.FloatField()
-    dec = fields.DecimalField(max_digits=10, decimal_places=2)
-    dec3 = fields.DecimalField(max_digits=12, decimal_places=3)
-    d = fields.DateField()
-    dt = fields.DatetimeField()
-    td = fields.TimeDeltaField()
-    s = fields.CharField(max_length=50)
-    flag = fields.BooleanField()
-    num_null = fields.IntField(null=True)
-    dec_null = fields.DecimalField(max_digits=10, decimal_places=2, null=True)
-    children: fields.ReverseRelation["ExpressionTypeChild"]
-
-
-class ExpressionTypeChild(Model):
-    """Child of `ExpressionTypeRow`, for aggregates and subqueries across a relation."""
-
-    row: fields.ForeignKeyRelation[ExpressionTypeRow] = fields.ForeignKeyField(
-        "models.ExpressionTypeRow", related_name="children"
-    )
-    num = fields.IntField()
-    dec = fields.DecimalField(max_digits=10, decimal_places=2)
 
 
 class DeletePreviewDiamondOwner(Model):

@@ -31,11 +31,5 @@ DEFAULT_CLEANUP_BATCH_SIZE = 1000
 #: Largest accepted ``batch_size`` and cleanup batch size.
 MAX_BATCH_SIZE = 10000
 
-#: Largest accepted ``max_delivery_attempts``.
-MAX_DELIVERY_ATTEMPTS_LIMIT = 10000
-
-#: Largest accepted ``concurrency``.
-MAX_CONCURRENCY = 1000
-
 #: The longest ``last_error`` kept of a failed delivery.
 LAST_ERROR_MAX_LENGTH = 4000

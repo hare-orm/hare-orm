@@ -13,7 +13,6 @@ from hare.core.connections.connections import Connections
 from hare.exceptions import QueryError, TransactionRetryError
 from hare.query.functions import Sum
 from hare.transactions.atomic.atomic import Atomic
-from hare.transactions.constants import MAX_TRANSACTION_RETRIES
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields
 
@@ -183,10 +182,3 @@ async def test_a_plain_block_with_retries_is_refused(db_truncate):
     with pytest.raises(QueryError, match="runs a block again as `async for attempt in atomic"):
         async with Transactions.atomic(retries=2):
             pass
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize("retries", [-1, MAX_TRANSACTION_RETRIES + 1, True, 1.0, "2"])
-def test_a_wrong_retries_is_refused(retries):
-    with pytest.raises(QueryError, match="atomic\\(retries=...\\) takes an int from 0 to"):
-        Transactions.atomic(retries=retries)

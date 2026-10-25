@@ -10,6 +10,7 @@ from hare.dialects.base.connection.driver import Driver
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
+from hare.fields.data.numeric.decimal_field import DecimalField
 
 
 class DatabaseUnderTest:
@@ -31,6 +32,12 @@ class DatabaseUnderTest:
     def get_dialect(cls, url: str | None = None) -> Dialect:
         """The dialect of a DB_URL - HARE_TEST_DB's by default."""
         return cls.get_driver(url).dialect
+
+    @classmethod
+    def holds_decimal_fields(cls) -> bool:
+        """Whether the database has a DecimalField - SQLite stores no exact decimal. A test model declares
+        its DecimalField under this condition, and a test of the field is marked decimal_fields."""
+        return DecimalField(max_digits=1, decimal_places=0).exists_on(cls.get_dialect())
 
     @classmethod
     def get_public_schema(cls) -> str | None:

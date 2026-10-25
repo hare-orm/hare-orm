@@ -39,15 +39,8 @@ from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import 
 from hare.dialects.sqlite.functions.datetime.sqlite_date_timestamp import SqliteDateTimestamp
 from hare.dialects.sqlite.functions.datetime.sqlite_local_now import SqliteLocalNow
 from hare.dialects.sqlite.functions.datetime.temporal_arithmetic_functions import TemporalArithmeticFunctions
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_arithmetic import SqliteDecimalArithmetic
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_average import SqliteDecimalAverage
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_collation import SqliteDecimalCollation
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_round import SqliteDecimalRound
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_storage import SqliteDecimalStorage
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_sum import SqliteDecimalSum
 from hare.dialects.sqlite.functions.json.sqlite_json_datetime import SqliteJsonDatetime
 from hare.dialects.sqlite.functions.json.sqlite_json_path import SqliteJsonPath
-from hare.dialects.sqlite.functions.sqlite_integer_range import SqliteIntegerRange
 from hare.dialects.sqlite.functions.sqlite_math_functions import SqliteMathFunctions
 from hare.dialects.sqlite.functions.statistics.sqlite_statistics import SqliteStatistics
 from hare.dialects.sqlite.functions.text.sqlite_text_functions import SqliteTextFunctions
@@ -153,7 +146,6 @@ class AiosqliteClient(SqliteClient):
             await SqliteDatePartExtraction.install(self._connection, self.function_errors)
             await DateTruncation.install(self._connection, self.function_errors)
             await SqliteMathFunctions.install(self._connection, self.function_errors)
-            await SqliteIntegerRange.install(self._connection, self.function_errors)
             await SqliteTextFunctions.install(self._connection, self.function_errors)
             await SqliteCast.install(self._connection, self.function_errors)
             await SqliteGreatestLeast.install(self._connection)
@@ -162,12 +154,6 @@ class AiosqliteClient(SqliteClient):
             await TemporalArithmeticFunctions.install(self._connection, self.function_errors)
             await SqliteJsonPath.install(self._connection)
             await SqliteJsonDatetime.install(self._connection)
-            await SqliteDecimalRound.install(self._connection)
-            await SqliteDecimalCollation.install(self._connection)
-            await SqliteDecimalArithmetic.install(self._connection, self.function_errors)
-            await SqliteDecimalSum.install(self._connection)
-            await SqliteDecimalAverage.install(self._connection)
-            await SqliteDecimalStorage.install(self._connection)
             await SqliteLocalNow.install(self._connection)
             await SqliteFullTextQuery.install(self._connection)
             if self.load_sqlite_vec:

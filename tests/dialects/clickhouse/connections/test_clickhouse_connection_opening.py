@@ -177,6 +177,9 @@ async def test_refused_credentials_and_a_missing_database_are_configuration_erro
     base = Connections.get("models")
     for overrides, message in (
         ({"password": "wrong"}, "Authentication failed connecting to ClickHouse"),
+        # A URL without a password or a user gives None - clickhouse-driver failed on it with an AttributeError.
+        ({"password": None}, "Authentication failed connecting to ClickHouse as user 'default'"),
+        ({"user": None, "password": None}, "Authentication failed connecting to ClickHouse as user 'default'"),
         ({"database": "hare_missing_database"}, "Can't use database hare_missing_database"),
     ):
         settings = {"host": base.host, "port": base.port, "user": base.user, "password": base.password}
@@ -193,5 +196,18 @@ async def test_refused_credentials_and_a_missing_database_are_configuration_erro
 @pytest.mark.database_independent
 def test_the_keeper_addresses_are_read():
     assert ClickhouseMigrationLock.get_addresses("keeper-1:9181, keeper-2") == (("keeper-1", 9181), ("keeper-2", 9181))
-    with pytest.raises(ConfigurationError):
-        ClickhouseMigrationLock.get_addresses("keeper-1:port")
+    for keeper_hosts in ("keeper-1:port", "keeper\x00-1:9181"):
+        with pytest.raises(ConfigurationError):
+            ClickhouseMigrationLock.get_addresses(keeper_hosts)
+
+
+@pytest.mark.asyncio
+async def test_a_keeper_taking_no_session_fails_the_opening_once(clickhouse_db):
+    """The failed check closed the client - the opening took it for a close meanwhile and opened the
+    connection again, failing the same way without end."""
+    client = Connections.current().create_independent("models", {"keeper_hosts": "127.0.0.1:1", "connect_timeout": 1})
+    try:
+        with pytest.raises(ConfigurationError, match="which took no session"):
+            await asyncio.wait_for(client.execute_dicts("SELECT 1 AS n"), WAIT_DEADLINE_SECONDS)
+    finally:
+        await client.close()

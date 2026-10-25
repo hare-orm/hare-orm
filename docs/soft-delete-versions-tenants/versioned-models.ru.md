@@ -75,8 +75,9 @@ revised = await current.create_new_version(title="Updated title")
 
 ## <a id="clickhouse"></a>Запись версий (ClickHouse)
 
-ClickHouse не хранит уникальность: ключ `(id, version)` не проверяется, и два одновременных
-`create_new_version()` одной версии пишут оба, оставляя две строки с одним ключом (см. [модели
+ClickHouse не хранит уникальность: ключ `(id, version)` не проверяется, поэтому `create_new_version()`
+не самой старшей версии ничего не бросает, а два одновременных `create_new_version()` одной версии
+пишут оба — и то и другое оставляет две строки с одним ключом (см. [модели
 ClickHouse](../dialects/clickhouse/models.ru.md#uniqueness-and-relations)). Там пишите версии одной
 записи из одной задачи за раз.
 

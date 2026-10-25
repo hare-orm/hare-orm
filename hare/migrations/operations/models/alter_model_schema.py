@@ -14,10 +14,10 @@ if TYPE_CHECKING:
 class AlterModelSchema(HareOperation):
     """Moves a model's table to another schema (``Meta.schema``), keeping its data - the partitions of a
     partitioned table, its automatic through tables and the objects it declares in its schema (views,
-    materialized views, functions, sequences, the functions of its triggers) with it. PostgreSQL moves
-    them with ``ALTER ... SET SCHEMA``; a database whose schemas are the databases of its server moves a
-    table with ``RENAME TABLE``, refusing a model whose objects name the table by its database; SQLite
-    can't move a table to another attached database and refuses the move. A refusal comes before any
+    materialized views, functions, sequences, the functions of its triggers) with it - as the dialect moves
+    them: a database of schemas with ``ALTER ... SET SCHEMA``; a database whose schemas are the databases
+    of its server with ``RENAME TABLE``, refusing a model whose objects name the table by its database; a
+    database whose schemas are attached databases moves no table and refuses the move. A refusal comes before any
     statement (``Schemas.raise_if_model_unmovable()``). ``CreateSchema`` creates the schema itself.
     """
 

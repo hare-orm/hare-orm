@@ -11,8 +11,9 @@ from hare.exceptions import (
 )
 from hare.query.expressions import ArithmeticOperator, Case, F, OuterReference, Q, Subquery, When
 from hare.query.functions import Coalesce, Count, Length, Lower, Sum
-from tests.shared_models import testmodels
-from tests.shared_models.testmodels import Currency, Event, ExpressionTypeRow, JSONFields, Tournament
+from tests.shared_models import testmodels, testmodels_postgres
+from tests.shared_models.testmodels import Currency, Event, JSONFields, Tournament
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
 
 
 @pytest.mark.database_independent
@@ -262,6 +263,7 @@ async def test_negative_int_field_plus_float_literal_returns_float(db):
     assert isinstance(rows[0]["result"], float)
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_int_field_plus_decimal_literal_returns_fractional_value(db):
     """Same root cause as the float case above - a bare Decimal literal also has no
@@ -377,7 +379,12 @@ async def test_f_expression_inside_an_in_list_raises(db, lookup):
 
 
 F_COLUMN_DECODING_CASES = [
-    (testmodels.DecimalFields, "decimal", {"decimal": Decimal("1.2345"), "decimal_nodec": 1}),
+    pytest.param(
+        testmodels_postgres.DecimalFields,
+        "decimal",
+        {"decimal": Decimal("1.2345"), "decimal_nodec": 1},
+        marks=pytest.mark.postgresql_models,
+    ),
     (testmodels.DatetimeFields, "datetime", {"datetime": datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.UTC)}),
     (testmodels.DateFields, "date", {"date": datetime.date(2024, 5, 6)}),
     (testmodels.TimeDeltaFields, "timedelta", {"timedelta": datetime.timedelta(days=1, seconds=5)}),
@@ -474,17 +481,18 @@ async def test_pk_alias_in_f_and_outer_ref(db):
     ).values_list("event_name", flat=True) == ["Final"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_union_decodes_annotation_through_its_field(db):
     """A union's instances decode an annotation like a plain query's do."""
-    await testmodels.DecimalFields.objects.create(decimal=Decimal("1.5"), decimal_nodec=1)
-    branch = testmodels.DecimalFields.objects.annotate(amount=Coalesce("decimal_null", F("decimal")))
+    await testmodels_postgres.DecimalFields.objects.create(decimal=Decimal("1.5"), decimal_nodec=1)
+    branch = testmodels_postgres.DecimalFields.objects.annotate(amount=Coalesce("decimal_null", F("decimal")))
     union_instances = await branch.union(
-        testmodels.DecimalFields.objects.annotate(amount=Coalesce("decimal_null", F("decimal")))
+        testmodels_postgres.DecimalFields.objects.annotate(amount=Coalesce("decimal_null", F("decimal")))
     )
     assert [union_instance.amount for union_instance in union_instances] == [Decimal("1.5000")]
     assert isinstance(union_instances[0].amount, Decimal)
-    mixed_instances = await branch.union(testmodels.DecimalFields.objects.annotate(amount=F("id")), all=True)
+    mixed_instances = await branch.union(testmodels_postgres.DecimalFields.objects.annotate(amount=F("id")), all=True)
     assert len(mixed_instances) == 2
 
 
@@ -541,6 +549,7 @@ async def test_integer_modulo_of_compound_operand(db):
     assert remainders == [(3, 10)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_computed_numbers_combine_with_any_numeric_column(db):
     await ExpressionTypeRow.objects.create(
@@ -579,4 +588,11 @@ async def test_computed_numbers_combine_with_any_numeric_column(db):
     for duration_sum in (F("td") + Count("id"), F("td") + 1, 1.5 - F("td")):
         with pytest.raises(FieldError, match="Cannot add a number to a duration"):
             await ExpressionTypeRow.objects.annotate(c=duration_sum).values_list("c", flat=True)
+    # A duration divided into a number, a remainder or a power of one - numbers of its microseconds.
+    for refused in (3 / F("td"), F("td") % 2, 2 % F("td"), F("td") ** 2):
+        with pytest.raises(FieldError, match="with a duration here"):
+            await ExpressionTypeRow.objects.annotate(c=refused).values_list("c", flat=True)
+    assert await ExpressionTypeRow.objects.annotate(c=F("td") / 2).values_list("c", flat=True) == [
+        datetime.timedelta(seconds=1)
+    ]
     assert str(values[0]["length_plus_decimal"]) == "4.10"

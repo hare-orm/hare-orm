@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 from hare.exceptions import ValidationError
 from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
+from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 
 if TYPE_CHECKING:
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
 
 TBool = TypeVar("TBool", bool, bool | None)
@@ -29,6 +31,15 @@ class BooleanField(Field[TBool]):
         super().__init__(**kwargs)
 
     native_write_check = NativeWriteCheck.NOTHING
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        # Imported here: the modules import each other.
+        from hare.fields.data.numeric.int_field import IntField
+
+        # An integer other than 0 and 1 would be read as true.
+        if isinstance(old_field, IntField):
+            return EnumValuesLimit(frozenset({0, 1}))
+        return None
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         if value is not None and type(value) is not bool:

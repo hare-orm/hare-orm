@@ -12,12 +12,13 @@ from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOpt
 from hare.dialects.clickhouse.fields import UInt64Field
 from hare.dialects.clickhouse.functions import DictGet
 from hare.dialects.clickhouse.schema_objects import ClickhouseDictionary
-from hare.exceptions import ConfigurationError, QueryError, ValidationError
+from hare.exceptions import ConfigurationError, FieldError, QueryError, ValidationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.drift import detect_drift
 from hare.migrations.operations import (
     AddDictionary,
     AlterDictionary,
+    AlterField,
     AlterModelOptions,
     AlterModelTable,
     CreateModel,
@@ -173,6 +174,15 @@ async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_
         by_rating = DictGet("dict_by_number", "city", "rating", output_field=fields.CharField(max_length=30))
         # A layout keyed by one number takes the key alone, not in a tuple.
         assert await Player.objects.annotate(city=by_rating).values_list("city", flat=True) == ["Paris"]
+        # A key literal was a raw TypeError, one in a list a raw AttributeError.
+        by_literal = DictGet("dict_by_number", "city", 2, output_field=fields.CharField(max_length=30))
+        assert await Player.objects.annotate(city=by_literal).values_list("city", flat=True) == ["Berlin"]
+        by_literals = DictGet(
+            "dict_cities", "city", ["de", Value("ber")], output_field=fields.CharField(max_length=30)
+        )
+        with pytest.raises(FieldError):
+            # A text names a field.
+            await Player.objects.annotate(city=by_literals).values_list("city", flat=True)
 
         replaced = ClickhouseDictionary("dict_cities", key=("code",), attributes=("city", "country"), lifetime=5)
         await run(AlterDictionary("Airport", replaced), state, editor)
@@ -232,6 +242,42 @@ async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
         await run(AlterModelTable("Airport", "dict_airport_renamed"), state, editor)
         await connection.execute_script("SYSTEM RELOAD DICTIONARY dict_follow")
         assert await Player.objects.annotate(city=city).values_list("city", flat=True) == ["Paris"]
+    finally:
+        await run(DeleteModel(name="Airport"), state, editor)
+
+
+@pytest.mark.asyncio
+async def test_a_dictionary_takes_the_new_type_of_a_field_it_reads(clickhouse_db):
+    """A field a dictionary reads changed its column type and the dictionary kept the old one - drift
+    reported the dictionary changed after every migration."""
+    connection = Country._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+    by_code = ClickhouseDictionary("dict_typed", key=("code",), attributes=("city", "passengers"))
+    await run(
+        CreateModel(
+            name="Airport",
+            fields=[
+                ("id", UInt64Field(primary_key=True, generated=False)),
+                ("code", fields.CharField(max_length=3)),
+                ("city", fields.CharField(max_length=30)),
+                ("passengers", fields.IntField()),
+            ],
+            options={"table": "dict_airport", "dictionaries": [by_code]},
+        ),
+        state,
+        editor,
+    )
+    try:
+        await connection.execute_script("INSERT INTO dict_airport VALUES (1, 'cdg', 'Paris', 70)")
+        await run(AlterField("Airport", "city", fields.CharField(max_length=60)), state, editor)
+        await run(AlterField("Airport", "passengers", fields.BigIntField(null=True)), state, editor)
+        (row,) = await connection.execute_dicts("SHOW CREATE DICTIONARY dict_typed")
+        assert "VARCHAR(60)" in row["statement"] and "Nullable(BIGINT)" in row["statement"]
+        await connection.execute_script("SYSTEM RELOAD DICTIONARY dict_typed")
+        await Player.objects.create(id=1, name="cdg", rating=1)
+        passengers = DictGet("dict_typed", "passengers", "name", output_field=fields.BigIntField(null=True))
+        assert await Player.objects.annotate(passengers=passengers).values_list("passengers", flat=True) == [70]
     finally:
         await run(DeleteModel(name="Airport"), state, editor)
 

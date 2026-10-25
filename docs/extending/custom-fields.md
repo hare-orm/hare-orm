@@ -146,6 +146,7 @@ same treatment without any change to hare:
 | `get_like_text_function()` | How the value becomes text for `contains`/`icontains`/`startswith`/... and the pattern lookups; `None` casts it to `VARCHAR`. |
 | `get_generated_from_field_names()` / `with_renamed_generated_from_field(old, new)` | The model's other fields a generated column is computed from, by name — a migration refuses to remove such a field while this one reads it, and a rename renames it here. |
 | `holds_container_value` | `True` for an array, range or JSON-like value — an annotation of such a field takes its own lookups. |
+| `holds_intervals` | `True` for a column of the database's interval type — a duration added to a moment as the database adds it, not as a count of microseconds. |
 
 ```python
 import operator

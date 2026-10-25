@@ -1,7 +1,7 @@
-"""inspectdb on SQLite, which keeps any declared type as written: a DECIMAL without a scale took the
-default scale of 6 past its precision, sizes no field takes (DECIMAL(5, 10), NUMERIC(0), VARCHAR(0))
-failed the whole inspection, a size written with spaces was missed, and a primary key column declared
-without NOT NULL became a nullable key field the generated model couldn't be imported with."""
+"""inspectdb on SQLite, which keeps any declared type as written: sizes no field takes (DECIMAL(5, 10),
+NUMERIC(0), VARCHAR(0)) failed the whole inspection, and a primary key column declared without NOT NULL
+became a nullable key field the generated model couldn't be imported with. A DECIMAL or NUMERIC column
+holds an integer or a REAL on SQLite - a FloatField, whatever its size."""
 
 import pytest
 
@@ -25,11 +25,11 @@ TABLES = {
 @pytest.mark.parametrize(
     ("table", "expected"),
     [
-        ("numeric_of_precision", "v = fields.DecimalField(max_digits=5, decimal_places=0, null=True)"),
-        ("scale_past_precision", "v = fields.DecimalField(max_digits=20, decimal_places=6, null=True)"),
-        ("numeric_of_no_digits", "v = fields.DecimalField(max_digits=20, decimal_places=6, null=True)"),
+        ("numeric_of_precision", "v = fields.FloatField(null=True)"),
+        ("scale_past_precision", "v = fields.FloatField(null=True)"),
+        ("numeric_of_no_digits", "v = fields.FloatField(null=True)"),
         ("text_of_no_length", "v = fields.TextField(null=True)"),
-        ("spaced_size", "v = fields.DecimalField(max_digits=8, decimal_places=3, null=True)"),
+        ("spaced_size", "v = fields.FloatField(null=True)"),
         ("nullable_key", "a = fields.IntField()\n    b = fields.TextField()"),
     ],
 )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from hare.contrib.test.constants import MEMORY_SQLITE
+from hare.contrib.test.constants import MEMORY_DATABASE
 
 #: The pytest ini setting naming the configuration - a dotted path, as ``[tool.hare] hare_orm``.
 HARE_CONFIG_INI = "hare_config"
@@ -10,7 +10,7 @@ HARE_DB_URL_OPTION = "--hare-db-url"
 #: The command line option leasing the test databases from ``ReusableTestDatabases``.
 HARE_REUSE_DB_OPTION = "--hare-reuse-db"
 #: The URL the test databases are made from when nothing names one.
-DEFAULT_TEST_DB_URL = MEMORY_SQLITE
+DEFAULT_TEST_DB_URL = MEMORY_DATABASE
 #: The marker skipping a test unless its connection has the features named.
 HARE_REQUIRES_MARKER = "hare_requires"
 HARE_REQUIRES_MARKER_HELP = (

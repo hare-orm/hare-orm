@@ -247,3 +247,33 @@ async def test_query_vectors_are_checked(vector_db):
         await SqliteVectorEntry.objects.filter(embedding__nearby=([1.0, 0.0, 0.0], "far"))
     with pytest.raises(OperationalError, match="Error reading 2nd vector"):
         await SqliteVectorEntry.objects.annotate(distance=L2Distance(F("embedding"), F("name")))
+
+
+@pytest.mark.asyncio
+async def test_a_vector_length_change_its_stored_vectors_dont_fit_is_refused():
+    """A vector field given another length kept the stored vectors of the old one - the field then read
+    none of them; pgvector refuses such a change, SQLite kept any BLOB."""
+    from hare import fields
+    from hare.migrations.operations import AlterField, CreateModel
+    from tests.dialects.sqlite.test_full_text_migrations import MigrationRunner
+
+    client = AiosqliteClient(file_path=":memory:", connection_alias="vector_length_change")
+    await client.create_connection(with_db=True)
+    try:
+        runner = MigrationRunner(client)
+        await runner.run(
+            CreateModel(
+                name="Embedded",
+                fields=[("id", fields.IntField(primary_key=True)), ("embedding", VectorField(dimensions=3))],
+                options={"table": "vector_embedded"},
+            )
+        )
+        await client.execute(
+            'INSERT INTO "vector_embedded" ("id", "embedding") VALUES (?, ?)', [1, array("f", [1, 2, 3]).tobytes()]
+        )
+        with pytest.raises(OperationalError, match="expected a vector of 4 dimension"):
+            await runner.run(AlterField("Embedded", "embedding", VectorField(dimensions=4)))
+        await client.execute('DELETE FROM "vector_embedded"')
+        await runner.run(AlterField("Embedded", "embedding", VectorField(dimensions=4)))
+    finally:
+        await client.close()

@@ -113,9 +113,9 @@ CLICKHOUSE_JSON_INTEGER_RANGE = (-(2**63), 2**64 - 1)
 #: its integers as floats.
 CLICKHOUSE_JSON_EXACT_FLOAT_INTEGER = 2**53
 #: What a JSON text holds where its value may be one a ``JSON`` column doesn't keep - a null, an empty
-#: object, an integer of 16 digits or more (past 2**53, its digits read as zeros); a text without any
-#: is kept as it is.
-CLICKHOUSE_JSON_NOT_KEPT_MARKS = ("null", "{}")
+#: object, a boolean, an integer of 16 digits or more (past 2**53, its digits read as zeros); a text
+#: without any is kept as it is.
+CLICKHOUSE_JSON_NOT_KEPT_MARKS = ("null", "{}", "true", "false")
 CLICKHOUSE_JSON_DIGITS_AS_ZEROS = str.maketrans("123456789", "000000000")
 CLICKHOUSE_JSON_LONG_INTEGER_MARK = "0" * 16
 

@@ -42,3 +42,13 @@ class Visa(Model):
 class Trip(Model):
     id = fields.IntField(primary_key=True)
     passports = fields.ManyToManyField("models.Passport", related_name="trips")
+
+
+class Guide(Model):
+    id = fields.IntField(primary_key=True)
+    name = fields.CharField(max_length=50, default="")
+
+
+class Tour(Model):
+    id = fields.IntField(primary_key=True)
+    guide = fields.ForeignKeyField("models.Guide", related_name="tours")

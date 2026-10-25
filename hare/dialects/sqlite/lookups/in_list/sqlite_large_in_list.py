@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from hare.dialects.base.features import Features
 from hare.dialects.base.parameters.large_in_list import LargeInList
 from hare.dialects.sqlite.lookups.in_list.json_array_row_values import JsonArrayRowValues
 from hare.dialects.sqlite.lookups.in_list.json_array_values import JsonArrayValues
 from hare.dialects.sqlite.parameters.constants import SQLITE_IN_JSON_ARRAY_THRESHOLD
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
+
+if TYPE_CHECKING:
+    from hare.dialects.sqlite.declarations import SqliteFeatures
 
 
 class SqliteLargeInList(LargeInList):
@@ -22,14 +24,15 @@ class SqliteLargeInList(LargeInList):
     """
 
     @staticmethod
-    def get_sqlite_client_features() -> Features:
+    def get_sqlite_client_features() -> SqliteFeatures:
         """The features of the SQLite driver of ``sqlite+aiosqlite://`` - its library is the server of every
         connection it opens, so whether it has ``unhex()`` is the same for each."""
         # Local imports: the registry and the dialect's constants import the dialect, which imports this.
         from hare.dialects.dialect_registry import DialectRegistry
         from hare.dialects.sqlite.constants import SQLITE_AIOSQLITE_DRIVER_NAME
 
-        return DialectRegistry.get_driver(SQLITE_AIOSQLITE_DRIVER_NAME).get_client_classes()[0].features
+        client_class = DialectRegistry.get_driver(SQLITE_AIOSQLITE_DRIVER_NAME).get_client_classes()[0]
+        return cast("SqliteFeatures", client_class.features)
 
     @classmethod
     def get_container(cls, non_null_values: list[Any]) -> JsonArrayValues | None:

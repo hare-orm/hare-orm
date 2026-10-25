@@ -297,14 +297,15 @@ async def test_a_text_field_with_rows_becomes_an_encrypted_field_with_a_blind_in
         FieldEncryption.reset()
 
 
+DECIMAL_FIELDS = pytest.mark.decimal_fields
 TEXT_TO_NUMBER_CHANGES = [
     ("fields.IntField()", "99999999999", False),
     ("fields.IntField()", "-42", True),
     ("fields.SmallIntField()", "40000", False),
     ("fields.BigIntField()", "9223372036854775808", False),
-    ("fields.DecimalField(max_digits=5, decimal_places=2)", "123456.78", False),
-    ("fields.DecimalField(max_digits=5, decimal_places=2)", "1.234", False),
-    ("fields.DecimalField(max_digits=5, decimal_places=2)", "-999.99", True),
+    pytest.param("fields.DecimalField(max_digits=5, decimal_places=2)", "123456.78", False, marks=DECIMAL_FIELDS),
+    pytest.param("fields.DecimalField(max_digits=5, decimal_places=2)", "1.234", False, marks=DECIMAL_FIELDS),
+    pytest.param("fields.DecimalField(max_digits=5, decimal_places=2)", "-999.99", True, marks=DECIMAL_FIELDS),
     # PostgreSQL and ClickHouse read it as NaN; SQLite keeps the text, no number.
     ("fields.FloatField()", "nan", None),
     ("fields.FloatField()", "2.5e3", True),

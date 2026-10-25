@@ -1,5 +1,6 @@
 """OperationSorter: operations run after what they need, keep their order otherwise, and a cycle among
-created models is broken by taking a relation out into an AddField - a many-to-many one first."""
+created models is broken by taking a relation out into an AddField - a many-to-many one first - and one among
+deleted models by taking a relation out into a RemoveField before its model's deletion."""
 
 from __future__ import annotations
 
@@ -86,6 +87,31 @@ def test_a_cycle_is_broken_by_a_many_to_many_relation_before_a_foreign_key():
         operation for operation in operations if isinstance(operation, CreateModel) and operation.name == "Alink"
     )
     assert [name for name, _field in created.fields] == ["id", "zebra", "tag"]
+
+
+def test_a_model_deleted_with_the_through_model_of_its_relation_loses_the_relation_first():
+    """The through model's deletion waited for the relation going through it, removed only with its model,
+    which waited for the through model's foreign key to it - a cycle, and makemigrations refused the change."""
+    zebra = make_model("Zebra", tags=fields.ManyToManyField("shop.Tag", related_name="zebras", through="shop.Alink"))
+    alink = make_model(
+        "Alink",
+        zebra=fields.ForeignKeyField("shop.Zebra", related_name="links"),
+        tag=fields.ForeignKeyField("shop.Tag", related_name="links"),
+    )
+    tag = make_model("Tag")
+
+    operations = OperationGenerator(build_state(zebra, alink, tag), build_state(make_model("Tag"))).generate()
+
+    assert describe(operations) == ["Remove field tags from Zebra", "Delete model Alink", "Delete model Zebra"]
+
+
+def test_models_deleted_together_pointing_at_each_other_lose_a_foreign_key_first():
+    author = make_model("Author", favorite=fields.ForeignKeyField("shop.Book", related_name="fans", null=True))
+    book = make_model("Book", author=fields.ForeignKeyField("shop.Author", related_name="books"))
+
+    operations = OperationGenerator(build_state(author, book), State()).generate()
+
+    assert describe(operations) == ["Remove field favorite from Author", "Delete model Book", "Delete model Author"]
 
 
 def test_a_cycle_no_relation_breaks_is_refused():

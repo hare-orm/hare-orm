@@ -95,7 +95,9 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
-            await connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+            await AsyncpgClient.run_ending_connection_on_cancel(
+                connection, connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+            )
 
     async def _driver_stream_batches(
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0

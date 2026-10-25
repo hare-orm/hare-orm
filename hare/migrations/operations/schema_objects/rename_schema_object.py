@@ -85,6 +85,11 @@ class RenameSchemaObject(ModelBoundOperation):
         )
         state.mark_models_changed([(app_label, self.model_name)])
 
+    def raise_if_unsupported(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> None:
+        self.object_type.raise_if_unsupported(schema_editor)
+
     async def database_forward(
         self,
         app_label: str,
@@ -109,7 +114,7 @@ class RenameSchemaObject(ModelBoundOperation):
         if not state_editor:
             return
         # Going back, old_state is the renamed state and new_state the one before the rename - the
-        # model it goes back to: SQLite renames a constraint by rebuilding the table from it.
+        # model it goes back to: a database without ALTER of constraints renames one by rebuilding the table from it.
         model = self._model(new_state, app_label)
         await self.object_type.rename(
             state_editor, model, self.find_new(old_state, app_label), self.find_old(new_state, app_label)

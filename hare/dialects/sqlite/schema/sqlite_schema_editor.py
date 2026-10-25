@@ -56,6 +56,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
     column_type_changes: SqliteColumnTypeChanges
     column_backfill_class = SqliteColumnBackfill
     column_conversion_check_class = SqliteColumnConversionCheck
+    column_conversion_check: SqliteColumnConversionCheck
     column_narrowing_check_class = SqliteColumnNarrowingCheck
     table_rebuild_class = SqliteTableRebuild
     table_comments_class = SqliteTableComments
@@ -96,6 +97,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         if self.collect_sql:
             await super().run_sql(sql)
             return
+        self.run_statement_count += 1
         if self.atomic_migration or self.client.is_transaction_client:
             for statement in SqliteClient.split_script(sql):
                 await self.client.execute(statement)
@@ -374,8 +376,7 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         """
         meta = model._meta
         if (
-            not self.client.features.supports_drop_column
-            or isinstance(field, ForeignKeyFieldInstance)
+            isinstance(field, ForeignKeyFieldInstance)
             or field.pk
             or field.unique
             or field.index
@@ -420,6 +421,12 @@ class SqliteSchemaEditor(BaseSchemaEditor):
         new_field = new_model._meta.fields_map[field_name]
         if self.column_type_changes.keeps_table(old_field, new_field, self.client.dialect):
             # The table stays as it is - only the column's own index and its stored values may change.
+            if not self.collect_sql:
+                await self.column_conversion_check.check_kept_values(
+                    self.qualify_table_name(new_model._meta.db_table, new_model._meta.schema),
+                    new_field,
+                    self.quote(self.table_rebuild.get_remake_column_name(new_field)),
+                )
             old_indexed = old_field.index and not old_field.pk
             new_indexed = new_field.index and not new_field.pk
             if old_indexed != new_indexed:

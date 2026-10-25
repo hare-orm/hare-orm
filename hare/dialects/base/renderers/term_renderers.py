@@ -10,7 +10,7 @@ from hare.core.registries import Registries
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
-    from hare.sql.enums import Order
+    from hare.sql.order import Order
     from hare.sql.sql_context import SqlContext
     from hare.sql.terms.functions.analytic_function import AnalyticFunction
     from hare.sql.terms.term import Term
@@ -159,8 +159,8 @@ class TermRenderers:
             return json_text
         return Cast(ValueWrapper(json_text), column_type)
 
-    def get_integer_aggregate_as_float(self, term: Term) -> Term:
-        """The average or a statistic of integers as a float - the term itself by default.
+    def get_statistic_as_float(self, term: Term) -> Term:
+        """An average or a statistic the database computes as a float - the term itself by default.
 
         Args:
             term: The aggregate.
@@ -197,48 +197,11 @@ class TermRenderers:
 
         return Tuple(*terms)
 
-    def get_decimal_compared_term(self, term: Term, *, only_decimals: bool) -> Term:
-        """What an annotation compared with Decimal values is compared as - an aggregate or
-        expression result carries no column type or collation of its own.
-
-        Args:
-            term: The annotation's term.
-            only_decimals: Whether every compared value is a Decimal.
-
-        Returns:
-            The term itself by default - a decimal is a number to the database.
-        """
-        return term
-
-    def get_decimal_value_term(self, term: Any) -> Any:
-        """A Decimal literal, or a DecimalField column, where it meets other numbers - a CASE or
-        COALESCE result.
-
-        Args:
-            term: A resolved term, or a raw Python value not wrapped into a term yet.
-
-        Returns:
-            The term itself by default.
-        """
-        return term
-
     def get_result_branch_term(self, term: Term, output_field: Field[Any] | None) -> Term:
         """A branch of a CASE or a COALESCE as the type of the whole result needs it.
 
         Args:
             term: The branch's term.
-            output_field: The field the result is decoded through, None when unknown.
-
-        Returns:
-            The term itself by default.
-        """
-        return term
-
-    def get_result_term(self, term: Term, output_field: Field[Any] | None) -> Term:
-        """A whole CASE or COALESCE as the type of its result needs it.
-
-        Args:
-            term: The CASE or COALESCE.
             output_field: The field the result is decoded through, None when unknown.
 
         Returns:
@@ -301,43 +264,14 @@ class TermRenderers:
         """
         return term_sql if order is None else f"{term_sql} {self.get_order_sql(order)}"
 
-    def get_value_range_ordering_term(self, term: Term) -> Term:
-        """What a window orders by for a term when its frame is a ``RANGE`` with an edge a number of
-        values away from the current row's.
-
-        Args:
-            term: The ordered term.
-
-        Returns:
-            The term itself by default - for a database adding the offset to the term's value.
-        """
-        return term
-
-    def get_ordering_term(self, term: Term, sql_context: SqlContext) -> Term:
-        """What ``ORDER BY`` sorts by for a term.
-
-        Args:
-            term: The ordered term.
-            sql_context: The context the clause renders in.
-
-        Returns:
-            The term itself by default.
-        """
-        return term
-
-    def get_assigned_decimal_term(
-        self, term: Term, max_digits: int, decimal_places: int, value_scale: int | None
-    ) -> Term:
-        """What an UPDATE sets a decimal column to for an expression.
+    def get_assigned_integer_term(self, term: Term) -> Term:
+        """What an UPDATE sets an integer column to for an expression of a fraction.
 
         Args:
             term: The expression.
-            max_digits: The column's ``max_digits``.
-            decimal_places: The column's ``decimal_places``.
-            value_scale: The places of a Decimal expression's result; None for any other one.
 
         Returns:
-            The term itself by default - the column type rounds it to its scale.
+            The term itself by default - the column type converts it.
         """
         return term
 
@@ -366,107 +300,38 @@ class TermRenderers:
         """
         return term
 
-    def get_widened_integer_sum_argument(self, term: Term) -> Term:
-        """The integer argument of a ``SUM`` or ``AVG`` - summed exactly, into a type wider than the
-        integers.
+    def get_same_type_math_result(self, term: Term, field: Field[Any] | None) -> Term:
+        """The result of a math function of the argument's type (``Abs``, ``Ceil``, ``Floor``).
 
         Args:
-            term: The argument.
+            term: The function's term.
+            field: The argument's field, if it has one.
 
         Returns:
-            The term itself by default - for a database summing integers exactly, or refusing an
-            overflow.
+            The term itself by default.
         """
         return term
 
-    def get_exact_integer_operand(self, term: Term, may_be_null: bool) -> Term:
-        """An operand of an integer sum, difference or product a query reads - widened where the
-        database's arithmetic wraps around, so that the range check of the result
-        (``get_checked_integer_result()``) sees the exact result.
-
-        Args:
-            term: The operand.
-            may_be_null: Whether the operand can be NULL.
-
-        Returns:
-            The term itself by default - for a database refusing an overflow itself, or keeping
-            the exact result.
-        """
-        return term
-
-    def get_checked_integer_result(self, term: Term, minimum: int, maximum: int, type_name: str) -> Term:
-        """An integer result of arithmetic read, refused out of the range given - past 64 bits, which
-        a database turns into a float or wraps around.
-
-        Args:
-            term: The result, of exact operands (``get_exact_integer_operand()``).
-            minimum: The smallest value of the type.
-            maximum: The largest value of the type.
-            type_name: The type, for the message.
-
-        Returns:
-            The term itself by default - for a database refusing an overflow itself.
-        """
-        return term
-
-    def get_decimal_operation_term(
-        self, operator_name: str, left: Term, right: Term, scales: list[int | None]
-    ) -> Term | None:
-        """A sum, difference, product or quotient of Decimals the dialect works out itself.
-
-        Args:
-            operator_name: The arithmetic operator's name - ``add``, ``sub``, ``mul`` or ``truediv``.
-            left: The left operand.
-            right: The right operand, a divisor checked already.
-            scales: Each operand's scale - 0 of an integer, None where unknown.
-
-        Returns:
-            None by default - the database's own arithmetic, exact for its decimals.
-        """
-        return None
-
-    def get_decimal_aggregate_argument(self, term: Term, scale: int) -> Term:
-        """The Decimal values a ``SUM`` or an ``AVG`` adds up.
-
-        Args:
-            term: The values.
-            scale: Their scale.
-
-        Returns:
-            The term itself by default - for a database adding up its decimals exactly.
-        """
-        return term
-
-    def get_decimal_aggregate_name(self, function_name: str) -> str | None:
-        """The aggregate summing or averaging Decimals in place of the database's own.
-
-        Args:
-            function_name: The SQL aggregate's name - ``SUM`` or ``AVG``.
-
-        Returns:
-            None by default - the database's own aggregate, exact for its decimals.
-        """
-        return None
-
-    def get_float_operand(self, term: Term) -> Term:
+    def get_float_operand(self, term: Term, field: Field[Any] | None) -> Term:
         """The integer operand of an arithmetic with a float.
 
         Args:
             term: The integer operand.
+            field: Its field, if it has one.
 
         Returns:
             The term itself by default.
         """
         return term
 
-    def get_decimal_dividend(self, term: Term) -> Term:
-        """The dividend of a division of Decimals.
+    def get_scaled_duration(self, term: Term) -> Term:
+        """The microseconds of a duration multiplied or divided by a number.
 
         Args:
-            term: The dividend.
+            term: The arithmetic.
 
         Returns:
-            The term itself by default.
+            The term itself by default - the database's number, read as a duration's microseconds.
         """
         return term
 
@@ -485,10 +350,12 @@ class TermRenderers:
         from hare.sql.terms.case.case import Case
         from hare.sql.terms.functions.function import Function
         from hare.sql.terms.functions.mod import Mod
+        from hare.sql.terms.term import Term
 
         # The dividend less its remainder divides exactly - an aggregate of integers may be a decimal.
+        # Term's own subtraction - a dividend term (RawSQL, Subquery) overrides the operators.
         signed_remainder = Mod(dividend, divisor, integer=True)
-        quotient = (dividend - signed_remainder) / divisor
+        quotient = Term.__sub__(dividend, signed_remainder) / divisor
         remainder = Function("ABS", signed_remainder)
         rest = Function("ABS", divisor) - remainder
         rounds_away = (remainder > rest) | ((remainder == rest) & (Mod(quotient, 2, integer=True) != 0))

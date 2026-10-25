@@ -11,6 +11,60 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_a_model_pointing_at_an_unmanaged_one_is_created_after_what_that_one_points_at(
+    project_factory,
+) -> None:
+    """Order pointed at an unmanaged model pointing at Shelf - no operation creates the unmanaged one, so
+    Order was created first and rendering it failed on the missing Shelf."""
+    project = await project_factory()
+    project.write_models("""
+    class Order(Model):
+        id = fields.IntField(primary_key=True)
+        item = fields.ForeignKeyField("app.Item", related_name="orders", null=True, db_constraint=False)
+    class Item(Model):
+        id = fields.IntField(primary_key=True)
+        shelf = fields.ForeignKeyField("app.Shelf", related_name="items", null=True, db_constraint=False)
+        class Meta:
+            managed = False
+    class Shelf(Model):
+        id = fields.IntField(primary_key=True)
+    """)
+    await project.cli_ok("makemigrations")
+    migration = project.read_latest_migration()
+    assert migration.index('name="Shelf"') < migration.index('name="Order"')
+    await project.query("CREATE TABLE item (id INTEGER PRIMARY KEY, shelf_id INTEGER)")
+    await project.cli_ok("migrate")
+    await project.cli_ok("sqlmigrate", "app", project.migration_files()[0])
+    await project.assert_in_sync()
+
+
+@pytest.mark.asyncio
+async def test_an_unmanaged_model_s_many_to_many_relation_is_known(project_factory) -> None:
+    """A model pointing at an unmanaged one with a many-to-many relation was created before the relation's
+    target, and drift took the relation's through table for an untracked one."""
+    project = await project_factory()
+    project.write_models("""
+    class Order(Model):
+        id = fields.IntField(primary_key=True)
+        item = fields.ForeignKeyField("app.Item", related_name="orders", null=True, db_constraint=False)
+    class Item(Model):
+        id = fields.IntField(primary_key=True)
+        tags = fields.ManyToManyField("app.Tag", related_name="items", db_constraint=False)
+        class Meta:
+            managed = False
+    class Tag(Model):
+        id = fields.IntField(primary_key=True)
+    """)
+    await project.cli_ok("makemigrations")
+    migration = project.read_latest_migration()
+    assert migration.index('name="Tag"') < migration.index('name="Order"')
+    await project.query("CREATE TABLE item (id INTEGER PRIMARY KEY)")
+    await project.query("CREATE TABLE item_tag (item_id INTEGER NOT NULL, tag_id INTEGER NOT NULL)")
+    await project.cli_ok("migrate")
+    await project.assert_in_sync()
+
+
+@pytest.mark.asyncio
 async def test_switching_managed_off_and_on_never_touches_the_table(project_factory) -> None:
     project = await project_factory()
     managed = """
@@ -173,6 +227,33 @@ async def test_a_view_of_a_queryset_is_made_without_a_connection(project_factory
     await project.query("INSERT INTO invoice (id, paid, amount) VALUES (1, true, 5), (2, false, 6)")
     assert await project.query("SELECT id, amount FROM paid_invoices") == [{"id": 1, "amount": 5}]
     await project.cli_ok("migrate", "app", "zero")
+
+
+@pytest.mark.asyncio
+async def test_a_view_of_an_unmanaged_model_needs_no_connection(project_factory) -> None:
+    """A many-to-many relation to an unmanaged model declaring a view of a queryset copied the model into the
+    migrations' state with the view, whose query sqlmigrate couldn't build without the connections."""
+    project = await project_factory()
+    if not project.is_postgres:
+        pytest.skip("views exist on PostgreSQL and ClickHouse")
+    project.write_models("""
+    from hare.ddl import View
+    from hare.query.queryset import ModelQuery
+
+    class Tag(Model):
+        id = fields.IntField(primary_key=True, generated=False)
+        name = fields.CharField(max_length=20)
+
+        class Meta:
+            managed = False
+            views = [View("tag_names", query=ModelQuery().values("id", "name"))]
+
+    class Note(Model):
+        id = fields.IntField(primary_key=True, generated=False)
+        tags = fields.ManyToManyField("app.Tag", related_name="notes", db_constraint=False)
+    """)
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("sqlmigrate", "app", project.migration_files()[0])
 
 
 @pytest.mark.asyncio

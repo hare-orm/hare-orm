@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from hare.exceptions import ValidationError
+from hare.fields.data.constants import EXTENT_VALUE_TYPE
 from hare.fields.field import Field
 from hare.gis.constants import EXTENT_BOX_PATTERN
 from hare.gis.geometries.geometry import Geometry
@@ -11,6 +12,8 @@ from hare.gis.geometries.geometry import Geometry
 class ExtentField(Field[tuple[float, float, float, float]]):
     """The result of ``Extent`` - the bounding box of a group's geometries as ``(xmin, ymin, xmax,
     ymax)``, read from the ``BOX(xmin ymin,xmax ymax)`` text or from the box's polygon."""
+
+    argument_value_type = EXTENT_VALUE_TYPE
 
     field_type = tuple
 

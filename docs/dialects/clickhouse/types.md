@@ -34,12 +34,11 @@ trees.
 
 A nullable field's column is `Nullable(...)` — a leaf's alone: an array, a map and a tuple are never
 `Nullable` (see [Containers](#containers)). An integer column wraps around on overflow, so hare checks
-the ranges of integer and decimal values itself before writing; an unsigned 64-bit value above 2⁶³ and
-the 128- and 256-bit integers are Python `int`. ClickHouse's integer arithmetic wraps around too: a
-value an `update()` writes (`update(total=F("total") + 1)`) is converted by ClickHouse into the column's
-type, wrapping around past its range (`2147483647 + 1` stored as `-2147483648` in an `Int32`) — see
-[Integer arithmetic](differences.md#results). In a query that reads the result (`annotate(next=F("total") + 1)`) a result past the
-type's range raises `OperationalError` (`integer out of range`), as on the other databases. A remainder of
+the ranges of the integer and decimal values it writes itself; an unsigned 64-bit value above 2⁶³ and
+the 128- and 256-bit integers are Python `int`. ClickHouse's integer arithmetic is its own: a result
+past its type's range wraps around, in a query that reads it (`annotate(next=F("total") + 1)`) and in
+a value an `update()` writes (`update(total=F("total") + 1)` stores `2147483647 + 1` as `-2147483648`
+in an `Int32`) — see [Integer arithmetic](differences.md#results). A remainder of
 integers (`F("count") % -2`)
 is ClickHouse's own `modulo()`, and so is a division or a remainder by zero (`inf`, `nan` or the server's
 error for integers); hare checks neither.
@@ -48,7 +47,8 @@ ClickHouse reads a number literal as the narrowest type holding it, and an unsig
 with a negative one. So hare writes an integer beyond `Int64` through a wide type
 (`toInt128('18446744073709551615')`), the values of the rows of a `bulk_update()` and of a `VALUES` list
 as their column's type, and a literal branch of a `Case` (or `Coalesce`) of an integer result as that
-type (`accurateCast`, refusing a value it doesn't hold). A UUID literal is read as a `UUID` (`toUUID`),
+type (`accurateCast`; a literal the type doesn't hold stays as it is, read as a type holding it). A UUID
+literal is read as a `UUID` (`toUUID`),
 and a dict branch of a `Case` of a map result as that map — a `Case` mixing literals and a column of the
 type works as on PostgreSQL.
 
@@ -189,7 +189,7 @@ clockwise — so a polygon given the other way round reads back with its rings r
 
 | `hare.gis` | ClickHouse |
 |---|---|
-| A point in an area (`__intersects`, `__within`, `__contains`, `__covers`, `__covered_by`, `__disjoint`) | `pointInPolygon` — a point on the border counts as in the area |
+| A point in an area (`__intersects`, `__within`, `__contains`, `__covers`, `__covered_by`, `__disjoint`) | `pointInPolygon` — a point on the border counts as in the area on some of its sides only (the left and the bottom of a square, not the right and the top): test a point near a border by distance |
 | Relations of two areas | `polygonsIntersect*`, `polygonsWithin*`, `polygonsEquals*` |
 | `__intersects`, `__equals`, `__disjoint` of two points | the coordinates compared — a point meets only the same point |
 | A relation or a `Distance` of a line | `UnSupportedError` — ClickHouse has no test of it |

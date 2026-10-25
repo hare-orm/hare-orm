@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.dialects.base.clauses.enums import RowLockStrength
 from hare.fields.relations.fields.relational_field import RelationalField
@@ -48,7 +49,19 @@ class Prefetcher:
         Returns:
             ``(to_attribute, queryset)`` of each prefetch, by relation name.
         """
-        prefetch_queries = {field_name: list(entries) for field_name, entries in prefetch.prefetch_queries.items()}
+        # A Prefetch queryset with no connection of its own gets the parent's offer, as a plain relation does.
+        prefetch_queries = {
+            field_name: [
+                (
+                    to_attribute,
+                    query
+                    if query._connection_explicitly_chosen
+                    else self._with_parent_connection(query._clone(), prefetch),
+                )
+                for to_attribute, query in entries
+            ]
+            for field_name, entries in prefetch.prefetch_queries.items()
+        }
         for field_name, forwarded_prefetches in prefetch.prefetch_map.items():
             entries = prefetch_queries.setdefault(field_name, [])
             # The plain relation's own Prefetch(field_name, queryset) takes the nested lookups;
@@ -66,21 +79,9 @@ class Prefetcher:
             # A queryset whose connection isn't chosen yet - it picks its own when it runs, the
             # fallback below included. It gets the parent query's visibility and tenant: the related
             # rows are scoped to the tenant the parent query was built under.
-            related_query = RowScopes.get_queryset(related_model, visibility=prefetch.visibility)
-            # The connection the parent pinned with .using() is offered to the prefetch query -
-            # taken after the router, before the related model's default connection.
-            if prefetch.db_explicitly_chosen:
-                related_query._router_fallback_connection = self.connection
-                # The prefetch query is marked as pinned too, so a nested prefetch gets the same
-                # offer.
-                related_query._connection_explicitly_chosen = True
-            elif (
-                related_model._meta.default_connection == self.model._meta.default_connection
-                and not InstanceConnections.is_routed(self.model)
-            ):
-                # The related rows live where the parent rows were read from - looked up by alias
-                # at execution time, after the router and before the default connection.
-                related_query._instance_connection_alias = self.connection.connection_alias
+            related_query = self._with_parent_connection(
+                RowScopes.get_queryset(related_model, visibility=prefetch.visibility), prefetch
+            )
             # The parent's select_for_update() locks the prefetched rows too. `of=` names the parent
             # query's tables and isn't passed on.
             if prefetch.select_for_update:
@@ -96,6 +97,33 @@ class Prefetcher:
             # Appended - the relation may also have Prefetch(..., to_attribute=...) entries of its own.
             entries.append((None, related_query))
         return prefetch_queries
+
+    def _with_parent_connection(self, related_query: QuerySet[Any], prefetch: PrefetchRequest) -> QuerySet[Any]:
+        """Offers the parent query's connection to a prefetch query that hasn't chosen one.
+
+        Args:
+            related_query: The prefetch query - changed in place.
+            prefetch: The request.
+
+        Returns:
+            ``related_query``.
+        """
+        # A related model of another default connection (a cross-database relation) keeps its own
+        # connection choice - the parent's is no database of its rows.
+        if related_query.model._meta.default_connection != self.model._meta.default_connection:
+            return related_query
+        # The connection the parent pinned with .using() is offered to the prefetch query -
+        # taken after the router, before the related model's default connection.
+        if prefetch.db_explicitly_chosen:
+            related_query._router_fallback_connection = self.connection
+            # The prefetch query is marked as pinned too, so a nested prefetch gets the same
+            # offer.
+            related_query._connection_explicitly_chosen = True
+        elif not InstanceConnections.is_routed(self.model):
+            # The related rows live where the parent rows were read from - looked up by alias
+            # at execution time, after the router and before the default connection.
+            related_query._instance_connection_alias = self.connection.connection_alias
+        return related_query
 
     @staticmethod
     def _without_lazy_select_defaults(related_queryset: QuerySet[Any]) -> QuerySet[Any]:
@@ -160,11 +188,23 @@ class Prefetcher:
             The objects.
         """
         if objs and (prefetch.prefetch_map or prefetch.prefetch_queries):
+            loaded_fields = self.get_loaded_relation_names(objs, prefetch)
+            fetched_prefetch = replace(
+                prefetch,
+                prefetch_map={
+                    field: forwarded
+                    for field, forwarded in prefetch.prefetch_map.items()
+                    if field not in loaded_fields
+                },
+            )
             prefetch_calls = [
                 self._do_prefetch(objs, field, related_query)
-                for field, related_queries in self._make_prefetch_queries(prefetch).items()
+                for field, related_queries in self._make_prefetch_queries(fetched_prefetch).items()
                 for related_query in related_queries
             ]
+            prefetch_calls.extend(
+                self.prefetch_through_loaded_relation(objs, field, prefetch) for field in loaded_fields
+            )
             if len(prefetch_calls) == 1:
                 # One prefetch - run as it is, no task made for it.
                 await prefetch_calls[0]
@@ -172,6 +212,55 @@ class Prefetcher:
                 await asyncio.gather(*prefetch_calls)
 
         return objs
+
+    def get_loaded_relation_names(self, objs: Iterable[Model], prefetch: PrefetchRequest) -> list[str]:
+        """The forward relations a prefetch goes through that every obj has loaded already - by
+        ``select_related()``, or with no related row to load - and no ``Prefetch()`` of its own reads.
+
+        Args:
+            objs: The objects.
+            prefetch: The request.
+
+        Returns:
+            The relations' names.
+        """
+        meta = self.model._meta
+        forward_relation_names = meta.foreign_key_fields | meta.one_to_one_fields
+        loaded_names = []
+        for field_name, forwarded in prefetch.prefetch_map.items():
+            if not forwarded or field_name not in forward_relation_names or field_name in prefetch.prefetch_queries:
+                continue
+            source_fields = cast("RelationalField[Any]", meta.fields_map[field_name]).source_fields
+            if all(
+                f"_{field_name}" in vars(obj) or all(getattr(obj, name) is None for name in source_fields)
+                for obj in objs
+            ):
+                loaded_names.append(field_name)
+        return loaded_names
+
+    async def prefetch_through_loaded_relation(
+        self, objs: Iterable[Model], field: str, prefetch: PrefetchRequest
+    ) -> None:
+        """Runs the prefetches nested in a loaded forward relation on its loaded objects - the
+        relation itself isn't read again, which would replace them.
+
+        Args:
+            objs: The objects.
+            field: The relation's name.
+            prefetch: The request.
+        """
+        related_objs = list(
+            {id(related): related for obj in objs if (related := vars(obj).get(f"_{field}")) is not None}.values()
+        )
+        if not related_objs:
+            return
+        related_model = cast("RelationalField[Any]", self.model._meta.fields_map[field]).related_model
+        prefetch_map: dict[str, set[str | Prefetch]] = {}
+        prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]] = {}
+        Prefetch.add_lookups(related_model, prefetch_map, prefetch_queries, prefetch.prefetch_map[field])
+        await Prefetcher(related_model, self.connection).prefetch(
+            related_objs, replace(prefetch, prefetch_map=prefetch_map, prefetch_queries=prefetch_queries)
+        )
 
     async def load(
         self, objs: Iterable[Model], *args: str | Prefetch, db_explicitly_chosen: bool = False

@@ -15,7 +15,7 @@ from hare.fields.database_default import DatabaseDefault
 from hare.models import Model
 from hare.query.expressions import F
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from tests.shared_models import testmodels
+from tests.shared_models import testmodels, testmodels_postgres
 
 pytestmark = pytest.mark.skipif(HydrateAccelerator.module is None, reason="rust.native isn't built")
 
@@ -79,6 +79,7 @@ async def test_every_test_model_without_arguments(db):
             assert_same(model, {})
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_plain_values(db):
     moment = datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.UTC)
@@ -97,8 +98,8 @@ async def test_plain_values(db):
         (testmodels.IntFields, {"missing": 1}),
         (testmodels.CharFields, {"char": "plain", "char_null": None}),
         (testmodels.CharFields, {"char": 123}),
-        (testmodels.DecimalFields, {"decimal": Decimal("1.23456"), "decimal_nodec": 7}),
-        (testmodels.DecimalFields, {"decimal": "bad", "decimal_nodec": 7}),
+        (testmodels_postgres.DecimalFields, {"decimal": Decimal("1.23456"), "decimal_nodec": 7}),
+        (testmodels_postgres.DecimalFields, {"decimal": "bad", "decimal_nodec": 7}),
         (testmodels.DatetimeFields, {"datetime": moment}),
         (testmodels.DatetimeFields, {"datetime": moment.replace(tzinfo=None), "datetime_null": None}),
         (testmodels.DatetimeFields, {"datetime": "2024-03-01T12:30:00+02:00"}),

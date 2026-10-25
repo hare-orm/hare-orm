@@ -125,6 +125,12 @@ class GeneratedField(Field[Any]):
                 f"GeneratedField {self.model_field_name!r} has stored=False, but the {dialect} dialect "
                 "only supports STORED generated columns."
             )
+        if self.model_field_name in self.get_generated_from_field_names():
+            # A column computed from itself - a database refuses its table, or every row written.
+            raise ConfigurationError(
+                f"GeneratedField {self.model_field_name!r} reads itself - a column can't be computed from its "
+                "own value."
+            )
         expression = self._expression_for_dialect(dialect)
         schema_editor_class = dialect.schema_editor_class
         template = (

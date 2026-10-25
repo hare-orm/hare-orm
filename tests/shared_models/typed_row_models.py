@@ -1,5 +1,6 @@
 from hare import fields
 from hare.models import Model
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class TypedRow(Model):
@@ -9,7 +10,8 @@ class TypedRow(Model):
     number = fields.IntField(null=True)
     big_number = fields.BigIntField(null=True)
     ratio = fields.FloatField(null=True)
-    amount = fields.DecimalField(max_digits=10, decimal_places=2, null=True)
+    if DatabaseUnderTest.holds_decimal_fields():
+        amount = fields.DecimalField(max_digits=10, decimal_places=2, null=True)
     name = fields.CharField(max_length=40, null=True)
     body = fields.TextField(null=True)
     flag = fields.BooleanField(null=True)

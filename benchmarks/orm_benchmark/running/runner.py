@@ -197,7 +197,7 @@ class Runner:
             "size": size,
             "runs": runs,
             "environment": first_run["environment"],
-            "hare_commit": cls.get_hare_commit(),
+            "hare_release": cls.get_version("hare-orm"),
             "databases": {},
         }
         for target in targets:
@@ -222,13 +222,3 @@ class Runner:
                 "scenarios": scenarios,
             }
         return report
-
-    @staticmethod
-    def get_hare_commit() -> str | None:
-        """The commit of the hare-orm checkout measured, None outside a git checkout."""
-        try:
-            return subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"], cwd=REPOSITORY, capture_output=True, text=True, check=True
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None

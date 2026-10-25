@@ -8,7 +8,7 @@ from functools import partial, wraps
 from typing import Any, ParamSpec, TypeVar, cast
 
 from hare import Hare
-from hare.contrib.test.constants import MEMORY_SQLITE
+from hare.contrib.test.constants import MEMORY_DATABASE
 from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
@@ -23,17 +23,17 @@ ModulesConfigType = str | list[str]
 
 
 @typing.overload
-def init_memory_sqlite(models: ModulesConfigType | None = None) -> AsyncFunctionDecorator: ...
+def init_memory_database(models: ModulesConfigType | None = None) -> AsyncFunctionDecorator: ...
 
 
 @typing.overload
-def init_memory_sqlite(models: AsyncFunction[..., typing.Any]) -> AsyncFunction[..., typing.Any]: ...
+def init_memory_database(models: AsyncFunction[..., typing.Any]) -> AsyncFunction[..., typing.Any]: ...
 
 
-def init_memory_sqlite(
+def init_memory_database(
     models: ModulesConfigType | AsyncFunction[..., typing.Any] | None = None,
 ) -> AsyncFunction[..., typing.Any] | AsyncFunctionDecorator:
-    """Decorator for initializing Hare with an in-memory SQLite database.
+    """Decorator for initializing Hare with an in-memory database (``MEMORY_DATABASE``).
 
     This is useful for simple scripts and examples that need a quick database setup.
 
@@ -42,7 +42,7 @@ def init_memory_sqlite(
 
     Example:
         from hare import Hare, fields, models
-        from hare.contrib.test import init_memory_sqlite
+        from hare.contrib.test import init_memory_database
 
 
         class MyModel(models.Model):
@@ -50,7 +50,7 @@ def init_memory_sqlite(
             name = fields.TextField()
 
 
-        @init_memory_sqlite
+        @init_memory_database
         async def run():
             obj = await MyModel.objects.create(name="")
             assert obj.id == 1
@@ -61,14 +61,14 @@ def init_memory_sqlite(
 
         Custom models example:
 
-        @init_memory_sqlite(models=["app.models", "app.other_models"])
+        @init_memory_database(models=["app.models", "app.other_models"])
         async def run(): ...
     """
 
     def wrapper(function: AsyncFunction[..., typing.Any], model_modules: list[str]):
         @wraps(function)
         async def runner(*args: Any, **kwargs: Any) -> T:
-            await Hare.init(HareConfig.from_db_url(MEMORY_SQLITE, {"models": model_modules}))
+            await Hare.init(HareConfig.from_db_url(MEMORY_DATABASE, {"models": model_modules}))
             await Hare.generate_schemas()
             return await function(*args, **kwargs)
 
@@ -113,7 +113,7 @@ async def hare_test_context(
 
     Args:
         modules: The module paths models are discovered in.
-        db_url: The database URL - in-memory SQLite by default.
+        db_url: The database URL - an in-memory database by default.
         app_label: The models' app label, "models" by default.
         connection_label: The connection alias, "default" by default.
         use_timezone: Make datetime fields timezone-aware.
@@ -122,7 +122,7 @@ async def hare_test_context(
         _create_db: False connects to an existing database another context created and keeps.
         _generate_schemas: False skips schema generation.
         _drop_db_on_exit: False leaves the database in place on exit - its owner drops it.
-        reuse_databases: Whether a Postgres database name's "{}" is filled with a
+        reuse_databases: Whether a server database name's "{}" is filled with a
             ``ReusableTestDatabases`` slot - reset and reused instead of created and dropped. None
             reads HARE_TEST_REUSE_DATABASES.
 

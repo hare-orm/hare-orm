@@ -22,12 +22,12 @@ class AlterColumnNotNullSafe(ModelBoundOperation):
     ``ConfigurationError`` suggesting ``BackfillColumn`` instead of the database's violation. The
     DDL is ``AlterField``'s.
 
-    On Postgres in a migration with ``atomic = False`` the table is never scanned while it is locked:
-    a ``CHECK (col IS NOT NULL)`` is added ``NOT VALID``, validated with a lock that doesn't block
-    writes, the column set NOT NULL - Postgres reads it off the validated check - and the check
-    dropped. Inside an atomic migration the NULL check and the ALTER run under ``LOCK TABLE ... IN
-    SHARE ROW EXCLUSIVE MODE``, so no NULL slips in between - writes wait while the table is
-    scanned. SQLite rebuilds the table after the NULL check.
+    In a migration with ``atomic = False`` on a database adding a check without scanning
+    (``Features.supports_not_valid_constraints``) the table is never scanned while it is locked: a
+    ``CHECK (col IS NOT NULL)`` is added ``NOT VALID``, validated with a lock that doesn't block writes,
+    the column set NOT NULL and the check dropped. Inside an atomic migration the NULL check and the
+    ALTER run under the dialect's table lock (``get_lock_table_sql()``), so no NULL slips in between -
+    writes wait while the table is scanned.
     """
 
     def __init__(self, model_name: str, field_name: str) -> None:
