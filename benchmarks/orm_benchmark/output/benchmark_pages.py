@@ -31,7 +31,7 @@ class BenchmarkPages:
         "ru": BENCHMARK_DIRECTORY / "README.ru.md",
     }
     SITE_URL = "https://hare-orm.github.io/hare-orm/"
-    REPOSITORY_URL = "https://github.com/hare-orm/hare-orm/blob/dev/"
+    REPOSITORY_URL = "https://github.com/hare-orm/hare-orm/blob/main/"
     GENERATED_NOTICE = "<!-- Written by benchmarks/bench.py (`all` or `charts`): edit the text there, not here. -->"
     #: The page's heading and the name of each database's server in the version table.
     SERVER_NAMES: ClassVar[dict[str, str]] = {
@@ -165,8 +165,8 @@ class BenchmarkPages:
             ),
             ("Python", environment["python"]),
         ]
-        if report.get("hare_commit"):
-            rows.append((self.text("hare-orm commit", "Коммит hare-orm"), f"`{report['hare_commit']}`"))
+        if report.get("hare_release"):
+            rows.append((self.text("hare-orm release", "Релиз hare-orm"), report["hare_release"]))
         runs = str(report["runs"])
         if report["runs"] > 1:
             runs += self.text(", median", ", медиана")

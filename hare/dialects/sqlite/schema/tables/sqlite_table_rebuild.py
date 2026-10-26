@@ -11,8 +11,6 @@ from hare.dialects.sqlite.schema.constants import (
     SQLITE_DATETIME_TO_DATE_SQL,
     SQLITE_DISABLE_LEGACY_ALTER_TABLE_SQL,
     SQLITE_ENABLE_LEGACY_ALTER_TABLE_SQL,
-    SQLITE_FLOAT_TO_DECIMAL_SQL,
-    SQLITE_INTEGER_TO_DECIMAL_SQL,
     SQLITE_NUMBER_TO_BOOLEAN_SQL,
     SQLITE_NUMBER_TO_INTEGER_SQL,
     SQLITE_RAISE_REBUILT_TABLE_SEQUENCE_SQL,
@@ -20,7 +18,6 @@ from hare.dialects.sqlite.schema.constants import (
     SQLITE_TEXT_TO_DATE_SQL,
 )
 from hare.fields.data.boolean_field import BooleanField
-from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.temporal.date_field import DateField
@@ -56,7 +53,7 @@ class SqliteTableRebuild(TableRebuild):
             An expression converting each stored value to the new field's storage format, or the
             column itself when the format stays the same.
         """
-        number_field_classes = (IntField, FloatField, DecimalField)
+        number_field_classes = (IntField, FloatField)
         text_field_classes = (CharField, TextField)
         template = None
         template_arguments: dict[str, Any] = {}
@@ -65,16 +62,8 @@ class SqliteTableRebuild(TableRebuild):
                 template = SQLITE_NUMBER_TO_BOOLEAN_SQL
             elif isinstance(old_field, text_field_classes):
                 template = SQLITE_TEXT_TO_BOOLEAN_SQL
-        elif isinstance(new_field, IntField) and isinstance(old_field, (FloatField, DecimalField)):
+        elif isinstance(new_field, IntField) and isinstance(old_field, FloatField):
             template = SQLITE_NUMBER_TO_INTEGER_SQL
-        elif isinstance(new_field, DecimalField) and isinstance(old_field, (IntField, BooleanField)):
-            template = SQLITE_INTEGER_TO_DECIMAL_SQL
-            template_arguments["fraction"] = (
-                f" || '.{'0' * new_field.decimal_places}'" if new_field.decimal_places else ""
-            )
-        elif isinstance(new_field, DecimalField) and isinstance(old_field, FloatField):
-            template = SQLITE_FLOAT_TO_DECIMAL_SQL
-            template_arguments["decimal_places"] = new_field.decimal_places
         elif isinstance(new_field, DateField) and isinstance(old_field, DatetimeField):
             template = SQLITE_DATETIME_TO_DATE_SQL
         elif isinstance(new_field, DateField) and isinstance(old_field, text_field_classes):

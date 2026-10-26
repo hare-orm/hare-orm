@@ -4,6 +4,7 @@ import dataclasses
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from hare.ddl.conditions.field_condition import FieldCondition
 from hare.exceptions import QueryError
 from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from hare.models import Model
 
 
-class Q(Plannable):
+class Q(Plannable, FieldCondition):
     """A condition to filter by, composed from smaller ones. ``Q(...)`` joins its conditions with AND;
     ``Q.with_connector(Connector.OR, ...)`` joins them with OR. The constructor takes nothing but
     conditions, so a filter on any field name fits in it.
@@ -42,7 +43,9 @@ class Q(Plannable):
     """
 
     __slots__ = (
-        "children",
+        "_children",
+        "_extended_from",
+        "_extension",
         "filters",
         "expression",
         "connector",
@@ -59,6 +62,10 @@ class Q(Plannable):
         ("_needs_double_negation_rewrite", PlanPartType.KEY),
         ("_filter_call_generation", PlanPartType.KEY),
         ("children", PlanPartType.EXPRESSIONS),
+        # Read through ``children``.
+        ("_children", PlanPartType.NONE),
+        ("_extended_from", PlanPartType.NONE),
+        ("_extension", PlanPartType.NONE),
         ("expression", PlanPartType.EXPRESSION),
         ("filters", PlanPartType.FILTERS),
     )
@@ -128,8 +135,12 @@ class Q(Plannable):
                     value = FilterValues.get_list_lookup_value(key, value)
                 filters[key] = value
             kwargs = filters
-        #: The conditions this Q joins by its connector.
-        self.children: tuple[Q, ...] = tuple(children)
+        #: The conditions this Q joins by its connector (``children``); None for a ``get_extended()`` Q
+        #: until they are first read.
+        self._children: tuple[Q, ...] | None = tuple(children)
+        #: The Q a ``get_extended()`` Q extends and the condition it adds - None once its children are read.
+        self._extended_from: Q | None = None
+        self._extension: Q | None = None
         #: The filters of this Q, as passed to Q(...)/`.filter(...)`: {"id": 5}, {"name__icontains": "x"}.
         self.filters: dict[str, Any] = kwargs
         #: Whether this Q joins its children by AND or by OR.
@@ -152,7 +163,7 @@ class Q(Plannable):
         if not isinstance(other, (Q, Exists)):
             raise QueryError("AND operation requires a Q node")
         if self.extends_with(Connector.AND):
-            return Q(*self.children, other)
+            return self.get_extended(Connector.AND, other)
         return Q(self, other)
 
     def __or__(self, other: Q | Exists) -> Q:
@@ -164,8 +175,46 @@ class Q(Plannable):
         if not isinstance(other, (Q, Exists)):
             raise QueryError("OR operation requires a Q node")
         if self.extends_with(Connector.OR):
-            return Q.with_connector(Connector.OR, *self.children, other)
+            return self.get_extended(Connector.OR, other)
         return Q.with_connector(Connector.OR, self, other)
+
+    def get_extended(self, connector: Connector, other: Q | Exists) -> Q:
+        """A ``Q`` of this one's children and one more condition, keeping only the two - its children
+        are gathered when first read: a chain ``q |= ...`` of thousands of conditions is built in
+        linear time, not by copying every child at every step.
+
+        Args:
+            connector: The connector of this ``Q``.
+            other: The condition joined.
+
+        Returns:
+            The ``Q``.
+        """
+        extended = Q.with_connector(connector)
+        extended._children = None
+        extended._extended_from = self
+        extended._extension = Q(other) if isinstance(other, Exists) else other
+        return extended
+
+    @property
+    def children(self) -> tuple[Q, ...]:
+        """The conditions this Q joins by its connector - a ``get_extended()`` Q's gathered along its
+        chain the first time they are read."""
+        children = self._children
+        if children is None:
+            extensions: list[Q] = []
+            node: Q = self
+            while node._children is None:
+                extensions.append(cast("Q", node._extension))
+                node = cast("Q", node._extended_from)
+            children = self._children = (*node._children, *reversed(extensions))
+            self._extended_from = self._extension = None
+        return children
+
+    @children.setter
+    def children(self, children: tuple[Q, ...]) -> None:
+        self._children = children
+        self._extended_from = self._extension = None
 
     def extends_with(self, connector: Connector) -> bool:
         """Whether a condition joined to this ``Q`` by ``connector`` joins its children instead - a
@@ -180,7 +229,8 @@ class Q(Plannable):
         """
         return (
             self.connector == connector
-            and bool(self.children)
+            # An extended Q has children - not gathered here, which would copy them at every step.
+            and (self._children is None or bool(self._children))
             and not self.filters
             and self.expression is None
             and not self._is_negated
@@ -467,18 +517,9 @@ class Q(Plannable):
     def _get_children(self, expression_context: ExpressionContext) -> QueryModifier:
         expression_context = self._get_node_expression_context(expression_context)
         recorded_paths_mark = self._get_recorded_paths_mark(expression_context)
-        node_modifiers = [node.get_result(expression_context) for node in self.children]
-        # Joined in pairs, level by level: a condition of thousands of children (a key list compared
-        # column by column) is as deep as their logarithm, not their number - each level of a
-        # criterion is a level of recursion where it is read and rendered.
-        while len(node_modifiers) > 1:
-            node_modifiers = [
-                self._combine_modifier(*node_modifiers[position : position + 2])
-                if position + 1 < len(node_modifiers)
-                else node_modifiers[position]
-                for position in range(0, len(node_modifiers), 2)
-            ]
-        modifier = node_modifiers[0] if node_modifiers else QueryModifier()
+        modifier = QueryModifier.get_paired(
+            [node.get_result(expression_context) for node in self.children], self._combine_modifier
+        )
         return self._finalize_modifier(modifier, expression_context, recorded_paths_mark)
 
     def get_result(

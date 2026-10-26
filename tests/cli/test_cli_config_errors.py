@@ -88,6 +88,26 @@ async def test_history_with_a_broken_connection_config_exits_cleanly(
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
+async def test_a_models_module_failing_as_it_is_imported_exits_cleanly(tmp_path, monkeypatch):
+    """A models module raising an error of its own as it was imported - not a missing name or broken
+    syntax - came out of the CLI as a traceback."""
+    _write_module(tmp_path, "cfgmodraise_models", 'raise RuntimeError("boom at import")')
+    _write_module(
+        tmp_path,
+        "cfgmodraise_settings",
+        'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
+        '"apps": {"models": {"models": ["cfgmodraise_models"]}}}',
+    )
+    _use_project(tmp_path, monkeypatch, "cfgmodraise_")
+
+    result = await _run_cli(["-c", "cfgmodraise_settings.HARE_ORM", "history"])
+
+    assert result.exit_code == 1
+    assert "'cfgmodraise_models' failed to import: RuntimeError: boom at import" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.asyncio
 async def test_a_configuration_module_failing_as_it_is_imported_exits_cleanly(tmp_path, monkeypatch):
     _write_module(tmp_path, "cfgraise_settings", 'raise RuntimeError("no secrets in this environment")')
     _use_project(tmp_path, monkeypatch, "cfgraise_")
@@ -221,3 +241,24 @@ async def test_single_file_app_keeps_its_inferred_migrations_package(tmp_path, m
 
     assert result.exit_code == 0, result.stderr
     assert (tmp_path / "migrations" / "__init__.py").exists()
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="'//' is the root of no server on Windows only")
+async def test_stubs_into_a_path_no_stub_name_goes_into_exit_cleanly(tmp_path, monkeypatch):
+    """ "//" made pathlib raise ValueError as a stub's name was put into it - a traceback."""
+    _write_module(tmp_path, "cfgstubroot_models", MODELS_SOURCE.format(name="CfgStubRootWidget"))
+    _write_module(
+        tmp_path,
+        "cfgstubroot_settings",
+        'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
+        '"apps": {"models": {"models": ["cfgstubroot_models"]}}}',
+    )
+    _use_project(tmp_path, monkeypatch, "cfgstubroot_")
+
+    for arguments in (["--output", "//"], ["--output", "//", "--check"]):
+        result = await _run_cli(["-c", "cfgstubroot_settings.HARE_ORM", "stubs", *arguments])
+        assert result.exit_code == 1
+        assert "Can't write the stubs into '//'" in result.stderr
+        assert "Traceback" not in result.stderr

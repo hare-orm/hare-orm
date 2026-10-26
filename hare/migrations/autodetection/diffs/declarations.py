@@ -6,25 +6,20 @@ from hare.migrations.autodetection.diffs.declared_schema_object_diff import Decl
 from hare.migrations.operations import (
     AddDictionary,
     AddFunction,
-    AddPolicy,
     AddSequence,
     AlterDictionary,
     AlterFunction,
-    AlterPolicy,
     AlterSequence,
     HareOperation,
     RemoveDictionary,
     RemoveFunction,
-    RemovePolicy,
     RemoveSequence,
     RenameDictionary,
     RenameFunction,
-    RenamePolicy,
     RenameSequence,
 )
 from hare.migrations.operations.schema_objects.object_types.dictionary_object_type import DictionaryObjectType
 from hare.migrations.operations.schema_objects.object_types.function_object_type import FunctionObjectType
-from hare.migrations.operations.schema_objects.object_types.policy_object_type import PolicyObjectType
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
 from hare.migrations.operations.schema_objects.object_types.sequence_object_type import SequenceObjectType
 
@@ -61,13 +56,3 @@ class SequenceDiff(DeclaredSchemaObjectDiff):
     alter_operation_class: ClassVar[type[HareOperation] | None] = AlterSequence
     remove_operation_class: ClassVar[type[HareOperation]] = RemoveSequence
     rename_operation_class: ClassVar[type[HareOperation] | None] = RenameSequence
-
-
-class PolicyDiff(DeclaredSchemaObjectDiff):
-    """The row level security policy operations of a model."""
-
-    object_type: ClassVar[type[SchemaObjectType]] = PolicyObjectType
-    add_operation_class: ClassVar[type[HareOperation]] = AddPolicy
-    alter_operation_class: ClassVar[type[HareOperation] | None] = AlterPolicy
-    remove_operation_class: ClassVar[type[HareOperation]] = RemovePolicy
-    rename_operation_class: ClassVar[type[HareOperation] | None] = RenamePolicy

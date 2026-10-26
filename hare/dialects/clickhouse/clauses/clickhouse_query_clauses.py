@@ -10,8 +10,10 @@ from hare.dialects.clickhouse.clauses.constants import (
     CLICKHOUSE_BULK_LOAD_STATEMENT_TEMPLATE,
     CLICKHOUSE_CONSTANT_KEY_SET_MUTATION_SETTINGS_SQL,
     CLICKHOUSE_DERIVED_TABLE_TEMPLATE,
+    CLICKHOUSE_DISTRIBUTED_MUTATION_READ_MESSAGE,
     CLICKHOUSE_EMPTY_CONTAINMENT_PATTERN_SQL,
     CLICKHOUSE_GLOBAL_PREFIX,
+    CLICKHOUSE_JOIN_KEYWORDS,
     CLICKHOUSE_JOINING_SUBQUERY_SETTINGS,
     CLICKHOUSE_ROW_KEY_COLUMNS_TEMPLATE,
     CLICKHOUSE_SET_OPERATION_SQL,
@@ -38,6 +40,8 @@ class ClickhouseQueryClauses(QueryClauses):
     lightweight delete, both run to the end before the statement returns (the session's
     ``mutations_sync``/``lightweight_deletes_sync``); a LIKE pattern escapes with a backslash, its
     only escape character."""
+
+    join_keywords = CLICKHOUSE_JOIN_KEYWORDS
 
     def get_bulk_load_statement_sql(self, table: str, columns: Sequence[str]) -> str:
         return CLICKHOUSE_BULK_LOAD_STATEMENT_TEMPLATE.format(table=table, columns=", ".join(columns))
@@ -187,6 +191,9 @@ class ClickhouseQueryClauses(QueryClauses):
         offset_sql = f" OFFSET {offset}" if offset else ""
         return f" LIMIT {limit}{offset_sql} BY {', '.join(term.get_sql(terms_context) for term in terms)}"
 
+    def get_select_all_except_sql(self, quoted_columns: Sequence[str]) -> str:
+        return f"SELECT * EXCEPT ({','.join(quoted_columns)})"
+
     def get_update_sql(self, builder: QueryBuilder, sql_context: SqlContext) -> str:
         """``ALTER TABLE t UPDATE column = value, ... WHERE ...`` - every row for no condition.
 
@@ -199,7 +206,8 @@ class ClickhouseQueryClauses(QueryClauses):
 
         Raises:
             UnSupportedError: The update joins or reads other tables, orders or limits its rows, or
-                has a ``WITH`` clause.
+                has a ``WITH`` clause; it changes a distributed table and its condition or values read a
+                table that isn't one.
         """
         # Local import: the SQL builder package imports the dialects, which load this module.
         from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
@@ -209,6 +217,9 @@ class ClickhouseQueryClauses(QueryClauses):
                 "A ClickHouse UPDATE mutation changes the rows of one table matching a condition - it joins, "
                 "orders, limits and reads a WITH clause of nothing"
             )
+        self.raise_if_server_rows_read(
+            builder._update_table, [builder._wheres, *(value for _, value in builder._updates)]
+        )
         field_context = sql_context.copy(with_namespace=False)
         value_context = sql_context.copy(subquery=True)
         assignments_sql = ", ".join(
@@ -231,7 +242,8 @@ class ClickhouseQueryClauses(QueryClauses):
 
         Raises:
             UnSupportedError: The delete joins other tables, orders or limits its rows, or has a
-                ``WITH`` clause.
+                ``WITH`` clause; it deletes from a distributed table and its condition reads a table that
+                isn't one.
         """
         # Local import: the SQL builder package imports the dialects, which load this module.
         from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
@@ -247,6 +259,7 @@ class ClickhouseQueryClauses(QueryClauses):
                 "A ClickHouse DELETE removes the rows of one table matching a condition - it joins, orders, "
                 "limits and reads a WITH clause of nothing"
             )
+        self.raise_if_server_rows_read(builder._from[0], [builder._wheres])
         where_sql = QuerySqlRendering.where_sql(builder, sql_context) if builder._wheres else " WHERE 1"
         table_sql = builder._from[0].get_sql(sql_context)
         statement_end_sql = self.get_statement_end_sql(builder, sql_context)
@@ -272,6 +285,88 @@ class ClickhouseQueryClauses(QueryClauses):
             for a model declaring none.
         """
         return ClickhouseTableOptions.get_of_dialect(getattr(table, "table_options", ()), dialect)
+
+    def raise_if_server_rows_read(self, table: Any, terms: Sequence[Any]) -> None:
+        """Refuses a change of a distributed table's rows whose condition or values read a table that isn't
+        distributed - each server changes its own rows of the table, reading its own rows of that one, so a
+        row matching by the rows of another server is left unchanged, with no error.
+
+        Args:
+            table: The changed table.
+            terms: The condition and the new values.
+
+        Raises:
+            UnSupportedError: The table is distributed and a term reads a table that isn't.
+        """
+        if self.get_model_table_options(table, self.dialect).distributed_over is None:
+            return
+        read_tables = {
+            read_table.get_name_without_alias(): None
+            for term in terms
+            for read_table in self.get_read_tables(term)
+            if self.get_model_table_options(read_table, self.dialect).distributed_over is None
+        }
+        if read_tables:
+            raise UnSupportedError(
+                CLICKHOUSE_DISTRIBUTED_MUTATION_READ_MESSAGE.format(
+                    table=table.get_name_without_alias(), read_tables=", ".join(read_tables)
+                )
+            )
+
+    @classmethod
+    def get_read_tables(cls, term: Any) -> list[Any]:
+        """The tables a term's subqueries read - in any of their clauses, at any depth.
+
+        Args:
+            term: A condition, a value or a query.
+
+        Returns:
+            The tables.
+        """
+        # Local import: the SQL builder package imports the dialects, which load this module.
+        from hare.query.expressions.subqueries.subquery import Subquery
+        from hare.sql.builder.queries.query_builder import QueryBuilder
+        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+        from hare.sql.builder.tables.table import Table
+
+        if isinstance(term, Table):
+            return [term]
+        if isinstance(term, Subquery):
+            nested_query = term.get_nested_query()
+            return [] if nested_query is None else cls.get_read_tables(nested_query)
+        if isinstance(term, SetOperationQuery):
+            queries = [
+                term.base_query,
+                *(query for _, query in term._set_operation),
+                *(cte.query for cte in term._with),
+            ]
+            return [table for query in queries for table in cls.get_read_tables(query)]
+        if isinstance(term, QueryBuilder):
+            limit_by = term._dialect_clauses.get(ClickhouseClause.LIMIT_BY)
+            parts = [
+                *term._from,
+                *(join.item for join in term._joins),
+                *(getattr(join, "criterion", None) for join in term._joins),
+                *(cte.query for cte in term._with),
+                *term._selects,
+                term._dialect_clauses.get(ClickhouseClause.PREWHERE),
+                term._wheres,
+                *term._groupbys,
+                term._havings,
+                *(ordering_term for ordering_term, _ in term._orderbys),
+                *(limit_by[2] if limit_by is not None else ()),
+            ]
+            return [
+                table for part in parts if part is not None and part is not term for table in cls.get_read_tables(part)
+            ]
+        if not hasattr(term, "nodes_"):
+            return []
+        return [
+            table
+            for node in term.nodes_()
+            if node is not term and isinstance(node, (Subquery, QueryBuilder, SetOperationQuery))
+            for table in cls.get_read_tables(node)
+        ]
 
     def get_update_head_sql(self, table: Any, table_sql: str) -> str:
         """How an update of a table begins - a lightweight ``UPDATE`` of a table declaring

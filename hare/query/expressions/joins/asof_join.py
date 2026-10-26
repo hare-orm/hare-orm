@@ -20,6 +20,7 @@ from hare.query.plans.recording.plan_recording import PlanRecording
 from hare.sql.builder.tables.asof_join_source import AsofJoinSource
 
 if TYPE_CHECKING:
+    from hare.core.apps.declarations import ModelReference
     from hare.models import Model
     from hare.query.expressions.expression_result import TableCriterionTuple
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
@@ -46,7 +47,8 @@ class AsofJoin(NamedJoin):
     ``UnSupportedError`` before the query is sent.
 
     Args:
-        source: The joined model, or a queryset of its rows.
+        source: The joined model - its class, its ``"app.Model"`` label or a ``swappable()`` setting - or a
+            queryset of its rows.
         on: The equalities and the one inequality.
 
     Raises:
@@ -71,11 +73,15 @@ class AsofJoin(NamedJoin):
     #: The inequalities the closest row is found by.
     INEQUALITY_LOOKUPS: ClassVar[frozenset[str]] = frozenset({Lookup.LT, Lookup.LTE, Lookup.GT, Lookup.GTE})
 
-    def __init__(self, source: type[Model] | QuerySet[Any, Any], *, on: Q) -> None:
-        # Local imports: the models and the queryset package import this module.
+    def __init__(self, source: ModelReference | QuerySet[Any, Any], *, on: Q) -> None:
+        # Local imports: the models, the queryset package and the context import this module.
+        from hare.core.hare_context import HareContext
+        from hare.fields.relations.swappable_model_reference import SwappableModelReference
         from hare.models import Model
         from hare.query.queryset.query_specification import QuerySpecification
 
+        if isinstance(source, (str, SwappableModelReference)):
+            source = HareContext.require_current().get_model(source)
         if isinstance(source, type) and issubclass(source, Model):
             self.model: type[Model] = source
         elif isinstance(source, QuerySpecification) and source._selection is None:
@@ -98,7 +104,7 @@ class AsofJoin(NamedJoin):
         """
         if isinstance(self.source, type):
             return None
-        return Subquery(self.source)  # type: ignore[arg-type]
+        return Subquery(self.source)
 
     def get_join_condition(self) -> Q:
         """The condition of the JOIN - its equalities, then its inequality.
@@ -179,7 +185,8 @@ class AsofJoin(NamedJoin):
         connection = expression_context.connection
         if connection is not None and not connection.features.supports_asof_join:
             raise UnSupportedError(
-                f"AsofJoin {self.name!r} needs an ASOF JOIN, which {expression_context.dialect} doesn't have"
+                f"AsofJoin {self.name!r} needs a join of the closest row, which {expression_context.dialect} doesn't "
+                "have (Features.supports_asof_join)"
             )
         joins = self.get_joins(expression_context)
         term, path_joins, output_field = LookupPaths.get_nested_field(

@@ -8,15 +8,28 @@ from hare.fields.db_defaults import SqlDefault
 from hare.fields.generated_field import GeneratedField
 from hare.models import Model
 from hare.query.expressions import F
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class PricedItem(Model):
-    price = fields.DecimalField(max_digits=10, decimal_places=2)
+    """A price in cents times a quantity."""
+
+    price = fields.IntField()
     quantity = fields.IntField()
-    total = GeneratedField(
-        expression=RawSQLTerm("price * quantity"),
-        output_field=fields.DecimalField(max_digits=12, decimal_places=2),
-    )
+    total = GeneratedField(expression=RawSQLTerm("price * quantity"), output_field=fields.IntField())
+
+
+class DecimalPricedItem(Model):
+    """PricedItem of a decimal price - a DecimalField the generated column computes from."""
+
+    if DatabaseUnderTest.holds_decimal_fields():
+        price = fields.DecimalField(max_digits=10, decimal_places=2)
+    quantity = fields.IntField()
+    if DatabaseUnderTest.holds_decimal_fields():
+        total = GeneratedField(
+            expression=RawSQLTerm("price * quantity"),
+            output_field=fields.DecimalField(max_digits=12, decimal_places=2),
+        )
 
 
 class LabeledItem(Model):
@@ -43,13 +56,10 @@ class VersionedPricedItem(Model):
     """PricedItem + Meta.optimistic_lock_field - for bulk_update(returning=True)'s
     interaction with optimistic-locking stale detection specifically."""
 
-    price = fields.DecimalField(max_digits=10, decimal_places=2)
+    price = fields.IntField()
     quantity = fields.IntField()
     version = fields.IntField(default=0)
-    total = GeneratedField(
-        expression=RawSQLTerm("price * quantity"),
-        output_field=fields.DecimalField(max_digits=12, decimal_places=2),
-    )
+    total = GeneratedField(expression=RawSQLTerm("price * quantity"), output_field=fields.IntField())
 
     class Meta:
         optimistic_lock_field = "version"
@@ -59,12 +69,9 @@ class AutoReturningPricedItem(Model):
     """PricedItem + Meta.returning = True - for bulk_create()/bulk_update()'s own
     returning=None -> Meta.returning fallback."""
 
-    price = fields.DecimalField(max_digits=10, decimal_places=2)
+    price = fields.IntField()
     quantity = fields.IntField()
-    total = GeneratedField(
-        expression=RawSQLTerm("price * quantity"),
-        output_field=fields.DecimalField(max_digits=12, decimal_places=2),
-    )
+    total = GeneratedField(expression=RawSQLTerm("price * quantity"), output_field=fields.IntField())
 
     class Meta:
         returning = True

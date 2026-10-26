@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
+from hare.ddl.conditions.dialect_condition import DialectCondition
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class ExclusiveArcCondition:
+class ExclusiveArcCondition(DialectCondition):
     """The condition of a ``CheckConstraint`` keeping an exclusive arc of relations - the branches of
     a ``GenericForeignKeyField``: exactly one of them is set, at most one with ``allow_none``. A
     branch to a composite key is set when all its columns are and unset when none is; any mix of

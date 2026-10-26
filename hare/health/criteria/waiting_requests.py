@@ -13,11 +13,11 @@ class WaitingRequests(HealthCriterion):
     """Holds when at least ``at_least`` tasks wait for a connection of a pool of the connection.
 
     Args:
-        at_least: The waiting tasks - at least 1.
+        at_least: The waiting tasks.
     """
 
     def __init__(self, at_least: int) -> None:
-        self.at_least = HealthCriterion.get_checked_count("at_least", at_least)
+        self.at_least = at_least
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         for pool in connection_check.pools:

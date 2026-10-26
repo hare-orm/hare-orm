@@ -4,13 +4,13 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.dialects.base.dialect import Dialect
-from hare.dialects.base.features import Features
 from hare.dialects.base.literals.sql_literals import SqlLiterals
 from hare.dialects.base.parameters.sql_parameters import SqlParameters
 from hare.dialects.base.transactions.transaction_statements import TransactionStatements
-from hare.dialects.enums import DialectName
 from hare.dialects.postgresql.clauses.constants import POSTGRESQL_EXPLAIN_OPTIONS
 from hare.dialects.postgresql.clauses.postgresql_query_clauses import PostgresqlQueryClauses
+from hare.dialects.postgresql.declarations import PostgresqlFeatures
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.literals.postgresql_literals import PostgresqlLiterals
 from hare.dialects.postgresql.parameters.constants import POSTGRESQL_MAX_BIND_PARAMETERS
 from hare.dialects.postgresql.parameters.postgresql_parameters import PostgresqlParameters
@@ -46,9 +46,10 @@ if TYPE_CHECKING:
 class PostgresqlDialect(Dialect):
     """PostgreSQL."""
 
-    name = DialectName.POSTGRESQL
+    name = PostgresqlDialectName.POSTGRESQL
     otel_system_name = "postgresql"
-    features = Features(
+    features = PostgresqlFeatures(
+        computes_integer_statistics_exactly=True,
         supports_nulls_distinct=True,
         supports_partitioned_exclusion_constraints=True,
         supports_update_limit_order_by=False,

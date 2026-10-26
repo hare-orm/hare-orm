@@ -8,6 +8,7 @@ from hare.cli.config_locator import ConfigLocator
 from hare.cli.context.cli_context import CLIContext
 from hare.cli.exceptions import CLIError, CLIUsageError
 from hare.core.config import AppConfig, HareConfig
+from hare.core.config.config_secrets import ConfigSecrets
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.core.hare_context import HareContext
 from hare.exceptions import (
@@ -25,12 +26,13 @@ class CommandContext:
     @staticmethod
     @contextlib.asynccontextmanager
     async def hare_cli_context(
-        config: dict[str, Any] | HareConfig,
+        config: dict[str, Any] | HareConfig, *, connect: bool = True
     ) -> AsyncGenerator[HareContext]:
         """A Hare context initialized with the configuration, for the block.
 
         Args:
             config: The configuration.
+            connect: Whether the connections are opened - a command reading files alone opens none.
 
         Yields:
             The context.
@@ -40,7 +42,7 @@ class CommandContext:
         """
         async with HareContext() as context:
             try:
-                await context.init(config=config)
+                await context.init(config=config, connect=connect)
             except (ConfigurationError, DBConnectionError) as error:
                 # A bad app config or a model module failing to import - Apps reports both as
                 # ConfigurationError.
@@ -81,7 +83,10 @@ class CommandContext:
         try:
             return HareConfig.load(config_value)
         except ConfigurationError as error:
-            raise CLIError(f"Invalid Hare ORM configuration {config_value!r}: {error}") from None
+            shown_value = (
+                ConfigSecrets.mask_url_secrets(config_value) if isinstance(config_value, str) else config_value
+            )
+            raise CLIError(f"Invalid Hare ORM configuration {shown_value!r}: {error}") from None
 
     @staticmethod
     def select_apps(config: HareConfig, app_labels: Iterable[str] | None) -> dict[str, AppConfig]:

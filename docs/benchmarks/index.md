@@ -29,10 +29,10 @@ every operation of the load before the timing starts.
 
 | | |
 |---|---|
-| Date | 2026-10-19 |
+| Date | 2026-10-26 |
 | Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| hare-orm commit | `07215c80` |
+| hare-orm release | 0.10.0 |
 | Runs | 3, median |
 
 - On PostgreSQL every ORM gets a pool of 50 connections, all opened before anything is timed.
@@ -69,6 +69,6 @@ every operation of the load before the timing starts.
 - Every scenario is written the way that ORM's documentation writes it.
 
 The benchmark is
-[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) in the
-repository; its [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.md) lists
+[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py) in the
+repository; its [README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.md) lists
 every scenario and how to run it on your own machine.

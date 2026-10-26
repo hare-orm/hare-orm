@@ -8,6 +8,7 @@ class SqlTypes:
 
     FLOAT = "FLOAT"
     NUMERIC = "NUMERIC"
+    INTEGER = "INTEGER"
     BIGINT = "BIGINT"
 
     DATE = "DATE"

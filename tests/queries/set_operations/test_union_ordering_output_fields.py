@@ -6,7 +6,8 @@ import pytest_asyncio
 
 from hare.query.expressions import F, Value
 from hare.query.functions import Count, Sum
-from tests.shared_models.testmodels import Author, Book, DateFields, DecimalFields
+from tests.shared_models.testmodels import Author, Book, DateFields
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 @pytest_asyncio.fixture
@@ -75,6 +76,7 @@ async def test_union_null_literal_branch_keeps_the_other_branchs_decoding(db):
     assert [(row.id, row.x) for row in await null_first] == [(1, datetime.date(2020, 1, 5)), (2, None)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_union_decodes_through_the_first_branchs_field(db):
     await DecimalFields.objects.create(id=1, decimal=Decimal("1.5"), decimal_nodec=1)

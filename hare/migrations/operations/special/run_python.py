@@ -26,6 +26,7 @@ class RunPython(HareOperation):
     """
 
     reduces_to_sql = False
+    backward_reads_state_reached = False
 
     def __init__(
         self,

@@ -5,6 +5,7 @@ from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.postgresql.fields.citext_field import CitextField
+from hare.dialects.postgresql.fields.constants import TEXT_SEARCH_VECTOR_VALUE_TYPE
 from hare.exceptions import ConfigurationError
 from hare.fields import CharField, Field, GeneratedField, TextField
 
@@ -33,6 +34,8 @@ class TSVectorField(Field[str]):
             (Postgres's 1-argument ``TO_TSVECTOR`` is only STABLE, not IMMUTABLE, so it can never
             satisfy a ``GENERATED ALWAYS ... STORED`` column).
     """
+
+    argument_value_type = TEXT_SEARCH_VECTOR_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
 

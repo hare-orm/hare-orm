@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from operator import attrgetter
 from typing import Any, cast
 
 from hare.dialects.base.types.type_mapping import TypeMapping
@@ -41,6 +42,7 @@ from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.network.ip_address_field import IPAddressField
 from hare.fields.data.numeric.big_int_field import BigIntField
+from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.numeric.small_int_field import SmallIntField
 from hare.fields.data.temporal.datetime_field import DatetimeField
@@ -86,6 +88,7 @@ class PostgresqlTypes:
                 to_python=container_values.to_python,
             ),
         )
+        types.register(DecimalField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
         types.register(IntField, TypeMapping(generated_sql="SERIAL NOT NULL"))
         types.register(BigIntField, TypeMapping(generated_sql="BIGSERIAL NOT NULL"))
         types.register(SmallIntField, TypeMapping(generated_sql="SMALLSERIAL NOT NULL"))

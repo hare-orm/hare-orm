@@ -40,6 +40,11 @@ class RefreshMaterializedView(ModelBoundOperation):
     def state_forward(self, app_label: str, state: State) -> None:
         return None
 
+    def raise_if_unsupported(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> None:
+        MaterializedViewObjectType.raise_if_unsupported(schema_editor)
+
     async def database_forward(
         self,
         app_label: str,

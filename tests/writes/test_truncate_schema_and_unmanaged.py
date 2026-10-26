@@ -27,9 +27,9 @@ async def test_truncate_all_models_empties_schema_qualified_tables():
         db_url=get_url_with_attached_databases(TEST_DB_URL, ["custom"]),
         connection_label="models",
     ) as ctx:
-        category_model = ctx.apps.get_model("models", "SchemaCategory")
-        product_model = ctx.apps.get_model("models", "SchemaProduct")
-        tag_model = ctx.apps.get_model("models", "SchemaTag")
+        category_model = ctx.apps.get_model("models.SchemaCategory")
+        product_model = ctx.apps.get_model("models.SchemaProduct")
+        tag_model = ctx.apps.get_model("models.SchemaTag")
         category = await category_model.objects.create(name="books")
         product = await product_model.objects.create(name="novel", category=category)
         tag = await tag_model.objects.create(label="fiction")
@@ -51,8 +51,8 @@ async def test_truncate_all_models_skips_unmanaged_models():
     async with hare_test_context(
         ["tests.schema.models_unmanaged_view"], db_url=TEST_DB_URL, connection_label="models"
     ) as ctx:
-        source_model = ctx.apps.get_model("models", "ViewSourceRow")
-        view_model = ctx.apps.get_model("models", "ViewRow")
+        source_model = ctx.apps.get_model("models.ViewSourceRow")
+        view_model = ctx.apps.get_model("models.ViewRow")
         client = Connections.get("models")
         await client.execute_script('CREATE VIEW "view_row" AS SELECT "id", "name" FROM "view_source_row"')
         await source_model.objects.create(id=1, name="first")
@@ -70,10 +70,10 @@ async def test_same_table_name_in_two_schemas_generates_and_truncates():
     async with hare_test_context(
         ["tests.schema.models_same_table_other_schema"], db_url=TEST_DB_URL, connection_label="models"
     ) as ctx:
-        other_writer_model = ctx.apps.get_model("models", "OtherSchemaWriter")
-        other_note_model = ctx.apps.get_model("models", "OtherSchemaNote")
-        public_writer_model = ctx.apps.get_model("models", "PublicWriter")
-        public_note_model = ctx.apps.get_model("models", "PublicNote")
+        other_writer_model = ctx.apps.get_model("models.OtherSchemaWriter")
+        other_note_model = ctx.apps.get_model("models.OtherSchemaNote")
+        public_writer_model = ctx.apps.get_model("models.PublicWriter")
+        public_note_model = ctx.apps.get_model("models.PublicNote")
         other_writer = await other_writer_model.objects.create(id=1, name="other")
         other_note = await other_note_model.objects.create(id=1, writer=other_writer)
         await other_note.readers.add(other_writer)

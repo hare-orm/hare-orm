@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from hare.contrib.test import init_memory_sqlite, requires_features
+from hare.contrib.test import init_memory_database, requires_features
 from hare.core.config import HareConfig
 
 
@@ -10,14 +10,14 @@ from hare.core.config import HareConfig
 @requires_features(dialect="sqlite")
 @patch("hare.Hare.init")
 @patch("hare.Hare.generate_schemas")
-async def test_init_memory_sqlite_decorator(
+async def test_init_memory_database_decorator(
     mocked_generate: AsyncMock,
     mocked_init: AsyncMock,
     db,
 ) -> None:
-    """Test init_memory_sqlite as decorator without parentheses."""
+    """Test init_memory_database as decorator without parentheses."""
 
-    @init_memory_sqlite
+    @init_memory_database
     async def run():
         return "result"
 
@@ -33,14 +33,14 @@ async def test_init_memory_sqlite_decorator(
 @requires_features(dialect="sqlite")
 @patch("hare.Hare.init")
 @patch("hare.Hare.generate_schemas")
-async def test_init_memory_sqlite_decorator_with_models_list(
+async def test_init_memory_database_decorator_with_models_list(
     mocked_generate: AsyncMock,
     mocked_init: AsyncMock,
     db,
 ) -> None:
-    """Test init_memory_sqlite as decorator with models list."""
+    """Test init_memory_database as decorator with models list."""
 
-    @init_memory_sqlite(["app.models"])
+    @init_memory_database(["app.models"])
     async def run():
         return "result"
 
@@ -56,14 +56,14 @@ async def test_init_memory_sqlite_decorator_with_models_list(
 @requires_features(dialect="sqlite")
 @patch("hare.Hare.init")
 @patch("hare.Hare.generate_schemas")
-async def test_init_memory_sqlite_decorator_with_models_string(
+async def test_init_memory_database_decorator_with_models_string(
     mocked_generate: AsyncMock,
     mocked_init: AsyncMock,
     db,
 ) -> None:
-    """Test init_memory_sqlite as decorator with models string."""
+    """Test init_memory_database as decorator with models string."""
 
-    @init_memory_sqlite("app.models")
+    @init_memory_database("app.models")
     async def run():
         return "result"
 

@@ -1,7 +1,7 @@
 # Test setup
 
 How a test suite gets its database: the pytest plugin hare ships, the `hare_test_context()` fixture
-pattern with reusable PostgreSQL databases, `init_memory_sqlite()` for a quick script, the warning about
+pattern with reusable PostgreSQL databases, `init_memory_database()` for a quick script, the warning about
 event-loop switches between tests, and skipping a test the database can't run. Objects for the tests come
 from [factories](factories.md).
 
@@ -113,11 +113,11 @@ whose DDL the database rejects doesn't leave a database behind.
 With `reuse_databases=True` a PostgreSQL test database is leased from a pool instead of created and
 dropped — see [PostgreSQL: testing](../dialects/postgresql/testing.md#reuse-databases).
 
-## <a id="init-memory-sqlite"></a>Quick scripts: `init_memory_sqlite()`
+## <a id="init-memory-database"></a>Quick scripts: `init_memory_database()`
 
 ```python
 from hare import Hare, fields
-from hare.contrib.test import init_memory_sqlite
+from hare.contrib.test import init_memory_database
 from hare.models import Model
 
 
@@ -126,7 +126,7 @@ class Book(Model):
     title = fields.TextField()
 
 
-@init_memory_sqlite
+@init_memory_database
 async def run():
     obj = await Book.objects.create(title="Moby Dick")
     assert obj.id == 1
@@ -139,7 +139,7 @@ if __name__ == "__main__":
 Spins up an in-memory SQLite database and generates schemas before calling the wrapped function — meant
 for throwaway scripts/examples, not test suites (use `hare_test_context()` for those). Takes an optional
 `models=[...]` (defaults to `["__main__"]`) when your models don't live in the calling module. Its
-connection URL is `hare.contrib.test.MEMORY_SQLITE` (`sqlite+aiosqlite://:memory:`).
+connection URL is `hare.contrib.test.MEMORY_DATABASE` (`sqlite+aiosqlite://:memory:`).
 
 ## <a id="hare-loop-switch-warning"></a>Event-loop switches between tests: `HareLoopSwitchWarning`
 

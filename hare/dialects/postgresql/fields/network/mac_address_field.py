@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from hare.dialects.postgresql.fields.constants import (
     MAC_ADDRESS_DIGITS_PATTERN,
     MAC_ADDRESS_SEPARATOR_PATTERN,
+    MAC_ADDRESS_VALUE_TYPE,
     POSTGRESQL_MACADDR_TYPE,
 )
 from hare.fields.field import Field
@@ -20,6 +21,8 @@ class MacAddressField(Field[str]):
     and written as ``08:00:2b:01:02:03``; another text raises ``ValidationError``. It filters by
     equality, comparison, membership, ``isnull`` and ``range``.
     """
+
+    argument_value_type = MAC_ADDRESS_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
     SQL_TYPE = POSTGRESQL_MACADDR_TYPE

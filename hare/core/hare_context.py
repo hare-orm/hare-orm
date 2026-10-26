@@ -12,20 +12,18 @@ from contextlib import suppress
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.caching.caches import Caches
 from hare.core.config import ConfigSecrets, HareConfig
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.core.log import logger
 from hare.core.routing.connection_router import ConnectionRouter
-from hare.dialects.base.constants import MAX_SLOW_QUERY_THRESHOLD_MS, SLOW_QUERY_THRESHOLD_MS
+from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.constants import OBSERVER_SHUTDOWN_WAIT_TIMEOUT_SECONDS
 from hare.instrumentation.observers.observer import ObserverCallback
 from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.instrumentation.observers.observers import Observers
-from hare.numbers.finite_numbers import FiniteNumbers
 from hare.time import Timezone
 from hare.time.constants import DEFAULT_TIMEZONE
 
@@ -33,6 +31,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from hare.core.apps import Apps
+    from hare.core.apps.declarations import ModelReference
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
 
@@ -210,7 +209,7 @@ class HareContext:
         self.observers = ObserverSet()
 
     def observe(
-        self, event_type: type, callback: TCallback, *, models: Iterable[type[Model]] | None = None
+        self, event_type: type, callback: TCallback, *, models: Iterable[ModelReference] | None = None
     ) -> TCallback:
         """Adds an observer of ``event_type`` getting the events while this context is the current
         one - see ``Observers.observe()``. Leaving the context (``async with``) drops it.
@@ -224,13 +223,13 @@ class HareContext:
             The callback, to pass to ``unobserve()``.
 
         Raises:
-            QueryError, TypeError: See ``Observers.observe()``.
+            QueryError, ConfigurationError: See ``Observers.observe()``.
         """
         self.observers.add(event_type, callback, models)
         return callback
 
     def unobserve(
-        self, event_type: type, callback: ObserverCallback, *, models: Iterable[type[Model]] | None = None
+        self, event_type: type, callback: ObserverCallback, *, models: Iterable[ModelReference] | None = None
     ) -> None:
         """Stops an observer of this context - see ``Observers.unobserve()``.
 
@@ -240,7 +239,7 @@ class HareContext:
             models: The models it stops observing.
 
         Raises:
-            QueryError, TypeError: See ``Observers.unobserve()``.
+            QueryError: See ``Observers.unobserve()``.
         """
         self.observers.remove(event_type, callback, models)
 
@@ -334,7 +333,6 @@ class HareContext:
 
         if not connect and _create_db:
             raise ConfigurationError("connect=False cannot be used with _create_db=True")
-        slow_query_threshold_ms = HareContext.get_validated_slow_query_threshold(slow_query_threshold_ms)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "Hare-ORM startup\n    connections: %s\n    apps: %s",
@@ -422,6 +420,9 @@ class HareContext:
                     validate_connections=connect,
                     swappable=typed_config.swappable,
                 )
+                # The labels observers name, looked up now that the models are bound.
+                for observer_set in (Observers.process_observers, self.observers):
+                    observer_set.find_model_labels(self._apps)
                 # router.init_routers() replaces the routers only once every one is instantiated.
                 self._init_routers(router_classes)
                 self.router.read_your_writes_seconds = typed_config.read_your_writes_seconds
@@ -518,23 +519,22 @@ class HareContext:
         for connection in self.connections.all():
             await connection.generate_schema(safe)
 
-    def get_model(self, app_label: str, model_name: str) -> type[Model]:
-        """
-        The model of an app label and a model name.
+    def get_model(self, reference: ModelReference) -> type[Model]:
+        """The model a reference names - an ``"app.Model"`` label (``"models.User"``), a ``swappable()``
+        setting or a class (the context's own class of the model).
 
         Args:
-            app_label: The app label (e.g., "models").
-            model_name: The model class name (e.g., "User").
+            reference: The reference.
 
         Returns:
             The model class.
 
         Raises:
-            ConfigurationError: If context not initialized or model not found.
+            ConfigurationError: The context isn't initialized, or the reference names no model.
         """
         if self._apps is None:
             raise ConfigurationError("Context not initialized. Call init() before accessing models.")
-        return self._apps.get_model(app_label, model_name)
+        return self._apps.get_model(reference)
 
     def get_connection(self, connection_alias: str | None = None) -> DatabaseClient:
         """
@@ -652,8 +652,7 @@ class HareContext:
         Raises:
             ConfigurationError: See ``swappable_label()``.
         """
-        app_label, model_name = self.swappable_label(setting).split(".", 1)
-        return self.get_model(app_label, model_name)
+        return self.get_model(self.swappable_label(setting))
 
     def register_live_models(
         self,
@@ -689,6 +688,7 @@ class HareContext:
         # Local import: the registry imports the models, which import the transactions and this module.
         from hare.core.apps import Apps
         from hare.core.apps.cross_connection_checks import CrossConnectionChecks
+        from hare.core.apps.enum_member_checks import EnumMemberChecks
         from hare.core.apps.relation_linking import RelationLinking
 
         if connection_alias not in self.connections.db_config:
@@ -742,6 +742,7 @@ class HareContext:
                 model._meta.registered_live = True
             CrossConnectionChecks.check_cross_connection_constraints(apps)
             apps.init_relations()
+            EnumMemberChecks.add_to_models(models, self.connections)
             CrossConnectionChecks.check_change_capture_connections(apps)
             apps.build_initial_querysets()
         except BaseException:
@@ -761,24 +762,25 @@ class HareContext:
             {target for model in models for target in RelationLinking.get_relation_targets(model)}
         )
 
-    def unregister_live_models(self, models: Iterable[type[Model]]) -> None:
+    def unregister_live_models(self, models: Iterable[ModelReference]) -> None:
         """Reverses ``register_live_models()``: removes the models from the registry together with
         the backward relations they added and every cache built for them - relations between the
         models themselves don't block it. A model with the same name, or the same class, can be
         registered again afterwards; an unregistered class runs no queries until then.
 
         Args:
-            models: Models registered in this context.
+            models: Models registered in this context - classes, ``"app.Model"`` labels or
+                ``swappable()`` settings.
 
         Raises:
             ConfigurationError: One of ``models`` isn't registered, or a model outside ``models``
                 still has a relation pointing at one of them.
         """
-        models = list(models)
+        references = list(models)
         if self._apps is None:
-            names = ", ".join(model.__name__ for model in models)
+            names = ", ".join(getattr(reference, "__name__", str(reference)) for reference in references)
             raise ConfigurationError(f"Model(s) {names!r} not registered.")
-        self._apps.remove_models(models)
+        self._apps.remove_models([self._apps.get_model(reference) for reference in references])
 
     async def drop_databases(self) -> None:
         """Drops every database of this context's connections and forgets its models - for tests.
@@ -798,31 +800,6 @@ class HareContext:
                 model._meta.default_connection = None
             self._apps.clear()
             self._apps = None
-
-    @staticmethod
-    def get_validated_slow_query_threshold(raw_threshold: Any) -> float:
-        """Validates ``init(slow_query_threshold_ms=...)``.
-
-        Args:
-            raw_threshold: The threshold in milliseconds.
-
-        Returns:
-            The threshold as a float.
-
-        Raises:
-            ConfigurationError: It is not a finite number in ``[0, MAX_SLOW_QUERY_THRESHOLD_MS]``.
-        """
-        if not FiniteNumbers.is_finite_number(raw_threshold):
-            raise ConfigurationError(
-                f"slow_query_threshold_ms must be a finite number of milliseconds, got {raw_threshold!r}"
-            )
-        threshold = float(raw_threshold)
-        if not 0 <= threshold <= MAX_SLOW_QUERY_THRESHOLD_MS:
-            raise ConfigurationError(
-                f"slow_query_threshold_ms must be between 0 and {MAX_SLOW_QUERY_THRESHOLD_MS:g}, got "
-                f"{ValueDescriptions.get_shown_value(raw_threshold)}"
-            )
-        return threshold
 
     async def __aenter__(self) -> HareContext:
         """

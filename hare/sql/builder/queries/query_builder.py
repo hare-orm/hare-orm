@@ -16,8 +16,9 @@ from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder.tables.table import Table
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import QUERY_WITHOUT_INSERT_MESSAGE
-from hare.sql.enums import JoinType, Order, SetOperation
+from hare.sql.enums import JoinType, SetOperation
 from hare.sql.exceptions import JoinException, QueryException
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.arithmetic_expression import ArithmeticExpression
 from hare.sql.terms.criteria.criterion import Criterion
@@ -1081,7 +1082,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
             elif grouped_sql_by_term_id and field.alias is None and id(field) in grouped_sql_by_term_id:
                 term = grouped_sql_by_term_id[id(field)]
             else:
-                term = sql_context.dialect.renderers.get_ordering_term(field, sql_context).get_sql(term_context)
+                term = field.get_sql(term_context)
 
             clauses.append(
                 sql_context.dialect.renderers.get_ordering_clause_sql(field, term, directionality, sql_context)

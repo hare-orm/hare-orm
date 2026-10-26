@@ -9,11 +9,9 @@ from taskiq import TaskiqMiddleware
 from taskiq.exceptions import NoResultError
 from taskiq.kicker import AsyncKicker
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.application_lifecycle import ApplicationLifecycle
 from hare.contrib.taskiq.constants import (
     DEFAULT_TENANT_LABEL,
-    MAX_TRANSACTION_RETRIES,
     TASK_ID_QUERY_TAG,
     TASK_NAME_QUERY_TAG,
     TRANSACTION_RETRIES_LABEL,
@@ -21,7 +19,7 @@ from hare.contrib.taskiq.constants import (
 from hare.contrib.taskiq.running_task import RunningTask
 from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
 from hare.core.log import logger
-from hare.exceptions import ConfigurationError, TransactionRetryError
+from hare.exceptions import TransactionRetryError
 from hare.instrumentation.queries.query_tags import QueryTags
 from hare.models.tenancy.tenancy import Tenancy
 from hare.transactions.transactions import Transactions
@@ -45,11 +43,7 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         atomic_tasks: True for a transaction per task on the default connection, the connection
             names for one on each of them, False for none.
         tenant_label: The label the tenant goes in; None to leave tenants alone.
-        transaction_retries: How many times a task is sent again after a transaction conflict, in
-            ``0..MAX_TRANSACTION_RETRIES``.
-
-    Raises:
-        ConfigurationError: An option has the wrong type or is out of range.
+        transaction_retries: How many times a task is sent again after a transaction conflict.
     """
 
     #: What the middleware set up for the task running in this context.
@@ -65,20 +59,7 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         transaction_retries: int = 0,
     ) -> None:
         super().__init__()
-        if tenant_label is not None and (not isinstance(tenant_label, str) or not tenant_label):
-            raise ConfigurationError(f"tenant_label must be None or a non-empty label name, got {tenant_label!r}")
-        if (
-            isinstance(transaction_retries, bool)
-            or not isinstance(transaction_retries, int)
-            or not 0 <= transaction_retries <= MAX_TRANSACTION_RETRIES
-        ):
-            raise ConfigurationError(
-                f"transaction_retries must be an int in 0..{MAX_TRANSACTION_RETRIES}, got "
-                f"{ValueDescriptions.get_shown_value(transaction_retries)}"
-            )
-        self.transaction_connection_names = ApplicationLifecycle.get_transaction_connection_names(
-            atomic_tasks, "atomic_tasks"
-        )
+        self.transaction_connection_names = ApplicationLifecycle.get_transaction_connection_names(atomic_tasks)
         self.tenant_label = tenant_label
         self.transaction_retries = transaction_retries
 
@@ -185,11 +166,19 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
                     retries,
                 )
             return
+        labels = dict(message.labels)
+        # The kicker writes a label as text - a scope of several tenants, of every tenant or by model would
+        # reach the task as the text of its mapping. The scope is the sender's again, and pre_send() labels it.
+        tenant = labels.pop(self.tenant_label, None) if self.tenant_label is not None else None
         kicker: AsyncKicker[Any, Any] = (
-            AsyncKicker(task_name=message.task_name, broker=self.broker, labels=dict(message.labels))
+            AsyncKicker(task_name=message.task_name, broker=self.broker, labels=labels)
             .with_task_id(message.task_id)
             .with_labels(**{TRANSACTION_RETRIES_LABEL: retries + 1})
         )
         logger.info("Task %s (%s) hit a transaction conflict - sending it again", message.task_name, message.task_id)
-        await kicker.kiq(*message.args, **message.kwargs)
+        if tenant is None:
+            await kicker.kiq(*message.args, **message.kwargs)
+        else:
+            with Tenancy.scope(TaskTenantLabels.get_scope(tenant)):
+                await kicker.kiq(*message.args, **message.kwargs)
         result.error = NoResultError()

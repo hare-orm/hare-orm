@@ -30,8 +30,6 @@ class MigrationsConfig(ConfigSection):
     safety: MigrationSafetyConfig | None = None
 
     def __post_init__(self) -> None:
-        if self.safety is not None and not isinstance(self.safety, MigrationSafetyConfig):
-            raise ConfigurationError("MigrationsConfig.safety must be a MigrationSafetyConfig or None")
         lock_timeout: Any = self.lock_timeout
         if lock_timeout is None:
             return
@@ -61,11 +59,9 @@ class MigrationsConfig(ConfigSection):
             section: What the mapping is, for error messages.
 
         Raises:
-            ConfigurationError: ``data`` isn't a mapping, holds an unknown key, ``lock_timeout``
-                isn't a number of seconds within the supported range, or ``safety`` isn't valid.
+            ConfigurationError: ``data`` holds an unknown key, ``lock_timeout`` isn't a number of
+                seconds within the supported range, or ``safety`` holds an unknown key.
         """
-        if not isinstance(data, Mapping):
-            raise ConfigurationError('Config "migrations" must be a mapping')
         cls.check_known_keys(data, section)
         safety_section = data.get("safety")
         safety = MigrationSafetyConfig.from_dict(safety_section) if safety_section is not None else None

@@ -93,7 +93,7 @@ What follows from it:
 | Option | Meaning |
 |---|---|
 | `engine` | The table engine with its arguments — `"MergeTree"`, `"ReplacingMergeTree(version)"`. Default `"MergeTree"`. The options of the `MergeTree` family below are refused with another engine. |
-| `order_by` | What the rows are sorted by — field names and [expressions](#expressions), the primary key first; a foreign key or one-to-one relation by its name sorts by its key columns (`"team"` is `team_id`). Empty: the primary key, or `tuple()` for a model without one. |
+| `order_by` | What the rows are sorted by — field names and [expressions](#expressions), the primary key first; a foreign key or one-to-one relation by its name sorts by its key columns (`"team"` is `team_id`). Empty: the primary key, or `tuple()` for a model without one. A nullable field in it or in `partition_by` needs `settings=(("allow_nullable_key", 1),)` — else `ConfigurationError`. |
 | `sample_by` | The expression [`sample()`](query-modifiers.md#sample) reads a share of — one of `order_by`. The table's `PRIMARY KEY` then runs from the model's key through it. |
 | `partition_by` | The expression the rows are partitioned by — `Trunc("viewed_at", "month")`. |
 | `ttl` | The table's `TTL` — see [`ttl`](#ttl) |
@@ -102,7 +102,7 @@ What follows from it:
 | `column_ttls` | How long columns keep their values — `(field name, expression)` pairs, the moment a value is reset to its default. Not of a key column. |
 | `projections` | The table's projections — see [Schema objects](schema-objects.md#projections). |
 | `distributed_over` | The local table storing the rows on every server of the connection's cluster — the model's table is then a `Distributed` one over it. See [Cluster](schema-objects.md#cluster). |
-| `sharding_key` | With `distributed_over`: the expression a row's shard is picked by; any shard without. |
+| `sharding_key` | With `distributed_over`: the expression a row's shard is picked by; any shard without. One reading a nullable field raises `ConfigurationError` — ClickHouse shards by an integer that holds no NULL. |
 | `lightweight_updates` | Rows change by a lightweight `UPDATE` — see [below](#lightweight-updates). |
 
 ### <a id="expressions"></a>Expressions
@@ -146,7 +146,9 @@ the server formats them.
 When a migration changes fields too, a changed `ttl`, column codec, column TTL or projection —
 expressions over columns — is removed before the fields change and set after them: a field made NOT NULL
 takes its new `ttl` after its change (ClickHouse refuses a `ttl` over a `Nullable` column), one made
-nullable loses its `ttl` before. `makemigrations` writes this as an `AlterModelOptions` on each side of
+nullable loses its `ttl` before. A changed key (`order_by`, `partition_by`, `sample_by`, the sharding
+key) or engine keeps its old value until the fields are added and takes the new one after them; the
+fields removed are removed last. `makemigrations` writes this as an `AlterModelOptions` on each side of
 the field operations. A field made NOT NULL while a row holds NULL in it raises `IntegrityError` before
 the column changes, as on PostgreSQL — the `MODIFY COLUMN` would fail in its mutation, which stays and
 fails every later one; fill the NULLs first. A field made nullable on ClickHouse before 26.3 — see

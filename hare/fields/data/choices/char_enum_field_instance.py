@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.exceptions import ConfigurationError
 from hare.fields.data.constants import AUTO_DESCRIPTION_MAX_LENGTH
 from hare.fields.data.text.char_field import CharField
+from hare.fields.data.text.text_field import TextField
 from hare.fields.field import Field
 from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 
@@ -20,9 +21,12 @@ class CharEnumFieldInstance(CharField[str]):
 
     #: The enum whose members the field holds.
     enum_type: type[Enum]
-    #: Whether a migration declares the enum itself, its members as they are when it is written -
-    #: for a field whose column type holds them.
-    snapshots_enum_in_migrations: ClassVar[bool] = False
+    #: A migration declares the enum itself, its members as they are when it is written - the column's
+    #: enum type or its CHECK holds them, and a member added to the class later is a change.
+    snapshots_enum_in_migrations: ClassVar[bool] = True
+    #: Whether the column is of an enum type of its own on every database - holding the members, it takes
+    #: no CHECK of them.
+    has_native_enum_type: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -80,12 +84,15 @@ class CharEnumFieldInstance(CharField[str]):
             raise
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
-        """An enum losing a member another field held stores only its own members - checked where the
-        column type names the members; else what a shorter text needs."""
+        """An enum losing a member another field held, or a text column becoming the enum's, stores only its
+        own members; else what a shorter text needs."""
         if isinstance(old_field, CharEnumFieldInstance):
             limit = EnumValuesLimit.get_for_dropped_members(self.enum_type, old_field.enum_type, str)
             if limit is not None:
                 return limit
+        elif isinstance(old_field, (CharField, TextField)):
+            # A text of no member would be read as none.
+            return EnumValuesLimit(frozenset(self.get_stored_member_values()))
         return super().get_narrowing_limit(old_field)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
@@ -99,6 +106,10 @@ class CharEnumFieldInstance(CharField[str]):
         except ValueError as error:
             validation_error = self.get_validation_error(error, value)
         raise validation_error
+
+    def get_stored_member_values(self) -> tuple[str, ...]:
+        """The texts the members are stored as."""
+        return tuple(str(member.value) for member in self.enum_type)
 
     def to_db_value(self, value: Enum | None | str, instance: type[Model] | Model | None) -> str | None:
         if value is None:

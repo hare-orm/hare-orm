@@ -29,6 +29,8 @@ class TemporalType(StrEnum):
     DATE = "date"
     TIME = "time"
     TIMEDELTA = "timedelta"
+    #: A column of the database's interval type (``Field.holds_intervals``).
+    INTERVAL = "interval"
 
 
 class NumericValueType(StrEnum):

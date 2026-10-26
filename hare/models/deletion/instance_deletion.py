@@ -60,8 +60,9 @@ class InstanceDeletion:
             connection: The connection of the delete.
         """
         with ChangeEvents.reporting_as_a_whole():
-            await InstanceDeletion.delete_with_cascade(obj, connection, apply_active_tenant_scope_guard=True)
-        if ChangeEvents.is_observed():
+            deleted = await InstanceDeletion.delete_with_cascade(obj, connection, apply_active_tenant_scope_guard=True)
+        # A row soft-deleted already is left alone - nothing changed to report.
+        if deleted and ChangeEvents.is_observed():
             await ChangeEvents.report_deletion(
                 connection, type(obj), pks=[obj.pk], soft=obj._meta.soft_delete_field is not None
             )
@@ -111,7 +112,7 @@ class InstanceDeletion:
     @staticmethod
     async def delete_with_cascade(
         obj: Model, connection: DatabaseClient, *, apply_active_tenant_scope_guard: bool
-    ) -> None:
+    ) -> bool:
         """Everything ``delete()`` does after its active-tenant-scope check.
 
         Args:
@@ -121,6 +122,9 @@ class InstanceDeletion:
                 match - it may belong to another tenant than the active scope (see
                 ``SoftDeletion.persist_soft_delete()``).
 
+        Returns:
+            Whether the row was deleted - False for one soft-deleted already.
+
         Raises:
             Same as ``delete()``, except the tenant-scope ``QueryError``.
         """
@@ -128,7 +132,7 @@ class InstanceDeletion:
         soft_delete_field = obj._meta.soft_delete_field
         if await SoftDeletion.is_already_soft_deleted(obj, connection):
             # Already soft-deleted - nothing to do; its deletion time stays.
-            return
+            return False
         if soft_delete_field:
             InstanceSaving.check_optimistic_lock_field_loaded(obj, "delete")
             if DeletionGraph.is_unreferenced(type(obj)) and await SoftDeletion.write_soft_delete_field(
@@ -142,7 +146,7 @@ class InstanceDeletion:
                 # Nothing cascades from or protects the row - one UPDATE of it while it's live. A
                 # row it didn't match (soft-deleted meanwhile, gone, a stale version) is settled by
                 # the full delete below.
-                return
+                return True
         await DeletionCollector.check_protected(type(obj), [obj.pk], connection)
         if not obj._meta.soft_delete_field:
             # The database's own cascade is invisible to Python - a PROTECT further down it is
@@ -160,7 +164,7 @@ class InstanceDeletion:
                     # Soft-deleted since this obj was read (a stale copy, or a concurrent
                     # delete this one waited for) - a no-op like any already-deleted row.
                     SoftDeletion.adopt_soft_delete_value(obj, transaction_connection, current_soft_delete_value)
-                    return
+                    return False
                 await CascadeDeletion.run_below(
                     obj,
                     transaction_connection,
@@ -178,6 +182,7 @@ class InstanceDeletion:
             await InstanceDeletion.delete_row_permanently(
                 obj, connection, apply_active_tenant_scope_guard=apply_active_tenant_scope_guard
             )
+        return True
 
     @staticmethod
     async def delete_row_permanently(

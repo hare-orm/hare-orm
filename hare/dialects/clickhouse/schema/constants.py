@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from hare.sql.order import Order
+
 #: The fields a ClickHouse container type maps to.
 CLICKHOUSE_ARRAY_FIELD_PATH = "hare.fields.data.containers.ArrayField"
 CLICKHOUSE_MAP_FIELD_PATH = "hare.fields.data.containers.MapField"
@@ -47,6 +49,12 @@ CLICKHOUSE_MATERIALIZED_VIEW_CREATE_TEMPLATE = (
 CLICKHOUSE_MATERIALIZED_VIEW_STORAGE_SETTINGS_SQL = " SETTINGS allow_nullable_key = 1"
 #: The rows of a materialized view's query written into it.
 CLICKHOUSE_MATERIALIZED_VIEW_FILL_TEMPLATE = "INSERT INTO {view}\n{query};"
+#: A fill of a materialized view on a cluster from tables keeping rows of each server's own.
+CLICKHOUSE_MATERIALIZED_VIEW_CLUSTER_FILL_MESSAGE = (
+    "{model}: the materialized view {view} is filled by its query on the server the connection is to, over the "
+    "rows of that server alone - its query reads {read_tables}, not a distributed table. Read distributed tables "
+    "(and name them in read_columns for raw SQL), or declare the view with_data=False and fill it on every server"
+)
 #: The query and the schedule of a materialized view changed in place.
 CLICKHOUSE_MATERIALIZED_VIEW_QUERY_TEMPLATE = "ALTER TABLE {view} MODIFY QUERY\n{query};"
 CLICKHOUSE_MATERIALIZED_VIEW_SCHEDULE_TEMPLATE = "ALTER TABLE {view} MODIFY REFRESH {schedule};"
@@ -102,6 +110,9 @@ CLICKHOUSE_MERGE_TREE_OPTIONS = (
 #: its place in it, which the new values written beside a row are matched to it by.
 CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTINGS = ("enable_block_number_column", "enable_block_offset_column")
 CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTING_VALUE = 1
+#: The table setting letting a column of the sorting or the partition key hold NULL - ClickHouse refuses
+#: a Nullable key column without it.
+CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING = "allow_nullable_key"
 #: The table options ClickHouse changes with an ``ALTER TABLE`` - a change of any other one remakes the
 #: table.
 CLICKHOUSE_ALTERABLE_TABLE_OPTIONS = frozenset(
@@ -131,6 +142,14 @@ CLICKHOUSE_WIDE_DECIMAL_BOUND_TEMPLATE = "toDecimal256('{}', 0)"
 #: A column made NOT NULL while it holds NULL - ClickHouse would write its type's default in place of
 #: each.
 CLICKHOUSE_NOT_NULL_CHANGE_REFUSED_MESSAGE = "column {column} of table {table} holds NULL"
+#: The text a FixedString column holds - its bytes without the zero bytes padding it to its width.
+CLICKHOUSE_FIXED_STRING_TEXT_TEMPLATE = "replaceRegexpOne(toString({column}), '\\\\x00+$', '')"
+#: A FixedString column turned into a String of its text - the step a narrower FixedString is reached by.
+CLICKHOUSE_FIXED_STRING_TO_TEXT_TEMPLATE = "MODIFY COLUMN {column} {sql_type}, UPDATE {column} = {text} WHERE 1"
+#: The type of a text column.
+CLICKHOUSE_TEXT_TYPE_NAME = "String"
+#: The name a check's lambda gives an element of an array - numbered by its depth.
+CLICKHOUSE_HELD_ELEMENT_NAME = "hare_element"
 #: A text column's type - a type change from it parses each value, and a value that doesn't parse fails
 #: the change's mutation after the column took its new type, or becomes NULL in a Nullable one.
 CLICKHOUSE_TEXT_COLUMN_TYPE_PATTERN = r"(?:Nullable\(|LowCardinality\()*(?:String|FixedString\(\d+\))\)*"
@@ -144,10 +163,12 @@ CLICKHOUSE_COLUMN_TYPES_QUERY = (
 CLICKHOUSE_DECIMAL_COLUMN_TYPE_PATTERN = r"Decimal\((\d+),\s*(\d+)\)"
 #: A label of an Enum column's type, as the SQL literal it is declared with.
 CLICKHOUSE_ENUM_LABEL_PATTERN = r"('(?:[^'\\]|\\.)*')\s*=\s*-?\d+"
-#: The column types a text column changes to unchecked - every text is one of a text type, and a
-#: container's values have no cast a check could read.
+#: The column types a column changes to unchecked - every text is one of a text type, a Dynamic holds a
+#: value of any type (past its max_types, as one of its shared types), and a container's values have no
+#: cast a check could read.
 CLICKHOUSE_UNCHECKED_CONVERSION_TYPE_PREFIXES = (
     "String",
+    "Dynamic",
     "FixedString",
     "LowCardinality(String",
     "Array(",
@@ -199,3 +220,5 @@ CLICKHOUSE_SHADOW_OTHER_DATABASE_ENGINE_SQL = "SELECT name, engine, engine_full 
 CLICKHOUSE_SHADOW_DATABASE_CREATE_TEMPLATE = "CREATE DATABASE {database}{engine}"
 #: The shadow database dropped - its replicated tables' Keeper paths removed before it returns.
 CLICKHOUSE_SHADOW_DATABASE_DROP_TEMPLATE = "DROP DATABASE IF EXISTS {database} SYNC"
+#: The orders of a projection's ORDER BY - a sorting key, ascending with NULL last.
+CLICKHOUSE_PROJECTION_ORDERS = frozenset({None, Order.ASC, Order.ASC_NULLS_LAST})

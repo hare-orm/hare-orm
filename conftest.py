@@ -26,7 +26,13 @@ from tests.plan_verification.plan_coverage import PlanCoverage
 from tests.plan_verification.plan_parts_verification import PlanPartsVerification
 from tests.plan_verification.plan_verification import PlanVerification
 from tests.sqlite_versions.constants import SQLITE_VERSION_ENVIRONMENT_VARIABLE
-from tests.utils.constants import RUN_TIMING_OPTION, SQLITE_ONLY_MARKER, TIMING_MARKER
+from tests.utils.constants import (
+    DECIMAL_FIELDS_MARKER,
+    POSTGRESQL_MODELS_MARKER,
+    RUN_TIMING_OPTION,
+    SQLITE_ONLY_MARKER,
+    TIMING_MARKER,
+)
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
 from tests.utils.power_throttling import PowerThrottling
@@ -390,6 +396,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     # A test opening only SQLite databases of its own runs the same on every database under test.
     if DatabaseUnderTest.get_engine_name(DatabaseUnderTest.get_dialect()) != "sqlite":
         left_out_markers.append(SQLITE_ONLY_MARKER)
+    # The models only PostgreSQL's shared test database holds.
+    if DatabaseUnderTest.get_dialect().name != "postgresql":
+        left_out_markers.append(POSTGRESQL_MODELS_MARKER)
+    # Exact decimals, on a database storing none.
+    if not DatabaseUnderTest.holds_decimal_fields():
+        left_out_markers.append(DECIMAL_FIELDS_MARKER)
     # A test whose outcome depends on time runs only when asked for.
     if not config.getoption(RUN_TIMING_OPTION):
         left_out_markers.append(TIMING_MARKER)
@@ -491,7 +503,7 @@ async def _shared_test_db_url(_orphaned_test_database_sweep: None):
         resolved_db_url = _resolve_db_url()
     print(f"[_shared_test_db_url] creating {resolved_db_url}", flush=True)
     async with hare_test_context(
-        modules=KeptSharedTestDatabase.MODULES,
+        modules=KeptSharedTestDatabase.get_modules(),
         db_url=resolved_db_url,
         app_label="models",
         connection_label="models",
@@ -521,7 +533,7 @@ async def db_module(_shared_test_db_url):
     """
     if _is_file_database(_shared_test_db_url):
         async with hare_test_context(
-            modules=["tests.shared_models.testmodels"],
+            modules=KeptSharedTestDatabase.get_modules(),
             db_url=_shared_test_db_url,
             app_label="models",
             connection_label="models",
@@ -530,7 +542,7 @@ async def db_module(_shared_test_db_url):
         return
 
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels"],
+        modules=KeptSharedTestDatabase.get_modules(),
         db_url=_shared_test_db_url,
         app_label="models",
         connection_label="models",
@@ -605,7 +617,7 @@ async def db_isolated():
     """
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels"],
+        modules=KeptSharedTestDatabase.get_modules(),
         db_url=db_url,
         app_label="models",
         connection_label="models",
@@ -631,7 +643,7 @@ async def db_isolated_no_schema():
     """
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels"],
+        modules=KeptSharedTestDatabase.get_modules(),
         db_url=db_url,
         app_label="models",
         connection_label="models",

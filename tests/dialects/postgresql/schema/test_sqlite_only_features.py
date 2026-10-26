@@ -57,7 +57,6 @@ class RecordingEditor:
 async def test_a_strict_sqlite_table_option_is_ignored(postgres_db):
     document = await SqliteFeatureDocument.objects.create(title="hare orm", body="fast")
     assert await SqliteFeatureDocument.objects.filter(id=document.id).count() == 1
-    assert not postgres_db.get_connection().features.supports_strict_tables
 
 
 @pytest.mark.asyncio

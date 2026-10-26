@@ -3,6 +3,7 @@ from __future__ import annotations
 from hare.classes.declared_subclass import DeclaredSubclass
 from hare.dialects.postgresql.fields.ranges.int_range_field import IntRangeField
 from hare.fields.data.constants import INT64_MAX, INT64_MIN
+from hare.fields.data.numeric.big_int_field import BigIntField
 
 BigIntRangeField = DeclaredSubclass.make(
     IntRangeField,
@@ -12,4 +13,5 @@ BigIntRangeField = DeclaredSubclass.make(
     SQL_TYPE="int8range",
     ELEMENT_SQL_TYPE="bigint",
     BOUND_RANGE=(INT64_MIN, INT64_MAX),
+    BOUND_FIELD=BigIntField(),
 )

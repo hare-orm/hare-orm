@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, cast
 
-from hare.exceptions import ConfigurationError
 from hare.models.enums import ModelOption
 from hare.query.managers.manager import Manager
 
@@ -34,15 +33,10 @@ class ModelManagers:
 
         Returns:
             The manager.
-
-        Raises:
-            ConfigurationError: ``objects`` is assigned something that isn't a ``Manager``.
         """
         objects = attributes.get("objects")
         if declares_objects:
-            if not isinstance(objects, Manager):
-                raise ConfigurationError(f"{name}.objects must be a Manager, got {type(objects).__name__}")
-            return objects
+            return cast("Manager[Any]", objects)
         # Read without running the manager's descriptor - off a class it gives a queryset.
         if inspect.getattr_static(meta_class, ModelOption.MANAGER, None) is None and isinstance(objects, Manager):
             return objects

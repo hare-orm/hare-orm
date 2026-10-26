@@ -16,7 +16,7 @@ class AddIndex(AddSchemaObject):
     Args:
         model_name: The model.
         index: The index.
-        concurrently: Build it without blocking writes (Postgres ``CREATE INDEX CONCURRENTLY``) -
+        concurrently: Build it without blocking writes (``Features.supports_concurrent_indexes``) -
             the migration needs ``atomic = False``.
     """
 

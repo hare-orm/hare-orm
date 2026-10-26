@@ -10,7 +10,10 @@ if TYPE_CHECKING:
 
 
 class RemoveExtension(HareOperation):
-    """Drop a Postgres extension after every table that depends on it is gone."""
+    """Drop a database extension after every table that depends on it is gone."""
+
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
 
     def __init__(self, extension_name: str) -> None:
         self.extension_name = extension_name

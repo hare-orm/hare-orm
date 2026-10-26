@@ -13,11 +13,11 @@ class PoolSaturation(HealthCriterion):
     """Holds when a pool of the connection has at least ``ratio`` of its most connections in use.
 
     Args:
-        ratio: The share of ``max_size`` - above 0, at most 1.
+        ratio: The share of ``max_size``.
     """
 
     def __init__(self, ratio: float) -> None:
-        self.ratio = HealthCriterion.get_checked_amount("ratio", ratio, 1.0)
+        self.ratio = ratio
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         for pool in connection_check.pools:

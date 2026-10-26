@@ -36,9 +36,9 @@ itoa = "1"
 # JSON numbers kept as their text - compared as exact decimals.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 # The MD5 and SHA digests of the text functions.
-md-5 = "0.10"
-sha1 = "0.10"
-sha2 = "0.10"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
 # The allocator of every Rust allocation in the extension - a decoded row allocates several times,
 # and the system allocator (HeapAlloc on Windows) costs several times more per allocation.
 mimalloc = { version = "0.1", default-features = false }

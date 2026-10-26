@@ -7,7 +7,9 @@ import pytest_asyncio
 from hare.exceptions import FieldError
 from hare.query.expressions import Case, F, When
 from hare.query.functions import Avg, Coalesce, Length, Lower, Max, Min, Sum, Trim, Upper
-from tests.shared_models.testmodels import CharFields, DateFields, DatetimeFields, DecimalFields
+from tests.shared_models.testmodels import CharFields, DateFields, DatetimeFields
+from tests.shared_models.testmodels_postgres import DecimalFields
+from tests.utils.integer_statistic import IntegerStatistic
 
 
 @pytest_asyncio.fixture
@@ -35,7 +37,7 @@ async def test_min_sum_of_length_are_integers(char_rows):
 async def test_avg_of_length_is_a_float(char_rows):
     result = await CharFields.objects.all().aggregate(result=Avg(Length("char")))
     assert result == {"result": 2.0}
-    assert isinstance(result["result"], float)
+    assert type(result["result"]) is IntegerStatistic.get_type(CharFields)
 
 
 @pytest.mark.asyncio
@@ -99,6 +101,7 @@ async def test_max_of_length_of_datetime_is_refused(db):
         await DatetimeFields.objects.all().aggregate(result=Max(Length("datetime")))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_function_over_annotation_name_keeps_the_annotation_type(db):
     await DecimalFields.objects.create(decimal=Decimal("1.1000"), decimal_nodec=1)

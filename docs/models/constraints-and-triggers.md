@@ -31,7 +31,9 @@ class UniqueConstraint:
 
 @dataclass(frozen=True)
 class CheckConstraint:
-    check: Q | RawSQLTerm   # a Q over the model's own fields, or raw SQL
+    # A Q over the model's own fields, raw SQL, or the condition hare adds itself: a GenericForeignKeyField's
+    # ExclusiveArcCondition, an enum field's EnumMembersCondition.
+    check: Q | RawSQLTerm | ExclusiveArcCondition | EnumMembersCondition
     name: str
 ```
 
@@ -216,7 +218,8 @@ embedded directly inside `CREATE TRIGGER ... BEGIN ... END`, with no separate fu
 
 A trigger of `Meta.triggers` fires on the model's table, so `INSTEAD_OF` — which the database fires on a
 view only — raises `ConfigurationError` when the model is defined; a `Meta.managed = False` model over a
-view may declare one.
+view may declare one. hare creates nothing of an unmanaged model — neither migrations nor
+`generate_schemas()` create its triggers, so such a trigger is created with the view itself (`RunSQL`).
 
 ### <a id="trigger-body-and-when"></a>`body` and `when`
 

@@ -205,3 +205,95 @@ def test_a_renamed_encrypted_field_renames_its_blind_index_with_it(answer_given_
         ("email_blind_index", "mail_blind_index"),
     ]
     assert get_types(operations) == ["RenameField", "RenameField"]
+
+
+def test_a_model_with_an_expression_in_its_options_is_asked_about() -> None:
+    """A model whose table options hold an expression of hare (a partition key) was never asked about - the
+    expressions of the two states compared by identity."""
+    from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+    from hare.query.functions import Trunc
+
+    def make_partitioned_model(model_name: str) -> type[Model]:
+        table_options = [ClickhouseTableOptions(partition_by=Trunc("created", "month"))]
+        meta = type("Meta", (), {"app": "shop", "table_options": table_options})
+        attributes = {"id": fields.IntField(primary_key=True), "created": fields.DatetimeField(), "Meta": meta}
+        return type(model_name, (Model,), attributes)
+
+    rename_questions = RecordedRenameQuestions(True)
+    operations = OperationGenerator(
+        build_state(make_partitioned_model("Item")),
+        build_state(make_partitioned_model("Product")),
+        rename_questions=rename_questions,
+    ).generate()
+
+    assert rename_questions.questions == ["Was model shop.Item renamed to Product?"]
+    assert get_types(operations) == ["RenameModel"]
+
+
+def test_options_ahead_of_a_field_rename_name_the_field_by_its_old_name() -> None:
+    """A field renamed in a ClickHouse sorting key beside a projection reading it: the options holding the
+    table while the field changed went ahead of the RenameField naming the new field - migrate refused them,
+    the field not renamed yet."""
+    from hare.ddl.raw_sql_term import RawSQLTerm
+    from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+    from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
+    from hare.migrations.operations import AlterModelOptions, RenameField
+
+    def make_sorted_model(site_name: str) -> type[Model]:
+        projection = ClickhouseProjection(
+            "by_site", RawSQLTerm(f"SELECT {site_name}, count() GROUP BY {site_name}"), read_columns=(site_name,)
+        )
+        table_options = [ClickhouseTableOptions(order_by=("id", site_name), projections=(projection,))]
+        meta = type("Meta", (), {"app": "shop", "table_options": table_options})
+        attributes = {
+            "id": fields.IntField(primary_key=True),
+            site_name: fields.CharField(max_length=20),
+            "Meta": meta,
+        }
+        return type("Hit", (Model,), attributes)
+
+    operations = OperationGenerator(
+        build_state(make_sorted_model("site")),
+        build_state(make_sorted_model("host")),
+        rename_questions=RecordedRenameQuestions(True),
+    ).generate()
+
+    rename_position = next(
+        position for position, operation in enumerate(operations) if isinstance(operation, RenameField)
+    )
+    (options_ahead,) = [
+        operation for operation in operations[:rename_position] if isinstance(operation, AlterModelOptions)
+    ]
+    (table_options,) = options_ahead.options["table_options"]
+    assert (table_options.order_by, table_options.projections) == (("id", "site"), ())
+
+
+def test_answers_given_beforehand_pair_several_models_declared_alike() -> None:
+    """Two models declared alike renamed at once: the warning names the --rename that renames each, which
+    renamed nothing - nothing was asked of a group, and the answers given beforehand weren't read either."""
+    rename_questions = RecordedRenameQuestions(True, {"shop.Item": "Product", "shop.Part": "Piece"})
+    generator = OperationGenerator(
+        build_state(make_model("Item", name=fields.IntField()), make_model("Part", name=fields.IntField())),
+        build_state(make_model("Piece", name=fields.IntField()), make_model("Product", name=fields.IntField())),
+        rename_questions=rename_questions,
+    )
+    operations = generator.generate()
+
+    assert rename_questions.questions == []
+    assert sorted((operation.old_name, operation.new_name) for operation in operations) == [
+        ("Item", "Product"),
+        ("Part", "Piece"),
+    ]
+    assert rename_questions.get_unapplied_rename_warnings() == []
+
+
+def test_answers_given_beforehand_pair_several_fields_declared_alike() -> None:
+    rename_questions = RecordedRenameQuestions(True, {"shop.Item.x": "x2", "shop.Item.y": "y2"})
+    operations = OperationGenerator(
+        build_state(make_model("Item", x=fields.IntField(), y=fields.IntField())),
+        build_state(make_model("Item", x2=fields.IntField(), y2=fields.IntField())),
+        rename_questions=rename_questions,
+    ).generate()
+
+    assert rename_questions.questions == []
+    assert sorted((operation.old_name, operation.new_name) for operation in operations) == [("x", "x2"), ("y", "y2")]

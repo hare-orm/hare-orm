@@ -13,21 +13,21 @@ from tests.shared_models.testmodels import (
     Currency,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     EnumFields,
-    HighPrecisionDecimalFields,
     JSONFields,
     Service,
     TimeDeltaFields,
     TimeFields,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields, HighPrecisionDecimalFields
 from tests.utils.pg_result_reading import PgResultReading
 from tests.utils.timezone_context import override_timezone
 
 MOMENT = datetime.datetime(2024, 3, 10, 6, 59, 59, 999999, tzinfo=datetime.UTC)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimals(db):
     await PgResultReading.assert_result_read_as_rows(
@@ -41,6 +41,7 @@ async def test_decimals(db):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimals_past_the_default_precision(db):
     await PgResultReading.assert_result_read_as_rows(

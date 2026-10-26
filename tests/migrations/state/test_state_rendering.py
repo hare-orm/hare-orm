@@ -66,7 +66,7 @@ def test_models_created_one_after_another_are_rendered_once_each(render_count: l
     names = [f"Model{number}" for number in range(12)]
     for position, name in enumerate(names):
         get_create_model(name, *names[:position][-1:]).state_forward("app", state)
-        assert state.apps.get_model("app", name).__name__ == name
+        assert state.apps.get_model(f"app.{name}").__name__ == name
     assert sorted(render_count) == sorted(names)
 
 
@@ -78,10 +78,10 @@ def test_a_changed_model_is_rendered_again_with_the_models_it_reaches(render_cou
     _ = state.apps
     render_count.clear()
     AddField(model_name="Book", name="pages", field=fields.IntField(default=0)).state_forward("app", state)
-    book = state.apps.get_model("app", "Book")
+    book = state.apps.get_model("app.Book")
     assert "pages" in book._meta.fields_map
     assert sorted(render_count) == ["Author", "Book"]
-    assert book._meta.fields_map["to_author"].related_model is state.apps.get_model("app", "Author")
+    assert book._meta.fields_map["to_author"].related_model is state.apps.get_model("app.Author")
 
 
 def test_a_clone_keeps_its_source_rendered_and_renders_only_when_asked(render_count: list[str]) -> None:

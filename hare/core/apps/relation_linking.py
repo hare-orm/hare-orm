@@ -24,6 +24,7 @@ from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.core.apps.apps import Apps
+    from hare.core.apps.declarations import ModelReference
     from hare.fields.field import Field
 
 
@@ -33,87 +34,40 @@ class RelationLinking:
     its foreign keys resolved, and the models a relation targets."""
 
     @staticmethod
-    def get_related_model_by_name(apps: Apps, related_app_name: str, related_model_name: str) -> type[Model]:
-        """The model a relation names by its app and model name.
+    def get_related_model(apps: Apps, reference: ModelReference) -> tuple[type[Model], str]:
+        """The model a relation points at - a class, its ``"app.Model"`` label or a ``swappable()``
+        setting, found in the registry (a registry of its own, a migration state, holds its own class of
+        the model a live class names).
 
         Args:
             apps: The registry.
-            related_app_name: The app's name.
-            related_model_name: The model's name.
+            reference: The related model as the relation names it.
 
         Returns:
-            The model.
+            The model and its name.
 
         Raises:
-            ConfigurationError: No such app, or no such model in it.
+            ConfigurationError: The target doesn't exist or is abstract, or is a swapped model named directly
+                instead of through ``swappable()``.
         """
-        if related_app_name not in apps.apps:
+        if isinstance(reference, type) and reference._meta.abstract:
+            # An abstract model has no primary key to relate to.
             raise ConfigurationError(
-                f"No app with name {related_app_name!r} registered. Please check your model names in "
-                "ForeignKeyFields and configurations."
+                f"{reference.__name__} is an abstract model (Meta.abstract = True) - it can never be "
+                "the target of a relation. Point the relation at a concrete model instead."
             )
-        return apps.get_model(related_app_name, related_model_name)
-
-    @staticmethod
-    def get_related_model(
-        apps: Apps, reference: str | type[Model] | SwappableModelReference
-    ) -> tuple[type[Model], str]:
-        """A relation's own `model_name`/`reference` is either the target model class
-        directly, a `"<appname>.<modelname>"` string that still needs resolving through
-        the app registry, or a swappable reference naming the model a setting points at.
-
-        Args:
-            apps: The registry.
-            reference: The related model - a class, its ``"app.Model"`` name or a swappable model reference.
-
-        Raises:
-            ConfigurationError: The target doesn't exist or is abstract, or is a swapped model
-                named directly instead of through ``swappable()``.
-        """
-        if isinstance(reference, SwappableModelReference):
-            related_app_name, related_model_name = apps.split_validated_reference(
-                apps.get_swappable_label(reference.setting)
-            )
-            return RelationLinking.get_related_model_by_name(
-                apps, related_app_name, related_model_name
-            ), related_model_name
-        related_model, related_model_name = RelationLinking.get_named_related_model(apps, reference)
-        if apps.REJECTS_SWAPPED_RELATION_TARGETS and related_model._meta.swapped is not None:
+        related_model = apps.get_model(reference)
+        if (
+            not isinstance(reference, SwappableModelReference)
+            and apps.REJECTS_SWAPPED_RELATION_TARGETS
+            and related_model._meta.swapped is not None
+        ):
             raise ConfigurationError(
                 f"A relation points at {related_model._meta.full_name!r}, which has been swapped for "
                 f"{related_model._meta.swapped!r} by the {related_model._meta.swappable} setting - declare it "
                 f"with swappable({related_model._meta.swappable!r}) instead"
             )
-        return related_model, related_model_name
-
-    @staticmethod
-    def get_named_related_model(apps: Apps, reference: str | type[Model]) -> tuple[type[Model], str]:
-        """The model a class or ``"<appname>.<modelname>"`` reference names.
-
-        Args:
-            apps: The registry.
-            reference: The related model - a class or its ``"app.Model"`` name.
-
-        Raises:
-            ConfigurationError: The target doesn't exist or is abstract.
-        """
-        if not isinstance(reference, str):
-            if reference._meta.abstract:
-                # An abstract model has no primary key to relate to.
-                raise ConfigurationError(
-                    f"{reference.__name__} is an abstract model (Meta.abstract = True) - it can never be "
-                    "the target of a relation. Point the relation at a concrete model instead."
-                )
-            # A registry of its own (a migration state) holds its own class of the model a live class
-            # names - the relation links to that one, never to the live model.
-            registered_model = apps.apps.get(reference._meta.app or "", {}).get(reference.__name__)
-            if registered_model is not None:
-                return registered_model, reference.__name__
-            return reference, reference.__name__
-        related_app_name, related_model_name = apps.split_validated_reference(reference)
-        return RelationLinking.get_related_model_by_name(
-            apps, related_app_name, related_model_name
-        ), related_model_name
+        return related_model, related_model.__name__
 
     @staticmethod
     def get_backward_relation_name(
@@ -566,12 +520,45 @@ class RelationLinking:
             )
 
     @staticmethod
-    def check_auto_through_table_name_free(apps: Apps, through: str, model: type[Model], field: str) -> None:
-        """Rejects an auto-generated M2M through table name already used by another M2M field's
-        through table or by a model's own table.
+    def get_table_owners(apps: Apps) -> dict[tuple[str | None, str], tuple[type[Model], str | None]]:
+        """Who holds each table name of a registry - a model its own table, a many-to-many field the through
+        table it names; looked up for every automatic through table instead of walking every model again.
 
         Args:
             apps: The registry.
+
+        Returns:
+            ``(schema, table)`` -> ``(model, None)`` for a model's table, ``(model, field)`` for a through table.
+        """
+        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]] = {}
+        for registered_model in apps.get_models_iterable():
+            meta = registered_model._meta
+            if meta.swapped is not None:
+                # A swapped model has no table, nor through tables of its own.
+                continue
+            table_owners.setdefault((meta.schema, meta.db_table), (registered_model, None))
+            for many_to_many_field_name in meta.many_to_many_fields:
+                many_to_many_field = cast("ManyToManyFieldInstance[Any]", meta.fields_map[many_to_many_field_name])
+                if not many_to_many_field._generated and many_to_many_field.through:
+                    table_owners.setdefault(
+                        (many_to_many_field.through_schema, many_to_many_field.through),
+                        (registered_model, many_to_many_field_name),
+                    )
+        return table_owners
+
+    @staticmethod
+    def check_auto_through_table_name_free(
+        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
+        through: str,
+        model: type[Model],
+        field: str,
+    ) -> None:
+        """Rejects an auto-generated M2M through table name already used by another M2M field's
+        through table or by a model's own table, then holds it for the field.
+
+        Args:
+            table_owners: Who holds each table name - ``get_table_owners()``, the through tables named so far
+                added.
             through: The automatic through table's name.
             model: The model declaring the field.
             field: The field's name.
@@ -579,33 +566,22 @@ class RelationLinking:
         Raises:
             ConfigurationError: ``through`` is taken.
         """
-        for registered_model in apps.get_models_iterable():
-            if registered_model._meta.swapped is not None:
-                # A swapped model has no table, nor through tables of its own.
-                continue
-            if registered_model._meta.db_table == through and registered_model._meta.schema == model._meta.schema:
+        key = (model._meta.schema, through)
+        owner = table_owners.get(key)
+        if owner is not None and owner != (model, field):
+            owner_model, owner_field_name = owner
+            if owner_field_name is None:
                 raise ConfigurationError(
                     f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
-                    f"{through!r}, which is the table of model {registered_model.__name__} - set through= "
+                    f"{through!r}, which is the table of model {owner_model.__name__} - set through= "
                     "explicitly."
                 )
-            for many_to_many_field_name in registered_model._meta.many_to_many_fields:
-                other_many_to_many_field = cast(
-                    "ManyToManyFieldInstance[Any]", registered_model._meta.fields_map[many_to_many_field_name]
-                )
-                if other_many_to_many_field._generated or (
-                    registered_model is model and many_to_many_field_name == field
-                ):
-                    continue
-                if (
-                    other_many_to_many_field.through == through
-                    and other_many_to_many_field.through_schema == model._meta.schema
-                ):
-                    raise ConfigurationError(
-                        f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
-                        f'{through!r}, already used by "{registered_model.__name__}.{many_to_many_field_name}" - set '
-                        "through= explicitly on one of them."
-                    )
+            raise ConfigurationError(
+                f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
+                f'{through!r}, already used by "{owner_model.__name__}.{owner_field_name}" - set '
+                "through= explicitly on one of them."
+            )
+        table_owners[key] = (model, field)
 
     @staticmethod
     def get_component_default(default: Any, position: int) -> Any:

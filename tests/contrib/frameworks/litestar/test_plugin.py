@@ -21,6 +21,7 @@ from hare.contrib.frameworks.litestar import (
 )
 from hare.contrib.repeated_queries import RepeatedQueryDetector
 from hare.contrib.request_query import (
+    ApiRequestError,
     CommaSeparated,
     Filter,
     FilterField,
@@ -293,6 +294,20 @@ async def test_a_forbidden_parameter_answers_403():
     }
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_a_value_another_service_failed_to_give_answers_502():
+    @get("/writer-cards")
+    async def writer_cards() -> None:
+        raise ApiRequestError("API people: the request for 7 failed", "people")
+
+    app = Litestar([writer_cards], plugins=[HarePlugin(CONFIG)])
+    async with AsyncTestClient(app) as client:
+        response = await client.get("/writer-cards")
+    assert response.status_code == 502
+    assert response.json() == {"status_code": 502, "detail": "Bad Gateway"}
+
+
 @pytest.mark.asyncio
 async def test_orm_errors_answer_404_and_409():
     async with AsyncTestClient(build_app()) as client:
@@ -373,11 +388,7 @@ async def test_atomic_requests_naming_an_unknown_connection_fails_at_startup():
 
 
 @pytest.mark.database_independent
-def test_atomic_requests_must_be_a_bool_or_connection_names():
-    with pytest.raises(ConfigurationError):
-        HarePlugin(CONFIG, atomic_requests="default")
-    with pytest.raises(ConfigurationError):
-        HarePlugin(CONFIG, atomic_requests=["default", "default"])
+def test_atomic_requests_names_the_connections():
     assert HarePlugin(CONFIG, atomic_requests=True).lifecycle.transaction_connection_names == (None,)
     assert HarePlugin(CONFIG).lifecycle.transaction_connection_names == ()
 

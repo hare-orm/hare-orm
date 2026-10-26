@@ -11,7 +11,6 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.search.constants import (
     FULL_TEXT_INDEX_REQUIRED_FEATURE,
-    SEARCH_RANK_LABEL_WEIGHT_COUNT,
     SEARCH_RANK_MAX_FIELD_WEIGHT,
     TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE,
 )
@@ -82,24 +81,6 @@ class SearchRank(Expression):
                         f"{SEARCH_RANK_MAX_FIELD_WEIGHT:g}, got {ValueDescriptions.get_shown_value(weight)}"
                     )
             weights = dict(weights)
-        elif weights is not None and not isinstance(weights, (str, Expression, Term)):
-            if (
-                not isinstance(weights, Sequence)
-                or len(weights) != SEARCH_RANK_LABEL_WEIGHT_COUNT
-                or not all(FiniteNumbers.is_finite_number(weight) for weight in weights)
-            ):
-                raise ConfigurationError(
-                    f"SearchRank weights must be {SEARCH_RANK_LABEL_WEIGHT_COUNT} numbers - the weights of the D, C, "
-                    f"B and A labels - or field weights by name, got {weights!r}"
-                )
-        if (
-            normalization is not None
-            and not isinstance(normalization, (Expression, Term))
-            and (isinstance(normalization, bool) or not isinstance(normalization, int))
-        ):
-            raise ConfigurationError(
-                f"SearchRank normalization must be an integer bitmask, got {type(normalization).__name__}"
-            )
         self.vector = vector
         self.query = query
         #: The query as an expression - search text as a ``SearchQuery``.

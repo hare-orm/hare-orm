@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, cast
 
 from hare.fields.field import Field
 from hare.migrations.constants import RUNTIME_MIGRATION_MODULE_PREFIX
@@ -13,6 +13,7 @@ from hare.transactions.transactions import Transactions
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.safety.enums import MigrationRiskCode
+    from hare.migrations.state.declarations import OperationUndo
 
 
 class Migration:
@@ -178,8 +179,10 @@ class Migration:
         self.raise_if_irreversible()
         for operation in self.operations:
             if need_old_state:
-                new_state = new_state.clone()
-                old_state = new_state.clone()
+                # One state between two operations - the state after one is the state before the next, and
+                # its models are rendered once for both.
+                old_state = new_state
+                new_state = old_state.clone()
                 operation.state_forward(self.app_label, new_state)
                 to_run.insert(0, (operation, old_state, new_state))
             else:
@@ -198,6 +201,47 @@ class Migration:
             if dry_run or not schema_editor:
                 continue
             await self._run_database_backward(operation, from_state, to_state, schema_editor, supports_transactions)
+        return state
+
+    async def unapply_in_place(
+        self,
+        state: State,
+        undos: Sequence[OperationUndo],
+        *,
+        dry_run: bool = False,
+        schema_editor: BaseSchemaEditor | None = None,
+    ) -> State:
+        """Unapplies the migration on the state after it, taking that state back operation by operation - a
+        copy of the state only for an operation whose backward step reads the states on both sides.
+
+        Args:
+            state: The state after the migration - taken back to the state before it.
+            undos: What takes the state back from each operation, in the operations' order.
+            dry_run: Whether only the state changes - no SQL runs.
+            schema_editor: The schema editor of the connection - None writes nothing.
+
+        Returns:
+            ``state``, now the state before the migration.
+        """
+        self.raise_if_irreversible()
+        runs_sql = not dry_run and schema_editor is not None
+        supports_transactions = schema_editor is not None and schema_editor.client.features.supports_transactions
+        for operation, undo in reversed(list(zip(self.operations, undos, strict=True))):
+            if not runs_sql:
+                state.undo(undo)
+                continue
+            editor = cast("BaseSchemaEditor", schema_editor)
+            if operation.backward_reads_state_left and operation.backward_reads_state_reached:
+                state_left = state.clone()
+                state.undo(undo)
+                await self._run_database_backward(operation, state_left, state, editor, supports_transactions)
+            elif operation.backward_reads_state_left:
+                # Its SQL reads the state it is undone from alone - run on the state as it is, then taken back.
+                await self._run_database_backward(operation, state, state, editor, supports_transactions)
+                state.undo(undo)
+            else:
+                state.undo(undo)
+                await self._run_database_backward(operation, state, state, editor, supports_transactions)
         return state
 
     def raise_if_unsupported(self, state: State, schema_editor: BaseSchemaEditor) -> None:

@@ -34,7 +34,7 @@ All the `contains`/`startswith`/`endswith`/`iexact`/`i*` variants and `posix_reg
 left side to text first — they're technically callable on a numeric field too, though that's rarely what you
 want; a float, decimal or boolean is matched as the database's own text of the value (`CAST ... AS
 VARCHAR`): a float is `2` on PostgreSQL and `2.0` on SQLite, a boolean `true`/`false` on PostgreSQL and
-`1`/`0` on SQLite, and a Decimal on SQLite is its stored text with the full scale (`2.0000`). A
+`1`/`0` on SQLite. A
 `CitextField` stays `citext`, so these match regardless of case (`posix_regex` included).
 
 `contains`/`startswith`/`endswith` and the `i...` variants also take a column or an expression —
@@ -313,7 +313,8 @@ LEFT OUTER JOIN LATERAL (
 `AsofJoin(source, on=Q(...))` (`hare.query.expressions`) joins a model's rows `ASOF` under a name of its
 own: each row of the query gets the one row of `source` closest to it by an inequality, among the rows
 equal to it by the other conditions — the last quote of a symbol at or before each trade. A row with no
-such row still comes, its values `NULL` — an `ASOF LEFT JOIN`:
+such row still comes, its values `NULL` — an `ASOF LEFT JOIN`. `source` is a model — its class or its
+`"app.Model"` label — or a queryset of its rows:
 
 ```python
 from hare.query.expressions import AsofJoin, OuterReference, Q
@@ -454,7 +455,8 @@ a string as itself, `true`/`false` as 1/0, a JSON `null` as `NULL`, an object or
 text; its order is numbers, then text. ClickHouse compares the `Dynamic` value it reads of the JSON text
 (session setting `allow_suspicious_types_in_order_by=1`): it orders a `Dynamic` by the name of its type
 first, then by value (a `Float64` `2.5` before an `Int64` `9`, `Bool` before numbers, strings after), and
-comparing a path that holds strings and numbers raises ClickHouse's `NO_COMMON_TYPE`. A `date`/`datetime`
+comparing a path that holds values of no common type — strings and numbers, objects and numbers —
+raises ClickHouse's own error (`NO_COMMON_TYPE`, `ILLEGAL_TYPE_OF_ARGUMENT`). A `date`/`datetime`
 is its ISO-8601 text, compared as a string — `data__at__gt=date(...)` matches any later text. `__filter`
 compares by the value's type instead (below).
 A path can't name an empty key (`data__`, `data____isnull` raise `FieldError`, as any key with an empty
@@ -535,7 +537,7 @@ await Book.objects.filter(details__filter={"publisher__has_key": "city"})
 ```
 
 > [!WARNING]
-> **`__isnull` on a JSON path means no value there: JSON `null` and an absent key both count**
+> **`__isnull` of `__filter` means no value there: JSON `null` and an absent key both count**
 >
 > `__filter={"key__isnull": True}` (and `{"key": None}`) is built on the `->>` text extraction, which
 > returns SQL `NULL` in **three** situations: the key exists with JSON `null`, the key is absent from the
@@ -551,6 +553,9 @@ await Book.objects.filter(details__filter={"publisher__has_key": "city"})
 > # key present with a real (non-null) value
 > Q(data__filter={"key__isnull": False})
 > ```
+>
+> A path's own lookups tell the two apart, on every database: `data__key__isnull=True` matches an
+> absent key (and no document at all), `data__key=None` a JSON `null`.
 
 ## <a id="custom-lookups"></a>Custom lookups
 

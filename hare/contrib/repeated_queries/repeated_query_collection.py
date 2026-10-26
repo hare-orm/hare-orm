@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.repeated_queries.repeated_query_entry import RepeatedQueryEntry
 from hare.exceptions import QueryError
 from hare.instrumentation.declarations import QueryExecuted
@@ -81,16 +80,11 @@ class RepeatedQueryCollection:
         """The shapes issued at least ``threshold`` times, most frequent first.
 
         Args:
-            threshold: The minimum count, at least 1.
+            threshold: The minimum count.
 
         Returns:
             The entries.
-
-        Raises:
-            QueryError: ``threshold`` is less than 1.
         """
-        if threshold < 1:
-            raise QueryError(f"threshold must be at least 1, got {ValueDescriptions.get_shown_text(threshold)}")
         matching_entries = [entry for entry in self.entries_by_shape_key.values() if entry.count >= threshold]
         return sorted(matching_entries, key=lambda entry: entry.count, reverse=True)
 

@@ -94,8 +94,6 @@ class SearchHeadline(Expression):
         self.min_words = self.get_checked_count("min_words", min_words, 0)
         self.short_word = self.get_checked_count("short_word", short_word, 0)
         self.max_fragments = self.get_checked_count("max_fragments", max_fragments, 0)
-        if highlight_all is not None and not isinstance(highlight_all, bool):
-            raise ConfigurationError(f"SearchHeadline highlight_all must be a bool, got {highlight_all!r}")
         self.highlight_all = highlight_all
 
     @staticmethod

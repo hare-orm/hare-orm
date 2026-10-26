@@ -26,7 +26,7 @@ async def db_array_fields_module():
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ArrayFields require PostgreSQL")
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels_postgres"],
+        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
         db_url=db_url,
         app_label="models",
         connection_label="models",
@@ -39,7 +39,8 @@ async def db_array_fields(db_array_fields_module):
     """
     Fixture for TestArrayFields, with transaction rollback cleanup between tests.
 
-    Equivalent to: test.IsolatedTestCase with hare_test_modules=["tests.shared_models.testmodels_postgres"]
+    Equivalent to: test.IsolatedTestCase with
+    hare_test_modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"]
     """
     async with RollbackIsolation(db_array_fields_module) as ctx:
         yield ctx

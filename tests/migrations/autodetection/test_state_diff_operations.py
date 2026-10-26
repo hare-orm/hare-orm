@@ -44,7 +44,7 @@ from hare.migrations.operations import (
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models import Model
-from hare.query.expressions import F
+from hare.query.expressions import F, Q
 
 pytestmark = pytest.mark.database_independent
 
@@ -1402,6 +1402,22 @@ def test_detect_trigger_altered() -> None:
     assert len(operations) == 1
     assert isinstance(operations[0], AlterTrigger)
     assert operations[0].trigger.on == "INSERT OR UPDATE"
+
+
+def test_a_trigger_whose_when_reads_a_changed_column_is_removed_before_and_added_after() -> None:
+    """A trigger whose Q condition read a column the migration changed was left in place - PostgreSQL
+    refused the change of a column a trigger reads."""
+    Widget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), price=fields.IntField())
+    WiderWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), price=fields.BigIntField())
+
+    old_state = build_state("models", Widget)
+    new_state = build_state("models", WiderWidget)
+    trigger = Trigger(name="widget_trig", on=TriggerEvent.INSERT, body=RawSQLTerm("RETURN NEW;"), when=Q(price__lt=0))
+    old_state.models[("models", "Widget")].options["triggers"] = (trigger,)
+    new_state.models[("models", "Widget")].options["triggers"] = (trigger,)
+
+    operations = OperationGenerator(old_state, new_state).generate()
+    assert [type(operation).__name__ for operation in operations] == ["RemoveTrigger", "AlterField", "AddTrigger"]
 
 
 def test_trigger_unchanged_produces_no_operations() -> None:

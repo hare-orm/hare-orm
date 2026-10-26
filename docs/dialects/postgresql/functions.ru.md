@@ -64,7 +64,9 @@ await Book.objects.annotate(
 `JSONBAgg` от `DecimalField` даёт `Decimal`, округлённый до `decimal_places` поля: сам JSON хранит число
 с точностью числа с плавающей точкой, поэтому, если важны точные цифры, используйте `ArrayAgg`.
 `JSONBAgg` от поля диапазона даёт значения `Range` (включая пустой диапазон, сторону без границы и
-включённые/невключённые границы). `ArrayAgg` от `ArrayField` строит один многомерный массив, строки
+включённые/невключённые границы). `JSONBAgg` от `IntervalField` или `BinaryField` даёт `FieldError` — в
+JSON нет такого значения, только текст по `IntervalStyle`/`bytea_output` сервера; `ArrayAgg` отдаёт их
+точно. `ArrayAgg` от `ArrayField` строит один многомерный массив, строки
 которого PostgreSQL требует одной длины: массивы разной длины или пустой среди непустых дают
 `OperationalError` (`cannot accumulate arrays of different dimensionality`). `JSONBAgg` собирает их
 списком списков — `[['a', 'b'], [], ['c']]`, — как `ArrayAgg` в ClickHouse.

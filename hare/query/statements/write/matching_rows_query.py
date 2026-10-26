@@ -19,8 +19,8 @@ from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.sql.builder.queries.query_builder import QueryBuilder
-from hare.sql.enums import Order
 from hare.sql.identifiers import Identifiers
+from hare.sql.order import Order
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.star import Star
 from hare.sql.terms.subqueries.exists_term import ExistsTerm

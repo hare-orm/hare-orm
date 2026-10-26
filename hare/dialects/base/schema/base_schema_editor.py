@@ -156,6 +156,8 @@ class BaseSchemaEditor:
         self.atomic_migration = connection.features.can_rollback_ddl and atomic
         self.collect_sql = collect_sql
         self.collected_sql: list[str] = []
+        #: The statements run so far - a migration failing before its first one changed nothing.
+        self.run_statement_count = 0
         self.column_definitions = self.column_definitions_class(self)
         self.column_type_changes = self.column_type_changes_class(self)
         self.column_backfill = self.column_backfill_class(self)
@@ -194,6 +196,7 @@ class BaseSchemaEditor:
             self.collected_sql.append(sql)
             return
         ProtectConstraintDeferral.forget_constraint_names()
+        self.run_statement_count += 1
         await self.client.execute_built_script(sql)
 
     async def run_raw_sql(self, sql: str) -> None:
@@ -208,7 +211,23 @@ class BaseSchemaEditor:
             self.collected_sql.append(sql)
             return
         ProtectConstraintDeferral.forget_constraint_names()
+        self.run_statement_count += 1
         await self.client.execute_script(sql)
+
+    async def run_parameterized_sql(self, sql: str, parameters: Sequence[Any]) -> int:
+        """Runs a statement of a migration that changes rows, with its parameters - a backfill's batch, a
+        ``RunSQL`` pair - counted as a statement run, as ``run_sql()`` counts its own.
+
+        Args:
+            sql: The statement.
+            parameters: Its parameters.
+
+        Returns:
+            The number of rows it changed.
+        """
+        self.run_statement_count += 1
+        rowcount, _ = await self.client.execute(sql, list(parameters))
+        return rowcount or 0
 
     @asynccontextmanager
     async def constraint_checking_disabled(self) -> AsyncGenerator[None]:

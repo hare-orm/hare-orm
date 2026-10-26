@@ -13,15 +13,10 @@ class AllOf(HealthCriterion):
     WaitingRequests(at_least=3))``.
 
     Args:
-        *criteria: The criteria - at least two.
-
-    Raises:
-        ValueError: Fewer than two criteria.
+        *criteria: The criteria.
     """
 
     def __init__(self, *criteria: HealthCriterion) -> None:
-        if len(criteria) < 2:
-            raise ValueError(f"AllOf needs at least two criteria, got {len(criteria)}")
         self.criteria = criteria
         self.requires_pool_metrics = any(criterion.requires_pool_metrics for criterion in criteria)
 

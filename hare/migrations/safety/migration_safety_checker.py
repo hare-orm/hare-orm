@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.classes.value_descriptions import ValueDescriptions
-from hare.core.constants import DEFAULT_LARGE_TABLE_ROWS, MAX_LARGE_TABLE_ROWS
-from hare.exceptions import ConfigurationError
+from hare.core.constants import DEFAULT_LARGE_TABLE_ROWS
 from hare.migrations.operations import CreateModel, RenameModel, SeparateDatabaseAndState
-from hare.migrations.safety.enums import MigrationRiskCode
 from hare.migrations.safety.migration_safety_context import MigrationSafetyContext
+from hare.migrations.safety.operation_states import OperationStates
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -15,7 +13,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.dialects.base.migration_safety.migration_safety_rule import MigrationSafetyRule
     from hare.migrations.migration import Migration
-    from hare.migrations.operations import Operation
     from hare.migrations.safety.migration_risk import MigrationRisk
     from hare.migrations.state.state import State
 
@@ -29,19 +26,9 @@ class MigrationSafetyChecker:
 
     Args:
         large_table_rows: The rows from which a table counts as large.
-
-    Raises:
-        ConfigurationError: ``large_table_rows`` isn't a whole number from 0 to 10**12.
     """
 
     def __init__(self, *, large_table_rows: int = DEFAULT_LARGE_TABLE_ROWS) -> None:
-        if isinstance(large_table_rows, bool) or not isinstance(large_table_rows, int):
-            raise ConfigurationError(f"large_table_rows must be a whole number of rows, got {large_table_rows!r}")
-        if not 0 <= large_table_rows <= MAX_LARGE_TABLE_ROWS:
-            raise ConfigurationError(
-                f"large_table_rows must be between 0 and {MAX_LARGE_TABLE_ROWS}, got "
-                f"{ValueDescriptions.get_shown_value(large_table_rows)}"
-            )
         self.large_table_rows = large_table_rows
 
     async def check(
@@ -65,12 +52,7 @@ class MigrationSafetyChecker:
 
         Returns:
             Its risks, in the order of its operations - exempted ones included, marked.
-
-        Raises:
-            ConfigurationError: The migration's ``safety_exemptions`` holds something other than a
-                ``MigrationRiskCode``.
         """
-        self.raise_for_unknown_exemptions(migration)
         rules = dialect.migration_safety_rules.rules
         created_model_names = frozenset(
             operation.name.lower()
@@ -92,70 +74,33 @@ class MigrationSafetyChecker:
         }
         risks: list[MigrationRisk] = []
         contexts: list[MigrationSafetyContext] = []
-        operation_state = state.clone()
-        for operation in migration.operations:
-            state_after = self.get_state_after(migration.app_label, operation, operation_state)
+        operation_states = OperationStates(migration.app_label, migration.operations, state)
+        for position, operation in enumerate(migration.operations):
             context = MigrationSafetyContext(
-                operation=operation, state_before=operation_state, state_after=state_after, **common_context_values
+                operation=operation, operation_states=operation_states, position=position, **common_context_values
             )
             contexts.append(context)
             risks.extend(self.check_operation(rules, context))
             if isinstance(operation, SeparateDatabaseAndState):
-                database_state = operation_state
-                for database_operation in operation.database_operations:
-                    database_state_after = self.get_state_after(
-                        migration.app_label, database_operation, database_state
-                    )
+                database_operation_states = OperationStates(
+                    migration.app_label, operation.database_operations, operation_states.get(position)
+                )
+                for database_position, database_operation in enumerate(operation.database_operations):
                     risks.extend(
                         self.check_operation(
                             rules,
                             MigrationSafetyContext(
                                 operation=database_operation,
-                                state_before=database_state,
-                                state_after=database_state_after,
+                                operation_states=database_operation_states,
+                                position=database_position,
                                 in_separate_database_and_state=True,
                                 **common_context_values,
                             ),
                         )
                     )
-                    database_state = database_state_after
-            operation_state = state_after
         for rule in rules:
             risks.extend(rule.check_migration(contexts))
         return risks
-
-    @staticmethod
-    def raise_for_unknown_exemptions(migration: Migration) -> None:
-        """Refuses a ``safety_exemptions`` entry that isn't a ``MigrationRiskCode``.
-
-        Args:
-            migration: The migration.
-
-        Raises:
-            ConfigurationError: For the first entry that isn't one.
-        """
-        known_codes = set(MigrationRiskCode)
-        for exemption in migration.safety_exemptions:
-            if exemption not in known_codes:
-                raise ConfigurationError(
-                    f"Migration {migration}: safety_exemptions takes MigrationRiskCode members, got {exemption!r}"
-                )
-
-    @staticmethod
-    def get_state_after(app_label: str, operation: Operation, state: State) -> State:
-        """The migration state after an operation.
-
-        Args:
-            app_label: The migration's app.
-            operation: The operation.
-            state: The state before it - left as it is.
-
-        Returns:
-            A new state.
-        """
-        state_after = state.clone()
-        operation.state_forward(app_label, state_after)
-        return state_after
 
     @staticmethod
     def check_operation(

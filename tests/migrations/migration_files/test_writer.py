@@ -685,13 +685,17 @@ def test_writer_handles_enum_fields(tmp_path: Path, monkeypatch) -> None:
         ),
     ]
     # The migration should use fields.IntEnumField and fields.CharEnumField
-    # NOT fields.IntEnumFieldInstance or fields.CharEnumFieldInstance
+    # NOT fields.IntEnumFieldInstance or fields.CharEnumFieldInstance; it declares the enums with their
+    # members as they are now instead of importing the classes.
     expected = textwrap.dedent(
         """\
         from hare import migrations
         from hare.migrations import operations as ops
-        from tests.migrations.migration_files.test_writer import Role, Status
+        from enum import IntEnum, StrEnum
         from hare import fields
+
+        Status = IntEnum('Status', {'ACTIVE': 1, 'INACTIVE': 2})
+        Role = StrEnum('Role', {'ADMIN': 'admin', 'USER': 'user'})
 
         class Migration(migrations.Migration):
             operations = [

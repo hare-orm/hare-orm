@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
 
 class CreateCollation(HareOperation):
-    """Creates a Postgres collation - e.g. a case-insensitive ICU one for ``Collate(field, name)``.
-    A database without collation DDL (``Features.supports_collations`` off - SQLite among them) skips
+    """Creates a collation - e.g. a case-insensitive ICU one for ``Collate(field, name)``.
+    A database without collation DDL (``Features.supports_collations`` off) skips
     it with a warning.
 
     Args:
@@ -27,6 +27,9 @@ class CreateCollation(HareOperation):
     Raises:
         ConfigurationError: The name isn't a plain collation name, or the provider is unknown.
     """
+
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
 
     def __init__(self, name: str, locale: str, *, provider: str = "libc", deterministic: bool = True) -> None:
         if not isinstance(name, str) or not COLLATION_NAME_PATTERN.fullmatch(name):

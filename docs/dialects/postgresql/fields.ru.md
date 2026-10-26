@@ -388,7 +388,9 @@ ltree](https://www.postgresql.org/docs/current/ltree.html).
 
 `path__depth` — число меток (целое) в фильтрах, `values()`, `F()` и `order_by()`:
 `filter(path__depth=2)`. `Subpath(field, offset, length=None)` читает часть пути как путь — метки с
-позиции `offset` (с 0, отрицательная — с конца), `length` штук или до конца:
+позиции `offset` (с 0, отрицательная — с конца), `length` штук или до конца. Позиция за пределами пути —
+дело самого `subpath()` PostgreSQL: положительная даёт `OperationalError`, отрицательная — часть пути, а не
+ошибку:
 
 ```python
 from hare.dialects.postgresql.functions import Subpath

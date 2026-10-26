@@ -8,20 +8,25 @@ permissions:
 jobs:
   # Every commit of a pull request must carry a Signed-off-by line naming its own author - the
   # contributor's certification of the Developer Certificate of Origin (CONTRIBUTING.md, Sign-off).
+  # Dependabot's commits are exempt: a bot certifies nothing, and it signs nothing off.
   sign-off:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check every commit is signed off by its author
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEPENDABOT_EMAIL: 49699333+dependabot[bot]@users.noreply.github.com
         run: |
           missing=0
           for commit in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
             author_email=$(git show -s --format='%ae' "$commit")
+            if [ "$author_email" = "$DEPENDABOT_EMAIL" ]; then
+              continue
+            fi
             if ! git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit" | grep -qiF "<$author_email>"; then
               echo "::error::$(git show -s --format='%h %s' "$commit") has no Signed-off-by line for its author <$author_email>."
               missing=1

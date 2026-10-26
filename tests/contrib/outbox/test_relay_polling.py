@@ -35,6 +35,20 @@ async def test_polling_delivers_events_published_before_the_relay_started(db_out
 
 
 @pytest.mark.asyncio
+async def test_a_relay_of_an_outbox_named_by_its_label(db_outbox):
+    await DemoOutboxEvent.enqueue("widget.updated", {"i": 1})
+    delivered: list[int] = []
+
+    async def deliver(event: DemoOutboxEvent) -> None:
+        delivered.append(event.payload["i"])
+
+    relay = OutboxRelay("models.DemoOutboxEvent", deliver)
+    assert await relay.poll_once() == 1
+    assert relay.model is DemoOutboxEvent
+    assert delivered == [1]
+
+
+@pytest.mark.asyncio
 async def test_poll_once_respects_batch_size(db_outbox):
     for i in range(EVENT_COUNT):
         await DemoOutboxEvent.enqueue("widget.updated", {"i": i})

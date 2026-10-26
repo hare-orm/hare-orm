@@ -10,6 +10,7 @@ from hare.core.caching.caches import Caches
 from hare.core.caching.constants import (
     DEFAULT_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL,
     ENV_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL,
+    MAX_PLAIN_BUCKET_ENTRIES,
     MAX_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL,
     MIN_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL,
 )
@@ -163,8 +164,8 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
         lookup that must cost no more than a dict's. It is dropped with the model's entries
         (``forget_model()``, ``forget_all()``), so it is asked for on every read and never kept -
         or read off the model's ``_meta`` (``model_attribute``), which is None once it is dropped.
-        For a cache whose keys hold no model (``keyed_by_model=False``); not bounded - its keys
-        must be few by nature (a model's field paths).
+        For a cache whose keys hold no model (``keyed_by_model=False``); bounded where its entries are
+        set with ``set_bounded()``.
 
         Args:
             model: The model.
@@ -182,6 +183,25 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
             if self.model_attribute is not None:
                 setattr(meta, self.model_attribute, bucket)
         return bucket
+
+    @staticmethod
+    def set_bounded(bucket: dict[Any, Any], key: Any, value: TCacheValue) -> TCacheValue:
+        """Sets an entry of a plain bucket (``get_model_bucket()``), emptying the bucket first once it
+        holds ``MAX_PLAIN_BUCKET_ENTRIES`` - a key may come from data, not from the model alone (a key
+        inside a JSON value, ``data__<key>``), and the bucket is read as a dict, with no order to evict by.
+
+        Args:
+            bucket: The bucket.
+            key: The key.
+            value: The value.
+
+        Returns:
+            ``value``.
+        """
+        if len(bucket) >= MAX_PLAIN_BUCKET_ENTRIES:
+            bucket.clear()
+        bucket[key] = value
+        return value
 
     def _drop_model_bucket(self, model: type[Model]) -> None:
         """Takes this cache's bucket off ``model``."""

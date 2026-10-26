@@ -41,3 +41,8 @@ POSTGRESQL_TS_VECTOR_PATTERN = re.compile(
 POSTGRESQL_TS_VECTOR_SOURCE_PATTERN = re.compile(
     r"\(?COALESCE\(\(?(?P<column>\"(?:[^\"]|\"\")+\"|[a-z_][a-z0-9_$]*)\)?(?:::text)?, ''::[a-z ]+\)\)?(?:::text)?"
 )
+
+#: How many label weights ``SearchRank(weights=[...])`` takes - one per label, D first: ``ts_rank()``'s array.
+POSTGRESQL_RANK_LABEL_WEIGHT_COUNT = 4
+#: The integers of a PostgreSQL ``integer`` - ``ts_rank()``'s normalization bitmask is one.
+POSTGRESQL_INTEGER_RANGE = (-(2**31), 2**31 - 1)

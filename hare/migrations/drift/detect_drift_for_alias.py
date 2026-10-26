@@ -29,8 +29,8 @@ async def detect_drift_for_alias(
         apps: The initialized model registry.
         apps_config: Every configured app, by label.
         connection_alias: The connection alias.
-        schema: The schema swept for untracked tables - an attached database on SQLite, a database of the
-            server where databases are the schemas; the connection's default one when None.
+        schema: The schema swept for untracked tables - a schema, an attached database or a database of
+            the server - the namespace of tables the database has; the connection's default one when None.
         app_labels: The app labels to check, in order - every app on ``connection_alias`` when omitted.
         journal_tables: The tables of migration journals besides ``hare_migrations`` - a
             ``MigrationRecorder(table_name=...)``'s - known too.

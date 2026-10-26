@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hare.contrib.request_query.api_getter.api_source import ApiSource
+from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.request_query.bounds.lookup_pair_bounds import LookupPairBounds
 from hare.contrib.request_query.bounds.parameter_bounds import ParameterBounds
 from hare.contrib.request_query.bounds.range_bounds import RangeBounds
@@ -12,11 +14,9 @@ from hare.contrib.request_query.declaration.constants import (
     STRICT_BOUND_LOOKUPS,
     UPPER_BOUND_LOOKUPS,
 )
-from hare.contrib.request_query.options.deleted_config import DeletedConfig
 from hare.contrib.request_query.options.fields_config import FieldsConfig
 from hare.contrib.request_query.options.filter import Filter
 from hare.contrib.request_query.options.include_config import IncludeConfig
-from hare.contrib.request_query.options.latest_versions import LatestVersions
 from hare.contrib.request_query.options.no_filter import NoFilter
 from hare.contrib.request_query.options.ordering_config import OrderingConfig
 from hare.contrib.request_query.options.search_config import SearchConfig
@@ -26,7 +26,7 @@ from hare.core.hare_context import HareContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
-from hare.query.enums import Connector, Lookup, LookupValueShape
+from hare.query.enums import Lookup, LookupValueShape
 from hare.query.queryset import QuerySet
 
 if TYPE_CHECKING:
@@ -68,24 +68,22 @@ class DeclarationBuilder:
         """
         queryset = self.get_queryset()
         dialects = self.get_dialects(queryset)
-        search = self.get_option("search", SearchConfig)
-        ordering = self.get_option("ordering", OrderingConfig)
-        pagination = self.get_option("pagination", Pagination)
-        fields = self.get_option("fields", FieldsConfig)
-        include = self.get_option("include", IncludeConfig)
-        deleted = self.get_option("deleted", DeletedConfig)
-        versions = self.get_option("versions", LatestVersions)
+        search = self.request_query_class.get_meta_option("search")
+        ordering = self.request_query_class.get_meta_option("ordering")
+        pagination = self.request_query_class.get_meta_option("pagination")
+        fields = self.request_query_class.get_meta_option("fields")
+        include = self.request_query_class.get_meta_option("include")
+        deleted = self.request_query_class.get_meta_option("deleted")
+        versions = self.request_query_class.get_meta_option("versions")
         for model_option in (deleted, versions, pagination):
             if model_option is not None:
                 model_option.check_model(self.class_name, queryset.model)
         join_type = self.request_query_class.get_meta_option("join_type")
-        if join_type not in {Connector.AND, Connector.OR}:
-            raise ConfigurationError(
-                f"{self.class_name}.Meta.join_type must be Connector.AND or Connector.OR, got {join_type!r}"
-            )
         option_parameters = self.get_option_parameters()
+        api_sources, api_mappings = self.get_api_getter()
+        api_target_fields = self.get_api_target_fields(api_sources, api_mappings)
         if fields is not None:
-            self.check_fields(queryset, fields)
+            self.check_fields(queryset, fields, api_target_fields)
         include_to_many = self.build_include(queryset, include) if include is not None else {}
         filters = tuple(
             declaration
@@ -122,6 +120,9 @@ class DeclarationBuilder:
             versions=versions,
             deleted=deleted,
             dialects=dialects,
+            api_sources=api_sources,
+            api_mappings=api_mappings,
+            api_target_fields=api_target_fields,
         )
 
     def get_queryset(self) -> QuerySet[Any]:
@@ -131,15 +132,13 @@ class DeclarationBuilder:
             The queryset.
 
         Raises:
-            ConfigurationError: The class declares no queryset, or not a ``QuerySet``.
+            ConfigurationError: The class declares no queryset.
         """
         queryset = self.request_query_class.get_meta_option("queryset")
         if queryset is None:
             raise ConfigurationError(
                 f"{self.class_name} declares no Meta.queryset - a class without one only serves as a base"
             )
-        if not isinstance(queryset, QuerySet):
-            raise ConfigurationError(f"{self.class_name}.Meta.queryset must be a QuerySet, got {queryset!r}")
         return queryset
 
     def get_dialects(self, queryset: QuerySet[Any]) -> tuple[Dialect, ...]:
@@ -169,24 +168,6 @@ class DeclarationBuilder:
                 f"is on a {connection_dialect.name} connection"
             )
         return (dialect,)
-
-    def get_option(self, name: str, option_type: Any) -> Any:
-        """One ``Meta`` option, checked for its type.
-
-        Args:
-            name: The option's name.
-            option_type: The type the option must have when set.
-
-        Returns:
-            The option, None when unset.
-
-        Raises:
-            ConfigurationError: The option has another type.
-        """
-        option = self.request_query_class.get_meta_option(name)
-        if option is not None and not isinstance(option, option_type):
-            raise ConfigurationError(f"{self.class_name}.Meta.{name} must be {option_type}, got {option!r}")
-        return option
 
     def get_option_parameters(self) -> set[str]:
         """The parameters the class's options add - they aren't filters.
@@ -319,17 +300,61 @@ class DeclarationBuilder:
                     )
         return tuple(bounds)
 
-    def check_fields(self, queryset: QuerySet[Any], fields: FieldsConfig) -> None:
-        """Checks that the fields a request may ask to load are the model's own fields.
+    def get_api_getter(self) -> tuple[tuple[ApiSource, ...], tuple[ApiValueMapping, ...]]:
+        """The class's ``Meta.api_getter``, its sources apart from its mappings of the row's own values.
+
+        Returns:
+            The sources and the mappings.
+        """
+        api_getter = self.request_query_class.get_meta_option("api_getter")
+        if api_getter is None:
+            return (), ()
+        return (
+            tuple(item for item in api_getter if isinstance(item, ApiSource)),
+            tuple(item for item in api_getter if isinstance(item, ApiValueMapping)),
+        )
+
+    @staticmethod
+    def get_api_target_fields(
+        api_sources: tuple[ApiSource, ...], api_mappings: tuple[ApiValueMapping, ...]
+    ) -> dict[str, tuple[str, ...]]:
+        """The fields of the row each target of ``Meta.api_getter`` is filled from - the first part of its
+        source's key, or of its mapping's key.
+
+        Args:
+            api_sources: The sources.
+            api_mappings: The mappings of the row's own values.
+
+        Returns:
+            The fields by the target's name - the first part of its path.
+        """
+        target_fields: dict[str, dict[str, None]] = {}
+        for source in api_sources:
+            for target_name in source.get_target_names():
+                target_fields.setdefault(target_name, {})[source.get_key_root_name()] = None
+        for mapping in api_mappings:
+            fields_of_target = target_fields.setdefault(ApiSource.get_root_name(mapping.set_key), {})
+            if mapping.key is not None:
+                fields_of_target[ApiSource.get_root_name(mapping.key)] = None
+        return {target_name: tuple(field_names) for target_name, field_names in target_fields.items()}
+
+    def check_fields(
+        self, queryset: QuerySet[Any], fields: FieldsConfig, api_target_fields: dict[str, tuple[str, ...]]
+    ) -> None:
+        """Checks that the fields a request may ask to load are the model's own fields, or targets of
+        ``Meta.api_getter``.
 
         Args:
             queryset: The class's queryset.
             fields: The fields option.
+            api_target_fields: The fields each target of ``Meta.api_getter`` is filled from.
 
         Raises:
             ConfigurationError: A name isn't a field of the model, or is a relation or a composite key.
         """
         for name in fields.fields:
+            if name in api_target_fields:
+                continue
             lookup_info = self.describe_filter(queryset, f"{self.class_name}.Meta.fields", name)
             if lookup_info.relations or isinstance(lookup_info.field, tuple) or lookup_info.transforms:
                 raise ConfigurationError(

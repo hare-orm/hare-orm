@@ -7,7 +7,7 @@ from hare.fields.relations.relation_accessors import RelationAccessors
 from hare.query.expressions import Expression, F, Ordering, Q, Window
 from hare.query.functions.window import RowNumber
 from hare.query.relation_loading.constants import PREFETCH_ROW_NUMBER_ANNOTATION
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.models import Model

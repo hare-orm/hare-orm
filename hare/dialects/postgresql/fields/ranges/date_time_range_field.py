@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, ClassVar
 
+from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range import Range
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
@@ -10,7 +11,6 @@ from hare.fields import Field
 from hare.fields.constants import NAIVE_INFINITY_DATETIMES
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.parse_datetime import parse_datetime
-from hare.query.rows.enums import RangeBoundType
 from hare.time import Timezone
 
 

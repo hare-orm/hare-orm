@@ -48,7 +48,7 @@ class SpatialAggregate(Aggregate):
             raise UnSupportedError(f"{type(self).__name__} aggregates geometry columns, not a geography")
         return super()._wrap_argument(expression_context, function_arg)
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         if self.value_field is not None:
             return self.value_field
         output_field_maker = type(self).output_field_maker

@@ -23,5 +23,5 @@ class CompositeForeignKeyInfo:
     #: The ON UPDATE action, as the database spells it.
     on_update: str = FOREIGN_KEY_NO_ACTION
     #: ``DEFERRABLE INITIALLY IMMEDIATE``/``DEFERRABLE INITIALLY DEFERRED``, ``""`` for a constraint
-    #: checked at once - None where the database doesn't tell (SQLite).
+    #: checked at once - None where the database doesn't tell.
     deferral: str | None = None

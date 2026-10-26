@@ -342,7 +342,6 @@ class ForeignKeyRebuild(SchemaEditorPart):
         self,
         model: type[Model],
         field: ManyToManyFieldInstance[Model],
-        old_field: ManyToManyFieldInstance[Model] | None = None,
     ) -> None:
         """Replaces both FK constraints of an auto-managed M2M through table - see
         rebuild_relation_foreign_keys().
@@ -350,8 +349,6 @@ class ForeignKeyRebuild(SchemaEditorPart):
         Args:
             model: The model owning the relation.
             field: The relation as it is now.
-            old_field: The relation as it was, whose constraints are dropped first - None when they are
-                dropped already.
 
         Raises:
             UnSupportedError: On a dialect without its own implementation.

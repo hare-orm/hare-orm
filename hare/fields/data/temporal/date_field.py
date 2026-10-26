@@ -8,9 +8,11 @@ from hare.fields.data.temporal.parse_datetime import parse_datetime
 from hare.fields.db_defaults.now import Now
 from hare.fields.enums import NowValueType
 from hare.fields.field import Field
+from hare.fields.narrowing.day_limit import DayLimit
 from hare.sql.enums import DateTruncSource
 
 if TYPE_CHECKING:
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
     from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.fields.data.temporal.temporal_values import TemporalValues
@@ -38,6 +40,15 @@ class DateField(Field[TDate]):
         super().__init__(**kwargs)
         if isinstance(self.db_default, Now):
             self.db_default = self.db_default.get_for_value_type(NowValueType.DATE)
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        # Imported here: the modules import each other.
+        from hare.fields.data.temporal.datetime_field import DatetimeField
+
+        # A moment's time of day would be cut off.
+        if isinstance(old_field, DatetimeField):
+            return DayLimit(None, None, checks_time_of_day=True)
+        return None
 
     def to_python(self, value: Any) -> datetime.date | None:
         if value is not None:

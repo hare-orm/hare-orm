@@ -49,13 +49,13 @@ from hare.migrations import operations as ops
 
 
 async def seed_widgets(apps, schema_editor):
-    widget_model = apps.get_model("app", "Widget")
+    widget_model = apps.get_model("app.Widget")
     for number in json.loads("[1, 2]"):
         await widget_model.objects.create(id=number, name=f"seeded-{number}")
 
 
 async def unseed_widgets(apps, schema_editor):
-    await apps.get_model("app", "Widget").objects.filter(id__in=[1, 2]).delete()
+    await apps.get_model("app.Widget").objects.filter(id__in=[1, 2]).delete()
 
 
 class Migration(migrations.Migration):

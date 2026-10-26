@@ -48,16 +48,6 @@ class WriteCodecType(StrEnum):
     CALL = "call"
 
 
-class RangeBoundType(StrEnum):
-    """The bounds of a range ``rust.native.rows.FieldCodec`` reads itself."""
-
-    INTEGER = "integer"
-    DECIMAL = "decimal"
-    DATE = "date"
-    #: A timestamp, read into the configured zone.
-    DATETIME = "datetime"
-
-
 class InlineCheckType(StrEnum):
     """A built-in validator ``rust.native.rows.FieldCodec`` checks itself."""
 

@@ -99,9 +99,9 @@ or `async with NotificationListener(...) as listener: ...`.
   The counter resets once a connection survives a health check.
 - **No support (SQLite, ClickHouse):** `start()` and `run()` raise `UnSupportedError` before any
   connection is opened — the database has no notification channels; poll instead.
-- Invalid `reconnect_attempts`/`backoff`/`max_backoff_seconds` (negative, non-finite, empty sequence,
-  wrong type) raise `ConfigurationError` from the constructor, and so does a `channel` no `LISTEN` takes —
-  empty, not a text, or holding a null byte — which no reconnect would ever listen on.
+- A `channel` no `LISTEN` takes raises `ConfigurationError`, as no reconnect would ever listen on it: empty,
+  not a text or holding a null byte from the constructor, longer than the database's names (63 bytes on
+  PostgreSQL) from `start()` and `run()`.
 
 > [!WARNING]
 > **NOTIFY is not persistent**

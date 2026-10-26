@@ -43,6 +43,12 @@ class BackfillColumn(ModelBoundOperation):
     def describe(self) -> str:
         return f"Backfill {self.field_name} on {self.model_name}"
 
+    def raise_if_unsupported(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> None:
+        model = self._model(new_state, app_label)
+        schema_editor.column_backfill.get_backfill_key_sql(model, self._get_column_field_name(model))
+
     async def database_forward(
         self,
         app_label: str,
@@ -80,10 +86,8 @@ class BackfillColumn(ModelBoundOperation):
             )
             return
 
-        while True:
-            rowcount, _ = await state_editor.client.execute(update_query, parameters)
-            if not rowcount:
-                break
+        while await state_editor.run_parameterized_sql(update_query, parameters):
+            pass
 
     def _get_column_field_name(self, model: type[Model]) -> str:
         """Returns the field backing this operation's column - a foreign key's own key field when

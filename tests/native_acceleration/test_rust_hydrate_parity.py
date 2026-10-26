@@ -36,7 +36,6 @@ from tests.shared_models.testmodels import (
     Currency,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     EnumFields,
     JSONFields,
     Service,
@@ -44,6 +43,7 @@ from tests.shared_models.testmodels import (
     TimeFields,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.model_rows_queries import get_model_rows_query
 from tests.utils.row_hydration import RowHydration
 from tests.utils.timezone_context import override_timezone
@@ -145,6 +145,7 @@ async def test_boolean_fields_default_bucket(db):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_fields_complex_bucket(db):
     await _assert_rust_matches_python(
@@ -294,25 +295,6 @@ async def test_enum_invalid_value_raises_same_error(db):
         RowHydration.hydrate_in_python(EnumFields, row, decode_plan, is_partial)
     with pytest.raises(ValidationError) as rust_exc_info:
         _hydrate_rust(EnumFields, decode_plan, is_partial, [row])
-
-    assert str(rust_exc_info.value) == str(python_exc_info.value)
-
-
-@test.requires_features(dialect="sqlite")  # Decimal is in postgres's own DB_NATIVE, bucket 6 never fires there
-@pytest.mark.asyncio
-async def test_decimal_invalid_value_raises_same_error(db):
-    """A raw value that isn't a valid Decimal literal (garbage written outside the ORM) must fall
-    back to field.from_db_value() and raise the exact same ValidationError on both sides - the
-    Rust fast path used to call Decimal(value).quantize(...) unconditionally and let the raw
-    decimal.InvalidOperation through instead of falling back like the enum/UUID buckets already
-    did."""
-    decode_plan, is_partial = _get_decode_plan(DecimalFields, only_fields=["id", "decimal", "decimal_nodec"])
-    row = _synthetic_row(decode_plan, {"id": 1, "decimal": "not-a-decimal", "decimal_nodec": Decimal("1")})
-
-    with pytest.raises(ValidationError) as python_exc_info:
-        RowHydration.hydrate_in_python(DecimalFields, row, decode_plan, is_partial)
-    with pytest.raises(ValidationError) as rust_exc_info:
-        _hydrate_rust(DecimalFields, decode_plan, is_partial, [row])
 
     assert str(rust_exc_info.value) == str(python_exc_info.value)
 

@@ -35,10 +35,7 @@ class MaterializedViewDiff(DeclaredSchemaObjectDiff):
     def get_operations(self) -> list[HareOperation]:
         operations = super().get_operations()
         removed_names = {operation.name for operation in operations if isinstance(operation, RemoveMaterializedView)}
-        added_names = {operation.view.name for operation in operations if isinstance(operation, AddMaterializedView)}
         for operation in operations:
-            if (isinstance(operation, RemoveMaterializedView) and operation.name in added_names) or (
-                isinstance(operation, AddMaterializedView) and operation.view.name in removed_names
-            ):
+            if isinstance(operation, AddMaterializedView) and operation.view.name in removed_names:
                 operation.replacing = True
         return operations

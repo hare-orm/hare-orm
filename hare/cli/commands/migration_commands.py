@@ -447,13 +447,16 @@ class MigrationCommands:
         apps_by_connection = CommandContext.group_apps_by_connection(apps_dict)
 
         loader = MigrationLoader(full_apps_dict, NoopRecorder())
-        try:
-            await loader.build_graph()
-        except MIGRATION_GRAPH_ERRORS as error:
-            # Mirrors migrate()'s own translation - a circular dependency, a dangling
-            # dependency on a removed migration or a broken migration file is shown as an
-            # error, not a raw traceback.
-            raise CLIError(str(error)) from None
+        # Hare is initialized without connecting - a migration file naming a swappable model reads its
+        # setting as it is imported.
+        async with CommandContext.hare_cli_context(hare_config.to_dict(), connect=False):
+            try:
+                await loader.build_graph()
+            except MIGRATION_GRAPH_ERRORS as error:
+                # Mirrors migrate()'s own translation - a circular dependency, a dangling
+                # dependency on a removed migration or a broken migration file is shown as an
+                # error, not a raw traceback.
+                raise CLIError(str(error)) from None
 
         for connection_alias, subset in apps_by_connection.items():
             OutputFormatter.emit_heads(loader, connection_alias, subset)

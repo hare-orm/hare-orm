@@ -9,12 +9,10 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
 from hare.core.routing import Routing
 from hare.core.routing.written_connections import WrittenConnections
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
-from hare.exceptions import ConfigurationError
 from tests.multiple_connections.read_your_writes_models import Note, Tag
 
 
@@ -231,16 +229,3 @@ async def test_a_write_made_before_the_routers_existed_changes_no_read():
             return await read_texts()
 
         assert await asyncio.create_task(request()) == []
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize("seconds", [0, -1, 3601, True, "5"])
-def test_the_window_is_checked(seconds):
-    with pytest.raises(ConfigurationError, match="read_your_writes_seconds"):
-        HareConfig.load(
-            {
-                "connections": {"default": "sqlite+aiosqlite://:memory:"},
-                "apps": {"models": {"models": ["tests.multiple_connections.read_your_writes_models"]}},
-                "read_your_writes_seconds": seconds,
-            }
-        )

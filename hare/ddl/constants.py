@@ -66,3 +66,34 @@ FIXED_FIELDS_WRITTEN_MESSAGE = (
     "{model}: {fields} - a column of the table's keys, which the database doesn't update in place; "
     "delete the row and create it with the new key instead"
 )
+
+#: The module of each name the package exports - imported on first use: the query package imports
+#: modules of this package while modules of it build on the query package.
+EXPORTED_MODULES = {
+    "CheckConstraint": "hare.ddl.constraints.check_constraint",
+    "DatabaseFunction": "hare.ddl.schema_objects.database_function",
+    "DatabaseSequence": "hare.ddl.schema_objects.database_sequence",
+    "Dictionary": "hare.ddl.schema_objects.dictionary",
+    "EnumMembersCondition": "hare.ddl.conditions.enum_members_condition",
+    "ExclusionConstraint": "hare.ddl.constraints.exclusion_constraint",
+    "ExclusionConstraintUsing": "hare.ddl.enums",
+    "ExclusiveArcCondition": "hare.ddl.conditions.exclusive_arc_condition",
+    "FunctionVolatility": "hare.ddl.enums",
+    "Grant": "hare.ddl.security.grant",
+    "GrantTarget": "hare.ddl.enums",
+    "Index": "hare.ddl.indexes.index",
+    "MaterializedView": "hare.ddl.schema_objects.materialized_view",
+    "PartialIndex": "hare.ddl.indexes.partial_index",
+    "Policy": "hare.ddl.security.policy",
+    "PolicyCommand": "hare.ddl.enums",
+    "Privilege": "hare.ddl.enums",
+    "RawSQLTerm": "hare.ddl.raw_sql_term",
+    "RowLevelSecurity": "hare.ddl.enums",
+    "TenantCondition": "hare.ddl.conditions.tenant_condition",
+    "Trigger": "hare.ddl.schema_objects.trigger",
+    "TriggerEvent": "hare.ddl.enums",
+    "TriggerForEach": "hare.ddl.enums",
+    "TriggerTiming": "hare.ddl.enums",
+    "UniqueConstraint": "hare.ddl.constraints.unique_constraint",
+    "View": "hare.ddl.schema_objects.view",
+}

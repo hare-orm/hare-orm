@@ -13,7 +13,6 @@ from hare.exceptions import ConfigurationError
 from hare.health.constants import (
     DEFAULT_HEALTH_TIMEOUT_SECONDS,
     DEFAULT_POOL_SATURATION_RATIO,
-    MAX_HEALTH_TIMEOUT_SECONDS,
     POOL_METRICS_REQUIRED_MESSAGE,
     UNKNOWN_HEALTH_CONNECTION_MESSAGE,
 )
@@ -43,7 +42,7 @@ class HealthCheck:
     current context or a configuration naming no such connection.
 
     Args:
-        timeout_seconds: How long a ping waits - above 0, at most 60.
+        timeout_seconds: How long a ping waits.
         degraded_when: The criteria making a connection degraded - by default some task waits for a
             connection, or 90% of a pool is in use.
         unhealthy_when: The criteria making a connection unhealthy - by default its ping failed.
@@ -53,7 +52,6 @@ class HealthCheck:
             pinged too.
 
     Raises:
-        ValueError: ``timeout_seconds`` is out of range.
         ConfigurationError: A criterion reads the measured waits while ``PoolMetrics`` is off.
     """
 
@@ -67,9 +65,7 @@ class HealthCheck:
         connections: Sequence[str] | None = None,
         check_direct: bool = False,
     ) -> None:
-        self.timeout_seconds = HealthCriterion.get_checked_amount(
-            "timeout_seconds", timeout_seconds, MAX_HEALTH_TIMEOUT_SECONDS
-        )
+        self.timeout_seconds = timeout_seconds
         self.degraded_when = tuple(
             [WaitingRequests(at_least=1), PoolSaturation(ratio=DEFAULT_POOL_SATURATION_RATIO)]
             if degraded_when is None

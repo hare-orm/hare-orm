@@ -47,18 +47,19 @@ class SqliteGeometryValues:
 
     @staticmethod
     def to_lookup(field: Field[Any], value: Any, instance: type[Model] | Model) -> bytes | None:
-        """The BLOB an equality compares the column with - in the column's SRID: a BLOB of another one
-        would equal no row.
+        """The BLOB an equality compares the column with - of the column's type, dimensions and SRID, as
+        a written one is: another one equaled no row here, while PostgreSQL refused it.
 
         Raises:
-            ValidationError: The value isn't a geometry, is empty, or has another SRID than the column.
+            ValidationError: The value isn't a geometry, is empty, or has another type, other dimensions or
+                another SRID than the column.
         """
         if value is None:
             return None
         geometry_field = cast("GeometryField", field)
         geometry = geometry_field.get_parsed_geometry(value)
         geometry_field.raise_if_other_srid(geometry)
-        return SpatialiteBlobWriter.write(geometry)
+        return SpatialiteBlobWriter.write(geometry_field.get_checked_geometry(geometry))
 
     @staticmethod
     def to_python(field: Field[Any], value: Any) -> Any:

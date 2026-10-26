@@ -7,6 +7,7 @@ from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.schema_objects.materialized_view import MaterializedView
 from hare.dialects.base.schema.schema_objects.materialized_views import MaterializedViews
 from hare.dialects.clickhouse.schema.constants import (
+    CLICKHOUSE_MATERIALIZED_VIEW_CLUSTER_FILL_MESSAGE,
     CLICKHOUSE_MATERIALIZED_VIEW_CREATE_TEMPLATE,
     CLICKHOUSE_MATERIALIZED_VIEW_FILL_TEMPLATE,
     CLICKHOUSE_MATERIALIZED_VIEW_QUERY_TEMPLATE,
@@ -102,10 +103,17 @@ class ClickhouseMaterializedViews(MaterializedViews):
         return DeclaredExpressions.get_sql(key, model, self.editor.client.dialect)
 
     async def create_materialized_view(self, model: type[Model], view: MaterializedView) -> None:
-        """Creates a view and fills it with the rows its query gives, where it is declared with them."""
-        await self.create_materialized_view_again(model, view)
+        """Creates a view and fills it with the rows its query gives, where it is declared with them.
+
+        Raises:
+            UnSupportedError: The view is filled on a cluster, its query reading a table that isn't distributed.
+        """
         clickhouse_view = ClickhouseMaterializedView.from_materialized_view(view)
-        if view.with_data and clickhouse_view.to is not None and clickhouse_view.refresh is None:
+        fills_table = view.with_data and clickhouse_view.to is not None and clickhouse_view.refresh is None
+        if fills_table:
+            await self.raise_if_filled_on_one_server(model, view)
+        await self.create_materialized_view_again(model, view)
+        if fills_table:
             await self.fill_materialized_view(model, view)
 
     async def create_materialized_view_again(self, model: type[Model], view: MaterializedView) -> None:
@@ -115,15 +123,53 @@ class ClickhouseMaterializedViews(MaterializedViews):
         Args:
             model: The model declaring the view.
             view: The view.
+
+        Raises:
+            UnSupportedError: The view's own storage is filled on a cluster, its query reading a table that
+                isn't distributed.
         """
-        await self.editor.run_sqls(self.get_materialized_view_create_sqls(model, view))
         clickhouse_view = ClickhouseMaterializedView.from_materialized_view(view)
+        if view.with_data and clickhouse_view.refresh is None and clickhouse_view.to is None:
+            await self.raise_if_filled_on_one_server(model, view)
+        await self.editor.run_sqls(self.get_materialized_view_create_sqls(model, view))
         if not view.with_data:
             return
         if clickhouse_view.refresh is not None:
             await self.wait_for_refresh(model, view)
         elif clickhouse_view.to is None:
             await self.fill_materialized_view(model, view)
+
+    async def raise_if_filled_on_one_server(self, model: type[Model], view: MaterializedView) -> None:
+        """Refuses to fill a view on a cluster from tables keeping rows of each server's own - the fill runs on
+        the server the connection is to, over its rows alone, and the rows of the others were left out.
+
+        Args:
+            model: The model declaring the view.
+            view: The view.
+
+        Raises:
+            UnSupportedError: The connection is to a cluster, and the view's query reads a table that isn't
+                distributed, or tables hare doesn't know (raw SQL without ``read_columns``).
+        """
+        cluster = getattr(self.editor.client, "cluster", None)
+        if cluster is None or self.editor.collect_sql:
+            return
+        distributed_tables = await cluster.fetch_distributed_tables()
+        read_tables = dict.fromkeys(table for table, _column in view.read_columns)
+        local_tables = [
+            table
+            for table in read_tables
+            if (cluster.database, table) not in distributed_tables
+            and tuple(table.split(".", 1)) not in distributed_tables
+        ]
+        if local_tables or not read_tables:
+            raise UnSupportedError(
+                CLICKHOUSE_MATERIALIZED_VIEW_CLUSTER_FILL_MESSAGE.format(
+                    model=model.__name__,
+                    view=view.name,
+                    read_tables=", ".join(local_tables) if local_tables else "tables it doesn't name in read_columns",
+                )
+            )
 
     async def fill_materialized_view(self, model: type[Model], view: MaterializedView) -> None:
         """Writes the rows a view's query gives now into the view.

@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
+from hare.contrib.package_checks import PackageChecks
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -29,8 +29,8 @@ class KafkaDelivery(OutboxDelivery):
         topic: The Kafka topic of every event; None for each event's own topic.
 
     Raises:
-        ConfigurationError: Neither or both of ``bootstrap_servers`` and ``producer``, an empty
-            ``topic``, or the ``aiokafka`` package isn't installed.
+        ConfigurationError: Neither or both of ``bootstrap_servers`` and ``producer``, or the
+            ``aiokafka`` package isn't installed.
     """
 
     #: The ``aiokafka`` package, None without the ``kafka`` extra.
@@ -39,11 +39,9 @@ class KafkaDelivery(OutboxDelivery):
     def __init__(
         self, bootstrap_servers: str | list[str] | None = None, *, producer: Any = None, topic: str | None = None
     ) -> None:
-        BrokerArguments.require_package(self.aiokafka, "KafkaDelivery", "aiokafka", "kafka")
+        PackageChecks.require_package(self.aiokafka, "KafkaDelivery", "aiokafka", "kafka")
         if (bootstrap_servers is None) == (producer is None):
             raise ConfigurationError("KafkaDelivery takes either bootstrap_servers or producer")
-        if topic is not None and (not isinstance(topic, str) or not topic):
-            raise ConfigurationError(f"topic must be None or a non-empty string, got {topic!r}")
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
         self.owns_producer = producer is None
@@ -59,7 +57,12 @@ class KafkaDelivery(OutboxDelivery):
         async with self.producer_lock:
             if self.producer is None:
                 producer = self.aiokafka.AIOKafkaProducer(bootstrap_servers=self.bootstrap_servers, acks="all")
-                await producer.start()
+                try:
+                    await producer.start()
+                except BaseException:
+                    # A producer that didn't start still holds its client - stopped, the next use starts anew.
+                    await producer.stop()
+                    raise
                 self.producer = producer
             return self.producer
 

@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.constants import GEOMETRY_VALUE_TYPE
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.field import Field
 from hare.gis.constants import (
     DEFAULT_SRID,
+    DISTANCE_LOOKUP_COMPARISONS,
     GEOGRAPHY_LATITUDE_LIMIT,
     GEOGRAPHY_LONGITUDE_LIMIT,
     GEOMETRY_DIMENSIONS,
@@ -18,12 +20,13 @@ from hare.gis.constants import (
     MAX_SRID,
     SPATIAL_LOOKUP_REQUIRED_FEATURE,
 )
-from hare.gis.enums import GeometryType, SpatialFunctionType
+from hare.gis.enums import GeometryType, SpatialFunctionType, SpatialRelation
 from hare.gis.geometries.geometry import Geometry
 from hare.gis.readers.ewkb_reader import EwkbReader
 from hare.gis.readers.geo_json_reader import GeoJsonReader
 from hare.gis.readers.wkt_reader import WktReader
 from hare.gis.spatial_features import SpatialFeatures
+from hare.query.enums import LookupValueShape
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -50,6 +53,8 @@ class GeometryField(Field[Geometry]):
     Raises:
         ConfigurationError: An argument is of the wrong type or out of range.
     """
+
+    argument_value_type = GEOMETRY_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
 
@@ -222,6 +227,21 @@ class GeometryField(Field[Geometry]):
         from hare.gis.lookups.spatial_field_lookups import SpatialFieldLookups
 
         return SpatialFieldLookups.get_lookups(self)
+
+    def get_lookup_value_description(self, lookup: str) -> tuple[LookupValueShape, Any] | None:
+        """``dwithin`` and the distance lookups take ``(geometry, distance)``, ``relate`` ``(geometry,
+        pattern)``, the other spatial relations (``contains`` among them) a geometry."""
+        if lookup == SpatialRelation.DWITHIN or lookup in DISTANCE_LOOKUP_COMPARISONS:
+            return LookupValueShape.VALUE, (Geometry, float)
+        if lookup == SpatialRelation.RELATE:
+            return LookupValueShape.VALUE, (Geometry, str)
+        if lookup in SpatialRelation:
+            return LookupValueShape.VALUE, Geometry
+        return None
+
+    def get_path_segments(self) -> tuple[str, ...]:
+        """A point's coordinates (``x``, ``y``, ``z``) and the SRID (``srid``)."""
+        return tuple(self.PATH_FUNCTION_TYPES)
 
     def get_path_transform(self, segment: str) -> tuple[Callable[[Term], Term], Field[Any]] | None:
         """A coordinate of a point (``location__x``, ``__y``, ``__z``) or the SRID (``__srid``)."""

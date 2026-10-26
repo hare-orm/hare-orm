@@ -8,7 +8,6 @@ from hare.core.constants import CACHE_MISS
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.capture.capture_needs import CaptureNeeds
 from hare.instrumentation.capture.captured_change import CapturedChange
-from hare.instrumentation.capture.change_sink import ChangeSink
 from hare.instrumentation.enums import ChangePayload, RowOperation
 from hare.query.constants import RETURNING_OLD_COLUMN_ALIAS_PREFIX
 from hare.sql.terms.values.old_row_value import OldRowValue
@@ -40,18 +39,12 @@ class ChangeCapturing:
             The needs, None for a model without ``Meta.change_capture`` or an abstract one.
 
         Raises:
-            ConfigurationError: ``Meta.change_capture`` isn't a ``ChangeSink``, or doesn't fit the
-                model.
+            ConfigurationError: ``Meta.change_capture`` doesn't fit the model.
         """
         sink = meta.change_capture
         if sink is None or meta.abstract:
             return None
         model = meta._model
-        if not isinstance(sink, ChangeSink):
-            raise ConfigurationError(
-                f"{model.__name__}: Meta.change_capture must be a ChangeSink (hare.contrib.outbox.ChangeCapture), "
-                f"got {sink!r}"
-            )
         if not meta.has_primary_key:
             raise ConfigurationError(
                 f"{model.__name__}: Meta.change_capture needs a primary key - a change names its row by it"

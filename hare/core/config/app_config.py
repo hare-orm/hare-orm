@@ -23,10 +23,7 @@ class AppConfig(ConfigSection):
 
     def __post_init__(self) -> None:
         # Dotted paths or modules, normalized to a list of module names.
-        raw_models = list(self.models)
-        if not raw_models:
-            raise ConfigurationError("AppConfig.models must be a non-empty list of strings")
-        normalized_models = [model.__name__ if isinstance(model, ModuleType) else model for model in raw_models]
+        normalized_models = [model.__name__ if isinstance(model, ModuleType) else model for model in self.models]
         object.__setattr__(self, "models", normalized_models)
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,11 +44,8 @@ class AppConfig(ConfigSection):
                 the app's name.
 
         Raises:
-            ConfigurationError: If ``data`` isn't a mapping, holds an unknown key, or a value is
-                invalid.
+            ConfigurationError: If ``data`` holds an unknown key, or no ``models``.
         """
-        if not isinstance(data, Mapping):
-            raise ConfigurationError("AppConfig must be created from a mapping")
         cls.check_known_keys(data, section)
         if "models" not in data:
             raise ConfigurationError('AppConfig requires "models"')

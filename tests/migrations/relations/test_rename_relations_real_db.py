@@ -616,3 +616,51 @@ async def test_rename_constraint_of_an_inlined_unique_constraint_leaves_one_cons
         assert list(await round_trip.get_index_definitions("rt_inline_unique")) == ["uq_rt_inline_old"]
     else:
         assert await get_index_and_constraint_names(round_trip, "rt_inline_unique") == ["uq_rt_inline_old"]
+
+
+async def get_foreign_key_targets(round_trip: ReversibleRoundTrip, table: str) -> list[tuple[str, str]]:
+    if round_trip.dialect == "sqlite":
+        rows = await round_trip.query(f"PRAGMA foreign_key_list('{table}')")
+        return sorted((row["from"], row["table"]) for row in rows)
+    rows = await round_trip.query(
+        "SELECT kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc "
+        "JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name "
+        "AND kcu.table_schema = tc.table_schema "
+        "JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name "
+        "AND ccu.table_schema = tc.table_schema "
+        f"WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = '{table}' "
+        "AND tc.table_schema = current_schema()"
+    )
+    return sorted((row["column_name"], row["table_name"]) for row in rows)
+
+
+@requires_features(supports_foreign_keys=True)
+@pytest.mark.asyncio
+async def test_a_many_to_many_relation_pointed_at_another_model_references_it(
+    reversible_round_trip: ReversibleRoundTrip,
+) -> None:
+    """The through table's foreign key kept referencing the old target - dropped with the old target's
+    table, and rolling back renamed a constraint that was gone."""
+    round_trip = reversible_round_trip
+    child = build_auto_table_model("RtChild", {})
+    owner = build_auto_table_model("RtOwner", {"kids": ManyToManyField("models.RtChild", related_name="owners")})
+    await round_trip.migrate_to(child, owner)
+
+    kid = build_auto_table_model("RtKid", {})
+    repointed_owner = build_auto_table_model(
+        "RtOwner", {"kids": ManyToManyField("models.RtKid", related_name="owners")}
+    )
+    await round_trip.migrate_to(kid, repointed_owner)
+
+    assert await get_foreign_key_targets(round_trip, "rtowner_rtkid") == [
+        ("rtkid_id", "rtkid"),
+        ("rtowner_id", "rtowner"),
+    ]
+    assert round_trip.get_pending_operations(kid, repointed_owner) == []
+
+    await round_trip.roll_back()
+
+    assert await get_foreign_key_targets(round_trip, "rtowner_rtchild") == [
+        ("rtchild_id", "rtchild"),
+        ("rtowner_id", "rtowner"),
+    ]

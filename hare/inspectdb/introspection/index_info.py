@@ -11,7 +11,7 @@ from hare.ddl.indexes.partial_index import PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.inspectdb.constants import DEFAULT_KEY_ORDERS
 from hare.query.expressions import F, Ordering
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.terms.field import Field as HareSqlField
 from hare.sql.terms.term import Term
 
@@ -29,41 +29,44 @@ class IndexInfo:
     #: can be matched/removed by name (RemoveIndex requires a name or field list; an unnamed,
     #: expression-based reconstruction has neither) instead of only ever comparing by shape.
     name: str = ""
-    #: Postgres access method name, lowercase ("gin", "gist", "hash", "brin", "spgist", "bloom")
-    #: - "" means the default, btree.
+    #: The index's access method, lowercase ("gin", "gist", "hash", "brin", "spgist", "bloom") - "" for
+    #: the default one.
     index_type: str = ""
     #: Every column's opclass, set once any is non-default - Index.opclasses takes one per field.
     opclasses: list[str] = dataclass_field(default_factory=list)
     #: Every column's opclass name when all of them are the access method's defaults (and
-    #: opclasses is therefore left empty) - Postgres only.
+    #: opclasses is therefore left empty) - where the database has opclasses.
     default_opclasses: list[str] = dataclass_field(default_factory=list)
     #: Each key term's SQL, in order, for an index with an expression term - rebuilt as
     #: Index(*expressions). None for plain columns.
     expression_terms: list[str] | None = None
-    #: The index's ``WITH (...)`` storage parameters (Postgres ``pg_class.reloptions``), e.g.
+    #: The index's ``WITH (...)`` storage parameters, e.g.
     #: ``{"lists": "5"}`` - raw value text, empty when none were set.
     storage_parameters: dict[str, str] = dataclass_field(default_factory=dict)
-    #: The UNIQUE constraint backed by this index is DEFERRABLE (Postgres only).
+    #: The UNIQUE constraint backed by this index is DEFERRABLE.
     deferrable: bool = False
-    #: The UNIQUE constraint backed by this index is INITIALLY DEFERRED (Postgres only).
+    #: The UNIQUE constraint backed by this index is INITIALLY DEFERRED.
     initially_deferred: bool = False
     #: The partial-index predicate as the database reports it, one outer pair of parentheses
     #: removed - None for an index that isn't partial.
     condition_sql: str | None = None
-    #: The index's non-key (``INCLUDE``) columns - None where the database has no such columns
-    #: (SQLite), so a declared ``include`` can't be checked there.
+    #: The index's non-key (``INCLUDE``) columns - None where the database has no such columns, so a
+    #: declared ``include`` can't be checked there.
     include: list[str] | None = None
-    #: The unique index treats NULLs as equal (Postgres ``NULLS NOT DISTINCT``).
+    #: The unique index treats NULLs as equal (``NULLS NOT DISTINCT``).
     nulls_not_distinct: bool = False
-    #: The unique constraint backed by this index holds its last key ``WITHOUT OVERLAPS`` (Postgres
-    #: 18) - the index's access method and opclasses are the constraint's own, not declared.
+    #: The unique constraint backed by this index holds its last key ``WITHOUT OVERLAPS`` - the index's
+    #: access method and opclasses are the constraint's own, not declared.
     without_overlaps: bool = False
-    #: Each key's direction and NULL placement (an ``Order`` value, Postgres's defaults - NULLs
-    #: last ascending, first descending - spelled out) - an expression key's too; empty for
+    #: Whether the index is complete - False for one whose build didn't finish (a failed concurrent
+    #: build), which the database keeps but doesn't use.
+    is_valid: bool = True
+    #: Each key's direction and NULL placement (an ``Order`` value, the database's defaults spelled
+    #: out) - an expression key's too; empty for
     #: ascending keys whose order wasn't read.
     key_orders: list[str] = dataclass_field(default_factory=list)
     #: What the index has that no hare index or constraint can declare - the sort order of a
-    #: collated key on SQLite - each described as SQL text (``a COLLATE NOCASE DESC``);
+    #: collated key - each described as SQL text (``a COLLATE NOCASE DESC``);
     #: reconstructed without it and flagged in a comment.
     unrepresentable_properties: list[str] = dataclass_field(default_factory=list)
 

@@ -21,6 +21,7 @@ from tests.fields.models_generated_field import (
     AutoReturningPricedItem,
     AveragedQuantityItem,
     DbDefaultDoubledItem,
+    DecimalPricedItem,
     GeneratedFieldFkTargetStockItem,
     GeneratedFieldFkTargetWarehouse,
     LabeledItem,
@@ -29,6 +30,7 @@ from tests.fields.models_generated_field import (
     TimestampedItem,
     VersionedPricedItem,
 )
+from tests.utils.integer_statistic import IntegerStatistic
 from tests.utils.timezone_context import override_timezone
 
 
@@ -78,6 +80,16 @@ def test_dict_expression_missing_dialect_raises():
     field.model_field_name = "combined"
     with pytest.raises(ConfigurationError, match="no expression for dialect 'postgresql'"):
         field.get_generated_sql(DialectRegistry.get_dialect("postgresql"))
+
+
+@pytest.mark.database_independent
+def test_a_column_computed_from_itself_is_refused():
+    """SQLite created the table of such a column and refused every row written into it."""
+    field = GeneratedField(expression=F("total") + 1, output_field=IntField())
+    field.model_field_name = "total"
+    for dialect_name in ("sqlite", "postgresql"):
+        with pytest.raises(ConfigurationError, match="'total' reads itself"):
+            field.get_generated_sql(DialectRegistry.get_dialect(dialect_name))
 
 
 @pytest.mark.database_independent
@@ -133,11 +145,11 @@ def test_primary_key_kwarg_rejected(kwarg_name):
 
 @pytest.mark.database_independent
 def test_sql_type_delegates_to_output_field_per_dialect():
-    """DecimalField's own SQL_TYPE differs by dialect (VARCHAR(40) on sqlite, DECIMAL(m,d) on
-    postgres) - GeneratedField must resolve through output_field for each dialect, not just
-    once at construction time."""
+    """DecimalField's own SQL_TYPE differs by dialect (DECIMAL(m,d) on postgres, none on sqlite) -
+    GeneratedField must resolve through output_field for each dialect, not just once at construction time."""
     field = GeneratedField(expression=RawSQLTerm("a * b"), output_field=DecimalField(max_digits=5, decimal_places=2))
-    assert field.get_column_type(DialectRegistry.get_dialect("sqlite")) == "VARCHAR(40)"
+    with pytest.raises(UnSupportedError, match="DecimalField only exists on"):
+        field.get_column_type(DialectRegistry.get_dialect("sqlite"))
     assert field.get_column_type(DialectRegistry.get_dialect("postgresql")) == "DECIMAL(5,2)"
 
 
@@ -161,49 +173,51 @@ def test_deconstruct_round_trips_without_duplicate_generated_kwarg():
     assert reconstructed.generated is True
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_generated_field_stored_decimal_expression(db_generated_field):
     """A STORED GeneratedField computing price * quantity - dialect-agnostic, runs on whatever
     HARE_TEST_DB is configured for."""
-    item = await PricedItem.objects.create(price=Decimal("19.99"), quantity=3)
-    fetched = await PricedItem.objects.get(id=item.id)
+    item = await DecimalPricedItem.objects.create(price=Decimal("19.99"), quantity=3)
+    fetched = await DecimalPricedItem.objects.get(id=item.id)
     assert fetched.total == Decimal("59.97")
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_generated_decimal_column_compares_and_orders_as_a_decimal(db_generated_field):
-    """SQLite stores the computed value as text - it compares and orders the way a DecimalField
-    column does, not as text."""
-    fifteen = await PricedItem.objects.create(price=Decimal("1.50"), quantity=10)
-    twenty_two = await PricedItem.objects.create(price=Decimal("2.25"), quantity=10)
-    three = await PricedItem.objects.create(price=Decimal("1.50"), quantity=2)
+    """The computed decimal column compares and orders the way a DecimalField column does."""
+    fifteen = await DecimalPricedItem.objects.create(price=Decimal("1.50"), quantity=10)
+    twenty_two = await DecimalPricedItem.objects.create(price=Decimal("2.25"), quantity=10)
+    three = await DecimalPricedItem.objects.create(price=Decimal("1.50"), quantity=2)
 
     def ids(**filters):
-        return PricedItem.objects.filter(**filters).order_by("id").values_list("id", flat=True)
+        return DecimalPricedItem.objects.filter(**filters).order_by("id").values_list("id", flat=True)
 
     assert await ids(total=Decimal("15")) == [fifteen.id]
     assert await ids(total__gte=Decimal("15")) == [fifteen.id, twenty_two.id]
     assert await ids(total__in=[Decimal("15.00"), Decimal("3")]) == [fifteen.id, three.id]
     assert await ids(total__lt=20) == [fifteen.id, three.id]
-    assert await PricedItem.objects.all().order_by("-total").values_list("id", flat=True) == [
+    assert await DecimalPricedItem.objects.all().order_by("-total").values_list("id", flat=True) == [
         twenty_two.id,
         fifteen.id,
         three.id,
     ]
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_a_filter_value_of_a_generated_column_is_compared_as_its_output_fields_filter_value(
     db_generated_field,
 ):
     """A filter value isn't rounded to the output field's scale, as a write's is - 15.004 is no total of
     15.00, on the generated column as on a DecimalField's."""
-    item = await PricedItem.objects.create(price=Decimal("1.501"), quantity=10)
+    item = await DecimalPricedItem.objects.create(price=Decimal("1.501"), quantity=10)
     assert item.price == Decimal("1.50")
-    assert await PricedItem.objects.filter(price=Decimal("1.501")).count() == 0
-    assert await PricedItem.objects.filter(total=Decimal("15.004")).count() == 0
-    assert await PricedItem.objects.filter(total__in=[Decimal("15.004")]).count() == 0
-    assert await PricedItem.objects.filter(total=Decimal("15.00")).count() == 1
+    assert await DecimalPricedItem.objects.filter(price=Decimal("1.501")).count() == 0
+    assert await DecimalPricedItem.objects.filter(total=Decimal("15.004")).count() == 0
+    assert await DecimalPricedItem.objects.filter(total__in=[Decimal("15.004")]).count() == 0
+    assert await DecimalPricedItem.objects.filter(total=Decimal("15.00")).count() == 1
 
 
 @pytest.mark.asyncio
@@ -213,8 +227,8 @@ async def test_generated_field_populated_in_memory_without_a_refetch(db_generate
     GeneratedField stayed unset in memory - None, not the real computed value - until a separate
     re-fetch) must populate a GeneratedField onto the just-created instance directly, identically
     on every backend - this is the exact gap the sibling re-fetching test above doesn't catch."""
-    item = await PricedItem.objects.create(price=Decimal("19.99"), quantity=3)
-    assert item.total == Decimal("59.97")
+    item = await PricedItem.objects.create(price=1999, quantity=3)
+    assert item.total == 5997
 
 
 @pytest.mark.asyncio
@@ -229,11 +243,11 @@ async def test_save_with_explicit_pk_does_not_pull_an_unrelated_generated_field_
     an unrelated GeneratedField used to pull that other column into the insert list too, failing
     validation instead of being correctly omitted (GeneratedField.to_db_value() requires a real
     numeric value, which an omitted field never has)."""
-    item = PricedItem(id=999001, price=Decimal("10.00"), quantity=2)
+    item = PricedItem(id=999001, price=1000, quantity=2)
     await item.save()
 
     fetched = await PricedItem.objects.get(id=999001)
-    assert fetched.total == Decimal("20.00")
+    assert fetched.total == 2000
 
 
 @pytest.mark.asyncio
@@ -243,65 +257,65 @@ async def test_bulk_create_with_explicit_pk_does_not_pull_an_unrelated_generated
     """Same gap as test_save_with_explicit_pk_does_not_pull_an_unrelated_generated_field_into_the_insert
     above, reached through bulk_create()'s own _execute_many() instead of save()'s single-row
     insert - both share the same regular_columns_all/_prepare_insert_columns() precomputation."""
-    await PricedItem.objects.bulk_create([PricedItem(id=999002, price=Decimal("15.00"), quantity=4)])
+    await PricedItem.objects.bulk_create([PricedItem(id=999002, price=1500, quantity=4)])
 
     fetched = await PricedItem.objects.get(id=999002)
-    assert fetched.total == Decimal("60.00")
+    assert fetched.total == 6000
 
 
 @pytest.mark.asyncio
 async def test_create_and_save_with_explicit_pk_read_back_the_generated_field(db_generated_field):
     """An INSERT carrying a caller-supplied pk asked RETURNING for nothing, leaving the
     GeneratedField unset in memory until a re-fetch."""
-    created = await PricedItem.objects.create(id=999003, price=Decimal("3.00"), quantity=3)
-    saved = PricedItem(id=999004, price=Decimal("5.00"), quantity=2)
+    created = await PricedItem.objects.create(id=999003, price=300, quantity=3)
+    saved = PricedItem(id=999004, price=500, quantity=2)
     await saved.save()
     defaulted = await DbDefaultDoubledItem.objects.create(id=999005)
 
-    assert created.total == Decimal("9.00")
-    assert saved.total == Decimal("10.00")
+    assert created.total == 900
+    assert saved.total == 1000
     assert (defaulted.quantity, defaulted.doubled) == (4, 8)
     assert created._custom_generated_pk is True
 
 
 @pytest.mark.asyncio
 async def test_a_new_instance_holds_no_generated_value_until_written(db_generated_field):
-    item = PricedItem(price=Decimal("2.00"), quantity=3)
+    item = PricedItem(price=200, quantity=3)
     with pytest.raises(NoValuesFetched, match="computed by the database"):
         _ = item.total
     await item.save()
-    assert item.total == Decimal("6.00")
+    assert item.total == 600
 
 
 @pytest.mark.asyncio
 async def test_a_clone_holds_no_generated_value_of_the_original_row(db_generated_field):
-    original = await PricedItem.objects.create(price=Decimal("2.00"), quantity=3)
+    original = await PricedItem.objects.create(price=200, quantity=3)
     copy = original.clone()
     copy.quantity = 5
     with pytest.raises(NoValuesFetched, match="computed by the database"):
         _ = copy.total
     await copy.save()
-    assert (original.total, copy.total) == (Decimal("6.00"), Decimal("10.00"))
+    assert (original.total, copy.total) == (600, 1000)
 
 
 @pytest.mark.asyncio
 async def test_bulk_create_without_returning_leaves_the_generated_field_unloaded(db_generated_field):
-    items = [PricedItem(id=999007, price=Decimal("2.00"), quantity=7)]
+    items = [PricedItem(id=999007, price=200, quantity=7)]
     await PricedItem.objects.bulk_create(items, returning=False)
     with pytest.raises(NoValuesFetched, match="refresh_from_db"):
         _ = items[0].total
     await items[0].refresh_from_db()
-    assert items[0].total == Decimal("14.00")
+    assert items[0].total == 1400
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_bulk_create_returning_populates_generated_field_for_explicit_pk_objects(db_generated_field):
-    items = [PricedItem(id=999006, price=Decimal("2.00"), quantity=7), PricedItem(price=Decimal("1.00"), quantity=2)]
+    items = [PricedItem(id=999006, price=200, quantity=7), PricedItem(price=100, quantity=2)]
 
     await PricedItem.objects.bulk_create(items, returning=True)
 
-    assert [(item.id is not None, item.total) for item in items] == [(True, Decimal("14.00")), (True, Decimal("2.00"))]
+    assert [(item.id is not None, item.total) for item in items] == [(True, 1400), (True, 200)]
     assert items[0].id == 999006
 
 
@@ -319,37 +333,37 @@ async def test_save_update_refreshes_the_generated_field_in_memory(db_generated_
     """save()'s UPDATE path silently left a GeneratedField at its stale pre-update in-memory
     value (only INSERT ever refreshed it, via RETURNING) - a change to one of the expression's
     own input columns (quantity here) never showed up on `total` without a separate re-fetch."""
-    item = await PricedItem.objects.create(price=Decimal("10.00"), quantity=2)
-    assert item.total == Decimal("20.00")
+    item = await PricedItem.objects.create(price=1000, quantity=2)
+    assert item.total == 2000
 
     item.quantity = 5
     await item.save()
 
-    assert item.total == Decimal("50.00")
-    assert (await PricedItem.objects.get(id=item.id)).total == Decimal("50.00")
+    assert item.total == 5000
+    assert (await PricedItem.objects.get(id=item.id)).total == 5000
 
 
 @pytest.mark.asyncio
 async def test_a_value_given_to_a_generated_field_is_refused_by_every_write(db_generated_field):
     """create(), the constructor and update_or_create() dropped the value silently - the database
     computes the column - while update() refused it."""
-    item = await PricedItem.objects.create(price=Decimal("10.00"), quantity=2)
+    item = await PricedItem.objects.create(price=1000, quantity=2)
     message = "Cannot set .total. via .* - it is computed by the database, not written to"
     for refused in (
-        lambda: PricedItem.objects.create(price=Decimal("1.00"), quantity=1, total=Decimal("9.00")),
-        lambda: PricedItem.objects.bulk_create([PricedItem(price=Decimal("1.00"), quantity=1, total=None)]),
-        lambda: PricedItem.objects.get_or_create(price=Decimal("2.00"), defaults={"quantity": 1, "total": 1}),
-        lambda: PricedItem.objects.update_or_create(id=item.id, defaults={"total": Decimal("999.00")}),
-        lambda: PricedItem.objects.update_or_create(id=item.id + 100, defaults={"total": Decimal("999.00")}),
+        lambda: PricedItem.objects.create(price=100, quantity=1, total=900),
+        lambda: PricedItem.objects.bulk_create([PricedItem(price=100, quantity=1, total=None)]),
+        lambda: PricedItem.objects.get_or_create(price=200, defaults={"quantity": 1, "total": 1}),
+        lambda: PricedItem.objects.update_or_create(id=item.id, defaults={"total": 99900}),
+        lambda: PricedItem.objects.update_or_create(id=item.id + 100, defaults={"total": 99900}),
     ):
         with pytest.raises(QueryError, match=message):
             await refused()
-    assert [(row.id, row.total) for row in await PricedItem.objects.all()] == [(item.id, Decimal("20.00"))]
+    assert [(row.id, row.total) for row in await PricedItem.objects.all()] == [(item.id, 2000)]
 
     # A row read back keeps its computed value through save() - it came from the database.
     item.quantity = 3
     await item.save()
-    assert item.total == Decimal("30.00")
+    assert item.total == 3000
 
 
 @requires_features(dialect="postgresql")
@@ -361,14 +375,14 @@ async def test_bulk_create_returning_populates_generated_field(db_generated_fiel
     RETURNING clause asks for generated_db_fields too, matching what a plain create() already
     does via _process_insert_result()."""
     items = [
-        PricedItem(price=Decimal("2.50"), quantity=3),
-        PricedItem(price=Decimal("4.00"), quantity=2),
+        PricedItem(price=250, quantity=3),
+        PricedItem(price=400, quantity=2),
     ]
     await PricedItem.objects.bulk_create(items, returning=True)
 
     assert all(item.id is not None for item in items)
-    assert items[0].total == Decimal("7.50")
-    assert items[1].total == Decimal("8.00")
+    assert items[0].total == 750
+    assert items[1].total == 800
 
 
 @requires_features(dialect="postgresql")
@@ -376,7 +390,7 @@ async def test_bulk_create_returning_populates_generated_field(db_generated_fiel
 async def test_bulk_create_returning_false_leaves_generated_field_untouched(db_generated_field):
     """The default (returning=False) reads nothing back - `total` stays unloaded on the Python side
     even though the database computed and stored a real value for it."""
-    items = [PricedItem(price=Decimal("1.00"), quantity=1)]
+    items = [PricedItem(price=100, quantity=1)]
     await PricedItem.objects.bulk_create(items)
 
     assert items[0].id is None
@@ -391,24 +405,24 @@ async def test_bulk_update_returning_populates_fresh_value(db_generated_field):
     returning (Postgres-only, matched by row POSITION), this is matched by PK VALUE, so it
     works on every dialect RETURNING supports, sqlite included."""
     created = [
-        await PricedItem.objects.create(price=Decimal("2.50"), quantity=3),
-        await PricedItem.objects.create(price=Decimal("4.00"), quantity=2),
+        await PricedItem.objects.create(price=250, quantity=3),
+        await PricedItem.objects.create(price=400, quantity=2),
     ]
     # Re-fetch first - a plain create() isn't guaranteed to populate a GeneratedField in memory
     # (a separate, pre-existing gap unrelated to this test's own subject).
     items = [await PricedItem.objects.get(id=item.id) for item in created]
-    assert items[0].total == Decimal("7.50")
-    assert items[1].total == Decimal("8.00")
+    assert items[0].total == 750
+    assert items[1].total == 800
 
     items[0].quantity = 10
     items[1].quantity = 5
     count = await PricedItem.objects.bulk_update(items, fields=["quantity"], returning=True)
 
     assert count == 2
-    assert items[0].total == Decimal("25.00")
-    assert items[1].total == Decimal("20.00")
+    assert items[0].total == 2500
+    assert items[1].total == 2000
     refreshed = await PricedItem.objects.get(id=items[0].id)
-    assert refreshed.total == Decimal("25.00")
+    assert refreshed.total == 2500
 
 
 @pytest.mark.asyncio
@@ -417,8 +431,8 @@ async def test_bulk_update_rejects_generated_field_in_fields(db_generated_field)
     reaching the database - bulk_update() builds its own SET clause directly and used to have no
     equivalent guard, letting the same mistake reach the database and surface as a raw,
     dialect-leaking driver error (sqlite: "cannot UPDATE generated column ...") instead."""
-    item = await PricedItem.objects.create(price=Decimal("2.50"), quantity=3)
-    item.total = Decimal("999.99")
+    item = await PricedItem.objects.create(price=250, quantity=3)
+    item.total = 99999
 
     with pytest.raises(QueryError, match="total"):
         await PricedItem.objects.bulk_update([item], fields=["total"])
@@ -429,16 +443,16 @@ async def test_bulk_update_returning_false_leaves_value_stale(db_generated_field
     """The default (returning=False) contract is unchanged - the in-memory
     object keeps whatever GeneratedField value it had before the update, even though the
     database recomputed a new one."""
-    created = await PricedItem.objects.create(price=Decimal("1.00"), quantity=1)
+    created = await PricedItem.objects.create(price=100, quantity=1)
     item = await PricedItem.objects.get(id=created.id)
-    assert item.total == Decimal("1.00")
+    assert item.total == 100
 
     item.quantity = 99
     await PricedItem.objects.bulk_update([item], fields=["quantity"])
 
-    assert item.total == Decimal("1.00")
+    assert item.total == 100
     refreshed = await PricedItem.objects.get(id=item.id)
-    assert refreshed.total == Decimal("99.00")
+    assert refreshed.total == 9900
 
 
 @pytest.mark.asyncio
@@ -462,8 +476,8 @@ async def test_bulk_update_returning_populates_non_stale_object_despite_batch_fa
     still be populated, mirroring how its version/dirty-snapshot are already bumped before the
     raise (objects that DID get written must not be penalized for a sibling's staleness)."""
     created = [
-        await VersionedPricedItem.objects.create(price=Decimal("2.50"), quantity=3),
-        await VersionedPricedItem.objects.create(price=Decimal("4.00"), quantity=2),
+        await VersionedPricedItem.objects.create(price=250, quantity=3),
+        await VersionedPricedItem.objects.create(price=400, quantity=2),
     ]
     items = [await VersionedPricedItem.objects.get(id=item.id) for item in created]
 
@@ -478,10 +492,10 @@ async def test_bulk_update_returning_populates_non_stale_object_despite_batch_fa
     with pytest.raises(StaleObjectError):
         await VersionedPricedItem.objects.bulk_update(items, fields=["quantity"], returning=True)
 
-    assert items[0].total == Decimal("25.00")
+    assert items[0].total == 2500
     refreshed = await VersionedPricedItem.objects.get(id=items[0].id)
     assert refreshed.quantity == 10
-    assert refreshed.total == Decimal("25.00")
+    assert refreshed.total == 2500
 
 
 @requires_features(dialect="postgresql")
@@ -490,31 +504,31 @@ async def test_meta_returning_default_applies_to_bulk_create_without_explicit_ar
     """`Meta.returning = True` on AutoReturningPricedItem means bulk_create() with NO explicit
     `returning=` argument at all still populates pk + GeneratedField, exactly as if the caller
     had passed `returning=True` on every call - the whole point of the Meta default."""
-    items = [AutoReturningPricedItem(price=Decimal("2.50"), quantity=3)]
+    items = [AutoReturningPricedItem(price=250, quantity=3)]
     await AutoReturningPricedItem.objects.bulk_create(items)
 
     assert items[0].id is not None
-    assert items[0].total == Decimal("7.50")
+    assert items[0].total == 750
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_meta_returning_default_applies_to_bulk_update_without_explicit_arg(db_generated_field):
     """Same Meta.returning fallback, bulk_update() side."""
-    created = await AutoReturningPricedItem.objects.create(price=Decimal("2.00"), quantity=2)
+    created = await AutoReturningPricedItem.objects.create(price=200, quantity=2)
     item = await AutoReturningPricedItem.objects.get(id=created.id)
 
     item.quantity = 5
     await AutoReturningPricedItem.objects.bulk_update([item], fields=["quantity"])
 
-    assert item.total == Decimal("10.00")
+    assert item.total == 1000
 
 
 @pytest.mark.asyncio
 async def test_explicit_returning_false_overrides_meta_returning_true(db_generated_field):
     """An explicit `returning=False` on the call always wins over `Meta.returning = True` -
     dialect-agnostic (this must hold on sqlite too, where returning=True itself would raise)."""
-    items = [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)]
+    items = [AutoReturningPricedItem(price=100, quantity=1)]
     await AutoReturningPricedItem.objects.bulk_create(items, returning=False)
 
     assert items[0].id is None
@@ -528,7 +542,7 @@ async def test_meta_returning_true_on_sqlite_silently_does_not_populate(db_gener
     into - it must never make bulk_create() start raising NotImplementedError on SQLite for
     every model that inherits it. Only an EXPLICIT `returning=True` raises there (see
     test_explicit_returning_true_on_sqlite_still_raises below)."""
-    items = [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)]
+    items = [AutoReturningPricedItem(price=100, quantity=1)]
     await AutoReturningPricedItem.objects.bulk_create(items)  # must not raise, on any dialect
 
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
@@ -544,7 +558,7 @@ async def test_meta_returning_true_with_ignore_conflicts_and_no_on_conflict_sile
     rejected up front, but `Meta.returning = True` is only a soft preference - it must never make
     the very common plain `bulk_create(..., ignore_conflicts=True)` start raising on every model
     that inherits it."""
-    items = [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)]
+    items = [AutoReturningPricedItem(price=100, quantity=1)]
     await AutoReturningPricedItem.objects.bulk_create(items, ignore_conflicts=True)
 
     assert items[0].id is None, "the inherited Meta default must yield to ignore_conflicts without on_conflict"
@@ -558,7 +572,7 @@ async def test_explicit_returning_true_on_sqlite_still_raises(db_generated_field
     raise on SQLite - the caller asked for something this dialect genuinely can't do."""
     with pytest.raises(UnSupportedError):
         await AutoReturningPricedItem.objects.bulk_create(
-            [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)], returning=True
+            [AutoReturningPricedItem(price=100, quantity=1)], returning=True
         )
 
 
@@ -574,12 +588,12 @@ async def test_meta_returning_true_with_use_copy_silently_skips_returning(db_gen
     deleted by hand at the end instead, to keep the module-scoped connection's state clean for
     later tests.
     """
-    items = [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)]
+    items = [AutoReturningPricedItem(price=100, quantity=1)]
     await AutoReturningPricedItem.objects.bulk_create(items, use_copy=True)
 
     assert items[0].id is None, "use_copy must silently suppress the inherited Meta.returning default"
 
-    await AutoReturningPricedItem.objects.filter(price=Decimal("1.00"), quantity=1).delete()
+    await AutoReturningPricedItem.objects.filter(price=100, quantity=1).delete()
 
 
 @requires_features(dialect="postgresql")
@@ -590,7 +604,7 @@ async def test_explicit_returning_true_with_use_copy_still_raises(db_generated_f
     yielding to a more specific one."""
     with pytest.raises(UnSupportedError, match="mutually exclusive"):
         await AutoReturningPricedItem.objects.bulk_create(
-            [AutoReturningPricedItem(price=Decimal("1.00"), quantity=1)], use_copy=True, returning=True
+            [AutoReturningPricedItem(price=100, quantity=1)], use_copy=True, returning=True
         )
 
 
@@ -657,5 +671,5 @@ async def test_avg_of_a_generated_int_field_keeps_fractional_part(db_generated_f
 
     result = await AveragedQuantityItem.objects.all().aggregate(avg=Avg("quantity_doubled"))
 
-    assert result == {"avg": pytest.approx(2.5)}
-    assert isinstance(result["avg"], float)
+    assert float(result["avg"]) == pytest.approx(2.5)
+    assert type(result["avg"]) is IntegerStatistic.get_type(AveragedQuantityItem)

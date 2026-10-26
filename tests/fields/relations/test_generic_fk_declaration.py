@@ -46,7 +46,7 @@ def test_the_options_are_checked():
         fields.GenericForeignKeyField({"post": Post}, on_delete=SET_NULL)
     with pytest.raises(ConfigurationError, match="SET_DEFAULT needs a default"):
         fields.GenericForeignKeyField({"post": Post}, on_delete=SET_DEFAULT)
-    with pytest.raises(ConfigurationError, match="lazy can only be"):
+    with pytest.raises(ValueError, match="'eager' is not a valid RelationLoadStrategy"):
         fields.GenericForeignKeyField({"post": Post}, lazy="eager")  # type: ignore[arg-type]
 
 

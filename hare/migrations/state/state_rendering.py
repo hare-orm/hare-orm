@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from hare.ddl.indexes.index import Index
+from hare.fields.field import Field
+from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
+from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
@@ -88,9 +91,9 @@ class StateRendering:
         return self.apps
 
     def apply_marks(self, model_states: dict[tuple[str, str], ModelState]) -> None:
-        """Brings the rendered classes up to date with the marked changes: a changed or removed model
-        and the models it reaches are rendered again; added models alone are rendered and linked in
-        place, nothing else again.
+        """Brings the rendered classes up to date with the marked changes: a changed model and the models
+        it reaches are rendered again, as is a removed one something left still points at; other removed
+        models are taken out and added ones rendered and linked in place, nothing else again.
 
         Args:
             model_states: The state's model states.
@@ -98,7 +101,8 @@ class StateRendering:
         apps = cast("StateApps", self.apps)
         added_keys, changed_keys, removed_keys = self.added_keys, self.changed_keys, self.removed_keys
         self.added_keys, self.changed_keys, self.removed_keys = set(), set(), set()
-        if not changed_keys and not removed_keys:
+        if not changed_keys and self.removes_in_place(removed_keys):
+            self.remove_models(removed_keys)
             self.add_models([key for key in added_keys if key in model_states], model_states)
             return
         # The models the old classes reach still carry the backward relations those registered on
@@ -110,6 +114,92 @@ class StateRendering:
             apps.unregister_model(app_label, model_name)
         reloaded_keys = {key for key in related_keys | changed_keys | added_keys if key in model_states}
         self.reload_models(reloaded_keys, model_states)
+
+    def removes_in_place(self, keys: set[tuple[str, str]]) -> bool:
+        """Whether removed models can be taken out of the rendered classes in place - no model left is a
+        subclass of one of them or points at one of them.
+
+        Args:
+            keys: The removed models' (app, model name) keys.
+        """
+        apps = cast("StateApps", self.apps)
+        removed_models = {apps.get_model(".".join(key)) for key in keys if StateRendering.is_rendered(apps, key)}
+        for model in removed_models:
+            for subclass in model.__subclasses__():
+                subclass_app = getattr(subclass._meta, "app", None) if issubclass(subclass, Model) else None
+                if subclass not in removed_models and subclass_app is not None:
+                    return False
+            meta = model._meta
+            for name in meta.fetch_fields:
+                field = meta.fields_map[name]
+                if StateRendering.is_relation_side(field) and field.related_model not in removed_models:
+                    # The other side of a relation declared by a model left.
+                    return False
+            if any(
+                relation.related_model not in removed_models for relation in meta.hidden_backward_relations.values()
+            ):
+                return False
+            for name in meta.fetch_fields:
+                target = cast("RelationalField[Model]", meta.fields_map[name]).related_model
+                if target is None or target in removed_models:
+                    continue
+                # A through model points at the model whose many-to-many relation goes through it.
+                for target_field_name in target._meta.many_to_many_fields:
+                    target_field = target._meta.fields_map[target_field_name]
+                    if getattr(target_field, "through_model_class", None) in removed_models:
+                        return False
+        return True
+
+    def remove_models(self, keys: set[tuple[str, str]]) -> None:
+        """Takes removed models out of the rendered classes in place - the other sides their relations put
+        on the models they point at are taken off those models, nothing is rendered again.
+
+        Args:
+            keys: The removed models' (app, model name) keys.
+        """
+        apps = cast("StateApps", self.apps)
+        removed_models = {apps.get_model(".".join(key)) for key in keys if StateRendering.is_rendered(apps, key)}
+        targets: dict[type[Model], None] = {}
+        for model in removed_models:
+            for field_name in model._meta.fetch_fields:
+                target = cast("RelationalField[Model]", model._meta.fields_map[field_name]).related_model
+                if target is not None and target not in removed_models:
+                    targets[target] = None
+        for target in targets:
+            meta = target._meta
+            for name, field in list(meta.fields_map.items()):
+                if StateRendering.is_relation_side(field) and field.related_model in removed_models:
+                    meta.remove_field(name)
+            for hidden_key, relation in list(meta.hidden_backward_relations.items()):
+                if relation.related_model in removed_models:
+                    meta.remove_hidden_backward_relation(hidden_key)
+        for app_label, model_name in keys:
+            apps.unregister_model(app_label, model_name)
+        for target in targets:
+            target._meta.finalise_model()
+        apps.build_querysets(targets)
+
+    @staticmethod
+    def is_relation_side(field: Field[Any]) -> TypeGuard[RelationalField[Any]]:
+        """Whether a field is the side a relation of another model puts on the model it points at - a
+        backward relation, a generated many-to-many field.
+
+        Args:
+            field: A field of a rendered model.
+        """
+        return isinstance(field, BackwardForeignKeyRelation) or (
+            isinstance(field, ManyToManyFieldInstance) and field._generated
+        )
+
+    @staticmethod
+    def is_rendered(apps: StateApps, key: tuple[str, str]) -> bool:
+        """Whether a model is among the rendered classes.
+
+        Args:
+            apps: The rendered classes.
+            key: The model's (app, model name) key.
+        """
+        return key[1] in apps.apps.get(key[0], {})
 
     def find_related_models(self, key: tuple[str, str]) -> set[tuple[str, str]]:
         """A model and every model it reaches through subclassing or a relation, transitively, as
@@ -124,7 +214,7 @@ class StateRendering:
         apps = cast("StateApps", self.apps)
         related_keys: set[tuple[str, str]] = {key}
         try:
-            model = apps.get_model(*key)
+            model = apps.get_model(".".join(key))
         except KeyError:
             return related_keys
         pending_models = self.get_related_models(model)
@@ -156,6 +246,9 @@ class StateRendering:
             # A target not rendered yet (a CreateModel still to come) has no class.
             if field.related_model is not None:
                 related_models.append(field.related_model)
+        # A relation declared related_name=False has no field on its target - the model declaring it is
+        # reached through the target's hidden backward relations, or rendering the target again loses them.
+        related_models.extend(relation.related_model for relation in model._meta.hidden_backward_relations.values())
         return related_models
 
     def reload_models(self, keys: set[tuple[str, str]], model_states: dict[tuple[str, str], ModelState]) -> None:
@@ -171,7 +264,7 @@ class StateRendering:
             apps.register_model(app_label, model_states[(app_label, model_name)].render(apps))
         apps.init_relations()
         apps.build_initial_querysets()
-        self.build_index_expressions(apps.get_model(*key) for key in keys)
+        self.build_index_expressions(apps.get_model(".".join(key)) for key in keys)
 
     def add_models(self, keys: list[tuple[str, str]], model_states: dict[tuple[str, str], ModelState]) -> None:
         """Renders models just added to the state and links them in place, as ``Apps`` links models

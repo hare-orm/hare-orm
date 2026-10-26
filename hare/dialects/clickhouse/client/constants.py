@@ -99,6 +99,8 @@ CLICKHOUSE_CLIENT_BASE_SETTINGS = frozenset({"connection_alias"})
 
 #: The database of a connection naming none.
 CLICKHOUSE_DEFAULT_DATABASE = "default"
+#: The user of a connection naming none - the server's own default user.
+CLICKHOUSE_DEFAULT_USER = "default"
 #: The values of the connection settings left unset.
 CLICKHOUSE_CONNECTION_OPTION_DEFAULTS = {
     "secure": False,

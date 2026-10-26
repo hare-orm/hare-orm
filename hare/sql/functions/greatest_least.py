@@ -7,15 +7,14 @@ from hare.sql.terms.functions.function import Function
 
 
 class GreatestLeast(Function):
-    """``GREATEST``/``LEAST`` - the database's own, or hare's comparing Decimals kept as text as numbers
-    where the dialect registers one."""
+    """``GREATEST``/``LEAST`` - the database's own, or the dialect's function comparing numbers as numbers."""
 
     def __init__(self, name: str, *args: Any, compares_numbers: bool = False, alias: str | None = None) -> None:
         """
         Args:
             name: ``GREATEST`` or ``LEAST``.
             args: The values.
-            compares_numbers: The values are numbers - compared numerically, also as stored text.
+            compares_numbers: The values are numbers - compared numerically.
             alias: Optional alias for the term.
         """
         super().__init__(name, *args, alias=alias)

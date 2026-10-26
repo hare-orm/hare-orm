@@ -69,10 +69,11 @@ class SqliteDefaults:
             constant_offset = default.get_constant_utc_offset(Timezone.default())
             if constant_offset is None:
                 return SQLITE_NOW_LOCAL_NOW_FUNCTION_SQL_TEMPLATE.format(
-                    zone=default.get_quoted_text(Timezone.name()), value_type=default.value_type.value
+                    zone=sql_context.dialect.literals.get_string_literal_sql(Timezone.name()),
+                    value_type=default.value_type.value,
                 )
             moment = SQLITE_NOW_SHIFTED_MOMENT_TEMPLATE.format(minutes=int(constant_offset.total_seconds() // 60))
-            suffix = " || " + default.get_quoted_text(default.get_configured_offset_text())
+            suffix = " || " + sql_context.dialect.literals.get_string_literal_sql(default.get_configured_offset_text())
         else:
             moment = SQLITE_NOW_LOCAL_MOMENT
         if default.value_type == NowValueType.DATE:

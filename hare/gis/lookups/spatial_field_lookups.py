@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import math
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -19,6 +18,7 @@ from hare.gis.enums import SpatialFunctionType, SpatialRelation
 from hare.gis.terms.geometry_value import GeometryValue
 from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
 from hare.gis.terms.spatial_relation_term import SpatialRelationTerm
+from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.filters.lookups.lookups import Lookups
 from hare.sql.enums import Equality
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
@@ -133,7 +133,8 @@ class SpatialFieldLookups:
             ValidationError: ``value`` isn't such a pair.
         """
         geometry, distance = SpatialFieldLookups.get_pair(value, field, "distance")
-        if isinstance(distance, bool) or not isinstance(distance, int | float) or not 0 <= distance < math.inf:
+        # An int a float can't hold is no distance either - float() would raise OverflowError on it.
+        if not FiniteNumbers.is_finite_number(distance) or distance < 0:
             raise ValidationError(
                 f"{field.model_field_name}: a distance is a finite number of zero or more, got {distance!r}"
             )

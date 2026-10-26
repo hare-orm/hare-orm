@@ -5,39 +5,29 @@
 
 use pyo3::call::PyCallArgs;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyString};
+use pyo3::types::{PyDict, PyFloat, PyInt};
 use pyo3::{PyTraverseError, PyVisit};
-
-use crate::sqlite_functions::decimal_number::DecimalNumber;
 
 /// A number argument.
 enum Number {
     Integer(i128),
     Float(f64),
-    /// A `DecimalField`'s text, with the float `float(Decimal(text))` makes of it.
-    Decimal(DecimalNumber, f64),
 }
 
 impl Number {
-    /// The number of an argument; None for one this doesn't read (NULL, text `Decimal()` reads
-    /// otherwise, a BLOB).
+    /// The number of an argument; None for one this doesn't read (NULL, text, a BLOB).
     fn read(value: &Bound<'_, PyAny>) -> Option<Self> {
         if value.is_instance_of::<PyInt>() {
             return value.extract().ok().map(Number::Integer);
         }
-        if let Ok(float) = value.cast::<PyFloat>() {
-            return Some(Number::Float(float.value()));
-        }
-        let text = value.cast::<PyString>().ok()?.to_str().ok()?;
-        let number = DecimalNumber::parse(text)?;
-        Some(Number::Decimal(number, text.parse().ok()?))
+        value.cast::<PyFloat>().ok().map(|float| Number::Float(float.value()))
     }
 
     fn to_float(&self) -> f64 {
         match self {
             #[expect(clippy::cast_precision_loss, reason = "float() of an int rounds the same way")]
             Number::Integer(integer) => *integer as f64,
-            Number::Float(float) | Number::Decimal(_, float) => *float,
+            Number::Float(float) => *float,
         }
     }
 }
@@ -45,28 +35,6 @@ impl Number {
 /// The 64-bit integer SQLite holds of a whole number - None past 64 bits.
 fn to_sqlite_integer(integer: i128) -> Option<i64> {
     i64::try_from(integer).ok()
-}
-
-/// A decimal rounded to a whole number up (`ceiling`) or down; None past 128 bits.
-fn round_decimal(number: &DecimalNumber, ceiling: bool) -> Option<i128> {
-    let DecimalNumber::Finite { negative, digits, exponent } = number else {
-        return Some(0);
-    };
-    let whole_digits = usize::try_from(exponent + 1).unwrap_or(0);
-    if whole_digits > 38 {
-        return None;
-    }
-    let mut whole: i128 = 0;
-    for index in 0..whole_digits {
-        whole = whole * 10 + i128::from(digits.get(index).map_or(0, |digit| digit - b'0'));
-    }
-    let has_fraction = digits.len() > whole_digits;
-    let signed = if *negative { -whole } else { whole };
-    Some(match (has_fraction, ceiling, *negative) {
-        (true, true, false) => signed + 1,
-        (true, false, true) => signed - 1,
-        _ => signed,
-    })
 }
 
 /// The math functions; arguments they don't handle go to the Python ones given.
@@ -153,8 +121,7 @@ impl MathFunctions {
                 None => self.call_python(py, "abs", (value,)),
             },
             Some(Number::Float(float)) => Ok(PyFloat::new(py, float.abs()).into_any()),
-            // A Decimal's text - the Python function gives the exact text of its absolute value.
-            Some(Number::Decimal(..)) | None => self.call_python(py, "abs", (value,)),
+            None => self.call_python(py, "abs", (value,)),
         }
     }
 
@@ -174,14 +141,6 @@ impl MathFunctions {
         let sign = match Number::read(value) {
             Some(Number::Integer(integer)) => integer.signum() as i64,
             Some(Number::Float(float)) if !float.is_nan() => i64::from(float > 0.0) - i64::from(float < 0.0),
-            Some(Number::Decimal(DecimalNumber::Zero, _)) => 0,
-            Some(Number::Decimal(DecimalNumber::Finite { negative, .. }, _)) => {
-                if negative {
-                    -1
-                } else {
-                    1
-                }
-            }
             _ => return self.call_python(py, "sign", (value,)),
         };
         Ok(sign.into_pyobject(py)?.into_any())
@@ -344,10 +303,6 @@ impl MathFunctions {
                 };
                 Ok(PyFloat::new(py, result).into_any())
             }
-            Some(Number::Decimal(number, _)) => match round_decimal(&number, ceiling).and_then(to_sqlite_integer) {
-                Some(result) => Ok(result.into_pyobject(py)?.into_any()),
-                None => self.call_python(py, name, (value,)),
-            },
             None => self.call_python(py, name, (value,)),
         }
     }

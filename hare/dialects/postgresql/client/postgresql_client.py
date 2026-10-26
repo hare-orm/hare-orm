@@ -6,7 +6,7 @@ import ssl
 import time
 import uuid
 from asyncio.events import AbstractEventLoop
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Self, SupportsInt, TypeVar, cast
 
@@ -17,7 +17,7 @@ from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.declarations import ShellCommand
 from hare.dialects.base.client.password_provider import PasswordProvider
 from hare.dialects.base.client.pool.pool_connection_wrapper import PoolConnectionWrapper
-from hare.dialects.base.literals.constants import PYTHON_LONG_INT_ERROR_START, SQL_LONG_INT_MESSAGE, SQL_NULL_BYTE
+from hare.dialects.base.literals.constants import SQL_LONG_INT_MESSAGE, SQL_NULL_BYTE
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.constants import (
     CTE_DEFINITION_RE,
@@ -65,6 +65,7 @@ from hare.dialects.postgresql.client.constants import (
     POSTGRESQL_SCHEMA_EXISTS_SQL,
     POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL,
     POSTGRESQL_SINGLE_CONNECTION_POOL_SETTINGS,
+    PYTHON_LONG_INT_ERROR_START,
     RETURNING_CLAUSE_RE,
     SQL_BLOCK_COMMENT_DELIMITER_RE,
     SQL_COMMENT_OR_QUOTED_TEXT_RE,
@@ -359,8 +360,14 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             The settings every connection is opened with.
 
         Raises:
-            ConfigurationError: The settings name a ``TimeZone`` other than UTC.
+            ConfigurationError: The settings are no mapping (a DB_URL's ``?server_settings=`` text), or name a
+                ``TimeZone`` other than UTC.
         """
+        if server_settings is not None and not isinstance(server_settings, Mapping):
+            raise ConfigurationError(
+                f"server_settings must be a mapping of PostgreSQL settings to values, got {server_settings!r} - "
+                "a DB_URL can't give one: set it in the connection's credentials"
+            )
         settings = dict(server_settings or {})
         for key in [key for key in settings if str(key).lower() == POSTGRES_SESSION_TIME_ZONE_SETTING.lower()]:
             configured_zone = settings.pop(key)

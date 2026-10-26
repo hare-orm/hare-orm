@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import abc
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.comparable_values import ComparableValues
+from hare.migrations.state.model_state import ModelState
 
 if TYPE_CHECKING:
     from hare.migrations.operations import HareOperation
-    from hare.migrations.state.model_state import ModelState
 
 
 class SchemaObjectDiff(abc.ABC):
@@ -61,15 +61,34 @@ class SchemaObjectDiff(abc.ABC):
         """The columns an object reads, ``(table, column)`` each - none known by default."""
         return ()
 
+    def get_field_columns(self, field_names: Iterable[str]) -> tuple[tuple[str, str], ...]:
+        """The columns of fields of the model, by the names of the state before the migration.
+
+        Args:
+            field_names: The fields.
+
+        Returns:
+            ``(table, column)`` of each field the state has a column of.
+        """
+        table = self.old_state.table or self.old_state.name.lower()
+        columns = []
+        for field_name in sorted(field_names):
+            field = self.old_state.fields.get(field_name)
+            column = ModelState.get_field_db_column(field_name, field) if field is not None else None
+            if column is not None:
+                columns.append((table, column))
+        return tuple(columns)
+
+    def reads_changed_columns(self, schema_object: Any) -> bool:
+        """Whether an object reads a column the migration changes."""
+        return any(column in self.changed_columns for column in self.get_read_columns(schema_object))
+
     def is_unchanged(self, old_object: Any, new_object: Any) -> bool:
         """Whether two objects of the two states are the same object, unchanged - and reading no column
         the migration changes."""
-        reads_changed_columns = any(
-            column in self.changed_columns
-            for column in (*self.get_read_columns(old_object), *self.get_read_columns(new_object))
-        )
         return (
-            not reads_changed_columns
+            not self.reads_changed_columns(old_object)
+            and not self.reads_changed_columns(new_object)
             and self.get_name(old_object) == self.get_name(new_object)
             and self.get_signature(old_object) == self.get_signature(new_object)
         )
@@ -139,6 +158,9 @@ class SchemaObjectDiff(abc.ABC):
             for old_position, old_object in list(unmatched_old.items()):
                 if self.get_name(old_object) != name:
                     continue
+                # Dropped before the column it reads changes, created again after.
+                if self.reads_changed_columns(old_object) or self.reads_changed_columns(new_object):
+                    break
                 alter_operation = self.get_alter_operation(new_object)
                 if alter_operation is not None:
                     alter_operations.append(alter_operation)

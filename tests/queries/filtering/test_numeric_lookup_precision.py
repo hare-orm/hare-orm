@@ -7,7 +7,8 @@ from decimal import Decimal
 import pytest
 
 from hare.exceptions import ValidationError
-from tests.shared_models.testmodels import DecimalFields, IntFields
+from tests.shared_models.testmodels import IntFields
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 async def _create_int_fields() -> None:
@@ -85,6 +86,7 @@ async def _create_decimal_fields() -> None:
     await DecimalFields.objects.create(decimal=Decimal("1.2346"), decimal_nodec=1)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_gt_with_extra_precision_bound(db):
     """decimal__gt=Decimal("1.23456") used to quantize the bound to 4 decimal places
@@ -97,6 +99,7 @@ async def test_decimal_field_gt_with_extra_precision_bound(db):
     assert result == ["1.2346"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_equality_with_extra_precision_value_matches_nothing(db):
     """decimal=Decimal("1.23454") used to quantize to 1.2345 before comparing, wrongly matching
@@ -106,6 +109,7 @@ async def test_decimal_field_equality_with_extra_precision_value_matches_nothing
     assert await DecimalFields.objects.filter(decimal=Decimal("1.23454")).count() == 0
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_lte_with_extra_precision_bound_excludes_rounded_up_row(db):
     """decimal__lte=Decimal("1.234599") used to quantize the bound to 1.2346 before comparing,
@@ -118,6 +122,7 @@ async def test_decimal_field_lte_with_extra_precision_bound_excludes_rounded_up_
     assert result == ["1.2344", "1.2345"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_with_decimal_places_zero_gt_with_fractional_bound(db):
     """decimal_nodec has decimal_places=0 - a fractional lookup bound (1.5) used to round to the

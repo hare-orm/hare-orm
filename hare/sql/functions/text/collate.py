@@ -44,18 +44,3 @@ class Collate(Function):
             The collated term itself for a `Collate`, `term` unchanged otherwise.
         """
         return term.args[0] if isinstance(term, cls) else term
-
-    @staticmethod
-    def is_decimal_text(term: Any) -> bool:
-        """Whether a term is a DecimalField column's text under an exact-decimal collation.
-
-        Args:
-            term: A term.
-
-        Returns:
-            True for a `DecimalTextCollate`.
-        """
-        # Imported here: the modules import each other.
-        from hare.sql.functions.text.decimal_text_collate import DecimalTextCollate
-
-        return isinstance(term, DecimalTextCollate)

@@ -14,7 +14,7 @@ ENV_HARE_ORM_CONFIG = "HARE_ORM"
 
 #: pytest-xdist sets this to the worker's id (e.g. "gw0") in each worker process, and leaves it
 #: unset in a plain (non-`-n`) pytest run. Read to give each worker a database of its own: the file of a
-#: SQLite `db_url` and the kept test databases are named per worker under `-n`.
+#: A file database's `db_url` and the kept test databases are named per worker under `-n`.
 ENV_PYTEST_XDIST_WORKER = "PYTEST_XDIST_WORKER"
 
 
@@ -36,5 +36,3 @@ CACHE_MISS = object()
 #: The rows from which a table counts as large for the migration safety check, by default - an
 #: operation locking a table this big keeps its readers or writers waiting noticeably.
 DEFAULT_LARGE_TABLE_ROWS = 100_000
-#: The largest ``migrations.safety.large_table_rows`` setting taken.
-MAX_LARGE_TABLE_ROWS = 10**12

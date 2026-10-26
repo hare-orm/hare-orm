@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from hare.sql.enums import SetOperation
+from hare.dialects.base.clauses.constants import JOIN_KEYWORDS
+from hare.sql.enums import JoinType, SetOperation
 
 #: The statement a bulk load of rows is reported under to the observers - the rows travel in
 #: ClickHouse's binary Native format, in no SQL text.
@@ -40,3 +41,17 @@ CLICKHOUSE_GLOBAL_PREFIX = "GLOBAL "
 #: A LIKE pattern computed by an expression - an empty text's containment, %%, written as %, which
 #: ClickHouse matches an empty string by.
 CLICKHOUSE_EMPTY_CONTAINMENT_PATTERN_SQL = "if({pattern} = '%%', '%', {pattern})"
+#: A change of a distributed table's rows reading a table of rows of each server's own in its condition.
+CLICKHOUSE_DISTRIBUTED_MUTATION_READ_MESSAGE = (
+    "A change of the rows of the distributed table {table} runs on every server over the server's own rows, its "
+    "condition reading there the server's own rows of {read_tables} - rows of other servers would be left "
+    "unchanged. Distribute those tables (ClickhouseTableOptions(distributed_over=...)), or read the keys of "
+    "the rows first and change them by pk__in"
+)
+#: The keywords of ClickHouse's own joins - besides ISO SQL's.
+CLICKHOUSE_JOIN_KEYWORDS: dict[str, str] = {
+    **JOIN_KEYWORDS,
+    JoinType.ASOF_LEFT: "ASOF LEFT JOIN",
+    JoinType.ARRAY: "ARRAY JOIN",
+    JoinType.LEFT_ARRAY: "LEFT ARRAY JOIN",
+}

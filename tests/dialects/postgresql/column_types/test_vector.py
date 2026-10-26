@@ -228,7 +228,7 @@ def test_to_db_value_rejects_non_finite_or_non_numeric_elements(bad_vector):
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("out_of_range", [1e39, -3.5e38])
+@pytest.mark.parametrize("out_of_range", [1e39, -3.5e38, 10**400, -(10**400)])
 def test_to_db_value_rejects_elements_outside_the_float4_range(out_of_range):
     field = VectorField(dimensions=3)
     field.model_field_name = "embedding"

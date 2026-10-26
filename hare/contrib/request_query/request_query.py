@@ -17,10 +17,16 @@ from weakref import WeakKeyDictionary, WeakSet, ref
 from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 from pydantic.fields import FieldInfo
 
+from hare.contrib.request_query.api_getter.api_getter import ApiGetter
+from hare.contrib.request_query.api_getter.api_source import ApiSource
+from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
+from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger
 from hare.contrib.request_query.constants import (
     DECLARATION_BUCKET_KEY,
     DESCENDING_PREFIX,
+    EMPTY_TEXT_MATCHING_LOOKUPS,
     INVALID_VALUE_ERROR_TYPE,
+    LOOKUP_SEPARATOR,
     MANY_VALUE_PARAMETERS_BUCKET_KEY,
     META_CLASS_NAME,
     MISSING_FILTER_ERROR_TYPE,
@@ -66,7 +72,9 @@ if TYPE_CHECKING:
     from hare.contrib.request_query.results.cursor_page import CursorPage
     from hare.contrib.request_query.results.page import Page
     from hare.contrib.request_query.results.scroll_page import ScrollPage
+    from hare.core.apps.declarations import ModelReference
     from hare.dialects.base.dialect import Dialect
+    from hare.fields.relations.swappable_model_reference import SwappableModelReference
     from hare.query.lookup_info.ordering_info import OrderingInfo
     from hare.query.queryset.single_rows.get_exception_argument import GetExceptionArgument
 
@@ -148,6 +156,9 @@ class RequestQuery[ModelType: Model](BaseModel):
             deleted: A ``DeletedConfig``, None when a request can't see soft-deleted rows.
             versions: ``LatestVersions()`` to keep only the latest version of each record of a
                 ``VersionedModel``, None for every version.
+            api_getter: A tuple of ``ApiSource`` - HTTP APIs of other services the rows are filled
+                from - and ``ApiValueMapping`` - values of the rows copied to other attributes; None
+                for none.
         """
 
         queryset: QuerySet[Any] | None = None
@@ -160,6 +171,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         include: IncludeConfig | None = None
         deleted: DeletedConfig | None = None
         versions: LatestVersions | None = None
+        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = None
 
     _request: Any = PrivateAttr(default=None)
     _request_url: str | None = PrivateAttr(default=None)
@@ -412,6 +424,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             declaration = declarations[DECLARATION_BUCKET_KEY] = built_declaration
         return cast("RequestQueryDeclaration", declaration)
 
+    @overload
     @classmethod
     def for_model[FactoryModel: Model](
         cls,
@@ -428,7 +441,47 @@ class RequestQuery[ModelType: Model](BaseModel):
         deleted: DeletedConfig | None = Meta.deleted,
         versions: LatestVersions | None = Meta.versions,
         join_type: Connector = Meta.join_type,
-    ) -> type[RequestQuery[FactoryModel]]:
+        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+    ) -> type[RequestQuery[FactoryModel]]: ...
+
+    @overload
+    @classmethod
+    def for_model(
+        cls,
+        model: str | SwappableModelReference,
+        *,
+        name: str | None = None,
+        queryset: QuerySet[Any] | None = None,
+        filters: tuple[FilterField, ...] | None = Meta.filters,
+        search: SearchConfig | None = Meta.search,
+        ordering: OrderingConfig | None = Meta.ordering,
+        pagination: Pagination | None = Meta.pagination,
+        fields: FieldsConfig | None = Meta.fields,
+        include: IncludeConfig | None = Meta.include,
+        deleted: DeletedConfig | None = Meta.deleted,
+        versions: LatestVersions | None = Meta.versions,
+        join_type: Connector = Meta.join_type,
+        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+    ) -> type[RequestQuery[Any]]: ...
+
+    @classmethod
+    def for_model(
+        cls,
+        model: ModelReference,
+        *,
+        name: str | None = None,
+        queryset: QuerySet[Any] | None = None,
+        filters: tuple[FilterField, ...] | None = Meta.filters,
+        search: SearchConfig | None = Meta.search,
+        ordering: OrderingConfig | None = Meta.ordering,
+        pagination: Pagination | None = Meta.pagination,
+        fields: FieldsConfig | None = Meta.fields,
+        include: IncludeConfig | None = Meta.include,
+        deleted: DeletedConfig | None = Meta.deleted,
+        versions: LatestVersions | None = Meta.versions,
+        join_type: Connector = Meta.join_type,
+        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+    ) -> type[RequestQuery[Any]]:
         """A request query class of a model known only while the application runs - one
         registered with ``Hare.register_live_models()`` - built and checked at once::
 
@@ -443,7 +496,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         the class is of that dialect.
 
         Args:
-            model: The model - bound, so its filters can be checked.
+            model: The model - bound, so its filters can be checked: its class, its ``"app.Model"`` label
+                or a ``swappable()`` setting, looked up in the current context.
             name: The class's name, ``<Model>RequestQuery`` by default.
             queryset: The rows the query starts from - ``model.objects`` by default.
             filters: ``Meta.filters``.
@@ -455,27 +509,25 @@ class RequestQuery[ModelType: Model](BaseModel):
             deleted: ``Meta.deleted``.
             versions: ``Meta.versions``.
             join_type: ``Meta.join_type``.
+            api_getter: ``Meta.api_getter``.
 
         Returns:
             The request query class.
 
         Raises:
-            ConfigurationError: ``model`` isn't a model, ``queryset`` is of another model, ``name``
-                isn't an identifier, or the declaration is wrong - as ``check_declarations()``
-                finds it.
+            ConfigurationError: ``queryset`` is of another model, or the declaration is wrong - as
+                ``check_declarations()`` finds it.
         """
-        if not (isinstance(model, type) and issubclass(model, Model)):
-            raise ConfigurationError(f"{cls.__qualname__}.for_model() takes a model class, got {model!r}")
+        if not isinstance(model, type):
+            model = HareContext.require_current().get_model(model)
         if queryset is None:
             queryset = model.objects.all()
-        elif not isinstance(queryset, QuerySet) or queryset.model is not model:
+        elif queryset.model is not model:
             raise ConfigurationError(
                 f"{cls.__qualname__}.for_model({model.__name__}) takes a queryset of {model.__name__}, "
                 f"got {queryset!r}"
             )
         class_name = name if name is not None else f"{model.__name__}RequestQuery"
-        if not isinstance(class_name, str) or not class_name.isidentifier():
-            raise ConfigurationError(f"{cls.__qualname__}.for_model() name must be an identifier, got {class_name!r}")
         # Named as a class nested in the new one - pydantic leaves such a class out of the fields.
         meta = type(
             META_CLASS_NAME,
@@ -493,11 +545,12 @@ class RequestQuery[ModelType: Model](BaseModel):
                 "deleted": deleted,
                 "versions": versions,
                 "join_type": join_type,
+                "api_getter": api_getter,
             },
         )
         base = cls[model] if cls.__pydantic_generic_metadata__["parameters"] else cls  # type: ignore[index]
         request_query_class = cast(
-            "type[RequestQuery[FactoryModel]]",
+            "type[RequestQuery[Any]]",
             type(
                 class_name, (base,), {"__module__": cls.__module__, "__qualname__": class_name, META_CLASS_NAME: meta}
             ),
@@ -753,6 +806,82 @@ class RequestQuery[ModelType: Model](BaseModel):
         """
         return items
 
+    async def loads_api_values(self) -> bool:
+        """Whether the rows the request reads are filled from ``Meta.api_getter`` - override it to leave
+        them as they are for some requests (a request of another service asking for the bare rows).
+
+        Returns:
+            True by default.
+        """
+        return True
+
+    async def load_api_values(
+        self, items: list[ModelType], trigger: ApiGetterTrigger = ApiGetterTrigger.READ
+    ) -> list[ModelType]:
+        """Fills rows from ``Meta.api_getter`` - the sources whose ``triggers`` run on ``trigger`` and
+        some of whose targets the request's ``fields`` names (all of them without ``fields``). ``fetch()``,
+        ``page()`` and ``get()`` call it for the rows they read; a handler calls it for the rows it created
+        or updated (``ApiGetterTrigger.CREATE``, ``ApiGetterTrigger.UPDATE``).
+
+        Args:
+            items: The rows.
+            trigger: What the rows come from.
+
+        Returns:
+            The rows.
+
+        Raises:
+            ApiGetterError: A required value couldn't be loaded - see ``ApiGetter.set()``.
+        """
+        declaration = self.get_declaration()
+        if not items or not (declaration.api_sources or declaration.api_mappings):
+            return items
+        requested_names = self.get_requested_names()
+        api_mappings = [
+            mapping
+            for mapping in declaration.api_mappings
+            if requested_names is None or ApiSource.get_root_name(mapping.set_key) in requested_names
+        ]
+        await ApiGetter.set(
+            items, declaration.api_sources, api_mappings, trigger=trigger, requested_names=requested_names
+        )
+        return items
+
+    def get_requested_names(self) -> frozenset[str] | None:
+        """The names the request asks to load - the fields of its ``fields`` parameter and the first parts
+        of the relations of its ``include`` parameter.
+
+        Returns:
+            The names, None when the request doesn't choose the fields.
+        """
+        declaration = self.get_declaration()
+        if declaration.fields is None:
+            return None
+        parameter_values = RequestQueryParameters.get_parameter_values(self)
+        field_names = declaration.fields.get_requested_names(parameter_values)
+        if not field_names:
+            return None
+        relation_names = (
+            RequestOption.split_names(parameter_values.get(declaration.include.parameter))
+            if declaration.include is not None
+            else ()
+        )
+        return frozenset([*field_names, *(relation.split(LOOKUP_SEPARATOR, 1)[0] for relation in relation_names)])
+
+    async def finish_rows(self, items: list[ModelType]) -> list[ModelType]:
+        """Fills the rows a request read from ``Meta.api_getter`` (``loads_api_values()``), then runs
+        ``after_fetch()`` on them.
+
+        Args:
+            items: The rows.
+
+        Returns:
+            The rows to return.
+        """
+        if await self.loads_api_values():
+            items = await self.load_api_values(items)
+        return await self.after_fetch(items)
+
     async def get_request_conditions(self, *, skipped_target: ValueTarget | None = None) -> list[Q]:
         """The conditions of the request's parameters and search. The async ``filter_<parameter>``
         methods of the parameters with a value run concurrently; the conditions keep the order the
@@ -765,41 +894,38 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             The parameters' conditions joined by ``Meta.join_type`` as one condition, and the
             search's as another; an empty list when the request filters by nothing.
-
-        Raises:
-            TypeError: A filter method returned something other than a ``Q`` or None.
         """
         declaration = self.get_declaration()
-        # Each parameter's condition in declaration order, with the method that gave it: an async
-        # filter method's is awaited below, every one of them at once.
-        method_conditions: list[tuple[str | None, Any]] = []
+        # Each parameter's condition in declaration order: an async filter method's is awaited below,
+        # every one of them at once.
+        parameter_conditions: list[Any] = []
         for filter_declaration in declaration.filters:
             value = getattr(self, filter_declaration.parameter)
             if value is None or self.is_skipped(filter_declaration, skipped_target):
                 continue
+            if (
+                value == ""
+                and filter_declaration.lookup_info is not None
+                and filter_declaration.lookup_info.lookup in EMPTY_TEXT_MATCHING_LOOKUPS
+            ):
+                # Matches every row - no filter, as a blank search is none; delete() and update()
+                # need one.
+                continue
             if filter_declaration.method_name is not None:
                 method = getattr(self, filter_declaration.method_name)
-                method_conditions.append((filter_declaration.method_name, method(value)))
+                parameter_conditions.append(method(value))
                 continue
-            method_conditions.append((None, Q(**{cast("str", filter_declaration.filter_key): value})))
+            parameter_conditions.append(Q(**{cast("str", filter_declaration.filter_key): value}))
         pending_positions = [
-            position for position, (__, condition) in enumerate(method_conditions) if inspect.isawaitable(condition)
+            position for position, condition in enumerate(parameter_conditions) if inspect.isawaitable(condition)
         ]
         if pending_positions:
             awaited_conditions = await asyncio.gather(
-                *(method_conditions[position][1] for position in pending_positions)
+                *(parameter_conditions[position] for position in pending_positions)
             )
             for position, condition in zip(pending_positions, awaited_conditions, strict=True):
-                method_conditions[position] = (method_conditions[position][0], condition)
-        filter_conditions: list[Q] = []
-        for method_name, condition in method_conditions:
-            if condition is None:
-                continue
-            if not isinstance(condition, Q):
-                raise TypeError(
-                    f"{type(self).__qualname__}.{method_name}() must return a Q or None, got {condition!r}"
-                )
-            filter_conditions.append(condition)
+                parameter_conditions[position] = condition
+        filter_conditions: list[Q] = [condition for condition in parameter_conditions if condition is not None]
         conditions = []
         if filter_conditions:
             conditions.append(Q.with_connector(declaration.join_type, *filter_conditions))
@@ -1012,7 +1138,10 @@ class RequestQuery[ModelType: Model](BaseModel):
                 if not ordering_info.relations:
                     ordered_fields.extend(ordering_info.paths)
             queryset = declaration.fields.apply(
-                queryset, parameter_values, [*declaration.key_ordering_paths, *ordered_fields]
+                queryset,
+                parameter_values,
+                [*declaration.key_ordering_paths, *ordered_fields],
+                declaration.api_target_fields,
             )
         if declaration.include is not None:
             queryset = declaration.include.apply(queryset, parameter_values, declaration.include_to_many)
@@ -1049,7 +1178,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         """Every row the request asks for, ordered, without pagination.
 
         Returns:
-            The rows, after ``after_fetch()``.
+            The rows, after ``finish_rows()``.
 
         Raises:
             InvalidRequestQuery: See ``refusing_invalid_values()``.
@@ -1057,7 +1186,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         with self.refusing_invalid_values():
             queryset = await self.get_filtered_queryset()
             items = list(await self.get_ordered_queryset(queryset))
-        return await self.after_fetch(items)
+        return await self.finish_rows(items)
 
     async def page(self) -> Page[ModelType] | ScrollPage[ModelType] | CursorPage[ModelType]:
         """The page of rows the request asks for - ``Meta.pagination`` builds it.
@@ -1109,7 +1238,7 @@ class RequestQuery[ModelType: Model](BaseModel):
                 the matching rows without counting them.
 
         Returns:
-            The row, after ``after_fetch()``; None when no row matches and
+            The row, after ``finish_rows()``; None when no row matches and
             ``does_not_exist_exception`` is None.
 
         Raises:
@@ -1125,7 +1254,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             )
         if item is None:
             return None
-        (item,) = await self.after_fetch([item])
+        (item,) = await self.finish_rows([item])
         return item
 
     async def count(self) -> int:
@@ -1191,7 +1320,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         """The one row the request asks for, locked until the surrounding transaction ends - for a
         handler that changes it (``SELECT ... FOR UPDATE``; a database locking no row refuses it). Call it
         inside a transaction. The request's fields and
-        include parameters don't apply: only the row itself is locked and loaded.
+        include parameters don't apply, nor does ``Meta.api_getter``: only the row itself is locked and loaded.
 
         Returns:
             The row, after ``after_fetch()``.

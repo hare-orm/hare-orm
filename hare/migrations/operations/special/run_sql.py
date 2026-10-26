@@ -28,6 +28,8 @@ class RunSQL(HareOperation):
 
     reduces_to_sql = True
     noop = ""
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
 
     def __init__(
         self,
@@ -100,7 +102,7 @@ class RunSQL(HareOperation):
                     else:
                         parameterizer = RecordingParameterizer()
                         rendered_sql = raw_sql.get_sql(sql_context.copy(parameterizer=parameterizer))
-                        await state_editor.client.execute(rendered_sql, parameterizer.values)
+                        await state_editor.run_parameterized_sql(rendered_sql, parameterizer.values)
                 else:
                     await state_editor.run_raw_sql(sql)
         elif isinstance(sqls, str) and sqls != RunSQL.noop:

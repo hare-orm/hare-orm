@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
+from hare.ddl.conditions.dialect_condition import DialectCondition
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class TenantCondition:
+class TenantCondition(DialectCondition):
     """The condition of a ``Policy`` keeping a ``Meta.tenant_field`` model's rows to the tenants of
     the transaction - the ``Tenancy.scope()`` active when the transaction began on a connection
     with ``tenant_row_level_security``. A transaction with no scope sees and writes no row."""
@@ -23,6 +24,10 @@ class TenantCondition:
     def get_referenced_field_names(self) -> set[str]:
         """The fields the condition names - none: it reads ``Meta.tenant_field``."""
         return set()
+
+    def with_renamed_field(self, old_name: str, new_name: str) -> TenantCondition:
+        """The condition as it is - it names no field."""
+        return self
 
     def get_condition_sql(self, model: type[Model], client: DatabaseClient) -> str:
         """The predicate written into a policy of ``model``'s table.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import functools
-import operator
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -105,6 +104,8 @@ class TemporalArithmetic:
         for field_class, temporal_type in TEMPORAL_FIELD_TYPES:
             if isinstance(field, field_class):
                 return temporal_type
+        if field is not None and field.holds_intervals:
+            return TemporalType.INTERVAL
         # A dialect's wall clock and time of day without a zone.
         source = field.date_function_source if field is not None else None
         if source is DateTruncSource.NAIVE_DATETIME:
@@ -170,8 +171,8 @@ class TemporalArithmetic:
             raise FieldError(
                 f"Unsupported arithmetic: {cls.describe(left)} {cls.get_operator_symbol(connector)} "
                 f"{cls.describe(right)}. Supported: datetime +/- timedelta, date +/- timedelta, "
-                "datetime - datetime, date - date, timedelta +/- timedelta - "
-                "use a timedelta, not a number, to shift a date/time."
+                "datetime - datetime, date - date, timedelta +/- timedelta, datetime/date +/- an interval "
+                "column - use a timedelta, not a number, to shift a date/time."
             )
         if left.type == right.type == TemporalType.DATETIME and cls.is_naive(left) != cls.is_naive(right):
             raise FieldError(
@@ -181,17 +182,21 @@ class TemporalArithmetic:
             )
 
         if left.type == right.type == TemporalType.TIMEDELTA:
-            term = getattr(operator, connector)(left.term, right.term)
+            # Term's own SQL arithmetic - an operand term (RawSQL, Subquery) overrides the operators to
+            # build a CombinedExpression instead.
+            term = getattr(Term, f"__{connector}__")(left.term, right.term)
         elif result_type == TemporalType.TIMEDELTA:
             term = TemporalDifference(left.term, right.term, is_date=left.type == TemporalType.DATE)
         else:
-            base, delta = (left, right) if right.type == TemporalType.TIMEDELTA else (right, left)
+            is_right_delta = right.type in (TemporalType.TIMEDELTA, TemporalType.INTERVAL)
+            base, delta = (left, right) if is_right_delta else (right, left)
             term = TemporalShift(
                 base.term,
                 delta.term,
                 is_date=base.type == TemporalType.DATE,
                 is_subtraction=connector == ArithmeticOperator.SUB,
                 is_naive=cls.is_naive(base),
+                is_interval=delta.type == TemporalType.INTERVAL,
             )
 
         output_field = next(
@@ -251,4 +256,5 @@ class TemporalArithmetic:
         """A short description of an operand's type, for error messages."""
         if operand.type is None:
             return "a non-date/time value"
-        return f"a {operand.type.value} {'literal' if operand.is_literal else 'value'}"
+        article = "an" if operand.type is TemporalType.INTERVAL else "a"
+        return f"{article} {operand.type.value} {'literal' if operand.is_literal else 'value'}"

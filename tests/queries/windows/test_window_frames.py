@@ -12,7 +12,8 @@ from hare.exceptions import QueryError
 from hare.query.expressions import F, RowRange, ValueRange, Window
 from hare.query.functions import Count
 from hare.query.functions.window import FirstValue, Lag, LastValue, RowNumber, Sum
-from tests.shared_models.testmodels import DecimalFields, IntFields, Tournament
+from tests.shared_models.testmodels import IntFields, Tournament
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 async def get_window_values(values: list[int], window: Window, *, order_by=("intnum", "id")) -> list:
@@ -58,11 +59,11 @@ async def test_a_value_range_sums_the_rows_whose_value_is_near(db, frame, expect
     assert await get_window_values([10, 20, 20, 40], window) == expected
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @pytest.mark.parametrize("descending", [False, True])
 async def test_a_value_range_counts_the_decimals_near(db, descending):
-    """SQLite keeps a decimal as text and adds no offset to text - the frame held the row's peers
-    alone."""
+    """A frame of a value range around a decimal counts the rows within it - not the row's peers alone."""
     for row_id, value in enumerate(["1.5", "2.5", "2.5", "10", "1.0", "1.0", "9.9"], start=1):
         await DecimalFields.objects.create(id=row_id, decimal=Decimal(value), decimal_nodec=row_id)
     ordering = F("decimal").desc() if descending else "decimal"

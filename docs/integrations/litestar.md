@@ -62,6 +62,7 @@ The plugin gives the application:
   | `ValidationError` (a value a field refuses: out of its range, too long, a null byte PostgreSQL refuses) | `422 Unprocessable Content`, the field's message in `detail` |
   | `InvalidRequestQuery` | `400 Bad Request` as Litestar answers invalid parameters itself: `{"status_code", "detail", "extra"}`, each error in `extra` as `{"message", "key", "source"}` (`query` or `path`); an error of the whole query (a model validator's) has no `key` |
   | `RequestQueryForbidden` (a parameter asks for what the request may not see: deleted rows without `may_see_deleted()`) | `403 Forbidden`, the parameter under `extra` |
+  | `ApiGetterError` (a value of another service a request query's `Meta.api_getter` requires couldn't be loaded) | `502 Bad Gateway`, without the error's message, which names the service and the values asked |
 
 - **A request's own state.** Each request starts with an empty count of `RepeatedQueryDetector`, so it
   reports the queries of one request. Only its own writes send its reads to the connection written
@@ -193,8 +194,9 @@ with `exclude`, as `exclude_sensitive=True` does for a [Pydantic model](pydantic
 
 A handler taking a model (`data: Book`) gets a `HareDTO` of it too: the request's data makes the row.
 Relations, the values the database generates (an autoincrement key) and the `auto_now`/`auto_now_add`
-stamps the ORM fills on save are read-only — the data sets the key column (`author_id`), not the
-relation, and a stamp sent in the body is ignored.
+stamps the ORM fills on save are read-only, and so is `Meta.soft_delete_field`, which `delete()` and
+`restore()` alone write — the data sets the key column (`author_id`), not the relation, and a stamp or
+a deletion time sent in the body is ignored.
 
 A change of some fields only (`PATCH`) takes a DTO with `DTOConfig(partial=True)` and `DTOData`: the
 model built from partial data has the defaults in the fields not sent, `update_instance()` sets only the

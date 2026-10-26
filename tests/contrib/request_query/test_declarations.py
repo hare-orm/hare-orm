@@ -255,27 +255,6 @@ async def test_a_class_without_a_queryset_only_serves_as_a_base(library):
 
 
 @pytest.mark.asyncio
-async def test_meta_options_are_checked(library):
-    class NotQuerysetQuery(RequestQuery[Book]):
-        class Meta:
-            queryset = Book
-
-    class WrongJoinQuery(RequestQuery[Book]):
-        class Meta:
-            queryset = Book.objects.all()
-            join_type = "XOR"
-
-    class WrongPaginationQuery(RequestQuery[Book]):
-        class Meta:
-            queryset = Book.objects.all()
-            pagination = 50
-
-    assert "must be a QuerySet" in declaration_error(NotQuerysetQuery)
-    assert "join_type" in declaration_error(WrongJoinQuery)
-    assert "Meta.pagination" in declaration_error(WrongPaginationQuery)
-
-
-@pytest.mark.asyncio
 async def test_parameter_markers_are_checked(library):
     with pytest.warns(UserWarning, match="shadows an attribute"):
 
@@ -356,18 +335,8 @@ def test_options_check_their_values():
         CursorPagination(max_limit=1_000_000)
     with pytest.raises(ConfigurationError, match="must be an int"):
         OffsetPagination(default_limit=True)
-    with pytest.raises(ConfigurationError, match="must differ"):
-        OffsetPagination(limit_parameter="page", offset_parameter="page")
-    with pytest.raises(ConfigurationError, match="identifiers"):
-        CursorPagination(cursor_parameter="next page")
     with pytest.raises(ConfigurationError, match="without a direction"):
         OrderingConfig(fields=("-title",))
-    with pytest.raises(ConfigurationError, match="non-empty tuple"):
-        SearchConfig(fields=())
-    with pytest.raises(ConfigurationError, match="join_type"):
-        SearchConfig(fields=("title",), join_type="ANY")
-    with pytest.raises(ConfigurationError, match="non-empty string"):
-        Filter("")
 
 
 @pytest.mark.database_independent

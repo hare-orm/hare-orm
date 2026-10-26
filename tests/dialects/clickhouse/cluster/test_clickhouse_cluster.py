@@ -3,6 +3,7 @@ every server, a table distributed over the shards read, written, changed and rem
 distributed table, a replicated table and the journal of migrations read on every server."""
 
 import os
+import secrets
 
 import pytest
 
@@ -11,10 +12,13 @@ from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.cluster.clickhouse_cluster_statements import ClickhouseClusterStatements
+from hare.dialects.clickhouse.functions import DictGet
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
+from hare.dialects.clickhouse.schema_objects.clickhouse_dictionary import ClickhouseDictionary
+from hare.dialects.clickhouse.schema_objects.clickhouse_materialized_view import ClickhouseMaterializedView
 from hare.exceptions import ConfigurationError, OperationalError, UnSupportedError
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
-from hare.migrations.operations import AddField, AlterModelOptions, CreateModel, DeleteModel
+from hare.migrations.operations import AddField, AddMaterializedView, AlterModelOptions, CreateModel, DeleteModel
 from hare.migrations.state.state import State
 from hare.query.expressions import Exists, OuterReference
 from hare.query.functions import Count
@@ -196,6 +200,43 @@ async def test_a_distributed_table_joins_and_reads_subqueries_of_the_rows_of_eve
 
 
 @pytest.mark.asyncio
+async def test_a_change_of_distributed_rows_reads_only_distributed_tables(clickhouse_cluster_db):
+    """A change of a distributed table's rows runs on every server over its own rows, its condition reading
+    there the server's own rows of the tables it names: a table kept on the server it was written through
+    matched the rows of that server alone - the rows of the other one were left unchanged, with no error."""
+    await Visit.objects.bulk_create([Visit(id=number, site="a") for number in range(1, 9)])
+    await Click.objects.bulk_create([Click(id=number, visit_id=number) for number in range(1, 9)])
+    label = await Label.objects.create(name="tagged")
+    await label.visits.add(*await Visit.objects.all())
+    await Site.objects.create(name="a", owner="amy")
+
+    for table, changed_rows in (
+        ("visit", Visit.objects.filter(labels__name="tagged").update(duration=1)),
+        ("visit", Visit.objects.filter(site__in=Site.objects.values("name")).update(duration=1)),
+        # A subquery in the PREWHERE of a subquery went unread - the check walked WHERE alone.
+        (
+            "visit",
+            Visit.objects.filter(
+                id__in=Visit.objects.prewhere(site__in=Site.objects.values("name")).values("id")
+            ).update(duration=1),
+        ),
+        ("click", Click.objects.filter(visit__labels__name="tagged").delete()),
+        ("click", Click.objects.filter(Exists(Label.objects.filter(visits=OuterReference("visit_id")))).delete()),
+    ):
+        with pytest.raises(UnSupportedError, match=f"distributed table {table} runs on every server"):
+            await changed_rows
+
+    # A distributed table is read whole from every server.
+    await Visit.objects.filter(id__in=Click.objects.filter(id__gt=4).values("visit_id")).update(duration=2)
+    assert await Visit.objects.filter(duration=2).count() == 4
+    await Click.objects.filter(visit_id__in=Visit.objects.filter(duration=2).values("id")).delete()
+    assert await Click.objects.count() == 4
+    # A delete running the cascade of Model.delete() reads the keys of its rows first, as a read does.
+    await Visit.objects.filter(id__in=Label.objects.values("visits__id")).delete()
+    assert await Visit.objects.count() == 0
+
+
+@pytest.mark.asyncio
 async def test_a_replicated_table_is_kept_on_every_server(clickhouse_cluster_db):
     connection = Site._meta.connection
     await Site.objects.bulk_create([Site(name="a", owner="ann"), Site(name="b", owner="bob")])
@@ -347,6 +388,138 @@ async def test_a_replicated_table_of_rows_per_shard_is_not_remade(clickhouse_clu
             )
     finally:
         await apply_operations("models", state, DeleteModel(name="Ledger"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse_cluster_db):
+    """A remade table is created beside the old one: on a replica path naming no {uuid} it took the old one's
+    path - the server refused it, the migration failing halfway - while a path naming {uuid} is the new
+    table's own."""
+    connection = Visit._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    # A dropped table leaves its Keeper path for a while - each run takes paths of its own.
+    run = secrets.token_hex(4)
+    for replica_path, remakes in (
+        (f"/clickhouse/tables/{run}/{{replica}}/{{database}}/ledger_local", False),
+        (f"/clickhouse/tables/{run}/{{replica}}/{{table}}", False),
+        (f"/clickhouse/tables/{run}/{{uuid}}/{{replica}}", True),
+    ):
+        engine = f"ReplicatedMergeTree('{replica_path}', '{{replica}}')"
+
+        def get_options(*order_by, engine=engine):
+            return {
+                "table": "ledger",
+                "table_options": [
+                    ClickhouseTableOptions(
+                        engine=engine,
+                        order_by=order_by,
+                        distributed_over="ledger_local",
+                        sharding_key=RawSQLTerm("intHash64(id)"),
+                    )
+                ],
+            }
+
+        state = State()
+        await apply_operations(
+            "models",
+            state,
+            CreateModel(
+                name="Ledger",
+                fields=[("id", fields.BigIntField(primary_key=True, generated=False)), ("text", fields.TextField())],
+                options=get_options("id"),
+            ),
+            schema_editor=editor,
+        )
+        try:
+            await connection.execute_script(
+                "INSERT INTO ledger (id, text) SELECT number + 1, 'a' FROM numbers(6) "
+                "SETTINGS insert_distributed_sync = 1"
+            )
+            remake = AlterModelOptions(name="Ledger", options=get_options("id", "text"))
+            if remakes:
+                await apply_operations("models", state, remake, schema_editor=editor)
+            else:
+                with pytest.raises(UnSupportedError, match="replica path names no {uuid}"):
+                    await apply_operations("models", state, remake, schema_editor=editor)
+            assert await connection.execute_dicts("SELECT count() AS rows FROM ledger") == [{"rows": 6}]
+        finally:
+            await apply_operations("models", state, DeleteModel(name="Ledger"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_materialized_view_filled_on_a_cluster_reads_distributed_tables(clickhouse_cluster_db):
+    """A view's fill runs on the server the connection is to: reading a table keeping rows of each server's own,
+    it took the rows of that server alone, with no error."""
+    connection = Visit._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    await Visit.objects.bulk_create([Visit(id=number, site="a", duration=number) for number in range(1, 11)])
+    state = State()
+    await apply_operations(
+        "models",
+        state,
+        CreateModel(
+            name="Durations",
+            fields=[("id", fields.BigIntField(primary_key=True, generated=False)), ("duration", fields.IntField())],
+            options={
+                "table": "durations",
+                "table_options": [
+                    ClickhouseTableOptions(
+                        distributed_over="durations_local", sharding_key=RawSQLTerm("intHash64(id)")
+                    )
+                ],
+            },
+        ),
+        schema_editor=editor,
+    )
+    try:
+        for query_sql, read_columns, refused_tables in (
+            (
+                "SELECT id, duration FROM visit_local",
+                [("visit_local", "id"), ("visit_local", "duration")],
+                "visit_local",
+            ),
+            ("SELECT id, duration FROM visit_local", [], "tables it doesn't name in read_columns"),
+        ):
+            view = ClickhouseMaterializedView(
+                "durations_of_visits", RawSQLTerm(query_sql), to="durations", read_columns=read_columns
+            )
+            with pytest.raises(UnSupportedError, match=f"its query reads {refused_tables}, not a distributed table"):
+                await apply_operations(
+                    "models", state.clone(), AddMaterializedView("Durations", view), schema_editor=editor
+                )
+        view = ClickhouseMaterializedView(
+            "durations_of_visits",
+            RawSQLTerm("SELECT id, duration FROM visit"),
+            to="durations",
+            read_columns=[("visit", "id"), ("visit", "duration")],
+        )
+        await apply_operations("models", state, AddMaterializedView("Durations", view), schema_editor=editor)
+        assert await connection.execute_dicts("SELECT count() AS rows FROM durations") == [{"rows": 10}]
+    finally:
+        await apply_operations("models", state, DeleteModel(name="Durations"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_dictionary_is_named_in_its_database_on_every_server(clickhouse_cluster_db):
+    """A bare dictionary name was looked up in the default database of the shards a distributed table's
+    query runs on, and of the servers a reload ran on - "Dictionary not found"."""
+    connection = Visit._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    await Site.objects.create(name="a", owner="amy")
+    await Visit.objects.bulk_create([Visit(id=number, site="a") for number in range(1, 9)])
+    await connection.execute_script(
+        "CREATE DICTIONARY site_owners ON CLUSTER hare_sharded (name String, owner String) PRIMARY KEY name "
+        "SOURCE(CLICKHOUSE(TABLE 'site' USER 'default' PASSWORD 'clickhouse')) LAYOUT(COMPLEX_KEY_HASHED()) "
+        "LIFETIME(0)"
+    )
+    try:
+        await editor.dictionaries.reload_dictionary(Site, ClickhouseDictionary("site_owners", ("name",), ("owner",)))
+        owners = await Visit.objects.annotate(
+            site_owner=DictGet("site_owners", "owner", "site", output_field=fields.CharField(max_length=50))
+        ).values_list("site_owner", flat=True)
+        assert list(owners) == ["amy"] * 8
+    finally:
+        await connection.execute_script("DROP DICTIONARY IF EXISTS site_owners ON CLUSTER hare_sharded SYNC")
 
 
 @pytest.mark.asyncio

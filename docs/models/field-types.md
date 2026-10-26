@@ -184,7 +184,7 @@ to it.
 | `SlugField` | `str` | `max_length=50`, `allow_unicode: bool` | `VARCHAR(max_length)`, indexed by default; letters, digits, `-` and `_` — see [below](#format-fields) |
 | `PhoneField` | `str` | `region: str` | `VARCHAR(16)`; a phone number written in E.164 form — see [below](#format-fields) |
 | `BooleanField` | `bool` | — | `BOOL` (SQLite: `INT`); takes a `bool` alone — `0`/`1` or a text raises `ValidationError` |
-| `DecimalField` | `Decimal` | **`max_digits: int`, `decimal_places: int`** (both required, `max_digits ≥ 1`, `0 ≤ decimal_places ≤ max_digits`) | `DECIMAL(max_digits, decimal_places)`; a text is parsed, a `bool` raises `ValidationError` |
+| `DecimalField` | `Decimal` | **`max_digits: int`, `decimal_places: int`** (both required, `max_digits ≥ 1`, `0 ≤ decimal_places ≤ max_digits`) | `DECIMAL(max_digits, decimal_places)` on PostgreSQL and ClickHouse, no column on SQLite ([below](#decimal-field-sqlite)); a text is parsed, a `bool` raises `ValidationError` |
 | `DatetimeField` | `datetime.datetime` | `auto_now: bool`, `auto_now_add: bool` (mutually exclusive) | `TIMESTAMP` (PostgreSQL: `TIMESTAMPTZ`) |
 | `DateField` | `datetime.date` | — | `DATE` |
 | `TimeField` | `datetime.time` | `auto_now`, `auto_now_add` (the local wall clock with the configured zone's standard offset — the same offset a naive time gets) | `TIME` (PostgreSQL: `TIMETZ`); a `timedelta` or the text `24:00` raises `ValidationError` |
@@ -239,29 +239,19 @@ so; the two compare equal everywhere.
 `DecimalField.max_digits`/`decimal_places` are enforced against every value on `save()`, not just checked
 at field-declaration time — `Decimal("12345.67")` on a `max_digits=6` field raises `ValidationError`, not
 a silent truncation or a database-level surprise. A value of more decimal places is rounded half away
-from zero on every database: `Decimal("2.345")` on a `decimal_places=2` field is `Decimal("2.35")`, an
-`update()` from an expression included. A negative zero (`Decimal("-0.00")`) reads back as
+from zero on every database: `Decimal("2.345")` on a `decimal_places=2` field is `Decimal("2.35")`. An
+`update()` from an expression stores what the database makes of it: PostgreSQL rounds half away from
+zero, ClickHouse cuts the extra places. A negative zero (`Decimal("-0.00")`) reads back as
 `Decimal("0.00")` — a decimal column holds no sign of zero.
 
 ### <a id="decimal-field-sqlite"></a>`DecimalField` (SQLite)
 
-SQLite has no exact decimal type: the column is stored as text (`VARCHAR(40)`, in fixed-point notation
-with the field's full scale — `2.0000`, `0.0000000001`; a zero without its sign, so a unique column takes
-`Decimal("-0")` for the `0` it equals). Comparisons
-(`exact`/`gt`/`lt`/`in`/`range`/`not`, against a value or another `DecimalField` via `F()`), ordering,
-`Min`/`Max` and a plain `F()` copy (`update(price=F("price"))`, `annotate(copy=F("price"))`) compare and
-move that text as an exact decimal, whatever `max_digits` is. A filter on an annotation compared with
-`Decimal` values (`annotate(top=Max("price")).filter(top__gt=Decimal("10"))`, `__in`, `__range`) is exact
-too. `contains`/`startswith`/`endswith`/`iexact` (and the `i...` variants) match the stored text:
-`2.0000` on a `decimal_places=4` field, and a `FloatField`'s SQLite text (`2.0`, not `2`).
-Arithmetic (`F("price") * 2`, `Sum`, `Avg`) and `Coalesce`/`Case` over a `DecimalField` are worked out
-exactly from the stored text by functions hare registers, so no digit is lost to a double; a quotient
-(a division, `Avg`, `StdDev`, `Variance`) is cut — not rounded — to 20 digits after the point. An
-annotation compared with a mix of `Decimal` and other numbers goes through a 64-bit double: about 15
-significant digits survive. An `update()` from such arithmetic stores the exact result rounded half away
-from zero to the field's scale — `update(price=F("price") - Decimal("2.005"))` on `1.50` stores `-0.51`
-(the exact result is `-0.505`); a float expression is taken at its shortest digits (`F("price") + 0.005`
-on `1.50` stores `1.51`). PostgreSQL uses a real arbitrary-precision `NUMERIC`.
+SQLite has no exact decimal type, so a `DecimalField` has no column there: a model declaring one raises
+`UnSupportedError` when it is bound to a SQLite connection, and so does a query run on SQLite with a
+`Decimal` value or a `Cast()` to a decimal in it — before any SQL. Keep money in whole minor units (an
+`IntField` or a `BigIntField` of cents) on SQLite, or use PostgreSQL or ClickHouse, which store exact
+decimals. [inspectdb](../migrations/inspectdb.md) reads a SQLite `DECIMAL` or `NUMERIC` column as a
+`FloatField`: SQLite gives such a column NUMERIC affinity, which keeps an integer or a 64-bit float.
 
 ### <a id="date-and-time-values"></a>Date and time values
 
@@ -308,7 +298,8 @@ validated one by one. `pydantic_model_creator()` puts that type into the schema.
 
 A value JSON can't hold raises `ValidationError` on every write path (`create()`, `save()`, `update()`,
 `bulk_create()` including `use_copy=True`, `bulk_update()`): a `NaN`/`Infinity` float anywhere inside it. A
-null byte inside a JSON value is stored as the database stores it. An int of any size is stored and read
+null byte inside a JSON value is stored as the database stores it where it can hold one; PostgreSQL
+refuses it, and hare raises `ValidationError`. An int of any size is stored and read
 back exactly — one outside the 64-bit range orjson handles is encoded and decoded by the standard library
 instead. A `datetime`, `date`, naive `time` or `UUID` inside the value is written as the same ISO/UUID text
 on both paths, and with orjson not installed at all.
@@ -427,13 +418,13 @@ The local part of an address keeps its case — a mail server may tell `Ann` fro
 `lowercase=True` when your addresses are case-insensitive, or `email__iexact=` to compare regardless of
 case.
 
-- `schemes` — lowercase scheme names, at least one; anything else raises `ConfigurationError`.
+- `schemes` — lowercase scheme names.
 - `SlugField` is indexed unless `db_index=False` is passed. A migration file writes `db_index=True` for
   it, and a field a migration file declares without `db_index` has no index — the same rule as for a
   `ForeignKeyField`.
-- `region` — a region code `phonenumbers` knows (`"US"`, `"GB"`, its `SUPPORTED_REGIONS`); another value,
-  or `region` without `phonenumbers` installed, raises `ConfigurationError`. Which numbers `phonenumbers`
-  finds valid follows its own metadata, so it can change with its version.
+- `region` — a region code `phonenumbers` knows (`"US"`, `"GB"`, its `SUPPORTED_REGIONS`); `region`
+  without `phonenumbers` installed raises `ConfigurationError`. Which numbers `phonenumbers` finds valid
+  follows its own metadata, so it can change with its version.
 
 A Pydantic schema (`pydantic_model_creator()`) and the OpenAPI built from it describe them with
 `format: email`, `format: uri`, a `pattern` of the slug's characters, and for a `PhoneField` without
@@ -476,6 +467,13 @@ def CharEnumField(
 - A number of no member — `7`, or a fraction such as `1.5` — raises `ValidationError` in a write and in a
   filter alike; so does a whole float (`1.0`) for an `IntEnumField`, which takes an `int` as an integer
   field does.
+- Where the column holds any integer or text (PostgreSQL, SQLite), a `CHECK` keeps it to the values the
+  members are stored as: a value of no member written around the field — by raw SQL, or computed by
+  `update(level=F("level") + 1)` — raises `IntegrityError`. It is a `CheckConstraint` of an
+  `EnumMembersCondition`, named `<field>_enum_members`, added to the model's constraints when it is
+  bound: `makemigrations` writes it with the model and replaces it when the members change. A column of
+  an enum type needs none — ClickHouse's `Enum8`/`Enum16` (`Features.keeps_enum_columns`), PostgreSQL's
+  `NativeEnumField`.
 
 ```python
 from enum import Enum

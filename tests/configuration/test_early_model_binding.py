@@ -50,7 +50,7 @@ DESCRIBE_SCRIPT = textwrap.dedent(
         return value
 
     def describe_model(model_name, keys, orderings):
-        model = HareContext.get_current().get_model("models", model_name) if mode == "full" else None
+        model = HareContext.get_current().get_model(f"models.{model_name}") if mode == "full" else None
         if model is None:
             module_object = __import__(module, fromlist=[model_name])
             model = getattr(module_object, model_name)

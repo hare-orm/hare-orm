@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from rust.native.pool import PoolStatistics, set_pool_metrics_enabled
 
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
-from hare.dialects.base.client.pool.pool_timeouts import PoolTimeouts
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.constants import (
     POSTGRES_PASSWORD_ENVIRONMENT_VARIABLE,
 )
+from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_connect_errors import PostgresqlConnectErrors
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler

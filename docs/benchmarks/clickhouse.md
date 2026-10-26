@@ -8,9 +8,9 @@ which counts operations per second.
 
 ## <a id="summary"></a>Summary
 
-How many times slower than hare-orm on clickhouse-connect over HTTP (its faster driver in this run)
-each library is, on average: the ratio of geometric means of the times over every scenario both run,
-except the cold start.
+How many times slower than hare-orm on clickhouse-driver over the native TCP protocol (its faster
+driver in this run) each library is, on average: the ratio of geometric means of the times over
+every scenario both run, except the cold start.
 
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-light.svg#gh-light-mode-only)
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-dark.svg#gh-dark-mode-only)
@@ -44,16 +44,16 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-10-19 |
+| Date | 2026-10-26 |
 | Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| hare-orm commit | `07215c80` |
+| hare-orm release | 0.10.0 |
 | Runs | 3, median |
 | ClickHouse | 25.8.33.6 |
 | asynch | 0.2.5 |
 | clickhouse-connect | 1.10.0 |
 | clickhouse-driver | 0.2.11 |
-| hare-orm | 0.9.0 |
+| hare-orm | 0.10.0 |
 | clickhouse-sqlalchemy | 0.3.2, Python 3.12.3 |
 | django-clickhouse-backend | 2.0 |
 | Rows in the table | 1,000,000 |
@@ -92,6 +92,6 @@ run to the worst.
 - Every scenario is written the way that ORM's documentation writes it.
 
 The benchmark is
-[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) in the
-repository; its [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.md) lists
+[`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py) in the
+repository; its [README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.md) lists
 every scenario and how to run it on your own machine.

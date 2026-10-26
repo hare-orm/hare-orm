@@ -4,6 +4,7 @@ from collections.abc import Collection, Iterable, Sequence
 from copy import copy
 from typing import Any, cast
 
+from hare.classes.comparable_values import ComparableValues
 from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.schema_objects.enum_type import EnumType
 from hare.dialects.dialect_registry import DialectRegistry
@@ -93,7 +94,8 @@ class OperationGenerator:
 
     def _match_renamed_models(self, old_keys: list[ModelKey], new_keys: list[ModelKey]) -> dict[ModelKey, ModelKey]:
         """The removed models renamed to added ones: a removed and an added model of one app declared
-        alike - the one such pair - that the rename questions confirm.
+        alike - the one such pair, that the rename questions confirm, or of several, one an answer given
+        beforehand pairs.
 
         Args:
             old_keys: The selected apps' models of the old state.
@@ -103,29 +105,46 @@ class OperationGenerator:
             New key -> old key of each renamed model.
         """
         renamed: dict[ModelKey, ModelKey] = {}
-        removed_keys = [key for key in old_keys if key not in new_keys]
-        added_keys = [key for key in new_keys if key not in old_keys]
-        # Each model's signature once - the loops below compare every pair.
-        old_signatures = {key: StateSignatures.get_model_signature(self.old_state.models[key]) for key in removed_keys}
-        new_signatures = {key: StateSignatures.get_model_signature(self.new_state.models[key]) for key in added_keys}
-        for new_key in sorted(added_keys):
-            new_signature = new_signatures[new_key]
-            # A candidate only when exactly one added and one removed model share the signature - a
-            # wrong pairing would put rows under the wrong model.
-            matching_added = [
-                key for key in added_keys if key[0] == new_key[0] and new_signatures[key] == new_signature
-            ]
-            matching_removed = [
-                key for key in removed_keys if key[0] == new_key[0] and old_signatures[key] == new_signature
-            ]
-            if len(matching_added) != 1 or len(matching_removed) != 1:
+        # The models of each app sharing a signature - each model's signature made once.
+        removed_by_signature: dict[tuple[str, str], list[ModelKey]] = {}
+        for key in old_keys:
+            if key not in new_keys:
+                signature_key = StateSignatures.get_model_signature_key(self.old_state.models[key])
+                removed_by_signature.setdefault((key[0], signature_key), []).append(key)
+        added_by_signature: dict[tuple[str, str], list[ModelKey]] = {}
+        signature_key_by_added_key: dict[ModelKey, str] = {}
+        for key in new_keys:
+            if key not in old_keys:
+                signature_key = StateSignatures.get_model_signature_key(self.new_state.models[key])
+                signature_key_by_added_key[key] = signature_key
+                added_by_signature.setdefault((key[0], signature_key), []).append(key)
+        for new_key in sorted(signature_key_by_added_key):
+            group_key = (new_key[0], signature_key_by_added_key[new_key])
+            matching_added = added_by_signature.get(group_key, [])
+            matching_removed = removed_by_signature.get(group_key, [])
+            if new_key not in matching_added or not matching_removed:
                 continue
-            old_key = matching_removed[0]
-            if not self.rename_questions.ask_model_rename(new_key[0], old_key[1], new_key[1]):
-                continue
+            if len(matching_added) == 1 and len(matching_removed) == 1:
+                old_key = matching_removed[0]
+                if not self.rename_questions.ask_model_rename(new_key[0], old_key[1], new_key[1]):
+                    continue
+            else:
+                # Several declared alike: nothing is asked - a wrong pairing would put rows under the wrong
+                # model - but an answer given beforehand tells which is which.
+                given_key = next(
+                    (
+                        removed_key
+                        for removed_key in matching_removed
+                        if self.rename_questions.is_given(f"{removed_key[0]}.{removed_key[1]}", new_key[1])
+                    ),
+                    None,
+                )
+                if given_key is None:
+                    continue
+                old_key = given_key
             renamed[new_key] = old_key
-            removed_keys.remove(old_key)
-            added_keys.remove(new_key)
+            matching_removed.remove(old_key)
+            matching_added.remove(new_key)
         return renamed
 
     def _get_table_identity(self, key: ModelKey, model_state: ModelState) -> tuple[str | None, str | None, str]:
@@ -222,7 +241,7 @@ class OperationGenerator:
             The rendered field, or None when the model or field isn't rendered there.
         """
         try:
-            model = state.apps.get_model(key[0], key[1])
+            model = state.apps.get_model(f"{key[0]}.{key[1]}")
         except KeyError:
             return None
         return model._meta.fields_map.get(field_name)
@@ -486,14 +505,13 @@ class OperationGenerator:
         removed_keys = [key for key in old_keys if key not in new_keys and key not in renamed_old_keys]
         added_keys = [key for key in new_keys if key not in old_keys and key not in renamed_models]
         warnings: list[str] = []
+        removed_names_by_signature: dict[tuple[str, str], list[str]] = {}
+        for old_key in removed_keys:
+            signature_key = StateSignatures.get_model_signature_key(self.old_state.models[old_key])
+            removed_names_by_signature.setdefault((old_key[0], signature_key), []).append(old_key[1])
         for new_key in added_keys:
-            new_signature = StateSignatures.get_model_signature(self.new_state.models[new_key])
-            matching_removed_names = sorted(
-                old_key[1]
-                for old_key in removed_keys
-                if old_key[0] == new_key[0]
-                and StateSignatures.get_model_signature(self.old_state.models[old_key]) == new_signature
-            )
+            signature_key = StateSignatures.get_model_signature_key(self.new_state.models[new_key])
+            matching_removed_names = sorted(removed_names_by_signature.get((new_key[0], signature_key), []))
             if not matching_removed_names:
                 continue
             removed_names = ", ".join(repr(name) for name in matching_removed_names)
@@ -1012,8 +1030,9 @@ class OperationGenerator:
         new_keys: list[ModelKey],
         renamed_models: dict[ModelKey, ModelKey],
     ) -> set[tuple[str, str]]:
-        """The columns the migration changes: those its field operations change, and every column of a
-        deleted model's table.
+        """The columns the migration changes: those its field operations change, every column of a
+        deleted model's table, and the columns of a view or materialized view dropped and created again - its
+        declaration changes or it reads one of them; a view reading it is dropped first in turn.
 
         Args:
             field_operations_by_key: The field operations of each model both states have, by its new key.
@@ -1038,7 +1057,67 @@ class OperationGenerator:
                 column = ModelState.get_field_db_column(field_name, field)
                 if column is not None:
                     changed_columns.add((table, column))
+        return self._add_read_view_columns(changed_columns, old_keys, new_keys)
+
+    def _add_read_view_columns(
+        self, changed_columns: set[tuple[str, str]], old_keys: list[ModelKey], new_keys: list[ModelKey]
+    ) -> set[tuple[str, str]]:
+        """Adds the columns that views read of every view and materialized view dropped and created again -
+        one whose declaration changes, one reading a changed column, through other views too: a view reading
+        it is dropped first and created again after it.
+
+        Args:
+            changed_columns: The columns changed so far.
+            old_keys: The selected models of the old state.
+            new_keys: The selected models of the new state.
+
+        Returns:
+            ``changed_columns``, with the columns of the views made again.
+        """
+        views = self._get_views(self.old_state, old_keys)
+        new_declarations = {
+            view.name: ComparableValues.get_declaration_key(view, without_name=True)
+            for view in self._get_views(self.new_state, new_keys)
+        }
+        # A view whose declaration changes is dropped and created again - the views reading it with it.
+        made_again_names = {
+            view.name
+            for view in views
+            if view.name in new_declarations
+            and ComparableValues.get_declaration_key(view, without_name=True) != new_declarations[view.name]
+        }
+        while True:
+            new_names = {
+                view.name
+                for view in views
+                if view.name not in made_again_names
+                and any(column in changed_columns or column[0] in made_again_names for column in view.read_columns)
+            }
+            if not new_names:
+                break
+            made_again_names |= new_names
+        changed_columns.update(
+            column for view in views for column in view.read_columns if column[0] in made_again_names
+        )
         return changed_columns
+
+    @staticmethod
+    def _get_views(state: State, keys: list[ModelKey]) -> list[Any]:
+        """The views and materialized views the models of a state declare.
+
+        Args:
+            state: The state.
+            keys: The models.
+
+        Returns:
+            The views.
+        """
+        return [
+            view
+            for key in keys
+            for option in (ModelOption.VIEWS, ModelOption.MATERIALIZED_VIEWS)
+            for view in state.models[key].get_option_list(option)
+        ]
 
     def _get_added_model_operations(self, added_keys: list[ModelKey]) -> list[HareOperation]:
         """The operations creating the models only the new state has.

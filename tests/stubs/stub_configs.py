@@ -19,6 +19,7 @@ MANAGERS_CONFIG = {
 }
 MANAGERS_STUB_PATH = ("tests", "stubs", "stub_managers_models.pyi")
 MYPY_MODELS_STUB_PATH = ("tests", "contrib", "mypy", "models.pyi")
+POSTGRESQL_MODELS_STUB_PATH = ("tests", "contrib", "mypy", "postgresql_models.pyi")
 #: The repository root - pyright reads the modules of the stubs' models from it.
 REPOSITORY_PATH = Path(__file__).resolve().parents[2]
 

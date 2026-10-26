@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import re
 import struct
 import uuid
@@ -42,12 +43,15 @@ from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import Clickhou
 from hare.dialects.clickhouse.introspection.clickhouse_type_parser import ClickhouseTypeParser
 from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_CAST_DEFAULT_PATTERN,
+    CLICKHOUSE_DATE_DEFAULT_PATTERN,
     CLICKHOUSE_DECIMAL_DEFAULT_PATTERN,
     CLICKHOUSE_ESCAPED_CHARACTERS,
     CLICKHOUSE_FLOAT_DEFAULT_PATTERN,
+    CLICKHOUSE_MOMENT_DEFAULT_PATTERN,
     CLICKHOUSE_QUOTED_STRING_PATTERN,
     CLICKHOUSE_STRING_ESCAPE_PATTERN,
     CLICKHOUSE_TEXT_VALUE_DEFAULT_PATTERN,
+    CLICKHOUSE_WIDE_INTEGER_DEFAULT_PATTERN,
 )
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_ENUM_LABEL_FIELD_PATH,
@@ -100,8 +104,9 @@ class ClickhouseIntrospector(SchemaIntrospector):
     @classmethod
     def parse_db_default(cls, raw_sql: str) -> Any:
         """Reads the typed literals hare writes a default as - a float by its bytes, a decimal of its
-        own scale, a UUID or an address from its text, a cast to a ``Dynamic`` or ``Variant`` type - back
-        as their values; anything else as ``SchemaIntrospector.parse_db_default()`` does.
+        own scale, a wide integer, a date, a moment, a UUID or an address from its text, a cast to a
+        ``Dynamic`` or ``Variant`` type - back as their values; anything else as
+        ``SchemaIntrospector.parse_db_default()`` does.
 
         Args:
             raw_sql: The default's expression as the server keeps it.
@@ -120,6 +125,15 @@ class ClickhouseIntrospector(SchemaIntrospector):
         decimal_match = CLICKHOUSE_DECIMAL_DEFAULT_PATTERN.fullmatch(sql)
         if decimal_match is not None:
             return Decimal(decimal_match.group(1))
+        wide_integer_match = CLICKHOUSE_WIDE_INTEGER_DEFAULT_PATTERN.fullmatch(sql)
+        if wide_integer_match is not None:
+            return int(wide_integer_match.group(1))
+        date_match = CLICKHOUSE_DATE_DEFAULT_PATTERN.fullmatch(sql)
+        if date_match is not None:
+            return datetime.date.fromisoformat(date_match.group(1))
+        moment_match = CLICKHOUSE_MOMENT_DEFAULT_PATTERN.fullmatch(sql)
+        if moment_match is not None:
+            return datetime.datetime.fromisoformat(moment_match.group(1)).replace(tzinfo=datetime.UTC)
         text_value_match = CLICKHOUSE_TEXT_VALUE_DEFAULT_PATTERN.fullmatch(sql)
         if text_value_match is not None:
             text = text_value_match.group(2)

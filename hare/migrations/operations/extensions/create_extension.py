@@ -16,6 +16,9 @@ class CreateExtension(HareOperation):
     state records it, so a model needing it again later creates it no second time.
     """
 
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
+
     def __init__(self, extension_name: str) -> None:
         self.extension_name = extension_name
 

@@ -4,6 +4,7 @@ import argparse
 import importlib
 import importlib.metadata
 import sys
+from typing import cast
 
 from hare.cli.constants import CLI_COMMAND_ENTRY_POINT_GROUP, CLI_COMMAND_REFERENCE_SEPARATOR
 from hare.cli.context.cli_context import CLIContext
@@ -36,16 +37,8 @@ class CLICommandRegistry:
 
         Returns:
             The loaded command.
-
-        Raises:
-            TypeError: If the object isn't a ``CLICommand`` subclass with a valid ``name``.
         """
-        if not isinstance(command_class, type) or not issubclass(command_class, CLICommand):
-            raise TypeError(f"{command_class!r} is not a CLICommand subclass")
-        name = getattr(command_class, "name", None)
-        if not isinstance(name, str) or not name or name.startswith("-"):
-            raise TypeError(f"{command_class.__qualname__}.name must be a non-empty subcommand name")
-        return LoadedCLICommand(command=command_class(), source=source)
+        return LoadedCLICommand(command=cast("type[CLICommand]", command_class)(), source=source)
 
     @staticmethod
     def load_entry_point_commands() -> list[LoadedCLICommand]:

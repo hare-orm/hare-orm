@@ -7,7 +7,7 @@ import math
 import pytest
 import pytest_asyncio
 
-from hare.exceptions import UnSupportedError
+from hare.exceptions import UnSupportedError, ValidationError
 from hare.gis import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from hare.gis.functions import Area, AsText, Buffer, Distance, Intersection, Perimeter
 from hare.query.functions import ArrayAgg, Count, Max
@@ -122,6 +122,16 @@ async def test_an_equality_with_a_geometry_of_another_srid_is_refused(places):
     assert await ids(location=Point(0.5, 0.5, srid=4326)) == [1]
     with pytest.raises(UnSupportedError, match="give it in SRID 4326, not 3857"):
         await ids(location=Point(0.5, 0.5, srid=3857))
+
+
+@pytest.mark.asyncio
+async def test_an_equality_with_a_geometry_of_another_type_is_refused(places):
+    """A point compared with a polygon column reached the server, which refused comparing an array with a
+    tuple - a write of it is refused before."""
+    with pytest.raises(ValidationError, match="area: expected a POLYGON, got a POINT"):
+        await ids(area=Point(0.5, 0.5, srid=3857))
+    with pytest.raises(ValidationError, match="zones: expected a MULTIPOLYGON, got a POLYGON"):
+        await ids(zones=Polygon([(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)], srid=4326))
 
 
 @pytest.mark.asyncio

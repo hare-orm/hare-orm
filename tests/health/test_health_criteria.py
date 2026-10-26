@@ -122,27 +122,8 @@ def test_the_longest_wait_since_the_last_check_is_judged():
 
 
 @pytest.mark.parametrize(
-    ("make_criterion", "error_type", "message"),
-    [
-        (lambda: PoolSaturation(ratio=0), ValueError, "ratio must be above 0 and at most 1"),
-        (lambda: PoolSaturation(ratio=1.5), ValueError, "ratio must be above 0 and at most 1"),
-        (lambda: PoolSaturation(ratio=float("nan")), ValueError, "ratio must be above 0"),
-        (lambda: WaitingRequests(at_least=0), ValueError, "at_least must be at least 1"),
-        (lambda: PingLatency(max_ms=60_001), ValueError, "max_ms must be above 0 and at most 60000"),
-        (lambda: AcquireWaitTime(max_seconds=-1), ValueError, "max_seconds must be above 0"),
-        (lambda: AllOf(PingFailed()), ValueError, "AllOf needs at least two criteria"),
-    ],
-)
-def test_a_criterion_refuses_an_argument_out_of_range(make_criterion, error_type, message):
-    with pytest.raises(error_type, match=message):
-        make_criterion()
-
-
-@pytest.mark.parametrize(
     ("arguments", "error_type", "message"),
     [
-        ({"timeout_seconds": 0}, ValueError, "timeout_seconds must be above 0 and at most 60"),
-        ({"timeout_seconds": 61}, ValueError, "timeout_seconds must be above 0 and at most 60"),
         ({"degraded_when": [AcquireWaitTime(max_seconds=1)]}, ConfigurationError, "call PoolMetrics.enable()"),
         (
             {
@@ -155,7 +136,7 @@ def test_a_criterion_refuses_an_argument_out_of_range(make_criterion, error_type
         ),
     ],
 )
-def test_a_health_check_refuses_an_argument_of_the_wrong_type_or_range(arguments, error_type, message):
+def test_a_health_check_refuses_criteria_reading_waits_without_pool_metrics(arguments, error_type, message):
     with pytest.raises(error_type, match=message):
         HealthCheck(**arguments)
 

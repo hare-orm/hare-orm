@@ -1,6 +1,6 @@
 # SQLite: функции
 
-В SQLite нет `DATE_TRUNC()`, статистических агрегатов и точного десятичного типа. hare регистрирует
+В SQLite нет `DATE_TRUNC()` и статистических агрегатов. hare регистрирует
 собственные функции на каждом открытом им подключении SQLite для тех своих функций, у которых в SQLite нет
 SQL, поэтому работает любая функция из `hare.query.functions`. Там, где в SQLite есть функция или
 оператор, hare пишет их, и результат собственный у SQLite: `UPPER()` меняет регистр только у букв ASCII,
@@ -19,17 +19,15 @@ await Book.objects.annotate(month=Trunc("published", "month"), key=Lower("title"
 Все имена начинаются с `hare_`, кроме `regexp` и `match`, которые вызывают операторы SQLite `REGEXP` и
 `MATCH`.
 
-| Область | Функции и правила сравнения | Что дают |
+| Область | Функции | Что дают |
 |---|---|---|
 | Даты и время | `hare_trunc_date_part`, `hare_extract_date_part`, `hare_date_timestamp` | `Trunc()`, `Extract()` и операторы фильтра по части даты; дата сравнивается с датой-временем по своему первому моменту. |
 | Даты и время | `hare_datetime_shift`, `hare_date_shift`, `hare_datetime_difference`, `hare_date_difference` | Арифметика дат и дат-времени с `timedelta` с точностью до микросекунды — см. [Арифметика с датой и временем](../../querying/expressions.ru.md#date-time-arithmetic). |
 | Даты и время | `hare_local_now` | Значение по умолчанию `Now()` у `DateField` или `TimeField` в поясе с правилами перехода на летнее время. |
 | Числа | `hare_math_<name>`: `abs`, `ceil`, `floor`, `sign`, `mod`, `power`, `log`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, `atan2`, `degrees`, `radians`, `pi` | Математические функции — см. [Математические функции](#math-functions). |
-| Числа | `hare_integer_in_range` | Целый результат арифметики за пределами 64 бит отклоняется; SQLite сделал бы из него `REAL`. |
 | Числа | `hare_greatest`, `hare_least` | `Greatest()`/`Least()` сравнивают числа как числа; как `max()`/`min()` SQLite, они дают NULL при любом аргументе NULL. |
-| Числа | `hare_cast` | `Cast()` так, как приводит `CAST` SQLite, с отказом там, где `CAST` молча сделал бы другое значение — см. [Приведение типов](#casts). |
+| Даты и время | `hare_cast` | `Cast()` к дате, дате-времени или времени суток, прочитанным из хранимого текста в UTC — см. [Приведение типов](#casts). |
 | Числа | `hare_stddev_pop`, `hare_stddev_samp`, `hare_var_pop`, `hare_var_samp` | `StdDev()` и `Variance()` как агрегаты и оконные функции. |
-| Десятичные | правило сравнения `hare_decimal`, `hare_decimal_text`, `hare_decimal_sort_key`, `hare_decimal_overflows`, `hare_decimal_stored_text`, `hare_decimal_add`, `hare_decimal_subtract`, `hare_decimal_multiply`, `hare_decimal_divide`, `hare_decimal_mod`, `hare_decimal_sum`, `hare_decimal_avg` | `DecimalField` хранится текстом, сравнивается и упорядочивается по точному значению и точно вычисляется — см. [Десятичные числа](#decimals). |
 | Текст | `hare_text_<name>`: `left`, `right`, `lpad`, `rpad`, `repeat`, `reverse`, `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` | Текстовые функции и хэши, которых нет в SQLite — см. [Текстовые функции](#text-functions). |
 | JSON | `hare_json_path`, `hare_json_datetime` | Путь с цифровым сегментом и дата, сравниваемая со значением JSON — см. [JSON](#json). |
 | Полнотекстовый поиск | `hare_full_text_query` | Текст поиска как запрос FTS5, слова которого никогда не читаются как синтаксис FTS5 — см. [Полнотекстовый поиск](../search-and-geodata/full-text-search.ru.md). |
@@ -46,37 +44,20 @@ await Book.objects.annotate(month=Trunc("published", "month"), key=Lower("title"
 
 ## <a id="casts"></a>Приведение типов
 
-Собственный `CAST` SQLite отбрасывает дробную часть, превращает текст, не являющийся числом, в 0 и не
-знает типов дат. `Cast()` в SQLite приводит так же, как `CAST`, и отказывает только там, где `CAST`
-молча сделал бы другое значение:
+`Cast()` к числу — собственный `CAST` SQLite, к `INTEGER` или к `REAL`:
 
 - при переводе числа в целое дробная часть отбрасывается, тогда как PostgreSQL округляет;
-- текст, не являющийся значением типа, даёт исключение, как и `NaN`;
-- целое за пределами диапазона целевого целочисленного поля (16, 32 или 64 бита) даёт исключение;
-- десятичный тип округляет половиной от нуля до своих знаков, а float становится десятичным по
-  кратчайшей записи цифр;
-- логическое читается из `true`, `false`, `1` или `0` в любом регистре, без пробелов по краям;
-- дата или время читаются в UTC;
-- JSON null пути `JSONField` (`Cast(F("data__n"), IntField())`) даёт `NULL`; JSON-строка, массив или
-  объект, не являющиеся значением типа, дают исключение.
+- текст, не являющийся числом, — `0`, число, обрамлённое пробелами, — его число (`' 42 '` — это `42`);
+- целое сохраняется, каким бы ни был диапазон целевого поля.
+
+Логического типа в SQLite нет: приведение к логическому читает значение как число
+(`CAST(... AS NUMERIC)`), истинное, если оно не `0`, — `'true'` даёт ложь. Типов дат в SQLite тоже нет:
+дату или время читает из хранимого текста в UTC функция hare `hare_cast`. JSON null пути `JSONField`
+(`Cast(F("data__n"), IntField())`) даёт `NULL`.
 
 Приведение к тексту собственное для SQLite: float даёт `2.0` с 15 значащими цифрами (с SQLite 3.53 — с 17),
 логическое — `1` или `0`. `max_length` у `CharField` ничего не обрезает. Любое другое приведение, например
 логического к float, — собственное преобразование SQLite.
-
-## <a id="decimals"></a>Десятичные числа
-
-`DecimalField` хранится текстом, поэтому ни одна цифра не теряется в double. Правило сравнения
-`hare_decimal` сравнивает этот текст по точному значению; текст, не являющийся числом, идёт после всех
-чисел. `UPDATE`, задающий `DecimalField` выражением, сохраняет тот же текст, что и обычная запись
-значения. Арифметика, `Abs`/`Ceil`/`Floor`/`Mod`, `Case`, `Coalesce`, `Sum`, `Avg` и `StdDev`/`Variance`
-над `Decimal` вычисляются по этому тексту точно функциями `hare_decimal_add`,
-`hare_decimal_subtract`, `hare_decimal_multiply`, `hare_decimal_divide`, `hare_decimal_mod`,
-`hare_decimal_sum` и `hare_decimal_avg`. Частное (деление, `Avg()`, `StdDev()`, `Variance()`) отсекается,
-а не округляется, до 20 знаков после запятой; у `numeric` PostgreSQL свои правила масштаба. `Round()`
-десятичного округляет его точный текст половиной от нуля. `AlterField` к меньшему числу цифр точно читает
-хранимый текст через `hare_decimal_overflows`, чтобы найти значение, которое больше не помещается, — см.
-[`AlterField`](../../migrations/operations.ru.md#alter-field).
 
 ## <a id="case-mapping"></a>Смена регистра
 
@@ -121,7 +102,7 @@ SQL. hare добавляет смысл собственных путей:
   даёт `json_extract()`;
 - `JSONObject()` и `JSONArray()` пишет `json_object()`: логическое как 1 или 0, float с 15 значащими цифрами
   (с SQLite 3.53 — с 17), момент или время как хранимый текст, байты как шестнадцатеричная запись заглавными,
-  десятичное как число, значение JSON вкладывается;
+  значение JSON вкладывается;
 - нулевой байт внутри значения JSON хранится как есть.
 
 Сами операторы фильтра — см. [`JSONField`](../../querying/filters.ru.md#jsonfield).
@@ -144,7 +125,7 @@ hare сохраняет собственное сообщение функции
 ## <a id="compiled-functions"></a>Скомпилированные версии
 
 Расширение `rust.native` (см. [Wheel-пакеты](../../getting-started/installation.ru.md#wheels)) содержит
-скомпилированные версии функций и правила сравнения, которые SQLite вызывает для каждой строки. Там, где
+скомпилированные версии функций, которые SQLite вызывает для каждой строки. Там, где
 оно установлено, hare регистрирует их вместо версий на Python; результаты те же.
 
 ## <a id="in-constraints-and-indexes"></a>В ограничениях и индексах
@@ -167,10 +148,4 @@ class Book(Model):
 ```
 
 То же относится к `Extract()`, `Cast()`, операторам фильтра путей `JSONField` и регулярных выражений.
-Некоторые выражения там пишутся собственным SQL SQLite:
-
-| Выражение | В ограничении или индексе |
-|---|---|
-| Сравнение `DecimalField` | Сравнивается как число (`CAST(... AS NUMERIC)`), а не по точному тексту. |
-| `Round()` десятичного | `ROUND()` SQLite над double. |
-| Арифметика дат и времени | Бросает `ConfigurationError`: в SQLite для неё нет SQL. |
+Арифметика дат и времени там бросает `ConfigurationError`: в SQLite для неё нет SQL.

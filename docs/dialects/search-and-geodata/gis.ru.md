@@ -276,7 +276,7 @@ DB_URL = "sqlite+aiosqlite://db.sqlite3?load_spatialite=true"
 `wgs84` (по умолчанию) — системы координат WGS84, долгота/широта 4326 и её зоны UTM, создаются за
 миллисекунды; `full` — все системы координат EPSG, известные SpatiaLite, создаются дольше; `none` — без
 метаданных. База, где метаданные уже есть, сохраняет свои. Они нужны geography
-(`Features.supports_geography`) и пространственному индексу (`Features.supports_spatial_index`).
+(`Features.supports_geography`) и пространственному индексу (`SqliteFeatures.supports_spatial_index`).
 
 `spatialite_path`, `spatialite_proj_database` и `spatialite_metadata` без `load_spatialite=true` дают
 `ConfigurationError`, как и библиотека, которая не загружается, и значение `spatialite_metadata` не из
@@ -290,7 +290,12 @@ Geography или пространственный индекс в SRID, кото
 координат (`InsertEpsgSrid()` SpatiaLite) и подключитесь заново.
 
 - **Колонки** типизированы по типу геометрии — `POINT`, `POLYGON`, `GEOMETRY`, с `Z` для x/y/z
-  (`POINTZ`). Пустой геометрии в SpatiaLite нет: её запись даёт `ValidationError`.
+  (`POINTZ`). Пустой геометрии в SpatiaLite нет: её запись даёт `ValidationError`, а функция с пустым
+  результатом (`Intersection()` непересекающихся геометрий, `Difference()` геометрии на покрывающую её,
+  `Boundary()` точки) читается как `None`.
+- **`Distance()`** SpatiaLite 5.1 — и построенные на нём `__dwithin` и операторы фильтра расстояния — для
+  геометрии внутри полигона может дать расстояние до границы полигона вместо 0, если в соединении уже
+  измерялся полигон с дырой; hare это не обходит. Такую геометрию проверяйте через `__intersects`.
 - **Geography** — геометрия долготы/широты, измеряемая на эллипсоиде: `Area`, `Length`, `Perimeter`,
   `Distance`, `__dwithin` и операторы расстояния — в квадратных метрах и метрах, через пространственные
   метаданные SpatiaLite — с `spatialite_metadata=none` они дают `UnSupportedError`. Отношения, которые
@@ -362,7 +367,9 @@ class Store(Model):
 
 В pydantic-модели, созданной по модели, геометрическое поле — геометрия GeoJSON: принимает словарь
 GeoJSON, WKT/EWKT, (E)WKB или `Geometry`, сериализуется объектом GeoJSON, а его JSON-схема описывает
-геометрию GeoJSON. `inspectdb` читает колонку PostGIS с типом и SRID как подходящее поле
+геометрию GeoJSON. Оно принимает то же, что запись: геометрия другого типа, другой размерности или с
+другим SRID отклоняется (GeoJSON, в который она сериализуется, SRID не хранит), а геометрия без SRID
+получает SRID поля. `inspectdb` читает колонку PostGIS с типом и SRID как подходящее поле
 (`geometry(PolygonZ,3857)` -> `PolygonField(srid=3857, dimensions=3)`); колонка `geography(Point,4326)`
 остаётся [`PostGISField`](../postgresql/fields.ru.md#postgisfield) с кортежем `(latitude, longitude)`, а
 колонка без типа и SRID или с координатами M — неоднозначный `TextField`. Таблицы и представления

@@ -14,8 +14,9 @@ import pytest
 from hare.exceptions import DoesNotExist
 from hare.query.expressions import F, Q, RawSQL
 from hare.query.plans.statement.statement_plans import StatementPlans
-from tests.shared_models import testmodels
-from tests.shared_models.testmodels import Author, Book, DecimalFields, Event, IntFields, Tournament
+from tests.shared_models import testmodels, testmodels_postgres
+from tests.shared_models.testmodels import Author, Book, Event, IntFields, Tournament
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 async def run_counting_plan_hits(build: Callable[[], Awaitable[Any]]) -> tuple[Any, int]:
@@ -201,6 +202,7 @@ async def test_get_by_composite_primary_key(db):
         assert (await testmodels.CompositePkThing.objects.get(thing_id=1, revision=1)).name == thing.name
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_equality_is_not_rounded(db):
     """A filter value is bound with the lookup conversion, not the write one, which rounds a
@@ -231,6 +233,7 @@ async def test_fetched_instance_flags(db):
         assert (await testmodels.DirtyTrackedThing.objects.filter(id=tracked.id))[0].get_dirty_fields() == {}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_every_field_type_is_read(db):
     date_obj = await testmodels.DateFields.objects.create(date=datetime.date(2024, 3, 15), date_null=None)
@@ -238,7 +241,7 @@ async def test_every_field_type_is_read(db):
     delta_obj = await testmodels.TimeDeltaFields.objects.create(timedelta=delta, timedelta_null=None)
     time_obj = await testmodels.TimeFields.objects.create(time=datetime.time(12, 30, 45), time_null=None)
     uuid_obj = await testmodels.UUIDFields.objects.create(data=uuid.uuid4(), data_null=None)
-    decimal_obj = await testmodels.DecimalFields.objects.create(
+    decimal_obj = await testmodels_postgres.DecimalFields.objects.create(
         decimal=Decimal("1234.5678"), decimal_nodec=Decimal("42"), decimal_null=None
     )
     json_obj = await testmodels.JSONFields.objects.create(data={"a": 1, "b": [1, 2, 3]}, data_null=None)
@@ -256,7 +259,7 @@ async def test_every_field_type_is_read(db):
         assert time_fetched.time.replace(tzinfo=None) == datetime.time(12, 30, 45)
         assert time_fetched.time_null is None
         assert (await testmodels.UUIDFields.objects.get(pk=uuid_obj.id)).data == uuid_obj.data
-        decimal_fetched = await testmodels.DecimalFields.objects.get(pk=decimal_obj.id)
+        decimal_fetched = await testmodels_postgres.DecimalFields.objects.get(pk=decimal_obj.id)
         assert decimal_fetched.decimal == Decimal("1234.5678")
         assert decimal_fetched.decimal_null is None
         assert (await testmodels.JSONFields.objects.get(pk=json_obj.id)).data == {"a": 1, "b": [1, 2, 3]}

@@ -16,22 +16,21 @@ pub struct Statistic {
     is_deviation: bool,
     /// `(values, sample, is_deviation) -> float | None`.
     compute: Py<PyAny>,
-    /// `decimal.Decimal`, which reads a `DecimalField`'s text.
-    decimal_type: Py<PyAny>,
     values: Mutex<Vec<Py<PyAny>>>,
 }
 
 impl Statistic {
-    /// A row's value as a number - a `DecimalField`'s text as a Decimal.
-    fn get_number<'py>(&self, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    /// A row's value as a number - a text as a float.
+    fn get_number<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         if value.is_instance_of::<PyInt>() || value.is_instance_of::<PyFloat>() {
             return Ok(value.clone());
         }
-        let decimal_type = self.decimal_type.bind(value.py());
+        // A text is read as a float, as SQLite reads it.
+        let float_type = value.py().get_type::<PyFloat>();
         if value.is_instance_of::<PyBytes>() {
-            return decimal_type.call1((value.call_method0(intern!(value.py(), "decode"))?,));
+            return float_type.call1((value.call_method0(intern!(value.py(), "decode"))?,));
         }
-        decimal_type.call1((value,))
+        float_type.call1((value,))
     }
 
     /// The statistic of integers, exactly as `statistics` works it out - None for other values, or
@@ -85,13 +84,12 @@ impl Statistic {
 #[pymethods]
 impl Statistic {
     #[new]
-    fn new(sample: bool, is_deviation: bool, compute: Py<PyAny>, decimal_type: Py<PyAny>) -> Self {
-        Statistic { sample, is_deviation, compute, decimal_type, values: Mutex::new(Vec::new()) }
+    fn new(sample: bool, is_deviation: bool, compute: Py<PyAny>) -> Self {
+        Statistic { sample, is_deviation, compute, values: Mutex::new(Vec::new()) }
     }
 
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.compute)?;
-        visit.call(&self.decimal_type)?;
         // The values are only ever changed with no Python code running, so they are never locked here.
         if let Ok(values) = self.values.try_lock() {
             for value in values.iter() {
@@ -106,7 +104,7 @@ impl Statistic {
         if value.is_none() {
             return Ok(());
         }
-        let number = self.get_number(value)?.unbind();
+        let number = Self::get_number(value)?.unbind();
         self.lock_values().push(number);
         Ok(())
     }
@@ -117,7 +115,7 @@ impl Statistic {
             return Ok(());
         }
         let py = value.py();
-        let number = self.get_number(value)?;
+        let number = Self::get_number(value)?;
         let values: Vec<Py<PyAny>> = self.lock_values().iter().map(|value| value.clone_ref(py)).collect();
         for (index, candidate) in values.iter().enumerate() {
             if candidate.bind(py).eq(&number)? {

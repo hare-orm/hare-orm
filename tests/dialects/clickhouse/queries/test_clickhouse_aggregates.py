@@ -23,9 +23,9 @@ from hare.dialects.clickhouse.functions import (
     UniqCombined,
     UniqExact,
 )
-from hare.exceptions import OperationalError, QueryError, UnSupportedError
+from hare.exceptions import QueryError, UnSupportedError
 from hare.query.expressions import F, Q, Value
-from hare.query.functions import Abs, ArrayAgg, Avg, Coalesce, Count, Sum
+from hare.query.functions import Abs, ArrayAgg, Coalesce, Count, Sum
 from tests.dialects.clickhouse.column_types.test_clickhouse_containers import make_shipment
 from tests.dialects.clickhouse.models import Account, Country, Player, Quote, Shipment
 
@@ -202,13 +202,12 @@ async def test_aggregates_over_a_window(quotes):
 
 
 @pytest.mark.asyncio
-async def test_a_sum_of_64_bit_integers_passing_their_range_is_exact(clickhouse_db):
-    """sum() of an Int64 is an Int64 on ClickHouse - four values of 2**62 summed to 0."""
+async def test_a_sum_of_64_bit_integers_passing_their_range_wraps_around_as_clickhouse_sums(clickhouse_db):
+    """sum() of an Int64 is ClickHouse's own Int64 - hare widens nothing."""
     await Account.objects.bulk_create([Account(id=2**62 + number, owner="a", balance=2**30) for number in range(4)])
-    totals = await Account.objects.aggregate(total=Sum("id"), average=Avg("id"), balances=Sum("balance"))
-    assert totals == {"total": 2**64 + 6, "average": float(2**62 + 1.5), "balances": 2**32}
-    # A sum of narrower integers keeps its argument - no 64-bit sum of them passes its range.
-    assert "toInt128" not in Account.objects.annotate(total=Sum("balance")).sql()
+    totals = await Account.objects.aggregate(total=Sum("id"), balances=Sum("balance"))
+    assert totals == {"total": 6, "balances": 2**32}
+    assert "toInt128" not in Account.objects.annotate(total=Sum("id")).sql()
 
 
 @pytest.mark.asyncio
@@ -252,10 +251,20 @@ async def test_an_absolute_value_of_a_signed_expression_combines_with_a_signed_b
         .values_list("magnitude", flat=True)
     )
     assert rows == [6, None]
-    # The minimum's absolute value isn't an Int64 - refused, not wrapped round to the minimum.
+    # The minimum's absolute value isn't an Int64 - ClickHouse's conversion keeps the minimum.
     await Country.objects.create(code="cc", name="c", population=-(2**63))
-    with pytest.raises(OperationalError):
-        await Country.objects.filter(code="cc").annotate(magnitude=Abs(F("population"))).values_list("magnitude")
+    assert await Country.objects.filter(code="cc").annotate(magnitude=Abs(F("population"))).values_list(
+        "magnitude", flat=True
+    ) == [-(2**63)]
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_value_of_an_aggregate_is_computed(clickhouse_db):
+    """abs() was cast to toTypeName() of its argument - of an aggregate no constant, refused (code 43)."""
+    await Country.objects.bulk_create(
+        [Country(code="aa", name="a", population=-3), Country(code="bb", name="b", population=-4)]
+    )
+    assert await Country.objects.aggregate(magnitude=Abs(Sum("population"))) == {"magnitude": 7}
 
 
 @pytest.mark.asyncio

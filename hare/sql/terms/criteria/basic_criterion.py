@@ -5,7 +5,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.enums import Comparator, Equality, JSONOperators
+from hare.sql.enums import Comparator, Equality
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.node import TNode
 from hare.sql.terms.term import Term
@@ -37,7 +37,7 @@ class BasicCriterion(Criterion):
 
     def __init__(
         self,
-        comparator: Comparator | JSONOperators | Enum,
+        comparator: Comparator | Enum,
         left: Term,
         right: Term,
         alias: str | None = None,

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.lookups.filter_operators import FilterOperators
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.dialects.enums import DialectName
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.lookups.in_list.postgresql_large_in_list import PostgresqlLargeInList
 from hare.dialects.postgresql.lookups.json.postgresql_json_lookups import PostgresqlJsonLookups
 from hare.dialects.postgresql.lookups.postgresql_regex_lookups import PostgresqlRegexLookups
@@ -65,7 +65,9 @@ class PostgresqlFilterOperators(FilterOperators):
     @staticmethod
     def get_column_type(field: Field[Any] | None) -> str | None:
         """The PostgreSQL type of a list's elements, None to type them by their values."""
-        return None if field is None else field.get_column_type(DialectRegistry.get_dialect(DialectName.POSTGRESQL))
+        if field is None:
+            return None
+        return field.get_column_type(DialectRegistry.get_dialect(PostgresqlDialectName.POSTGRESQL))
 
     def get_overridden_operator(
         self, operator: Callable[..., Any], field_lookup: FieldLookup | None

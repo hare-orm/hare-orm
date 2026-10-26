@@ -13,7 +13,6 @@ from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import
 from hare.query.expressions.arithmetic.combined_expression import CombinedExpression
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
-from hare.query.expressions.enums import NumericValueType
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
@@ -33,7 +32,6 @@ from hare.sql.terms.functions import AggregateFunction
 from hare.sql.terms.functions.analytic_function import AnalyticFunction
 from hare.sql.terms.functions.function import Function as HareSqlFunction
 from hare.sql.terms.functions.window_frame_analytic_function import WindowFrameAnalyticFunction
-from hare.sql.terms.term import Term
 
 
 class Aggregate(Function):
@@ -77,68 +75,24 @@ class Aggregate(Function):
     )
 
     @staticmethod
-    def _widen_integer_argument(result: ExpressionResult, expression_context: ExpressionContext) -> None:
-        """Has the dialect sum the aggregate's integer argument exactly
-        (``TermRenderers.get_widened_integer_sum_argument()``).
-
-        Args:
-            result: The resolved aggregate - of an integer argument.
-            expression_context: The query's resolve context.
-        """
-        term = result.term
-        if isinstance(term, AggregateFunction) and term.args:
-            term.args = [
-                expression_context.dialect.renderers.get_widened_integer_sum_argument(term.args[0]),
-                *term.args[1:],
-            ]
-
-    @staticmethod
-    def use_decimal_aggregate(
-        term: Term, value_field: Field[Any] | None, expression_context: ExpressionContext
-    ) -> None:
-        """Has the dialect sum or average Decimals its own way - the values widened
-        (``TermRenderers.get_decimal_aggregate_argument()``), its own aggregate
-        (``TermRenderers.get_decimal_aggregate_name()``) - in an aggregate or a window function over it.
-
-        Args:
-            term: The resolved aggregate's term, changed in place.
-            value_field: The field of the aggregated values.
-            expression_context: The query's resolve context.
-        """
-        numeric_type = NumericTyping.get_field_type(value_field)
-        if (
-            not isinstance(term, AggregateFunction)
-            or not term.args
-            or numeric_type is None
-            or numeric_type.type is not NumericValueType.DECIMAL
-        ):
-            return
-        renderers = expression_context.dialect.renderers
-        if numeric_type.scale is not None:
-            term.args = [renderers.get_decimal_aggregate_argument(term.args[0], numeric_type.scale), *term.args[1:]]
-        decimal_name = renderers.get_decimal_aggregate_name(term.name)
-        if decimal_name is not None:
-            term.name = decimal_name
-
-    @staticmethod
-    def _cast_integer_result_to_float(
-        result: ExpressionResult, float_output_field: Field[Any], expression_context: ExpressionContext
+    def _get_statistic_result(
+        result: ExpressionResult, value_field: Field[Any] | None, expression_context: ExpressionContext
     ) -> ExpressionResult:
-        """The result of an aggregate over integers as the float it is decoded as - the dialect
-        casts it where the database computes it as a decimal, which would otherwise be a Decimal
-        inside arithmetic or text. Any other result is returned as it is.
+        """The result of an average or a statistic as the database computes it - over integers or
+        Decimals the exact Decimal where it computes one, elsewhere a float, cast by the dialect where
+        the database gives another type. Any other result is returned as it is.
 
         Args:
             result: The aggregate's result.
-            float_output_field: The output field the aggregate gives integers.
+            value_field: The field of the values it reads.
             expression_context: The query's resolve context.
 
         Returns:
             The result.
         """
-        if result.output_field is not float_output_field:
+        if not NumericTyping.is_statistic_a_float(value_field, expression_context.dialect):
             return result
-        float_term = expression_context.dialect.renderers.get_integer_aggregate_as_float(result.term)
+        float_term = expression_context.dialect.renderers.get_statistic_as_float(result.term)
         if float_term is result.term:
             return result
         return ExpressionResult(

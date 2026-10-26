@@ -945,6 +945,17 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             QueryError: The model has no tenant scope, or an object belongs to a tenant outside it.
         """
         if not self._tenant_scoped:
+            if self.model._meta.tenant_field:
+                # .all_tenants() widens the rows a query reads, not the rows an object points at - an
+                # object holding its tenant is checked under the active scope, as save() checks it.
+                tenant_field = self.model._meta.tenant_field
+                TenantWriteRules.scope_objects(
+                    self.model,
+                    [obj for obj in self._objects if obj.__dict__.get(tenant_field) is not None],
+                    "bulk_update",
+                    fills_missing=False,
+                    requires_active=False,
+                )
             return
         scope = TenantWriteRules.scope_objects(
             self.model, self._objects, "bulk_update", fills_missing=False, requires_active=True

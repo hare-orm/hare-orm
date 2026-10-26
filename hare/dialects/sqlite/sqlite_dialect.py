@@ -4,12 +4,12 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.dialects.base.dialect import Dialect
-from hare.dialects.base.features import Features
 from hare.dialects.base.literals.sql_literals import SqlLiterals
 from hare.dialects.base.parameters.sql_parameters import SqlParameters
 from hare.dialects.base.transactions.transaction_statements import TransactionStatements
-from hare.dialects.enums import DialectName
 from hare.dialects.sqlite.clauses.sqlite_query_clauses import SqliteQueryClauses
+from hare.dialects.sqlite.declarations import SqliteFeatures
+from hare.dialects.sqlite.enums import SqliteDialectName
 from hare.dialects.sqlite.literals.sqlite_literals import SqliteLiterals
 from hare.dialects.sqlite.parameters.sqlite_parameters import SqliteParameters
 from hare.dialects.sqlite.server_versions import (
@@ -38,9 +38,9 @@ if TYPE_CHECKING:
 class SqliteDialect(Dialect):
     """SQLite."""
 
-    name = DialectName.SQLITE
+    name = SqliteDialectName.SQLITE
     otel_system_name = "sqlite"
-    features = Features(
+    features = SqliteFeatures(
         inline_comments=True,
         supports_ordered_aggregates=True,
         supports_select_for_update=False,

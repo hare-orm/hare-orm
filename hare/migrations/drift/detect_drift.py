@@ -25,8 +25,8 @@ async def detect_drift(
         connection: The connection to introspect.
         new_state: The current models' state.
         target_labels: The app labels to compare.
-        schema: The schema swept for untracked tables - an attached database on SQLite, a database of the
-            server where databases are the schemas; the connection's default one when None.
+        schema: The schema swept for untracked tables - a schema, an attached database or a database of
+            the server - the namespace of tables the database has; the connection's default one when None.
         unmanaged_model_states: The ``Meta.managed = False`` models' states - their tables count as
             known.
         journal_tables: The tables of migration journals besides ``hare_migrations`` - a

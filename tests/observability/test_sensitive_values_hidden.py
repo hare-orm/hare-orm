@@ -12,6 +12,8 @@ from hare.contrib.test import RollbackIsolation, hare_test_context
 from hare.exceptions import IntegrityError, OperationalError, QueryError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
+from hare.query.expressions import F, OuterReference, Subquery, Value
+from hare.query.functions import Coalesce, Concat, Lower
 from hare.sql.constants import HIDDEN_PARAMETER_TEXT
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 from hare.transactions.transactions import Transactions
@@ -99,7 +101,9 @@ async def test_a_statement_without_a_sensitive_value_binds_a_plain_list(accounts
     await Account.objects.create(id=1, name="ann", passport=SECRETS[0])
     events.clear()
     assert await Account.objects.filter(name="ann").count() == 1
-    assert [type(event.parameters) for event in events] == [list]
+    assert await Account.objects.annotate(shown=Lower("name")).filter(shown="ann", id__gte=1).count() == 1
+    assert [type(event.parameters) for event in events] == [list, list]
+    assert events[1].parameters == ["ann", 1]
 
 
 @pytest.mark.database_independent
@@ -238,3 +242,67 @@ async def test_a_key_reaching_a_sensitive_field_shows_no_value(accounts, events,
     text = shown_text(caplog, events)
     for secret in ("tok-secret-1", "P-100200", "P-300400"):
         assert secret not in text, secret
+
+
+@pytest.mark.asyncio
+async def test_a_filter_on_an_expression_over_a_sensitive_field_shows_no_value(accounts, events, caplog, monkeypatch):
+    """A filter comparing an annotation or an alias over a sensitive field - the field itself, a function
+    of it, one through a relation, a subquery selecting it, a path in a sensitive JSON field - bound its
+    value shown."""
+    monkeypatch.setattr(Observers, "slow_query_threshold_ms", -1.0)
+    account = await Account.objects.create(id=1, name="ann", passport=SECRETS[0], token=SECRETS[2])
+    await Badge.objects.create(id=1, code="b-1", holder=account)
+    await Profile.objects.create(id=1, settings={"token": "tok-secret-1"})
+    with caplog.at_level("DEBUG", logger="hare.db_client"):
+        for _ in range(2):
+            assert await Account.objects.annotate(shown=F("passport")).filter(shown=SECRETS[0]).count() == 1
+            assert await Account.objects.alias(shown=Lower("passport")).filter(shown=SECRETS[0].lower()).count() == 1
+            assert (
+                await Account.objects.annotate(shown=Coalesce("token", Value("")))
+                .filter(shown__in=[SECRETS[2]])
+                .count()
+                == 1
+            )
+            assert (
+                await Account.objects.annotate(shown=Concat("name", F("passport")))
+                .filter(shown="ann" + SECRETS[0])
+                .count()
+                == 1
+            )
+            assert await Badge.objects.annotate(shown=F("holder__passport")).filter(shown=SECRETS[0]).count() == 1
+            holder = Account.objects.filter(id=OuterReference("holder_id"))
+            assert (
+                await Badge.objects.annotate(shown=Subquery(holder.values("passport")[:1]))
+                .filter(shown=SECRETS[0])
+                .count()
+                == 1
+            )
+            assert (
+                await Badge.objects.annotate(
+                    shown=Subquery(holder.annotate(lowered=Lower("passport")).values("lowered")[:1])
+                )
+                .filter(shown=SECRETS[0].lower())
+                .count()
+                == 1
+            )
+            assert await Profile.objects.annotate(shown=F("settings__token")).filter(shown="tok-secret-1").count() == 1
+    text = shown_text(caplog, events)
+    assert HIDDEN_PARAMETER_TEXT in text
+    for secret in (SECRETS[0], SECRETS[0].lower(), SECRETS[2]):
+        assert secret not in text, secret
+
+
+@pytest.mark.asyncio
+async def test_one_walk_answers_every_model_of_a_relation_graph(accounts):
+    """Each model walked the whole relation graph again to tell whether a filter key reaches a
+    sensitive field - a chain of n relations took n walks of it."""
+    from hare.query.filters.resolution.sensitive_filter_keys import SensitiveFilterKeys
+    from tests.observability.sensitive_values_models import Guide, Tour
+
+    cache = SensitiveFilterKeys.reaches_sensitive_fields.cache
+    cache.clear()
+    assert SensitiveFilterKeys.reaches_sensitive_fields(Visa) is True
+    assert (cache.get(Passport), cache.get(Trip)) == (True, True)
+    assert SensitiveFilterKeys.reaches_sensitive_fields(Tour) is False
+    assert cache.get(Guide) is False
+    assert await Tour.objects.filter(guide__name="ann").count() == 0

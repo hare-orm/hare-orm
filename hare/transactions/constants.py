@@ -27,9 +27,6 @@ MIN_TRANSACTION_STATEMENT_TIMEOUT_SECONDS = 0.001
 #: signed 32-bit integer holds, the widest a timeout setting is kept in.
 MAX_TRANSACTION_STATEMENT_TIMEOUT_SECONDS = 2_147_483.647
 
-#: Largest `Transactions.atomic(retries=...)` - how many times a transaction runs again.
-MAX_TRANSACTION_RETRIES = 100
-
 #: The module of each exported name - imported on first use: the database clients import modules
 #: of this package while ``Transactions`` builds on the clients.
 EXPORTED_MODULES = {

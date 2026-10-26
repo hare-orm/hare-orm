@@ -184,12 +184,13 @@ async def test_search_rank(db_postgres):
     )
 
 
-@pytest.mark.database_independent
-@pytest.mark.parametrize("normalization", [1.5, True, "1"])
-def test_search_rank_normalization_that_is_no_integer_is_refused(normalization):
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("normalization", [1.5, True, "1", 2**31, -(2**31) - 1, 10**20])
+@pytest.mark.asyncio
+async def test_search_rank_normalization_that_is_no_integer_is_refused(db, normalization):
     """A fractional normalization was sent as an integer bitmask, 1.5 ranking as 1."""
     with pytest.raises(ConfigurationError, match="integer bitmask"):
-        SearchRank("text", "fat", normalization=normalization)
+        TextFields.objects.annotate(rank=SearchRank("text", "fat", normalization=normalization)).sql()
 
 
 @requires_features(dialect="postgresql")
@@ -456,21 +457,22 @@ async def test_search_query_annotation_reads_as_tsquery_text(db_tsvector):
     assert row == [{"plain": "'fat' & 'cat'", "raw": "'cat':*A & !'dog'"}]
 
 
+@requires_features(dialect="postgresql")
 @pytest.mark.parametrize(
     ("make", "error_class", "message"),
     [
         (
-            lambda: SearchVector("title", weight="E"),
+            lambda: SearchVector("text", weight="E"),
             QueryError,
             "SearchVector weight must be one of A, B, C, D, got 'E'",
         ),
-        (lambda: SearchVector("title", weight=5), QueryError, "a letter A-D or an expression giving one, got 5"),
-        (lambda: SearchRank(SearchVector("title"), "fox", weights=[1, 2]), ConfigurationError, "must be 4 numbers"),
-        (lambda: SearchRank(SearchVector("title"), "fox", weights=[1, 2, "x", 4]), ConfigurationError, "4 numbers"),
+        (lambda: SearchRank(SearchVector("text"), "fox", weights=[1, 2]), ConfigurationError, "must be 4 numbers"),
+        (lambda: SearchRank(SearchVector("text"), "fox", weights=[1, 2, "x", 4]), ConfigurationError, "4 numbers"),
     ],
 )
-def test_a_weight_of_no_label_is_refused_when_declared(make, error_class, message):
-    """'E' failed in the enum with a ValueError while the query was built, 5 and two label weights in
-    the database."""
+@pytest.mark.asyncio
+async def test_a_weight_of_no_label_is_refused_before_the_query_runs(db, make, error_class, message):
+    """'E' failed in the enum with a ValueError while the query was built, two label weights in the
+    database."""
     with pytest.raises(error_class, match=message):
-        make()
+        TextFields.objects.annotate(searched=make()).sql()

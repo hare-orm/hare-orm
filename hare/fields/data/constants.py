@@ -33,6 +33,17 @@ BINARY_FIELD_SUPPORTED_LOOKUPS = frozenset(
 #: by no function of text or numbers alike on every database: it is cast to the type meant first.
 JSON_VALUE_TYPE = "a JSON value"
 
+#: The types of values of the fields no other field's values are stored in, as refusals name them - an
+#: UPDATE setting such a field to another type's value, or another field to one, is refused.
+BINARY_VALUE_TYPE = "bytes"
+IP_ADDRESS_VALUE_TYPE = "an IP address"
+ARRAY_VALUE_TYPE = "an array"
+MAP_VALUE_TYPE = "a map"
+TUPLE_VALUE_TYPE = "a tuple"
+VECTOR_VALUE_TYPE = "a vector"
+GEOMETRY_VALUE_TYPE = "a geometry"
+EXTENT_VALUE_TYPE = "an extent"
+
 #: The digits a float32 is written with at most - its shortest text that reads back as the same
 #: float32 is searched from FLOAT32_MIN_DIGITS up.
 FLOAT32_MIN_DIGITS = 6
@@ -115,8 +126,6 @@ SLUG_FIELD_MAX_LENGTH = 50
 #: The length of a PhoneField - an E.164 number: "+" and at most 15 digits.
 PHONE_FIELD_MAX_LENGTH = 16
 
-#: A URL scheme a URLField accepts, as it is declared - lowercase.
-URL_SCHEME_PATTERN = r"[a-z][a-z0-9+.-]*"
 
 #: The hour a time text starts with at the end of a day (24:00) - no time of day holds it.
 END_OF_DAY_HOUR_TEXT = "24"

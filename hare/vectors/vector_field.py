@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields import Field
+from hare.fields.data.constants import VECTOR_VALUE_TYPE
 from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -36,6 +37,8 @@ class VectorField(Field[list[float]]):
     Raises:
         ConfigurationError: ``dimensions`` isn't an int in its range.
     """
+
+    argument_value_type = VECTOR_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
 
@@ -74,6 +77,9 @@ class VectorField(Field[list[float]]):
             validation_error = None
             try:
                 element_float = float(element)
+            except OverflowError:
+                # An integer past every float - past a float32 too.
+                element_float = VECTOR_ELEMENT_MAX * 2
             except (TypeError, ValueError) as error:
                 validation_error = self.get_validation_error(
                     error, element, f"{self.model_field_name}[{index}]: expected a number, got {shown_element}"
@@ -99,7 +105,7 @@ class VectorField(Field[list[float]]):
         if isinstance(value, tuple):
             return list(value)
         raise ValidationError(
-            f"{self.model_field_name}: expected a list of floats, got {self.get_value_for_message(value)}"
+            f"{self.model_field_name}: expected a list/tuple of floats, got {self.get_value_for_message(value)}"
         )
 
     @staticmethod

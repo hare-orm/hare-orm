@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 class DropSchema(HareOperation):
     """Drop a database schema."""
 
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
+
     def __init__(self, schema_name: str) -> None:
         self.schema_name = schema_name
 

@@ -10,7 +10,6 @@ from hare.models.instances.dirty_fields import DirtyFields
 from tests.shared_models.testmodels import (
     Currency,
     DatetimeFields,
-    DecimalFields,
     DirtyTrackedThing,
     EnumFields,
     JSONFields,
@@ -18,6 +17,7 @@ from tests.shared_models.testmodels import (
     TimeDeltaFields,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 @pytest.mark.asyncio
@@ -107,6 +107,7 @@ async def test_partial_instance_explicit_unloaded_field_raises(db):
         partial.snapshot(fields=["count"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_immutable_values_are_not_copied(db):
     moment = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)
@@ -276,6 +277,7 @@ async def test_diff_against_reports_a_json_value_changing_only_a_nested_type(db)
     assert thing.diff_against(snapshot) == {"data": ({"a": 1, "b": 0}, {"a": True, "b": 0})}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_diff_against_keeps_equal_decimals_of_different_scale_clean():
     record = DecimalFields(decimal=Decimal("1.50"), decimal_nodec=Decimal("2"))

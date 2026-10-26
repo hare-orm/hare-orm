@@ -1,14 +1,12 @@
 """Q conditions in CheckConstraint.check, UniqueConstraint.condition and PartialIndex.condition."""
 
-from decimal import Decimal
-
 import pytest
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import PartialIndex
 from hare.exceptions import ConfigurationError, IntegrityError, UnSupportedError
-from hare.fields.data.numeric import DecimalField, IntField
+from hare.fields.data.numeric import FloatField, IntField
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.text import CharField
 from hare.fields.relations.fields import ForeignKeyField
@@ -31,7 +29,7 @@ def build_stock_model(table: str, **meta_options):
         {
             "name": CharField(max_length=20, db_index=True),
             "qty": IntField(),
-            "price": DecimalField(max_digits=10, decimal_places=2, null=True),
+            "price": FloatField(null=True),
         },
         meta_options,
     )
@@ -42,7 +40,7 @@ CONDITIONED_OPTIONS = {
         CheckConstraint(check=Q(qty__gte=0) & ~Q(name=""), name="stock_valid"),
         UniqueConstraint(fields=("name",), condition=Q(price__isnull=False) & Q(qty__gt=100), name="stock_big_name"),
     ],
-    "indexes": [PartialIndex(fields=["name"], condition=Q(price__gt=Decimal("1")) | Q(qty__lt=3))],
+    "indexes": [PartialIndex(fields=["name"], condition=Q(price__gt=1) | Q(qty__lt=3))],
 }
 
 
@@ -111,7 +109,7 @@ async def test_db_index_and_partial_index_on_the_same_field_stay_two_indexes(rou
 
 @pytest.mark.database_independent
 def test_q_condition_round_trips_through_a_migration_file() -> None:
-    condition = (~Q(qty__lt=0) | Q(price__gte=Decimal("1.50"), name__in=["a", "b"])) & Q(qty__gt=F("min_qty"))
+    condition = (~Q(qty__lt=0) | Q(price__gte=1.50, name__in=["a", "b"])) & Q(qty__gt=F("min_qty"))
     constraint = CheckConstraint(check=condition, name="stock_check")
     imports = ImportManager()
     code = MigrationWriter.render_value(constraint, imports)
@@ -146,7 +144,7 @@ def test_rename_field_renames_q_conditions() -> None:
     assert check.check == Q(amount__gte=0) & ~Q(name="")
     assert unique.condition == Q(price__isnull=False) & Q(amount__gt=100)
     (index,) = [index for index in options["indexes"] if isinstance(index, PartialIndex)]
-    assert index.condition == Q(price__gt=Decimal("1")) | Q(amount__lt=3)
+    assert index.condition == Q(price__gt=1) | Q(amount__lt=3)
 
 
 @pytest.mark.database_independent
@@ -215,13 +213,13 @@ async def test_generated_schema_enforces_q_conditions_without_drift() -> None:
     async with hare_test_context(["tests.queries.filtering.q_condition_models"], db_url=db_url) as context:
         from tests.queries.filtering.q_condition_models import Batch
 
-        await Batch.objects.create(id=1, name="a", qty=5, price=Decimal("2"))
+        await Batch.objects.create(id=1, name="a", qty=5, price=2)
         with pytest.raises(IntegrityError):
             await Batch.objects.create(id=2, name="b", qty=-1)
-        await Batch.objects.create(id=3, name="c", qty=200, price=Decimal("1"))
+        await Batch.objects.create(id=3, name="c", qty=200, price=1)
         if context.get_connection().dialect.features.supports_unique_constraints:
             with pytest.raises(IntegrityError):
-                await Batch.objects.create(id=4, name="d", qty=200, price=Decimal("5"))
+                await Batch.objects.create(id=4, name="d", qty=200, price=5)
         await Batch.objects.create(id=5, name="e", qty=200)
         apps_config = {
             "models": {"models": ["tests.queries.filtering.q_condition_models"], "default_connection": "default"}

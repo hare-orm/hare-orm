@@ -9,6 +9,10 @@ from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 #: and the weak reference slot of a relation object.
 UNCOPIED_QUERY_SLOTS = frozenset({"_plan_origin", "__weakref__"})
 
+#: The most calls a queryset's call signature records - a longer chain is built as it goes: each call
+#: would copy the whole signature, making a chain of thousands of calls quadratic.
+MAX_CALL_SIGNATURE_LENGTH = 256
+
 #: A write called with a method of a dialect that changes how rows are read.
 WRITE_REFUSED_EXTENSION_MESSAGE = (
     "{method_name}() changes how rows are read - an UPDATE or DELETE matches its rows by its condition alone"

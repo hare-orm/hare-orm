@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hare.dialects.enums import DialectName
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.fields.ltree_field import LtreeField
 from hare.dialects.postgresql.functions.ltree import Subpath
 from hare.exceptions import ValidationError
@@ -159,9 +159,12 @@ def test_inspectdb_maps_ltree_and_network_columns():
         column = ColumnInfo(
             name="value", db_type=db_type, nullable=True, is_pk=False, is_unique=False, udt_name=udt_name
         )
-        assert ColumnTypeMapper.map_column_type(DialectName.POSTGRESQL, column)[::2] == (expected_path, False)
+        assert ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)[::2] == (
+            expected_path,
+            False,
+        )
     macaddr8 = ColumnInfo(name="value", db_type="macaddr8", nullable=True, is_pk=False, is_unique=False)
-    assert ColumnTypeMapper.map_column_type(DialectName.POSTGRESQL, macaddr8)[2] is True
+    assert ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, macaddr8)[2] is True
 
 
 @pytest.mark.asyncio

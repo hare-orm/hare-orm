@@ -18,7 +18,7 @@ from hare.dialects.postgresql.constants import (
     POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE,
 )
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 
 class PostgresqlDefinitions:

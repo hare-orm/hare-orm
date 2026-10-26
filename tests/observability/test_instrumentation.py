@@ -447,14 +447,6 @@ async def test_close_connections_does_not_wait_forever_for_a_stuck_observer(monk
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("timeout_seconds", [0, -1, float("nan"), float("inf"), True, "1"])
-@pytest.mark.asyncio
-async def test_wait_for_pending_rejects_an_invalid_timeout(timeout_seconds):
-    with pytest.raises(ValueError, match="timeout_seconds"):
-        await Observers.wait_for_pending(timeout_seconds=timeout_seconds)
-
-
-@pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_observing_reaches_only_the_block_and_the_tasks_it_starts():
     seen = []

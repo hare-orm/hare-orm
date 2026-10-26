@@ -39,6 +39,7 @@ schema editor, the SQL renderer and the introspector all ask it:
 | Member | Meaning |
 |---|---|
 | `identifier_quote_char`, `alias_quote_char`, `quote_identifier(name)`, `qualify_table_name(table, schema)` | Quoting of table/column/index/constraint names and of SELECT aliases. |
+| `get_identifier_key(name)` | What a name is told apart by — two names of one key name one table or column; the name as written by default, lower-cased where the database compares names regardless of case. |
 | `get_string_literal_sql(text)`, `get_literal_sql(value)`, `get_boolean_literal_sql(value)`, `get_bytes_literal_sql(value)`, `get_array_literal_sql(element_sqls)` | Literals written into SQL text — a string, a column default, a boolean of a query, bytes, an array. |
 
 `SqlParameters` binds values:
@@ -98,6 +99,7 @@ def build_types(self):
 | `inserted_by_select` | An INSERT writing the column writes its rows as a `SELECT` of them, not as `VALUES` — for a value written as an expression the dialect's `VALUES` doesn't read; or a `(field) -> bool` deciding it per field. |
 
 `Features` describe how values behave: `divides_integers_exactly` (`/` of integers gives a fraction too),
+`computes_integer_statistics_exactly` (the average of integers is an exact decimal),
 `supports_virtual_generated_columns`. Where a value is stored or computed
 differently, the dialect's `TermRenderers` give the SQL ([next section](#functions-and-lookups)). A
 function the database has only for some argument types (PostgreSQL's `ROUND(numeric, int)`) is a renderer
@@ -140,16 +142,23 @@ SQL needs another:
 | Member | Meaning |
 |---|---|
 | `is_distinct_from_operator` | The NULL-safe inequality (`IS NOT` on SQLite). |
-| `get_decimal_compared_term()`, `get_decimal_value_term()`, `get_decimal_dividend()`, `get_assigned_decimal_term()` | Decimals stored as text: compared, mixed with other numbers, divided, assigned by an `UPDATE`. |
+| `get_distinct_from_sql(left_sql, right_sql)` | The NULL-safe inequality of two values — `left <is_distinct_from_operator> right` by default. |
 | `get_enum_number_term()` | The column of an integer enum field where its number is computed with — an operand of arithmetic, an argument of a function of numbers — on a database whose enum type takes neither. |
-| `get_exact_integer_operand()` | An operand of an integer sum, difference or product a query reads, widened where the database's arithmetic wraps around — the range check of the result (`get_checked_integer_result()`) then sees the exact result. A value an `UPDATE` writes is the database's own. |
+| `get_same_type_math_result()` | The result of a math function of its argument's type (`Abs`, `Ceil`, `Floor`) — converted back to the argument's type where the database's function gives another one. |
 | `get_float_operand()` | The integer operand of an arithmetic with a float — converted where the database has no arithmetic of a wide integer and a float. |
 | `get_json_path_comparand()` | What the JSON value at a path is compared with — JSON stored as text. |
-| `get_integer_aggregate_as_float()` | An average or a statistic of integers, read as a float. |
+| `get_statistic_as_float()` | An average or a statistic the database computes as a float, read as one. |
 | `get_datetime_part_comparand()` | A date or time of day compared with a datetime's part. |
 | `get_concatenated_argument_sql(sql, argument)` | An argument of a text concatenation, cast where the database types it only from what's around it. |
-| `get_ordering_term()` | What `ORDER BY` sorts by for a term. |
-| `get_value_range_ordering_term()` | What a window orders by when its frame is a `RANGE` a number of values away from the current row — a number, where the column's own value takes no offset (a decimal stored as text). |
+| `get_order_sql(order)` | The SQL of a sort direction — `ASC`, `DESC NULLS LAST`, ... — its own text by default. |
+| `get_ordering_clause_sql(term, term_sql, order, sql_context)` | One key of an `ORDER BY` — the term and its direction by default. |
+| `get_window_ordering_clause_sql(function, term, term_sql, order, sql_context)` | One key of a window's `ORDER BY` — `get_window_ordering_sql()` by default. |
+| `get_window_ordering_sql(function, term_sql, order)` | The SQL of one ordering of a window — the term and its direction by default. |
+| `get_result_branch_term(term, output_field)` | A branch of a `CASE` or a `COALESCE` as the type of the whole result needs it. |
+| `get_assigned_integer_term(term)` | What an `UPDATE` sets an integer column to for an expression of a fraction — converted where the column type doesn't round it. |
+| `get_assigned_enum_term(term, member_numbers)` | What an `UPDATE` sets an integer enum column to for an expression — where the column refuses a number of no member. |
+| `get_scaled_duration(term)` | The microseconds of a duration multiplied or divided by a number. |
+| `get_duration_quotient(dividend, divisor)` | The microseconds of a duration divided by an integer — rounded to the nearest, a half to the even one, as Python divides a `timedelta`. |
 | `get_composite_distinct_key()` | What `COUNT(DISTINCT ...)` counts a composite key by. |
 | `get_never_null_column_count_argument(term)` | What `COUNT` takes for a column of the queried table that holds no NULL — the column by default; `*` where counting rows is cheaper than reading the column. |
 
@@ -209,6 +218,9 @@ for every clause databases write differently; the base `QueryClauses` writes ISO
 | `get_typed_placeholder_template()`, `get_values_table_columns_sql()`, `get_update_from_values_sql()`, `get_insert_rows_source_sql()` | The statements hare writes as text: an `UPDATE` from a `VALUES` table (`bulk_update()`), an `INSERT` of rows from a source. |
 | `get_upsert_inserted_flag_sql()` | The `RETURNING` expression telling an upsert's inserted row from an updated one. |
 | `get_explain_sql(sql, output_format, options, features)` | The `EXPLAIN` statement `QuerySet.sql(explain=True)` and `explain()` use. |
+| `join_keywords`, `get_join_keyword_sql(join_type)` | The keyword of a join of each type — `JOIN`, `LEFT OUTER JOIN` by default; a type the mapping lacks raises `UnSupportedError`. A dialect adds its own joins (ClickHouse's `ASOF` and `ARRAY JOIN`) to the mapping. |
+| `get_select_all_except_sql(quoted_columns)` | The head of a query selecting every column of its source but some — the derived table a query of correlated subqueries runs in, where the database runs them that way; `UnSupportedError` by default. |
+| `get_values_source_sql(row_sqls, column_names, alias_sql, *, matches_no_row)` | A subquery of rows given as values — the source of a `MERGE`. |
 
 The query class only binds statements to the dialect:
 

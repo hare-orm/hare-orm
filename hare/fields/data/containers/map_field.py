@@ -5,6 +5,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.constants import MAP_VALUE_TYPE
 from hare.fields.data.containers.constants import (
     ARRAY_LENGTH_PATH_SEGMENT,
     LOOKUP_NAMES,
@@ -44,6 +45,8 @@ class MapField(ContainerField):
         ConfigurationError: A field isn't a field instance, or the key field is of another type or
             holds NULL.
     """
+
+    argument_value_type = MAP_VALUE_TYPE
 
     field_type = dict
 

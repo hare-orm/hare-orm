@@ -200,8 +200,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
     async def _prepare_objects(self) -> None:
         """Gets the objects ready to be written: scoped to the active tenant, their async defaults
         resolved - as save() does - their relations checked and their keys handed out."""
-        if self._tenant_scoped:
-            self._scope_to_active_tenant()
+        self._scope_to_active_tenant()
         for obj in self._objects:
             if obj._await_when_save:
                 await InstanceSaving.set_async_default_field(obj)
@@ -373,7 +372,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             )
         if has_conflict_handling:
             raise UnSupportedError(
-                "use_copy does not support ON CONFLICT - a bulk load inserts every row, it handles no conflicts."
+                "use_copy takes no conflict handling - a bulk load inserts every row, it handles no conflicts."
             )
         return returning
 
@@ -747,6 +746,12 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                 an object carries none under a scope of several values.
         """
         if not self._tenant_scoped:
+            if self.model._meta.tenant_field:
+                # .all_tenants() widens the rows a query reads, not the rows an object points at - each
+                # object is checked under the active scope, as create() checks it.
+                TenantWriteRules.scope_objects(
+                    self.model, self._objects, "bulk_create", fills_missing=True, requires_active=False
+                )
             return
         scope = TenantWriteRules.scope_objects(
             self.model, self._objects, "bulk_create", fills_missing=True, requires_active=True

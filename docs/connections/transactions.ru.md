@@ -271,10 +271,10 @@ async for attempt in Transactions.atomic(isolation="serializable", retries=3):
   внешней транзакции, которую нужно запускать заново целиком — это делает её собственный `retries`.
 - Код блока выполняется в каждой попытке: действия вне базы (отправленное письмо, вызов сервиса) держите
   вне его или в `on_commit()`.
-- `retries` — целое от `0` (по умолчанию — одна попытка) до `100`; другое значение даёт `QueryError`.
-  Обычный `async with Transactions.atomic(retries=3):` даёт `QueryError` при входе — блок `with` нельзя
-  выполнить дважды; используйте форму с `async for`. Попытка формы с `async for`, в которую не вошли
-  через `async with attempt:`, даёт `QueryError` на следующей — иначе цикл никогда бы не закончился.
+- `retries` по умолчанию `0` — одна попытка. Обычный `async with Transactions.atomic(retries=3):` даёт
+  `QueryError` при входе — блок `with` нельзя выполнить дважды; используйте форму с `async for`. Попытка формы
+  с `async for`, в которую не вошли через `async with attempt:`, даёт `QueryError` на следующей — иначе цикл
+  никогда бы не закончился.
 
 ## <a id="autonomous"></a>Независимое соединение: `autonomous()`
 

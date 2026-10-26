@@ -10,9 +10,7 @@ class DecimalMod(Function):
     """Exact remainder of two decimals with at most ``scale`` digits after the decimal point - None
     when a scale isn't known.
 
-    A dialect without an exact decimal type, whose ``MOD()`` runs on doubles and misses remainders
-    such as ``2.00 % 0.1``, scales both operands to whole numbers first and scales the integer
-    remainder back. A dialect whose remainder reads both Decimals at the dividend's scale casts both
+    A dialect whose remainder reads both Decimals at the dividend's scale casts both
     to one scale. An exact numeric ``MOD()`` is written as it is.
 
     Args:

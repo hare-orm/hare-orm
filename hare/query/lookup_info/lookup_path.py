@@ -68,8 +68,7 @@ class LookupPath:
             current_model = relation.related_model
             position += 1
         path = cls(tuple(relations), tuple(segments[:position]), current_model, tuple(segments[position:]))
-        paths[cache_key] = path
-        return path
+        return Cache.set_bounded(paths, cache_key, path)
 
     @property
     def prefix(self) -> str:

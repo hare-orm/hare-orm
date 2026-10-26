@@ -63,9 +63,8 @@ class ForeignKeyFieldInstance(RelationalField[TModel]):
             requirement_error = self.get_set_default_requirement_error()
             if requirement_error is not None:
                 raise ConfigurationError(f"If on_delete is SET_DEFAULT, then {requirement_error}")
-        if lazy is not None and lazy not in set(RelationLoadStrategy):
-            raise ConfigurationError("lazy can only be 'joined', 'select', or None")
-        self.lazy = lazy
+        # The strategy is looked up - an unknown one raises ValueError.
+        self.lazy = RelationLoadStrategy(lazy) if lazy is not None else None
 
     def is_db_default_redundant_with_default(self) -> bool:
         """Whether a db_default next to a default= can never take effect.

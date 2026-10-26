@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -973,3 +974,16 @@ async def test_a_filter_key_that_isnt_text_or_range_bounds_that_are_containers_a
         await JSONFields.objects.filter(data__filter={1: 1}).count()
     with pytest.raises(QueryError, match="range bounds are single values"):
         await JSONFields.objects.filter(data__filter={"scores__range": [[10, 20], [30, 40]]}).count()
+
+
+@test.requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_a_decimal_compared_with_a_json_path_is_refused_where_no_decimal_is_stored(db):
+    """A Decimal compared with a JSON path on SQLite was turned into an int or a float silently, though any
+    other Decimal of a query is refused there."""
+    with pytest.raises(UnSupportedError, match="has no type on sqlite"):
+        await JSONFields.objects.filter(data__price=Decimal("1.5")).count()
+    with pytest.raises(UnSupportedError, match="has no type on sqlite"):
+        await JSONFields.objects.filter(data__filter={"price__gt": Decimal("1.5")}).count()
+    with pytest.raises(UnSupportedError, match="has no type on sqlite"):
+        await JSONFields.objects.filter(data__filter={"price__in": [Decimal(1), 2]}).count()

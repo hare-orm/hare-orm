@@ -28,13 +28,13 @@ async def test_a_collated_comparison_over_two_joins_of_one_table_finds_its_rows(
             "CREATE TABLE sale (id INTEGER PRIMARY KEY, shop_id INT REFERENCES shop (id), total TEXT);"
             "CREATE INDEX sale_shop ON sale (shop_id);"
             "INSERT INTO shop VALUES (1), (2);"
-            "INSERT INTO sale VALUES (1, 1, '100.00'), (2, 1, '50.00'), (3, 2, '30.00');"
+            "INSERT INTO sale VALUES (1, 1, 'BIG'), (2, 1, 'small'), (3, 2, 'other');"
         )
         rows = await client.execute_dicts(
             "SELECT shop.id FROM shop LEFT JOIN sale first_sale ON shop.id = first_sale.shop_id "
             "LEFT JOIN sale second_sale ON shop.id = second_sale.shop_id "
-            "WHERE (first_sale.total COLLATE hare_decimal) = ? AND (second_sale.total COLLATE hare_decimal) = ?",
-            ["100", "50"],
+            "WHERE (first_sale.total COLLATE NOCASE) = ? AND (second_sale.total COLLATE NOCASE) = ?",
+            ["big", "SMALL"],
         )
     finally:
         await client.close()

@@ -31,6 +31,7 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_CONNECTION_ERROR_CODES,
     CLICKHOUSE_CONNECTION_OPTION_DEFAULTS,
     CLICKHOUSE_DEFAULT_DATABASE,
+    CLICKHOUSE_DEFAULT_USER,
     CLICKHOUSE_DISCARDED_CLIENT_MESSAGE,
     CLICKHOUSE_FAILED_MUTATIONS_PATTERN,
     CLICKHOUSE_INSERTED_AS_IS_TYPES,
@@ -101,7 +102,7 @@ from hare.fields.data.containers.declarations import MapValue, TupleValue
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.transaction_client import TransactionClient
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.models import Model
 
 ResultType = TypeVar("ResultType")
@@ -138,7 +139,7 @@ class ClickhouseClient(DatabaseClient):
             try:
                 await self.check_transactions()
             except self.driver_errors.driver as error:
-                await self.close()
+                await self.close_opened_connection()
                 raise ConfigurationError(
                     f"{self.connection_alias!r} asks for transactions (transactions=true), which the server doesn't "
                     f"run - it needs a ClickHouse Keeper and allow_experimental_transactions: {error}"
@@ -159,8 +160,8 @@ class ClickhouseClient(DatabaseClient):
         self,
         host: str = "127.0.0.1",
         port: int | None = None,
-        user: str = "default",
-        password: str = "",  # nosec B107 - no password, as ClickHouse's default user
+        user: str | None = CLICKHOUSE_DEFAULT_USER,
+        password: str | None = "",  # nosec B107 - no password, as ClickHouse's default user
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -176,8 +177,9 @@ class ClickhouseClient(DatabaseClient):
             raise ConfigurationError(f"A ClickHouse connection's database must be a non-empty name, got {database!r}")
         self.host = host
         self.port = port
-        self.user = user
-        self.password = password
+        # A URL without a user or a password names none - None, which the drivers take for no text.
+        self.user = user or CLICKHOUSE_DEFAULT_USER
+        self.password = password or ""
         self.database = database
         #: The checked connection settings, by name.
         self.options: dict[str, Any] = self.connection_options.read(settings, self.connection_option_defaults)
@@ -541,6 +543,13 @@ class ClickhouseClient(DatabaseClient):
         finally:
             await migration_lock.close()
 
+    async def close_opened_connection(self) -> None:
+        """Closes the connection a failed setup of it opened - no close of the client, which the opening
+        would take for a close meanwhile and open again, failing the same way without end."""
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            await connection.close()
+
     async def check_keeper_session(self) -> None:
         """Checks that a Keeper server of ``keeper_hosts`` opens a session.
 
@@ -555,7 +564,7 @@ class ClickhouseClient(DatabaseClient):
         try:
             await migration_lock.check()
         except DBConnectionError as error:
-            await self.close()
+            await self.close_opened_connection()
             raise ConfigurationError(
                 f"{self.connection_alias!r} takes its migration lock in ClickHouse Keeper (keeper_hosts="
                 f"{self.options['keeper_hosts']!r}), which took no session: {error}"

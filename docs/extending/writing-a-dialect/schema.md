@@ -56,8 +56,19 @@ again, its sequences kept with their values.
 inside `CREATE TABLE` and the column definition; a database setting comments by statements of their own
 returns `""` from them and the statements from `get_table_comment_statements(table, comment)` and
 `get_column_comment_statements(table, column, comment)` — hare runs them right after the table or the
-column. `ColumnNarrowingCheck.get_decimal_overflow_predicate_sql()` finds the stored numbers an
-`AlterField` to a narrower decimal can't hold. `ColumnConversionCheck.check_alter_field_conversion()` runs
+column.
+
+An `AlterField` to a narrower type is refused while a stored value doesn't fit it: the new field's
+`get_narrowing_limit(old_field)` gives a `NarrowingLimit`, and the limit asks the editor's
+`ColumnNarrowingCheck` for the predicate finding the values past it
+(`NarrowingLimit.get_overflow_predicate_sql(check, quoted_column)`). A dialect overrides the predicates its
+database writes otherwise: `get_integer_overflow_predicate_sql()`, `get_float_overflow_predicate_sql()`,
+`get_decimal_overflow_predicate_sql()`, `get_text_overflow_predicate_sql()`,
+`get_day_overflow_predicate_sql()` (with `get_time_of_day_predicate_sql()`),
+`get_enum_overflow_predicate_sql()` and `get_held_value_overflow_predicate_sql()` for a value held in a
+container. A limit only one dialect's fields give — an address narrowed to a network on PostgreSQL, a
+moment or a byte length on ClickHouse — lives in that dialect's package and calls a predicate of that
+dialect's own check. `ColumnConversionCheck.check_alter_field_conversion()` runs
 before a column's type changes and checks nothing by default; a database that converts the stored values
 after the column has changed (or turns one it can't convert into NULL or another value) raises there for
 such a value.
@@ -97,7 +108,7 @@ database refuse the statement.
 | Feature | Without it |
 |---|---|
 | `supports_foreign_keys` | No `FOREIGN KEY` constraints; hare runs every `on_delete` action and `PROTECT` check itself, as for a `db_constraint=False` relation. |
-| `supports_unique_constraints` | No unique constraints: a uniqueness is refused - a model's when it is bound, a migration's before its first statement; an automatic through table keeps no unique pair; an upsert targets the primary key only. |
+| `supports_unique_constraints` | No unique constraints: a uniqueness is refused — a model's when it is bound, a migration's before its first statement; an automatic through table keeps no unique pair; an upsert targets the primary key only. |
 | `creates_tables_with_forward_references` | Set it when a table is created with a foreign key to one not created yet (the reference checked when a row is written) — `generate_schemas` then creates a cycle of foreign keys table by table; without it a table of the cycle gets the foreign keys to the tables after it once they exist. |
 | `supports_partial_indexes`, `supports_index_key_order`, `supports_index_nulls_order`, `supports_concurrent_indexes` | The index part is left out or rejected — a `PartialIndex` without the feature is created as the index of every row. |
 | `supports_deferrable_constraints`, `supports_not_valid_constraints` | The constraint type is rejected. |
@@ -113,6 +124,7 @@ one writes the SQL in its parts — the clauses below are class methods of a par
 |---|---|
 | Non-key index columns (`include=`) | `IndexStatements.get_index_include_sql(quoted_columns)` — the clause after the index keys; `""` by default, which leaves the columns out. |
 | `UniqueConstraint(nulls_distinct=...)` | `ConstraintStatements.get_nulls_distinct_sql(nulls_distinct)` — the clause; also set `Features.supports_nulls_distinct`. |
+| Enum fields' `CHECK` (`EnumMembersCondition`) | `ConstraintStatements.get_enum_members_check_sql(quoted_column, value_sqls)` — the predicate: the column holds one of the members' values; ISO `IN (...)` by default. |
 | Exclusion constraints | `ConstraintStatements.get_exclusion_constraint_extension(constraint, fields_by_name)` — the extension a constraint needs; `ConstraintStatements.exclusion_constraint_sql(model, constraint)` — its definition. |
 | `supports_concurrent_indexes` | the editor's `add_index(model, index, concurrently)` and `remove_index(...)`; the base builds and drops the plain way. `IndexStatements.get_index_create_sql()` and `IndexStatements.get_index_drop_sql()` give the plain statements to start from. |
 | `supports_not_valid_constraints` | `ConstraintStatements.add_check_constraint_not_valid()` and `validate_constraint()`; the base adds the constraint as usual and validates nothing. |

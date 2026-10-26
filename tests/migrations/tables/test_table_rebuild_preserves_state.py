@@ -12,13 +12,14 @@ from hare.ddl import RawSQLTerm
 from hare.ddl.constraints import UniqueConstraint
 from hare.exceptions import IntegrityError
 from hare.fields.data.boolean_field import BooleanField
-from hare.fields.data.numeric import BigIntField, DecimalField, IntField
+from hare.fields.data.numeric import BigIntField, DecimalField, FloatField, IntField
 from hare.fields.data.temporal import DateField, DatetimeField
 from hare.fields.data.text import CharField
 from hare.fields.generated_field import GeneratedField
 from hare.migrations.drift import detect_drift
 from hare.migrations.operations import AddField
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.asyncio
@@ -51,7 +52,8 @@ async def test_add_indexed_field_through_a_rebuild_creates_its_index_once(db_iso
 @pytest.mark.asyncio
 async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_no_schema):
     """A rebuild copied every value as it was - a datetime text in a DATE column, a date in a
-    TIMESTAMP one, 5 in a boolean one - so filters on the new type matched nothing."""
+    TIMESTAMP one, 1 in a boolean one - so filters on the new type matched nothing. The values fit the
+    new types - a time of day, a number other than 0 and 1 are refused before the rebuild."""
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     await round_trip.migrate_to(
         build_model(
@@ -61,10 +63,10 @@ async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_
         )
     )
     await round_trip.connection.execute(
-        "INSERT INTO rebuild_typed (moment, day, count, number) VALUES ($1, $2, 5, 7)"
+        "INSERT INTO rebuild_typed (moment, day, count, number) VALUES ($1, $2, 1, 7)"
         if round_trip.dialect == "postgresql"
-        else "INSERT INTO rebuild_typed (moment, day, count, number) VALUES (?, ?, 5, 7)",
-        [datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.UTC), datetime.date(2024, 1, 2)],
+        else "INSERT INTO rebuild_typed (moment, day, count, number) VALUES (?, ?, 1, 7)",
+        [datetime.datetime(2024, 5, 6, tzinfo=datetime.UTC), datetime.date(2024, 1, 2)],
     )
     changed = build_model(
         "Typed",
@@ -73,7 +75,10 @@ async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_
             "moment": DateField(),
             "day": DatetimeField(),
             "count": BooleanField(),
-            "number": DecimalField(max_digits=10, decimal_places=2),
+            # SQLite keeps no exact decimal: a FloatField there.
+            "number": DecimalField(max_digits=10, decimal_places=2)
+            if DatabaseUnderTest.holds_decimal_fields()
+            else FloatField(),
         },
     )
 
@@ -84,7 +89,7 @@ async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_
         assert row["moment"] == "2024-05-06"
         assert row["day"].startswith("2024-01-02 00:00:00")
         assert row["count"] == 1
-        assert row["number"] == "7.00"
+        assert row["number"] == 7.0
     else:
         assert row["moment"] == datetime.date(2024, 5, 6)
         assert row["count"] is True
@@ -98,7 +103,13 @@ async def test_type_change_converts_stored_values_to_the_new_format(db_isolated_
         (CharField(max_length=10), "'abc'", IntField(), '"abc"'),
         (CharField(max_length=10), "'abc'", BooleanField(), '"abc"'),
         (CharField(max_length=10), "'abc'", DateField(), '"abc"'),
-        (CharField(max_length=10), "'1.5x'", DecimalField(max_digits=6, decimal_places=2), '"1.5x"'),
+        pytest.param(
+            CharField(max_length=10),
+            "'1.5x'",
+            DecimalField(max_digits=6, decimal_places=2),
+            '"1.5x"',
+            marks=pytest.mark.decimal_fields,
+        ),
     ],
 )
 async def test_a_type_change_refuses_a_value_the_new_field_cant_read(
@@ -118,15 +129,20 @@ async def test_a_type_change_refuses_a_value_the_new_field_cant_read(
     assert len(await round_trip.connection.execute_dicts("SELECT value FROM rebuild_converted")) == 1
 
 
+def get_number_field() -> DecimalField | FloatField:
+    """A DecimalField - a FloatField on SQLite, which keeps no exact decimal."""
+    if DatabaseUnderTest.holds_decimal_fields():
+        return DecimalField(max_digits=6, decimal_places=2)
+    return FloatField()
+
+
 @pytest.mark.asyncio
 async def test_a_number_made_a_boolean_converts_as_the_database_converts(db_isolated_no_schema):
     """SQLite takes a number other than zero as true; PostgreSQL refuses a numeric made a boolean."""
     from hare.exceptions import OperationalError
 
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
-    await round_trip.migrate_to(
-        build_model("Converted", "rebuild_converted", {"value": DecimalField(max_digits=6, decimal_places=2)})
-    )
+    await round_trip.migrate_to(build_model("Converted", "rebuild_converted", {"value": get_number_field()}))
     await round_trip.connection.execute_script("INSERT INTO rebuild_converted (value) VALUES (2.50), (0)")
     boolean_model = build_model("Converted", "rebuild_converted", {"value": BooleanField()})
     if round_trip.dialect != "sqlite":

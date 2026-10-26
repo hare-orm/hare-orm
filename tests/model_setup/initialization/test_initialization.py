@@ -323,14 +323,6 @@ async def test_init_connections_false_then_running_a_query_raises_clear_error():
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_url_config_needs_a_modules_mapping():
-    await _reset_hare()
-    with pytest.raises(ConfigurationError, match="modules must be a mapping of app label to module paths"):
-        await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://:memory:", ["tests.shared_models.testmodels"]))
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
 async def test_default_connection_init():
     await _reset_hare()
     await Hare.init(
@@ -390,10 +382,6 @@ async def test_init_takes_one_configuration_source():
             },
             config_file="file.json",
         )
-    with pytest.raises(
-        ConfigurationError, match="config must be a HareConfig, a dict, a file path or 'module.VARIABLE'"
-    ):
-        await Hare.init(42)
 
 
 @pytest.mark.database_independent

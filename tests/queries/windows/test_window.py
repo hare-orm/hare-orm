@@ -30,7 +30,6 @@ from tests.shared_models.testmodels import (
     CompositePkThing,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     Event,
     IntFields,
     JSONFields,
@@ -39,6 +38,8 @@ from tests.shared_models.testmodels import (
     Team,
     Tournament,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
+from tests.utils.integer_statistic import IntegerStatistic
 
 
 @pytest_asyncio.fixture
@@ -414,6 +415,7 @@ async def test_window_with_after_cursor(db, intfields_data):
     assert [row["intnum"] for row in rows][:2] == [10, 11]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_sum_over_decimal_field_decodes_through_the_fields_own_type(db):
     """Window.get_result() never set output_field at all, so a Window(Sum(...)) annotation
@@ -440,6 +442,7 @@ async def test_windowed_sum_over_decimal_field_decodes_through_the_fields_own_ty
     assert isinstance(second[0]["running"], Decimal)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_rank_like_window_functions_do_not_inherit_the_partition_fields_type(db):
     """The opposite failure mode: RowNumber()/Rank() etc. have no underlying field at all, so
@@ -503,15 +506,17 @@ async def typed_rows(db):
         await DecimalFields.objects.create(decimal=decimal, decimal_nodec=Decimal("1"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_avg_of_int_field_is_a_fraction(typed_rows):
     """AVG over an IntField used to decode through that IntField, truncating 1.5 to 1."""
     for _ in range(2):  # cache miss, then cache hit
         values = await IntFields.objects.all().annotate(c=Window(Avg("intnum"))).values_list("c", flat=True)
         assert values == [1.5, 1.5]
-        assert all(isinstance(value, float) for value in values)
+        assert all(type(value) is IntegerStatistic.get_type(IntFields) for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_avg_of_decimal_field_stays_decimal(typed_rows):
     values = await DecimalFields.objects.all().annotate(c=Window(Avg("decimal"))).values_list("c", flat=True)
@@ -519,6 +524,7 @@ async def test_windowed_avg_of_decimal_field_stays_decimal(typed_rows):
     assert all(isinstance(value, Decimal) for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     "model,field_name",
     [
@@ -538,6 +544,7 @@ async def test_windowed_count_is_an_integer_whatever_the_field_type(typed_rows, 
     assert all(type(value) is int for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_count_partitioned_and_ordered(typed_rows):
     rows = (
@@ -549,6 +556,7 @@ async def test_windowed_count_partitioned_and_ordered(typed_rows):
     assert rows == [{"char": "abc", "c": 1}, {"char": "a", "c": 1}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_min_max_first_last_keep_the_field_type(typed_rows):
     rows = (
@@ -566,6 +574,7 @@ async def test_windowed_min_max_first_last_keep_the_field_type(typed_rows):
     assert rows == [expected, expected]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_windowed_count_referenced_by_f(typed_rows):
     rows = (
@@ -577,6 +586,7 @@ async def test_windowed_count_referenced_by_f(typed_rows):
     assert rows == [(2, 4), (2, 4)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_lag_json_default_is_encoded_through_the_field(typed_rows):
     """A dict default used to reach the driver unencoded - rejected by SQLite and asyncpg."""
@@ -590,6 +600,7 @@ async def test_lag_json_default_is_encoded_through_the_field(typed_rows):
         assert values == [default, {"a": 1}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_lead_json_default_with_partition(typed_rows):
     values = (
@@ -601,6 +612,7 @@ async def test_lead_json_default_with_partition(typed_rows):
     assert values == [["none"], ["none"]]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_lag_lead_temporal_and_decimal_defaults(typed_rows):
     moments = (
@@ -626,6 +638,7 @@ async def test_lag_lead_temporal_and_decimal_defaults(typed_rows):
     assert decimals == [Decimal("2.5"), Decimal("9.25")]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_lag_int_default_that_fits_the_field(typed_rows):
     values = (
@@ -637,6 +650,7 @@ async def test_lag_int_default_that_fits_the_field(typed_rows):
     assert values == [-1, 1]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize("default", [0.5, Decimal("0.5"), "x"])
 @pytest.mark.asyncio
 async def test_lag_default_that_doesnt_fit_an_int_field_is_rejected(typed_rows, default):
@@ -645,6 +659,7 @@ async def test_lag_default_that_doesnt_fit_an_int_field_is_rejected(typed_rows, 
         await IntFields.objects.all().annotate(c=Window(Lag("intnum", 1, default), order_by=["id"])).values_list("c")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_lag_default_that_doesnt_fit_is_rejected_on_a_cache_hit_too(typed_rows):
     def get_query(default):
@@ -658,8 +673,8 @@ async def test_lag_default_that_doesnt_fit_is_rejected_on_a_cache_hit_too(typed_
 
 @pytest.mark.asyncio
 async def test_window_over_count_annotation_has_count_types(db):
-    """A window Sum()/Avg() over a Count() annotation decodes as int/float on every backend -
-    Postgres returns SUM(bigint)/AVG(bigint) as numeric."""
+    """A window Sum() over a Count() annotation decodes as an int, an Avg() as the database's statistic of
+    integers - Postgres returns SUM(bigint) as numeric."""
     first = await Author.objects.create(name="first")
     second = await Author.objects.create(name="second")
     for rating in (1, 2, 3):
@@ -673,7 +688,7 @@ async def test_window_over_count_annotation_has_count_types(db):
     assert totals == [4, 4]
     assert all(type(total) is int for total in totals)
     assert means == [2.0, 2.0]
-    assert all(type(mean) is float for mean in means)
+    assert all(type(mean) is IntegerStatistic.get_type(Book) for mean in means)
 
 
 @pytest.mark.asyncio

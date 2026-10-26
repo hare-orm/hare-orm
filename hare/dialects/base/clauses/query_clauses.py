@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from hare.dialects.base.clauses.constants import JOIN_KEYWORDS
 from hare.dialects.base.clauses.enums import MergeAction, MergeMatch
 from hare.exceptions import UnSupportedError
 
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
-    from hare.sql.enums import SetOperation
+    from hare.sql.enums import JoinType, SetOperation
     from hare.sql.sql_context import SqlContext
     from hare.sql.tables.table import Table
     from hare.sql.terms.criteria.like import Like
@@ -25,6 +26,9 @@ class QueryClauses:
     table). This base writes ISO SQL; a clause ISO SQL has no form for raises ``UnSupportedError``
     when a statement needs it.
     """
+
+    #: The keyword of each join the dialect writes.
+    join_keywords: ClassVar[Mapping[str, str]] = JOIN_KEYWORDS
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -279,6 +283,38 @@ class QueryClauses:
         if ordinality_name_sql is not None:
             columns.insert(0, f"{ordinality_name_sql} FOR ORDINALITY")
         return f"JSON_TABLE({document_sql}, {path_sql} COLUMNS ({', '.join(columns)}))"
+
+    def get_select_all_except_sql(self, quoted_columns: Sequence[str]) -> str:
+        """The head of a query selecting every column of its source but some - the hidden columns of a derived
+        table a query of correlated subqueries runs in.
+
+        Args:
+            quoted_columns: The columns left out.
+
+        Returns:
+            The ``SELECT`` with its column list.
+
+        Raises:
+            UnSupportedError: The database selects no columns but some - by default.
+        """
+        raise UnSupportedError(f"The {self.dialect.name} database selects no columns of a source but some")
+
+    def get_join_keyword_sql(self, join_type: JoinType) -> str:
+        """The keyword a join of a type is written with.
+
+        Args:
+            join_type: The join's type.
+
+        Returns:
+            The keyword - ``JOIN`` of an inner join.
+
+        Raises:
+            UnSupportedError: The database has no such join.
+        """
+        keyword = self.join_keywords.get(join_type)
+        if keyword is None:
+            raise UnSupportedError(f"The {self.dialect.name} database has no {join_type} join")
+        return keyword
 
     def get_lateral_sql(self, subquery_sql: str) -> str:
         """A subquery joined in ``FROM`` that reads the columns of the tables before it.
@@ -569,6 +605,25 @@ class QueryClauses:
             UnSupportedError: A ``VALUES`` table's columns have no names the dialect reads them by.
         """
         raise UnSupportedError(f"An UPDATE from a VALUES table has no SQL for the {self.dialect} dialect")
+
+    def get_values_source_sql(
+        self, row_sqls: Sequence[str], column_names: Sequence[str], alias_sql: str, *, matches_no_row: bool
+    ) -> str:
+        """A subquery of rows given as values - the source of a ``MERGE``.
+
+        Args:
+            row_sqls: Each row's values, in parentheses.
+            column_names: The quoted names of the columns, in column order.
+            alias_sql: The quoted name the ``VALUES`` table is read under.
+            matches_no_row: Whether the source holds no row - its one row of NULLs, typing the columns,
+                is filtered out.
+
+        Returns:
+            The subquery, in parentheses.
+        """
+        columns_sql = self.get_values_table_columns_sql(column_names)
+        condition_sql = " WHERE 1 = 0" if matches_no_row else ""
+        return f"(SELECT {columns_sql} FROM (VALUES {', '.join(row_sqls)}) AS {alias_sql}{condition_sql})"  # nosec B608
 
     def get_update_from_values_sql(
         self,

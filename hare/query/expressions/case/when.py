@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 from hare.dialects.enums import ParameterPosition
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
+from hare.gis.geometries.geometry import Geometry
 from hare.query.expressions.case.case_branch_value import CaseBranchValue
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
@@ -49,7 +50,8 @@ class When(Expression):
         **kwargs: Any,
     ) -> None:
         self.args = args
-        self.then = then
+        # A geometry is written as Value() writes it - a driver binds none.
+        self.then = Value(then) if isinstance(then, Geometry) else then
         self.negate = negate
         self.kwargs = kwargs
         #: The conditions the branch matches on - made once, the same objects for its plan and its build.
@@ -117,7 +119,6 @@ class When(Expression):
         if isinstance(term, ValueWrapper) and types_literal:
             # A Value(...) branch is typed as a bare literal is.
             term = Value.get_typed_term(term, term.value, ParameterPosition.CASE_BRANCH, dialect)
-        term = dialect.renderers.get_decimal_value_term(term)
         return ExpressionResult(term=term, joins=list(result.joins), output_field=output_field)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

@@ -63,6 +63,7 @@ Every statement runs with these settings:
 | `cast_string_to_dynamic_use_inference=0`, `cast_string_to_variant_use_inference=0` | A text cast to a `Dynamic` or `Variant` value stays a text — the server would read `'5'` as a number. |
 | `json_type_escape_dots_in_keys=1` | A dot in a key of a JSON value is part of the key, not a nested path. |
 | `allow_suspicious_types_in_order_by=1` | A `Dynamic` value (a JSON path) can be ordered by. |
+| `allow_suspicious_types_in_group_by=1` | A grouping can take such an ordering — `values("data__n").annotate(...).order_by("data__n")`. |
 | `calculate_text_stack_trace=0` | An error's text is the server's message, without the server's own stack trace the native protocol sends. |
 
 A wrong password or user and a missing database of the connection raise `ConfigurationError` on both
@@ -73,7 +74,9 @@ drivers, as on PostgreSQL — no retry fixes them; a server that refuses or drop
 
 A date or a moment is stored from 1900-01-01 to 2299-12-31 (`Date32`, `DateTime64`); the server turns any
 other one into the nearest of them without an error. hare refuses such a value instead — in a write and
-in a filter alike — with `ValidationError`. The range is the UTC one: a moment within a day of its ends,
+in a filter alike — with `ValidationError`. A `ClickhouseDatetimeField(precision=9)` counts
+nanoseconds in 64 bits and holds moments up to `2262-04-11 23:47:16.854775` UTC — a later one is refused
+the same way. The range is the UTC one: a moment within a day of its ends,
 read in a zone that puts its local time outside it (`1900-01-01 00:00` UTC in `America/New_York`), is
 turned around by the server in `Extract()`, `Trunc()` and a date-part filter in that zone — keep such
 moments a day inside the range.

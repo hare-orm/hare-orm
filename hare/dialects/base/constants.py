@@ -27,8 +27,6 @@ FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
 #: A query-executing call taking at least this long gets one extra DEBUG-level log line - a
 #: generous default meant to flag genuinely slow queries, not every normal round-trip.
 SLOW_QUERY_THRESHOLD_MS = 500.0
-#: Sanity ceiling (one day, in milliseconds) for Hare.init(slow_query_threshold_ms=...).
-MAX_SLOW_QUERY_THRESHOLD_MS = 86_400_000.0
 
 
 #: The client methods running a statement given as ``(query, values)`` - translate_exceptions

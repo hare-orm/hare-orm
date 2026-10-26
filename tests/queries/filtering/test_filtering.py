@@ -26,7 +26,6 @@ from tests.shared_models.testmodels import (
     CharPkModel,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     DirtyTrackedComposite,
     DocumentRevisionNote,
     Drink,
@@ -47,6 +46,7 @@ from tests.shared_models.testmodels import (
     UUIDFields,
     VersionedDocument,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 @pytest.mark.asyncio
@@ -1862,7 +1862,13 @@ LARGE_IN_LIST_CASES = {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_name", list(LARGE_IN_LIST_CASES))
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        pytest.param(case_name, marks=pytest.mark.postgresql_models) if case_name == "decimal" else case_name
+        for case_name in LARGE_IN_LIST_CASES
+    ],
+)
 async def test_large_in_list_matches_like_a_short_one(db, case_name):
     model, field_name, extra_kwargs, matching_value, get_filler_value = LARGE_IN_LIST_CASES[case_name]
     await model.objects.create(**{field_name: matching_value}, **extra_kwargs)

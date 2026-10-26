@@ -54,9 +54,6 @@ class ExpressionContext:
     # The annotations being resolved up the chain, shared by it - an annotation referencing itself
     # through another raises QueryError instead of recursing forever.
     annotation_names_in_progress: set[str] = dataclass_field(default_factory=set)
-    # Whether the expression is a value written into a column - its integer arithmetic is then left to
-    # the database, which wraps the result into the column's type; a read result is widened and checked.
-    writes_column_value: bool = False
     #: The dialect the expressions compile for.
     dialect: Dialect = dataclass_field(kw_only=True)
     #: The connection the query runs on; None when compiling DDL or SQL for no particular database.

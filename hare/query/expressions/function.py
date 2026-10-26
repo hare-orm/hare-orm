@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import FieldError, QueryError
+from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
@@ -15,7 +16,8 @@ from hare.query.expressions.arithmetic.combined_expression import CombinedExpres
 from hare.query.expressions.compatibility.constants import TEXT_VALUE_TYPE
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
-from hare.query.expressions.constants import NO_CAST_SQL_TYPES
+from hare.query.expressions.constants import FIELD_TYPED_LITERAL_TYPES, NO_CAST_SQL_TYPES
+from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
@@ -34,6 +36,7 @@ from hare.sql.functions.numeric_cast import NumericCast
 from hare.sql.functions.text.collate import Collate
 from hare.sql.terms.functions.function import Function as HareSqlFunction
 from hare.sql.terms.term import Term
+from hare.sql.terms.values.literal_value import LiteralValue
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
@@ -67,6 +70,9 @@ class Function(CombinableExpression):
     refused_argument_value_types: ClassVar[frozenset[str]] = frozenset()
     #: How many arguments the function takes after its first, at least and at most (None: any number).
     default_value_counts: ClassVar[tuple[int, int | None]] = (0, None)
+    #: Whether the result is one of the arguments as given (Coalesce, Greatest, Least) - a literal among
+    #: them may be the value written.
+    returns_an_argument: ClassVar[bool] = False
 
     plan_parts: ClassVar[DeclaredPlanParts] = (
         ("get_plan_options", PlanPartType.KEY_METHOD),
@@ -88,6 +94,13 @@ class Function(CombinableExpression):
         self.field = field
         self.field_object: Field[Any] | None = None
         self.default_values = default_values
+
+    def get_result_literals(self) -> list[Any]:
+        if not self.returns_an_argument:
+            return []
+        # A first argument given as a str names a field.
+        arguments = self.default_values if isinstance(self.field, str) else (self.field, *self.default_values)
+        return [literal for argument in arguments for literal in self.get_literals_of(argument)]
 
     def _get_function_field(self, term: Term | str, *default_values: Any) -> HareSqlFunction:
         if self.function_name is not None:
@@ -238,15 +251,17 @@ class Function(CombinableExpression):
         )
         EncryptedFieldBase.raise_if_encrypted(field_object, f"{type(self).__name__}()")
 
-    @staticmethod
     def _cast_literal_argument(
-        expression_context: ExpressionContext, function_arg: ExpressionResult
+        self, expression_context: ExpressionContext, function_arg: ExpressionResult, argument: Any
     ) -> ExpressionResult:
-        """Types a bare literal main argument where the dialect says nothing around it does.
+        """Types a bare literal main argument where the dialect says nothing around it does - of a function
+        returning one of its arguments, a literal bound in its field type's stored form
+        (``FIELD_TYPED_LITERAL_TYPES``) as that type's column.
 
         Args:
             expression_context: Carries the model whose database decides the dialect.
             function_arg: The resolved main argument.
+            argument: The main argument as given.
 
         Returns:
             `function_arg`, or a copy whose term is the cast literal.
@@ -255,6 +270,24 @@ class Function(CombinableExpression):
         if isinstance(term, Term) and not isinstance(term, ValueWrapper):
             return function_arg
         literal = term.value if isinstance(term, ValueWrapper) else term
+        given_literal = argument.value if isinstance(argument, Value) else argument
+        if (
+            self.returns_an_argument
+            and isinstance(given_literal, FIELD_TYPED_LITERAL_TYPES)
+            and function_arg.output_field is not None
+        ):
+            # The text a UUID or a dict is bound as - as their column, or COALESCE() finds no type of both.
+            cast_sql_type = expression_context.dialect.parameters.get_field_parameter_cast_type(
+                function_arg.output_field
+            )
+            if cast_sql_type is None:
+                return function_arg
+            # The type as the dialect names it - Cast() writes a bare name upper-cased.
+            return ExpressionResult(
+                term=Cast(term, LiteralValue(cast_sql_type)),
+                joins=function_arg.joins,
+                output_field=function_arg.output_field,
+            )
         typed_term = Value.get_typed_term(
             term, literal, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
         )
@@ -324,7 +357,7 @@ class Function(CombinableExpression):
             TermPlanDescriptions.record(self.field, expression_context.value_wrapper_references)
         self._raise_if_encrypted_argument(self.field, function_arg)
         self._raise_if_argument_type_refused(self.field, function_arg)
-        function_arg = self._cast_literal_argument(expression_context, function_arg)
+        function_arg = self._cast_literal_argument(expression_context, function_arg, self.field)
         if TEXT_VALUE_TYPE in self.refused_argument_value_types and NumericTyping.is_enum_field(
             function_arg.output_field
         ):
@@ -334,6 +367,7 @@ class Function(CombinableExpression):
         default_results = [
             self._get_default_argument(expression_context, value, function_arg) for value in self.default_values
         ]
+        function_arg = self._get_literal_beside_json_column(expression_context, function_arg, default_results)
         for default_value, default_result in zip(self.default_values, default_results, strict=True):
             self._raise_if_encrypted_argument(default_value, default_result)
         default_terms = self._get_default_terms(function_arg, default_results, expression_context)
@@ -369,7 +403,7 @@ class Function(CombinableExpression):
         )
 
         if self.populate_field_object and (result_output_field := result.output_field):
-            coerced_output_field = self._coerce_output_field(result_output_field)
+            coerced_output_field = self._coerce_output_field(result_output_field, expression_context)
             self.field_object = coerced_output_field
             # A new result carrying the coerced field - the query reads the output field off the
             # result.
@@ -401,9 +435,9 @@ class Function(CombinableExpression):
             return self.value_field
         return result.output_field if self.populate_field_object else None
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         """Hook: the field of a result that isn't of the argument's type (``Avg()`` of an integer
-        field). By default the argument's field.
+        field, the dialect's). By default the argument's field.
         """
         return field_object
 
@@ -434,7 +468,7 @@ class Function(CombinableExpression):
         ):
             # A date/time/timedelta/UUID/dict literal is bound in its stored form.
             return ExpressionResult(term=ValueWrapper(encoder(value)))
-        if isinstance(value, Value) and self.is_wall_clock_literal(value.value, function_arg):
+        if isinstance(value, Value) and self.binds_as_main_field(value.value, function_arg):
             result = value.get_encoded_result(
                 expression_context, self._get_default_literal_encoder(value.value, function_arg, expression_context)
             )
@@ -453,29 +487,97 @@ class Function(CombinableExpression):
 
         Returns:
             The encoder, None for a literal bound as it is - a naive datetime beside a wall clock in no
-            zone (``NaiveDatetimeField``) is one too, written as that field writes it, not as a moment of
-            the configured zone.
+            zone (``NaiveDatetimeField``) is written as that field writes it, not as a moment of the
+            configured zone, and a timedelta beside an interval as an interval.
         """
-        if self.is_wall_clock_literal(value, function_arg):
-            wall_clock_field: Field[Any] = function_arg.output_field  # type: ignore[assignment]
-            return TemporalArithmetic.get_field_encoder(wall_clock_field, expression_context.dialect)
+        if self.binds_as_main_field(value, function_arg):
+            main_field: Field[Any] = function_arg.output_field  # type: ignore[assignment]
+            return TemporalArithmetic.get_field_encoder(main_field, expression_context.dialect)
         return Value.get_literal_encoder(value, expression_context.dialect)
 
+    def _get_literal_beside_json_column(
+        self,
+        expression_context: ExpressionContext,
+        function_arg: ExpressionResult,
+        default_results: list[ExpressionResult],
+    ) -> ExpressionResult:
+        """A literal main argument of a function returning one of its arguments, beside a JSON column among
+        the default values, bound as that column's JSON - a text, a number or a list would be bound as itself,
+        which the column then holds as no JSON, or a database finds no type of both.
+
+        Args:
+            expression_context: The context the function is resolved in.
+            function_arg: The resolved main argument.
+            default_results: The resolved default values.
+
+        Returns:
+            `function_arg`, or the literal encoded by the JSON column's field.
+
+        Raises:
+            ValidationError: The column's field refuses the literal.
+        """
+        if not self.returns_an_argument:
+            return function_arg
+        literal = self.field.value if isinstance(self.field, Value) else self.field
+        if literal is None or isinstance(literal, (Expression, Term, str)) and not isinstance(self.field, Value):
+            return function_arg
+        json_field = next(
+            (
+                result.output_field
+                for value, result in zip(self.default_values, default_results, strict=True)
+                if not isinstance(value, Value) and Function.is_json_field(result.output_field)
+            ),
+            None,
+        )
+        if json_field is None or Function.is_json_field(function_arg.output_field):
+            return function_arg
+        encoded = TemporalArithmetic.get_field_encoder(json_field, expression_context.dialect)(literal)
+        term: Term = ValueWrapper(encoded)
+        if (
+            cast_sql_type := expression_context.dialect.parameters.get_field_parameter_cast_type(json_field)
+        ) is not None:
+            term = Cast(term, LiteralValue(cast_sql_type))
+        return ExpressionResult(term=term, joins=function_arg.joins, output_field=json_field)
+
     @staticmethod
-    def is_wall_clock_literal(value: Any, function_arg: ExpressionResult) -> bool:
-        """Whether a literal is a naive datetime beside a main argument of a wall clock in no zone.
+    def is_json_field(field: Field[Any] | None) -> bool:
+        """Whether a field holds JSON - a column a literal beside it is written into as JSON.
+
+        Args:
+            field: The field, None for none.
+        """
+        return field is not None and isinstance(GeneratedField.get_effective_field(field), JSONField)
+
+    def binds_as_main_field(self, value: Any, function_arg: ExpressionResult) -> bool:
+        """Whether a literal default value is bound as the main argument's field binds a value - see
+        ``is_main_field_literal()``; of a function returning one of its arguments, any value beside a JSON
+        column too, as its JSON.
+
+        Args:
+            value: The literal.
+            function_arg: The resolved main argument.
+        """
+        if self.returns_an_argument and value is not None and Function.is_json_field(function_arg.output_field):
+            return True
+        return self.is_main_field_literal(value, function_arg)
+
+    @staticmethod
+    def is_main_field_literal(value: Any, function_arg: ExpressionResult) -> bool:
+        """Whether a literal is bound as the main argument's field binds a value - a naive datetime beside a
+        wall clock in no zone, a timedelta beside an interval.
 
         Args:
             value: The literal.
             function_arg: The resolved main argument.
 
         Returns:
-            Whether the literal is bound as that wall clock.
+            Whether the literal is bound as the main argument's field binds it.
         """
+        if isinstance(value, datetime):
+            return value.tzinfo is None and TemporalArithmetic.is_naive_field(function_arg.output_field)
         return (
-            isinstance(value, datetime)
-            and value.tzinfo is None
-            and TemporalArithmetic.is_naive_field(function_arg.output_field)
+            isinstance(value, timedelta)
+            and TemporalArithmetic.get_field_temporal_type(function_arg.output_field) is TemporalType.INTERVAL
         )
 
     def _get_default_terms(

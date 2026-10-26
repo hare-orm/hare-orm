@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import abc
-import math
 from typing import TYPE_CHECKING
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.health.constants import POOL_DESCRIPTION, TENANT_SCHEMA_POOL_DESCRIPTION
 
 if TYPE_CHECKING:
@@ -46,42 +44,3 @@ class HealthCriterion(abc.ABC):
         if status.schema is not None:
             return TENANT_SCHEMA_POOL_DESCRIPTION.format(schema=status.schema)
         return POOL_DESCRIPTION.format(role=status.role.value)
-
-    @staticmethod
-    def get_checked_count(name: str, value: int) -> int:
-        """A count a criterion takes - a whole number of at least 1.
-
-        Args:
-            name: The argument, for the error.
-            value: The value.
-
-        Returns:
-            The value.
-
-        Raises:
-            ValueError: It is below 1.
-        """
-        if value < 1:
-            raise ValueError(f"{name} must be at least 1, got {ValueDescriptions.get_shown_text(value)}")
-        return value
-
-    @staticmethod
-    def get_checked_amount(name: str, value: float, maximum: float) -> float:
-        """An amount a criterion takes - a finite number above 0, at most ``maximum``.
-
-        Args:
-            name: The argument, for the error.
-            value: The value.
-            maximum: The largest value taken.
-
-        Returns:
-            The value.
-
-        Raises:
-            ValueError: It is out of range.
-        """
-        if not math.isfinite(value) or not 0 < value <= maximum:
-            raise ValueError(
-                f"{name} must be above 0 and at most {maximum:g}, got {ValueDescriptions.get_shown_text(value)}"
-            )
-        return float(value)

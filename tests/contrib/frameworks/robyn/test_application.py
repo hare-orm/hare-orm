@@ -24,7 +24,6 @@ from hare.contrib.request_query import (
     RequestQuery,
     RequestQueryForbidden,
 )
-from hare.exceptions import ConfigurationError
 from hare.query.enums import Lookup
 from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
@@ -303,9 +302,7 @@ def test_without_atomic_requests_a_failed_request_keeps_its_writes():
 
 
 @pytest.mark.database_independent
-def test_atomic_requests_must_be_a_bool_or_connection_names():
-    with pytest.raises(ConfigurationError, match="atomic_requests"):
-        HareRobyn(__file__, hare_config=CONFIG, atomic_requests="default")
+def test_atomic_requests_names_the_connections():
     assert HareRobyn(__file__, hare_config=CONFIG, atomic_requests=True).hare.transaction_connection_names == (None,)
 
 

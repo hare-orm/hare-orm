@@ -148,7 +148,7 @@ async def test_options_are_created_and_changed_in_place(clickhouse_db):
 
 
 @pytest.mark.database_independent
-def test_options_are_checked():
+def test_options_are_checked(monkeypatch):
     for arguments in (
         {"column_codecs": (("page", "ZSTD(3)); DROP TABLE x"),)},
         {"column_codecs": {"page": "ZSTD"}},
@@ -183,6 +183,39 @@ def test_options_are_checked():
     # Rows are sampled by an unsigned integer.
     with pytest.raises(ConfigurationError, match="sample_by 'name' is a column of String"):
         ClickhouseTableOptions(order_by=("id", "name"), sample_by="name").raise_if_unsupported(Team, Features())
+    # A local table of the model's own name was the only table created - the rows weren't distributed.
+    # The table is named when the app is set up, which a run on another database doesn't do.
+    monkeypatch.setattr(Team._meta, "db_table", Team._meta.db_table or "team")
+    with pytest.raises(ConfigurationError, match="distributed_over names the model's table"):
+        ClickhouseTableOptions(distributed_over=Team._meta.db_table).raise_if_unsupported(Team, Features())
+    # A nullable key column met the server's refusal halfway through a migration.
+    for arguments in ({"order_by": ("id", "description")}, {"partition_by": "description"}):
+        with pytest.raises(ConfigurationError, match=r"read the nullable fields \['description'\]"):
+            ClickhouseTableOptions(**arguments).raise_if_unsupported(Team, Features())
+        ClickhouseTableOptions(**arguments, settings=(("allow_nullable_key", 1),)).raise_if_unsupported(
+            Team, Features()
+        )
+    # No setting lets a sharding key read one.
+    with pytest.raises(ConfigurationError, match=r"sharding_key reads the nullable fields \['description'\]"):
+        ClickhouseTableOptions(
+            distributed_over="team_local", sharding_key="description", settings=(("allow_nullable_key", 1),)
+        ).raise_if_unsupported(Team, Features())
+
+
+def test_a_renamed_field_is_renamed_in_every_key_naming_it():
+    """A partition or a sharding key naming a field by its name kept the old name after a RenameField - the
+    migration makemigrations wrote was refused."""
+    options = ClickhouseTableOptions(
+        order_by=("id", "x"), sample_by="x", partition_by="x", ttl="x", distributed_over="t_local", sharding_key="x"
+    ).with_renamed_field("x", "y")
+
+    assert (options.order_by, options.sample_by, options.partition_by, options.ttl, options.sharding_key) == (
+        ("id", "y"),
+        "y",
+        "y",
+        "y",
+        "y",
+    )
 
 
 @pytest.mark.asyncio

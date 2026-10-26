@@ -4,11 +4,17 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.clickhouse.fields.constants import FIXED_STRING_MAX_LENGTH, FIXED_STRING_PAD_BYTE
+from hare.dialects.clickhouse.fields.narrowing.byte_length_limit import ByteLengthLimit
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.boolean_field import BooleanField
+from hare.fields.data.text.char_field import CharField
+from hare.fields.data.text.text_field import TextField
 from hare.fields.data.text.text_values import TextValues
+from hare.fields.enums import NarrowedValueSource
 from hare.fields.field import Field
 
 if TYPE_CHECKING:
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
 
 TStr = TypeVar("TStr", str, str | None)
@@ -50,6 +56,18 @@ class FixedStringField(Field[TStr]):
     def get_written_value_of_another_type(self, value: Any) -> Any:
         TextValues.raise_if_not_text(self, value)
         return super().get_written_value_of_another_type(value)
+
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        if isinstance(old_field, FixedStringField) and self.length >= old_field.length:
+            return None
+        # A text longer in bytes would be cut off.
+        if isinstance(old_field, (CharField, TextField, FixedStringField)):
+            source = NarrowedValueSource.TEXT
+        elif isinstance(old_field, BooleanField):
+            source = NarrowedValueSource.BOOLEAN
+        else:
+            source = NarrowedValueSource.OTHER
+        return ByteLengthLimit(self.length, source)
 
     def to_python(self, value: Any) -> Any:
         if value is not None and not isinstance(value, str):

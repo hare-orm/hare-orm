@@ -169,12 +169,12 @@ class ManyToManyScopeChecks:
         condition = KeyColumns.row_equality(pk_columns, KeyColumns.get_db_values(meta, obj, connection.dialect.types))
         query = connection.query_class.from_(table).where(condition).select(tenant_db_column)
         _, rows = await connection.execute(*query.get_parameterized_sql())
-        stored_tenant = (
-            connection.dialect.types.get_python_value(meta.fields_map[tenant_field], rows[0][tenant_db_column])
-            if rows
-            else None
-        )
-        if not rows or not Tenancy.allows(type(obj), active_tenant, stored_tenant):
+        # A database keeping no key unique may hold another tenant's row of the key too.
+        stored_tenants = [
+            connection.dialect.types.get_python_value(meta.fields_map[tenant_field], row[tenant_db_column])
+            for row in rows
+        ]
+        if not any(Tenancy.allows(type(obj), active_tenant, stored_tenant) for stored_tenant in stored_tenants):
             raise QueryError(
                 f"{type(obj).__name__} instance (pk={obj.pk!r}) belongs to a tenant "
                 f"other than the active one ({active_tenant!r}) according to the database."
