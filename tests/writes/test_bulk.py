@@ -59,8 +59,8 @@ async def test_bulk_create_gives_the_objects(db_truncate):
     assert await UniqueName.objects.bulk_create(given) == given
     from_generator = await UniqueName.objects.bulk_create(UniqueName(name=name) for name in ("c", "d"))
     assert [(obj.name, obj._saved_in_db) for obj in from_generator] == [("c", True), ("d", True)]
-    skipped = await UniqueName.objects.bulk_create([UniqueName(name="a")], ignore_conflicts=True)
-    assert [obj.name for obj in skipped] == ["a"]
+    skipped = await UniqueName.objects.bulk_create([UniqueName(name="a")], ignore_conflicts=True, on_conflict=["name"])
+    assert skipped == []
 
 
 @requires_features(supports_unique_constraints=True)
@@ -336,7 +336,7 @@ async def test_bulk_create_ignore_conflicts(db_truncate):
     name1 = UniqueName(name="name1")
     name2 = UniqueName(name="name2")
     await UniqueName.objects.bulk_create([name1, name2])
-    await UniqueName.objects.bulk_create([name1, name2], ignore_conflicts=True)
+    assert await UniqueName.objects.bulk_create([name1, name2], ignore_conflicts=True, on_conflict=["name"]) == []
     with pytest.raises(IntegrityError):
         await UniqueName.objects.bulk_create([name1, name2])
 
@@ -659,26 +659,26 @@ async def test_bulk_create_ignore_conflicts_returning_matches_survivors_by_confl
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_bulk_create_ignore_conflicts_returning_without_on_conflict_raises_before_any_sql(db_truncate):
-    """Without on_conflict=[...] naming the conflict target columns, a skipped row can't be told
-    apart from a survivor once ON CONFLICT DO NOTHING actually skips at least one row - matching
-    positionally would silently stamp the wrong pk onto the wrong object, so this must raise
-    instead. It used to raise only AFTER the INSERT had already run (and only when a conflict
+    """Without on_conflict=[...] naming the conflict target columns, a skipped row of an object without
+    its key can't be told apart from a survivor once ON CONFLICT DO NOTHING actually skips at least one
+    row - matching positionally would silently stamp the wrong pk onto the wrong object, so this must
+    raise instead. It used to raise only AFTER the INSERT had already run (and only when a conflict
     really happened), leaving the surviving row in the table although the call failed - the
-    combination is now rejected up front, whether or not any row would conflict."""
+    combination is rejected before any SQL, whether or not any row would conflict."""
     await UniqueName.objects.create(name="dup")
 
-    with pytest.raises(QueryError, match="on_conflict"):
-        UniqueName.objects.bulk_create(
+    with pytest.raises(UnSupportedError, match="on_conflict"):
+        await UniqueName.objects.bulk_create(
             [UniqueName(name="dup"), UniqueName(name="fresh2")],
             ignore_conflicts=True,
             returning=True,
         )
     assert not await UniqueName.objects.filter(name="fresh2").exists()
 
-    with pytest.raises(QueryError, match="on_conflict"):
-        UniqueName.objects.bulk_create([UniqueName(name="no-conflict")], ignore_conflicts=True, returning=True)
-    with pytest.raises(QueryError, match="on_conflict"):
-        UniqueName.objects.bulk_create(
+    with pytest.raises(UnSupportedError, match="on_conflict"):
+        await UniqueName.objects.bulk_create([UniqueName(name="no-conflict")], ignore_conflicts=True, returning=True)
+    with pytest.raises(UnSupportedError, match="on_conflict"):
+        await UniqueName.objects.bulk_create(
             [UniqueName(name="no-conflict")],
             ignore_conflicts=True,
             on_conflict_constraint="uniquename_name_key",
@@ -919,19 +919,17 @@ async def test_bulk_create_ignore_conflicts_only_marks_survivors_saved_in_db(db_
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_bulk_create_ignore_conflicts_without_returning_marks_nobody_saved_in_db(db_truncate):
-    """Without returning=True, there's no universally-available way to tell which objects
-    survived ON CONFLICT DO NOTHING (mirrors the identical reasoning already established for
-    dirty-tracking in BulkCreateQuery._run()) - leaving every object unmarked is the safer
-    failure mode, even for one that didn't actually collide."""
+async def test_bulk_create_ignore_conflicts_marks_only_the_inserted_objects_saved_in_db(db_truncate):
+    """The rows RETURNING gives back tell which objects survived ON CONFLICT DO NOTHING - only those are
+    marked saved, also without returning=True."""
     await UniqueName.objects.create(name="dup")
 
     colliding = UniqueName(name="dup")
     surviving = UniqueName(name="fresh2")
-    await UniqueName.objects.bulk_create([colliding, surviving], ignore_conflicts=True)
+    await UniqueName.objects.bulk_create([colliding, surviving], ignore_conflicts=True, on_conflict=["name"])
 
     assert colliding._saved_in_db is False
-    assert surviving._saved_in_db is False
+    assert surviving._saved_in_db is True
 
 
 @requires_features(supports_transactions=True)

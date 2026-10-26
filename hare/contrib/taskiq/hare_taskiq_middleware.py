@@ -59,7 +59,9 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         transaction_retries: int = 0,
     ) -> None:
         super().__init__()
-        self.transaction_connection_names = ApplicationLifecycle.get_transaction_connection_names(atomic_tasks)
+        self.transaction_connection_names = ApplicationLifecycle.get_transaction_connection_names(
+            atomic_tasks, "atomic_tasks"
+        )
         self.tenant_label = tenant_label
         self.transaction_retries = transaction_retries
 

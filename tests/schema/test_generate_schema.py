@@ -520,34 +520,30 @@ async def test_table_and_row_comment_generation():
 
 
 # ============================================================================
-# PostgreSQL Tests (asyncpg)
+# PostgreSQL Tests
 # ============================================================================
 
 
-async def _init_for_asyncpg(module: str, safe: bool = False) -> list[str]:
-    """Initialize Hare for asyncpg and return SQL statements."""
-    try:
-        with patch("asyncpg.create_pool", new=MagicMock()):
-            await Hare.init(
-                {
-                    "connections": {
-                        "default": {
-                            "engine": "postgresql+asyncpg",
-                            "credentials": {
-                                "database": "test",
-                                "host": "127.0.0.1",
-                                "password": "foomip",
-                                "port": 5432,
-                                "user": "root",
-                            },
-                        }
+async def _init_for_postgres(module: str, safe: bool = False) -> list[str]:
+    """Initialize Hare for PostgreSQL - no connection opened - and return SQL statements."""
+    await Hare.init(
+        {
+            "connections": {
+                "default": {
+                    "engine": "postgresql",
+                    "credentials": {
+                        "database": "test",
+                        "host": "127.0.0.1",
+                        "password": "foomip",
+                        "port": 5432,
+                        "user": "root",
                     },
-                    "apps": {"models": {"models": [module], "default_connection": "default"}},
                 }
-            )
-            return Connections.get("default").get_schema_sql(safe).split("; ")
-    except ImportError:
-        pytest.skip("asyncpg not installed")
+            },
+            "apps": {"models": {"models": [module], "default_connection": "default"}},
+        }
+    )
+    return Connections.get("default").get_schema_sql(safe).split("; ")
 
 
 @pytest.mark.parametrize(
@@ -573,11 +569,12 @@ async def _init_for_asyncpg(module: str, safe: bool = False) -> list[str]:
             id="fk_set_default_with_db_default_succeeds",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.shared_models.testmodels",
             '"noid"',
             ('"name" VARCHAR(255)', '"id" SERIAL NOT NULL CONSTRAINT "pk_noid_id_810145db0262" PRIMARY KEY'),
-            id="asyncpg_noid",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_noid",
         ),
     ],
 )
@@ -594,12 +591,13 @@ async def test_the_sql_of_a_table(init, models_module, table_text, fragments):
         await _teardown_hare()
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_asyncpg_table_and_row_comment_generation():
+async def test_postgresql_table_and_row_comment_generation():
     await _reset_hare()
     try:
-        sqls = await _init_for_asyncpg("tests.shared_models.testmodels")
+        sqls = await _init_for_postgres("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "comments")
         assert "COMMENT ON TABLE \"comments\" IS 'Test Table comment'" in sql
         assert (
@@ -1179,56 +1177,68 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
         # before event (see the cyclic-fk dependency-ordering fix: only a reference.db_constraint
         # relation counts as a table dependency now).
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_no_db_constraint",
             False,
             ASYNCPG_SCHEMA_NO_DB_CONSTRAINT_SQL,
-            id="asyncpg_schema_no_db_constraint",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_schema_no_db_constraint",
         ),
         pytest.param(
-            _init_for_asyncpg, "tests.schema.models_schema_create", False, ASYNCPG_SCHEMA_SQL, id="asyncpg_schema"
+            _init_for_postgres,
+            "tests.schema.models_schema_create",
+            False,
+            ASYNCPG_SCHEMA_SQL,
+            marks=pytest.mark.requires("native"),
+            id="postgresql_schema",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_schema_create",
             True,
             ASYNCPG_SCHEMA_SAFE_SQL,
-            id="asyncpg_schema_safe",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_schema_safe",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_postgres_index",
             False,
             ASYNCPG_INDEX_UNSAFE_SQL,
-            id="asyncpg_index_unsafe",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_index_unsafe",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_postgres_index",
             True,
             ASYNCPG_INDEX_SAFE_SQL,
-            id="asyncpg_index_safe",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_index_safe",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_no_auto_create_m2m",
             False,
             ASYNCPG_M2M_NO_AUTO_CREATE_SQL,
-            id="asyncpg_m2m_no_auto_create",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_m2m_no_auto_create",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_postgres_fields",
             False,
             ASYNCPG_PGFIELDS_UNSAFE_SQL,
-            id="asyncpg_pgfields_unsafe",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_pgfields_unsafe",
         ),
         pytest.param(
-            _init_for_asyncpg,
+            _init_for_postgres,
             "tests.schema.models_postgres_fields",
             True,
             ASYNCPG_PGFIELDS_SAFE_SQL,
-            id="asyncpg_pgfields_safe",
+            marks=pytest.mark.requires("native"),
+            id="postgresql_pgfields_safe",
         ),
     ],
 )
@@ -1334,13 +1344,14 @@ async def test_sqlite_keeps_the_comments_of_tables_and_through_tables():
         assert "/* How participants relate */" in sql_by_table["teamevents"]
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_asyncpg_schema_qualified_safe():
+async def test_postgresql_schema_qualified_safe():
     """Postgres (asyncpg) should produce schema-qualified names with CREATE SCHEMA."""
     await _reset_hare()
     try:
-        await _init_for_asyncpg("tests.schema.models_schema_qualified")
+        await _init_for_postgres("tests.schema.models_schema_qualified")
         sql = Connections.get("default").get_schema_sql(safe=True)
         # Should have CREATE SCHEMA
         assert 'CREATE SCHEMA IF NOT EXISTS "custom";' in sql
@@ -1364,13 +1375,14 @@ async def test_asyncpg_schema_qualified_safe():
         await _teardown_hare()
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_schema_qualified_single_schema_creation():
     """Only one CREATE SCHEMA per unique schema value."""
     await _reset_hare()
     try:
-        await _init_for_asyncpg("tests.schema.models_schema_qualified")
+        await _init_for_postgres("tests.schema.models_schema_qualified")
         sql = Connections.get("default").get_schema_sql(safe=True)
         # All 3 models share schema "custom" — should create only once
         assert sql.count('CREATE SCHEMA IF NOT EXISTS "custom"') == 1

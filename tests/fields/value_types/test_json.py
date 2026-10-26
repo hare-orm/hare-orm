@@ -3,7 +3,6 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 from hare.contrib.test import assert_query_count, requires_features
 from hare.ddl.indexes import Index
@@ -42,12 +41,6 @@ def test_primary_key_with_explicit_unique_raises():
         JSONField(primary_key=True, unique=True)
 
 
-class MyPydanticModel(BaseModel):
-    name: str
-    idx: Index
-    model_config = dict(arbitrary_types_allowed=True)
-
-
 @pytest.mark.asyncio
 async def test_create(db):
     """Test JSON field creation and retrieval."""
@@ -61,10 +54,6 @@ async def test_create(db):
     obj3 = await testmodels.JSONFields.objects.create(data="{}", data_decimal=Decimal(0))
     obj3 = await testmodels.JSONFields.objects.get(id=obj3.id)
     assert str(obj3.data_decimal) == "0"
-    pyd_model = MyPydanticModel(name="", idx=Index(fields=["data"]))
-    obj4 = await testmodels.JSONFields.objects.create(data="{}", data_index=pyd_model)
-    obj4 = await testmodels.JSONFields.objects.get(id=obj4.id)
-    assert obj4.data_index == {"idx": {"fields": ["data"]}, "name": ""}
 
 
 @pytest.mark.asyncio
@@ -515,46 +504,6 @@ def test_json_field_error_matches_other_fields_validation_error_convention():
 
 
 @pytest.mark.asyncio
-async def test_data_pydantic_shape_mismatch_raises_validation_error_on_create(db):
-    """JSONField(field_type=SomePydanticModel) used to validate the value's shape only on READ
-    (from_db_value), not on WRITE (to_db_value) - a dict that doesn't match the pydantic
-    model's schema used to be written successfully, only failing later, when some other read
-    re-runs pydantic validation. Must now fail immediately at create() time."""
-    with pytest.raises(ValidationError):
-        await testmodels.JSONFields.objects.create(data=[], data_pydantic={"foo": "not an int", "bar": "baz"})
-
-    with pytest.raises(ValidationError):
-        await testmodels.JSONFields.objects.create(data=[], data_pydantic={"foo": 1})  # missing required "bar"
-
-
-@pytest.mark.asyncio
-async def test_data_pydantic_shape_mismatch_raises_validation_error_on_update(db):
-    """Same shape validation as create() must also run on the QuerySet.update() write path."""
-    obj = await testmodels.JSONFields.objects.create(data=[])
-    with pytest.raises(ValidationError):
-        await testmodels.JSONFields.objects.filter(pk=obj.pk).update(data_pydantic={"foo": "not an int", "bar": "baz"})
-
-
-@pytest.mark.asyncio
-async def test_data_pydantic_matching_shape_still_succeeds(db):
-    """A plain dict matching the configured pydantic model's shape must still write and read
-    back correctly - the new write-time validation must not reject valid data."""
-    obj0 = await testmodels.JSONFields.objects.create(data=[], data_pydantic={"foo": 1, "bar": "baz"})
-    obj = await testmodels.JSONFields.objects.get(id=obj0.id)
-    assert obj.data_pydantic.foo == 1
-    assert obj.data_pydantic.bar == "baz"
-
-
-@pytest.mark.database_independent
-def test_to_db_value_pydantic_field_type_shape_mismatch_raises_immediately():
-    """Direct to_db_value() call (no DB round trip) - the shape mismatch must be caught before
-    any encoding/DB interaction happens at all, not merely by the time a full create() runs."""
-    field = testmodels.JSONFields._meta.fields_map["data_pydantic"]
-    with pytest.raises(ValidationError):
-        field.to_db_value({"foo": "not an int", "bar": "baz"}, testmodels.JSONFields)
-
-
-@pytest.mark.asyncio
 async def test_exact_and_not_compare_json_values(db):
     """A JSON value equals the same value written the same way; whether key order or a number's
     spelling matter is the database's own - PostgreSQL's jsonb compares values, SQLite the text."""
@@ -601,29 +550,6 @@ async def test_in_and_not_in_with_a_long_json_value_list(db):
 
     assert {row.id for row in await testmodels.JSONFields.objects.filter(data__in=long_values)} == {first.id}
     assert {row.id for row in await testmodels.JSONFields.objects.filter(data__not_in=long_values)} == {second.id}
-
-
-@pytest.mark.asyncio
-async def test_declared_field_type_validates_and_converts_on_assign_write_and_read(db):
-    """field_type=Model / list[Model]: a dict (or list of dicts) becomes the model in memory
-    right away, the same value a later read returns; list items are validated too."""
-    schema_type = testmodels.TestSchemaForJSONField
-    row = await testmodels.JSONFieldsDeclaredType.objects.create(
-        item={"foo": "1", "bar": "a"}, items=[schema_type(foo=2, bar="b"), {"foo": 3, "bar": "c"}]
-    )
-
-    assert row.item == schema_type(foo=1, bar="a")
-    assert row.items == [schema_type(foo=2, bar="b"), schema_type(foo=3, bar="c")]
-    fetched = await testmodels.JSONFieldsDeclaredType.objects.get(id=row.id)
-    assert fetched.item == row.item
-    assert fetched.items == row.items
-    values = await testmodels.JSONFieldsDeclaredType.objects.filter(id=row.id).values("items")
-    assert values == [{"items": row.items}]
-
-    with pytest.raises(ValidationError):
-        await testmodels.JSONFieldsDeclaredType.objects.create(items=[{"foo": "not an int", "bar": "x"}])
-    with pytest.raises(ValidationError):
-        await testmodels.JSONFieldsDeclaredType.objects.create(item={"bar": "missing foo"})
 
 
 @pytest.mark.asyncio
@@ -690,19 +616,13 @@ def test_native_storable_value_check_matches_the_python_walk(monkeypatch):
         assert outcomes[0] == outcomes[1], sample
 
 
-class JsonDocument(BaseModel):
-    title: str
-
-
 @pytest.mark.database_independent
-def test_deconstruct_writes_field_type_only_when_declared():
+def test_deconstruct_writes_no_field_type_when_undeclared():
     """The class's own value type of an undeclared document (dict[str, Any] | list[Any]) was
     written as field_type=..., a migration file then failing on the unimported typing.Any."""
     _, _, undeclared_kwargs = JSONField().deconstruct()
-    _, _, declared_kwargs = JSONField(field_type=JsonDocument).deconstruct()
 
     assert "field_type" not in undeclared_kwargs
-    assert declared_kwargs["field_type"] is JsonDocument
 
 
 @pytest.mark.asyncio
@@ -744,3 +664,16 @@ async def test_subclasses_of_json_types_are_stored_as_their_base_values(db):
     ):
         created = await testmodels.JSONFields.objects.create(data=data)
         assert (await testmodels.JSONFields.objects.get(id=created.id)).data == stored
+
+
+@pytest.mark.database_independent
+def test_a_declared_type_without_pydantic_names_its_extra(monkeypatch):
+    """A field_type declared without pydantic installed left the field's values unvalidated."""
+    from hare.lazy_loading.pydantic_classes import PydanticClasses
+
+    monkeypatch.setattr(PydanticClasses, "loaded", True)
+    monkeypatch.setattr(PydanticClasses, "type_adapter", None)
+    field = JSONField(field_type=list[str])
+    field.model_field_name = "tags"
+    with pytest.raises(ConfigurationError, match=r"hare-orm\[pydantic\]"):
+        field.to_db_value(["a"], None)

@@ -5,7 +5,7 @@ new row sharing the same `id` but a higher `version`, instead of mutating a row 
 
 ```python
 class VersionedModel(Model):
-    id = fields.UUIDField(default=uuid4, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True)
     version = fields.PositiveSmallIntField(default=1)
     pk = CompositePrimaryKey("id", "version")
 
@@ -16,10 +16,18 @@ class VersionedModel(Model):
     async def get_last_version_or_exception(
         cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
     ) -> Self: ...
+    @classmethod
+    async def get_last_visible_version_or_exception(
+        cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
+    ) -> Self: ...
 
     def get_new_version(self, **kwargs: Any) -> Self: ...      # raises QueryError if kwargs has "id"/"version"
     async def create_new_version(self, **kwargs: Any) -> Self: ...
 ```
+
+A new record's `id` is a version 7 UUID (`hare.fields.uuid7.Uuid7.new`): time-ordered, and increasing
+within a process even within one millisecond — an index over the ids grows at its end. It is Python's
+own `uuid.uuid7` on 3.14 and newer, and the same layout made by hare on 3.12 and 3.13.
 
 `id` and `version` together are the table's real primary key, not a surrogate one with a bolted-on
 uniqueness constraint — which means a foreign key can target a specific version with a real, enforced
@@ -50,7 +58,11 @@ revised = await current.create_new_version(title="Updated title")
 ```
 
 `get_last_version_or_exception()` returns the highest version matching the filters — `DoesNotExist`, or
-the `exception` passed, when none does. `get_new_version`/`create_new_version` copy every direct field
+the `exception` passed, when none does. It sees every version, a soft-deleted one too: the next version
+must not collide with it. `get_last_visible_version_or_exception()` returns the highest version of those
+the model's manager shows — soft-deleted versions hidden, the tenant scope applied — for reading the
+current state of a record whose deletion marked its versions. `get_new_version`/`create_new_version`
+copy every direct field
 via `deepcopy`, except `id`, `version`, and anything listed in `Meta.new_version_excluded_fields`,
 bumping `version` by 1; `get_new_version()` builds the version without saving it. A database-computed
 column (`GeneratedField`, any `generated=True` field) and an `auto_now=True` column are never copied —

@@ -24,6 +24,12 @@ class DatabaseUnderTest:
         return os.getenv("HARE_TEST_DB", cls.DEFAULT_URL)
 
     @classmethod
+    def get_url_with_options(cls, options: str, url: str | None = None) -> str:
+        """A DB_URL - HARE_TEST_DB's by default - with more options of its query, after those it has."""
+        base_url = url or cls.get_url()
+        return f"{base_url}{'&' if '?' in base_url else '?'}{options}"
+
+    @classmethod
     def get_driver(cls, url: str | None = None) -> Driver:
         """The driver a DB_URL's scheme picks - HARE_TEST_DB's by default."""
         return DialectRegistry.get_driver_for_url_scheme((url or cls.get_url()).split("://", 1)[0])
@@ -78,22 +84,14 @@ class DatabaseUnderTest:
     async def get_postgresql_server_version(cls) -> tuple[int]:
         """The major version of the PostgreSQL server HARE_TEST_DB points at, asked of the server
         itself - before a context opens, which an older server may refuse."""
-        import asyncpg
+        # Local import: the session module reads this one's direct credentials.
+        from tests.utils.server_session import ServerSession
 
-        credentials = cls.get_direct_credentials(
-            DbUrlConfigGenerator.expand(cls.get_url(), testing=False)["credentials"]
-        )
-        connection = await asyncpg.connect(
-            user=credentials["user"],
-            password=credentials["password"],
-            host=credentials["host"],
-            port=credentials["port"],
-            database="postgres",
-        )
+        session = await ServerSession.open(cls.get_url(), "postgres")
         try:
-            version_number = int(await connection.fetchval("SHOW server_version_num"))
+            version_number = int(await session.fetchval("SHOW server_version_num"))
         finally:
-            await connection.close()
+            await session.close()
         return (version_number // 10000,)
 
     @classmethod

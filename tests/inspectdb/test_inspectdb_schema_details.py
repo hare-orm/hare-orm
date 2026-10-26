@@ -457,3 +457,28 @@ async def test_a_sequence_no_column_owns_read_by_two_tables_is_declared_once(con
         "# TODO: sequence 'inspect_shared_seq' a default reads is declared by the model of table "
         "'inspect_shared_seq_a'"
     ) in second_source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("owner", ["inspect_key_seq_a.id", "NONE"], ids=["owned by the key", "owned by none"])
+@pytest.mark.asyncio
+async def test_a_sequence_a_key_and_another_tables_column_read_is_declared(connection, owner):
+    """The sequence a primary key of one column takes its default from was taken for the generated key's own and
+    declared by no model - the default of the other table's column read a sequence no migration made."""
+    await connection.execute_script(
+        "CREATE SEQUENCE inspect_key_seq; "
+        "CREATE TABLE inspect_key_seq_a (id bigint PRIMARY KEY DEFAULT nextval('inspect_key_seq'), n int); "
+        "CREATE TABLE inspect_key_seq_b (id serial PRIMARY KEY, ticket bigint DEFAULT nextval('inspect_key_seq')); "
+        f"ALTER SEQUENCE inspect_key_seq OWNED BY {owner}"
+    )
+
+    key_source = await generated_source(connection, "inspect_key_seq_a")
+    reading_source = await generated_source(connection, "inspect_key_seq_b")
+
+    if owner == "NONE":
+        # The key takes its own sequence once migrated - the model of the column reading it declares it.
+        assert "DatabaseSequence" not in key_source
+        assert "sequences = [DatabaseSequence(name='inspect_key_seq')]" in reading_source
+    else:
+        assert "sequences = [DatabaseSequence(name='inspect_key_seq', owned_by='id')]" in key_source
+        assert "DatabaseSequence" not in reading_source

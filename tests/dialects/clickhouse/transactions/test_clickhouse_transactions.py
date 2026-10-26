@@ -156,6 +156,36 @@ async def test_a_server_without_transactions_is_refused_on_connect(clickhouse_tr
 
 
 @pytest.mark.asyncio
+async def test_a_connection_not_opened_yet_has_transactions(clickhouse_transactions_db):
+    """The features were set as the connection opened - the first atomic() of a process, before any
+    statement, raised UnSupportedError ("has no transactions")."""
+    connection = Entry._meta.connection
+    client = type(connection)(
+        connection_alias="not_opened",
+        host=connection.host,
+        port=connection.port,
+        user=connection.user,
+        password=connection.password,
+        database=connection.database,
+        transactions=True,
+    )
+
+    assert client._connection is None
+    assert client.features.supports_transactions and not client.features.supports_savepoints
+
+
+@pytest.mark.asyncio
+async def test_an_autonomous_block_with_options_rolls_back_when_it_raises(clickhouse_transactions_db):
+    """Its new connection had no transactions before it opened - the block ran without one, its write kept."""
+    with pytest.raises(RuntimeError, match="undo"):
+        async with Transactions.autonomous(isolation=IsolationLevel.REPEATABLE_READ) as connection:
+            await Entry.objects.using(connection).create(id=1, account="a", amount=1)
+            raise RuntimeError("undo")
+
+    assert await count_committed("entry") == 0
+
+
+@pytest.mark.asyncio
 async def test_a_transaction_reads_its_snapshot(clickhouse_transactions_db):
     # Any level up to REPEATABLE READ runs at the snapshot the transaction began with; no stronger one.
     async with Transactions.atomic(isolation=IsolationLevel.READ_COMMITTED):
@@ -202,6 +232,7 @@ async def test_a_long_in_list_is_read_in_the_transaction(clickhouse_transactions
         assert await Entry.objects.filter(id__in=list(range(1, 701))).count() == 700
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_a_transaction_per_request_needs_a_connection_with_transactions():
     """An application asking for a transaction per request on a ClickHouse connection without

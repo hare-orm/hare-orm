@@ -1,7 +1,5 @@
 import re
 
-from pydantic import BaseModel
-
 from hare import fields
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.fields.validators import MinLengthValidator, RegexValidator
@@ -55,14 +53,8 @@ class SensitiveGeneratedRecord(Model):
         table = "sensitive_generated_record"
 
 
-class EncryptedWebhookSettings(BaseModel):
-    url: str
-    retries: int = 3
-
-
 class EncryptedTypedRecord(Model):
     id = fields.IntField(primary_key=True)
-    settings = fields.EncryptedJSONField(field_type=EncryptedWebhookSettings, null=True)
     api_key = fields.EncryptedTextField(null=True, validators=[MinLengthValidator(32)])
     pin = fields.EncryptedTextField(null=True, validators=[RegexValidator(r"^\d{4}$", re.IGNORECASE)])
 
@@ -74,7 +66,6 @@ class EncryptedDocumentRecord(Model):
     id = fields.IntField(primary_key=True)
     plain_keys = fields.EncryptedJSONField(null=True)
     encrypted_keys = fields.EncryptedJSONField(null=True, encrypt_keys=True)
-    settings_list = fields.EncryptedJSONField(null=True, field_type=list[EncryptedWebhookSettings], encrypt_keys=True)
 
     class Meta:
         table = "encrypted_document_record"

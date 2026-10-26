@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError
-from hare.query.expressions import Expression, F, RawSQL
+from hare.query.expressions import ConditionValue, Expression, F, Q, RawSQL
 from hare.query.expressions.term_expression import TermExpression
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.lookup_info.value_paths import ValuePaths
@@ -32,13 +32,19 @@ class AnnotationArguments:
             annotations: The annotations given, by name.
 
         Returns:
-            The annotations kept - the mapping given when it holds no term built by hand.
+            The annotations kept - the mapping given when it holds no term built by hand or condition, a
+            ``Q`` kept as its ``ConditionValue``.
 
         Raises:
             TypeError: A value is e.g. a bare field name string.
         """
         kept_annotations = annotations
         for key, annotation in annotations.items():
+            if isinstance(annotation, Q):
+                if kept_annotations is annotations:
+                    kept_annotations = dict(annotations)
+                kept_annotations[key] = ConditionValue(annotation)
+                continue
             if isinstance(annotation, Expression):
                 continue
             if not isinstance(annotation, Term):

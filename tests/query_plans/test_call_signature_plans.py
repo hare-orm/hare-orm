@@ -54,7 +54,7 @@ async def test_a_later_chain_of_the_same_calls_builds_nothing(db):
 async def test_values_and_updates_run_on_the_plan_of_their_calls(db):
     for number in range(1, 4):
         await IntFields.objects.create(intnum=number)
-    assert list(await IntFields.objects.filter(intnum__gte=2).values_list("intnum", flat=True)) == [2, 3]
+    assert sorted(await IntFields.objects.filter(intnum__gte=2).values_list("intnum", flat=True)) == [2, 3]
     assert await IntFields.objects.filter(intnum=1).update(intnum_null=7) == 1
     hits = StatementPlans.hits
     with spy_on_builds() as builds:

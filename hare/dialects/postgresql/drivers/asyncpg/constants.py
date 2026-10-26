@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import datetime
 import decimal
-import inspect
-
-import asyncpg
 
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
@@ -56,16 +53,6 @@ DEFAULT_STREAM_PREFETCH = 1000
 #: asyncpg.connect() connection listen() opens, which rejects them with a TypeError.
 ASYNCPG_POOL_ONLY_PARAMETERS = frozenset(
     {"min_size", "max_size", "max_queries", "max_inactive_connection_lifetime", "setup", "init", "reset", "connect"}
-)
-
-#: Every keyword asyncpg.create_pool() accepts, its own and those it forwards to asyncpg.connect()
-#: - read from the installed asyncpg, so a credential outside it is rejected at configuration
-#: time instead of by the first query.
-ASYNCPG_CONNECTION_PARAMETERS = frozenset(
-    name
-    for function in (asyncpg.connect, asyncpg.create_pool)
-    for argument_specification in (inspect.getfullargspec(function),)
-    for name in (*argument_specification.args, *argument_specification.kwonlyargs)
 )
 
 #: Sanity ceilings for asyncpg's own numeric connection parameters.

@@ -245,3 +245,18 @@ app = Litestar(route_handlers, plugins=[HarePlugin(HARE_CONFIG, health_routes=He
 
 Какие маршруты готовности и работоспособности он добавляет — см.
 [Веб-фреймворки](web-frameworks.ru.md#health-routes).
+
+## <a id="tests"></a>Тесты
+
+С pytest-плагином hare тестируемое приложение работает на тестовых базах и берёт контекст теста.
+`AsyncTestClient` запускает его в потоке портала anyio — в своём цикле событий: под
+`hare_app_transactional_db` его записи фиксируются, а таблицы очищаются после теста, на любом драйвере; под
+`hare_app_db` они откатываются вместе с записями теста на драйверах `postgresql` и SQLite, а
+`postgresql+asyncpg` от них отказывается, — см. [Тесты приложения](../testing/setup.ru.md#application-tests).
+
+```python
+@pytest.mark.asyncio
+async def test_create_reader(hare_app_transactional_db):
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.post("/readers", json={"name": "ann"})).status_code == 201
+```

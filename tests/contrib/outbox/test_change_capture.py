@@ -18,6 +18,7 @@ from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.capture_models import (
     AuditedOrder,
     CapturedArticle,
+    CapturedArticleTag,
     CapturedChild,
     CapturedCustomer,
     CapturedMeasurement,
@@ -236,6 +237,16 @@ async def test_bulk_create_and_bulk_update_are_captured(db_capture):
     events = await get_events("models.capturedorder.updated")
     assert sorted(event.payload["pk"] for event in events) == [1, 2]
     assert all(event.payload["after"]["status"] == "packed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_the_changed_fields_of_a_save_are_in_the_order_the_model_declares_them(db_capture):
+    order = await AuditedOrder.objects.create(id=1)
+    order.note = "second"
+    order.status = "paid"
+    await order.save()
+
+    assert (await get_events())[-1].payload["changed"] == ["status", "note"]
 
 
 @pytest.mark.asyncio
@@ -524,3 +535,89 @@ async def test_a_bulk_update_with_a_stale_object_writes_and_captures_the_other_r
     assert statuses == ["packed", "other", "packed"]
     events = await get_events("models.versionedcapturedorder.updated")
     assert sorted(event.payload["pk"] for event in events) == [1, 2, 3]
+
+
+@requires_features(supports_unique_constraints=True)
+@pytest.mark.asyncio
+async def test_bulk_create_ignoring_conflicts_captures_the_rows_it_inserted(db_capture):
+    await CapturedCustomer.objects.create(id=1, name="old")
+    await CaptureOutboxEvent.objects.all().delete()
+    new = CapturedCustomer(id=2, name="new")
+
+    assert await CapturedCustomer.objects.bulk_create(
+        [CapturedCustomer(id=1, name="x"), new], ignore_conflicts=True
+    ) == [new]
+    assert [event.payload["after"] for event in await get_events()] == [{"id": 2, "name": "new"}]
+
+
+def fail_extension(change):
+    raise RuntimeError("the extension failed")
+
+
+async def create_extended_row():
+    await ExtendedRow.objects.create(id=2, name="new")
+
+
+async def save_extended_row():
+    obj = await ExtendedRow.objects.get(id=1)
+    obj.name = "saved"
+    await obj.save()
+
+
+async def bulk_create_extended_rows():
+    await ExtendedRow.objects.bulk_create([ExtendedRow(id=2, name="new"), ExtendedRow(id=3, name="newer")])
+
+
+async def update_extended_rows():
+    await ExtendedRow.objects.filter(id=1).update(name="updated")
+
+
+async def bulk_update_extended_rows():
+    obj = await ExtendedRow.objects.get(id=1)
+    obj.name = "bulk updated"
+    await ExtendedRow.objects.bulk_update([obj], fields=["name"])
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.parametrize(
+    "write",
+    [
+        create_extended_row,
+        save_extended_row,
+        bulk_create_extended_rows,
+        update_extended_rows,
+        bulk_update_extended_rows,
+    ],
+    ids=["create", "save", "bulk_create", "update", "bulk_update"],
+)
+@pytest.mark.asyncio
+async def test_a_change_failing_in_an_open_transaction_undoes_its_write(db_capture, monkeypatch, write):
+    """In an open transaction the write joined it: a change failing after its row was written, caught by the
+    caller going on in the transaction, left the row written without its event."""
+    await ExtendedRow.objects.create(id=1, name="kept")
+    monkeypatch.setattr(ExtendedRow._meta.change_capture, "extend", fail_extension)
+
+    async with Transactions.atomic("models"):
+        with pytest.raises(RuntimeError, match="the extension failed"):
+            await write()
+        await UncapturedRow.objects.create(id=1, name="written after")
+
+    assert await ExtendedRow.objects.order_by("id").values_list("id", "name") == [(1, "kept")]
+    assert await UncapturedRow.objects.values_list("name", flat=True) == ["written after"]
+    assert [event.payload["operation"] for event in await get_events()] == ["inserted"]
+
+
+@requires_features(supports_transactions=True)
+@pytest.mark.asyncio
+async def test_a_link_change_failing_in_an_open_transaction_undoes_the_link(db_capture, monkeypatch):
+    article = await CapturedArticle.objects.create(id=1, title="a")
+    tag = await CapturedTag.objects.create(id=1, name="t")
+    monkeypatch.setattr(CapturedArticleTag._meta.change_capture, "extend", fail_extension)
+
+    async with Transactions.atomic("models"):
+        with pytest.raises(RuntimeError, match="the extension failed"):
+            await article.tags.add(tag)
+        await UncapturedRow.objects.create(id=1, name="written after")
+
+    assert await CapturedArticleTag.objects.count() == 0
+    assert await get_events() == []

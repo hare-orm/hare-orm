@@ -1,7 +1,7 @@
 """The text format codec writes what the field's own ``to_db_value`` writes - the same normalized
 string, or the same error with the same message - for EmailField, URLField, SlugField and a
 PhoneField without ``phonenumbers``, on a grid of valid, invalid and borderline values, on SQLite and
-both PostgreSQL drivers."""
+PostgreSQL."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from hare.fields.validators import MinLengthValidator
 from hare.query.rows.enums import ReadCodecType, WriteCodecType
 from hare.query.rows.native.field_codecs import FieldCodecs
 from tests.native_acceleration.test_field_codecs import CONNECTIONS, assert_writes_match, make_field, native_rows
+
+REQUIRES = ("native",)
 
 pytestmark = pytest.mark.database_independent
 
@@ -247,6 +249,7 @@ def test_phone_without_phonenumbers_writes_match(monkeypatch, null):
     assert_writes_match(field, PHONE_VALUES)
 
 
+@pytest.mark.requires("phone")
 def test_phone_with_phonenumbers_is_written_by_the_field():
     field = make_field(fields.PhoneField(region="US"), "phone")
     for _connection_name, types, _native_types in CONNECTIONS:

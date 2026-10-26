@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from hare import Hare
 from hare.contrib.test.databases.model_truncation import truncate_all_models
@@ -268,9 +267,12 @@ def test_config_rejects_malformed_swappable_settings(swappable_settings: Any, me
         )
 
 
+@pytest.mark.requires("yaml")
 @pytest.mark.database_independent
 @pytest.mark.parametrize("extension", [".json", ".yml"])
 def test_config_file_reads_swappable_settings(tmp_path: Path, extension: str) -> None:
+    import yaml
+
     data = {
         "connections": {"default": "sqlite+aiosqlite://:memory:"},
         "apps": {"accounts": {"models": ["tests.shared_models.testmodels"]}},

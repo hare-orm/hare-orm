@@ -1,6 +1,6 @@
 [project]
 name = "hare-orm"
-version = "0.10.0"
+version = "0.11.0"
 description = "An async Python ORM for PostgreSQL, SQLite and ClickHouse, built with relations in mind"
 readme = "README.md"
 authors = [
@@ -80,12 +80,22 @@ clickhouse-driver = [
 ]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 tzlocal = ["tzlocal>=5.0"]
+# HareConfig.from_config_file() reading a .yml/.yaml file.
+yaml = ["pyyaml (>=6.0.3)"]
+# hare.contrib.factories - Faker() declarations.
+faker = ["faker (>=20.0)"]
 # Fernet at-rest encryption for hare.fields.EncryptedTextField/EncryptedJSONField.
 encryption = ["cryptography>=42.0"]
 # hare.fields.PhoneField reading a number in any form, with region=.
 phone = ["phonenumbers>=8.13"]
 # hare.dialects.sqlite.vectors - VectorField's distances on SQLite (load_sqlite_vec=True).
 sqlite-vec = ["sqlite-vec (>=0.1.6)"]
+# pydantic: a JSONField whose field_type is a pydantic model, hare.contrib.pydantic's schemas of the models
+# (pydantic 2.10.0 leaves hare's pydantic models not fully defined, 2.12 is the first with Python 3.14).
+pydantic = [
+    "pydantic (>=2.10.1) ; python_version < '3.14'",
+    "pydantic (>=2.12) ; python_version >= '3.14'",
+]
 # hare.contrib.request_query - a query built from the parameters of a request (pydantic 2.10.0 leaves
 # hare's pydantic models not fully defined, 2.12 is the first with Python 3.14).
 request-query = [
@@ -178,37 +188,12 @@ types-PyYAML = "*"
 types-pytz = "*"
 pre-commit = "^4.6.2"
 
-[tool.poetry.group.contrib.dependencies]
-# Pydantic support (hare.contrib.pydantic)
-pydantic = ">=2.10.1"
-# Litestar support (hare.contrib.frameworks.litestar)
-litestar = {version = ">=2.23,<3.0", python = "<4.0"}
-# FastAPI support (hare.contrib.frameworks.fastapi)
-fastapi = {version = ">=0.135", python = "<4.0"}
-# Robyn support (hare.contrib.frameworks.robyn)
-robyn = {version = ">=0.88,<0.89", python = "<4.0"}
-# taskiq support (hare.contrib.taskiq)
-taskiq = {version = ">=0.12.2", python = "<4.0"}
-# Outbox wakeups and deliveries (hare.contrib.outbox)
-redis = ">=5.0"
-aiokafka = ">=0.12"
-aio-pika = {version = ">=9.4", python = "<4.0"}
-httpx = ">=0.27"
-pytest-asyncio = ">=1.2"
-
+# The groups hold tools only: a package of an extra is installed by the extra, so a test environment
+# (tests/matrix/constants.py SUITE_ENVIRONMENTS) installs exactly what its tests require.
 [tool.poetry.group.test.dependencies]
 pytest = "*"
-# The tests of `hare stubs` type-check queries through the stubs with it.
-pyright = "*"
 pytest-xdist = "*"
 pytest-asyncio = "*"
-cryptography = ">=46.0.3"
-phonenumbers = ">=8.13"
-# The SQLite vector search tests load it.
-sqlite-vec = ">=0.1.6"
-pytz = ">=2025.2"
-# The PostgreSQL tests with use_timezone=False read the machine's zone name through it.
-tzlocal = ">=5.0"
 # makemigrations formats the migration files it writes with it, and the migration tests read them;
 # also the formatter and linter of `make check`.
 ruff = "*"
@@ -217,6 +202,20 @@ pytest-timeout = "*"
 pytest-randomly = "^5.0.0"
 pytest-repeat = "^0.9.4"
 pytest-cov = "^7.1.0"
+
+# The tests of `hare stubs` type-check queries through the stubs with it (the "stubs" environment).
+[tool.poetry.group.pyright-cli]
+optional = true
+
+[tool.poetry.group.pyright-cli.dependencies]
+pyright = "*"
+
+# The tests of pytz time zones (the "pytz" and "clickhouse-driver" environments).
+[tool.poetry.group.pytz]
+optional = true
+
+[tool.poetry.group.pytz.dependencies]
+pytz = ">=2025.2"
 
 [tool.poetry.group.docs.dependencies]
 mkdocs = "*"
@@ -290,6 +289,7 @@ markers = [
     "database_independent: The test reads no test database - a suite of its own (make test_database_independent), left out of the suite of every database",
     "sqlite_only: The test opens only SQLite databases of its own, whatever HARE_TEST_DB is - left out of the suite of every other database",
     "timing: The test's outcome depends on time (a timeout, a lease, a delay running out) - left out unless --run-timing",
+    "requires: The test requires extras or poetry groups besides its module's REQUIRES - it runs in the environment of tests/matrix/constants.py SUITE_ENVIRONMENTS installing exactly them; native - hare's rust.native extension, missing in the pure environment",
     "postgresql_models: The test reads a model of tests.shared_models.testmodels_postgres - left out of the suite of every other database",
     "decimal_fields: The test reads or writes exact decimals (a DecimalField, a Decimal value) - left out of the suite of a database storing none (SQLite)",
     "plan_verification_after_test: --verify-plans compares the runs on a plan after the test's body - for tests counting the builds or calls a run on a plan makes",

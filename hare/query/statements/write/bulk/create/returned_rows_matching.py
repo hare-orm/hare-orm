@@ -76,6 +76,8 @@ class ReturnedRowsMatching:
         objects_item: list[TModel],
         returned_rows: Sequence[Any],
         conflict_field_names: Sequence[str] = (),
+        written_field_names: Sequence[str] = (),
+        applied_columns: Collection[str] | None = None,
     ) -> None:
         """Sets each object's database-computed columns from its ``RETURNING`` row - by position; where
         the database returns rows in no order, by the conflict target's values when there is one, else
@@ -86,12 +88,38 @@ class ReturnedRowsMatching:
             objects_item: The objects of one statement, in order.
             returned_rows: Its returned rows.
             conflict_field_names: The ``on_conflict=[...]`` fields, when rows can be skipped.
+            written_field_names: The fields the statement wrote - an ``ignore_conflicts`` row a database
+                returns in no order is matched by all of them, a conflict target with a NULL telling no row
+                apart.
+            applied_columns: The columns of a row set on its object - every one when None; the columns
+                returned only to match a row are left out.
 
         Raises:
             QueryError: Rows were skipped and there is no conflict target to match the rest by.
         """
         types = bulk_create.dialect.types
         matches: Iterable[tuple[TModel, Any]]
+        if bulk_create._ignore_conflicts and written_field_names:
+            # Of objects sharing a conflict key the first is written; the values compared as stored - a field
+            # may write a value otherwise (an email's domain in lower case).
+            if bulk_create.dialect.features.guarantees_returning_order:
+                matches = ReturnedValues.match_rows_in_order(
+                    bulk_create.model,
+                    types,
+                    objects_item,
+                    returned_rows,
+                    list(conflict_field_names) or bulk_create.model._meta.primary_key_attribute_names,
+                )
+            else:
+                matches = ReturnedValues.match_rows_by_stored_values(
+                    bulk_create.model, types, objects_item, returned_rows, written_field_names
+                )
+            for obj, row in matches:
+                ReturnedRowsMatching.apply_returning_row(bulk_create, obj, row, applied_columns)
+            return
+        if len(returned_rows) != len(objects_item) and not conflict_field_names and bulk_create._ignore_conflicts:
+            # Without on_conflict every object carries its key - checked before the insert.
+            conflict_field_names = bulk_create.model._meta.primary_key_attribute_names
         if len(returned_rows) != len(objects_item):
             if not conflict_field_names:
                 raise QueryError(
@@ -121,16 +149,21 @@ class ReturnedRowsMatching:
             ReturnedRowsMatching.apply_returning_row(bulk_create, obj, row)
 
     @staticmethod
-    def apply_returning_row(bulk_create: BulkCreateQuery[Any], obj: TModel, row: Any) -> None:
+    def apply_returning_row(
+        bulk_create: BulkCreateQuery[Any], obj: TModel, row: Any, columns: Collection[str] | None = None
+    ) -> None:
         """Marks ``obj`` saved and sets every field ``row`` carries a column for.
 
         Args:
             bulk_create: The bulk insert.
             obj: The object whose row was written.
             row: Its RETURNING row, keyed by DB column.
+            columns: Only these columns of the row - every one when None.
         """
         custom_generated_pk = obj._custom_generated_pk
+        if bulk_create._inserted_objects is not None:
+            bulk_create._inserted_objects.append(obj)
         WrittenInstances.mark_saved((obj,), bulk_create._connection)
-        ReturnedValues.apply_row(bulk_create.model, bulk_create.dialect.types, obj, row)
+        ReturnedValues.apply_row(bulk_create.model, bulk_create.dialect.types, obj, row, columns)
         # Assigning the pk on a saved instance clears the flag - a caller-supplied pk stays marked so.
         object.__setattr__(obj, "_custom_generated_pk", custom_generated_pk)

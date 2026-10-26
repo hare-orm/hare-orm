@@ -65,7 +65,9 @@ hare inspectdb --connection default --schema public books authors > library/mode
   условие — готовый SQL) и `deferrable=`/`initially_deferred=` (в том числе у `DEFERRABLE UNIQUE` по
   одной колонке).
 - Условие `CHECK` восстанавливается без пары скобок, в которую его оборачивает PostgreSQL
-  (`CheckConstraint(check=RawSQLTerm("age >= 0"))`).
+  (`CheckConstraint(check=RawSQLTerm("age >= 0"))`); список `IN` по колонке `varchar` — у `CharEnumField` —
+  восстанавливается так, как был объявлен (`color IN ('red', 'blue')`), а не как `(color)::text = ANY (...)`
+  PostgreSQL: объявленный заново, этот текст PostgreSQL выводит иначе.
 - Индекс восстанавливается с колонками `INCLUDE (...)` (`include=`), порядком `DESC`/`NULLS FIRST`
   каждого ключа (`"-a"`, `F("a").desc(nulls_last=True)`, ключ-выражение — как
   `OrderedIndexKey(RawSQLTerm("lower(c)"), Order.DESC_NULLS_FIRST)`), ключом с `COLLATE` как выражением
@@ -116,7 +118,10 @@ hare inspectdb --connection default --schema public books authors > library/mode
   домена PostgreSQL — полем типа домена — и первичный ключ identity (`GENERATED ... AS IDENTITY`) —
   генерируемым ключом, который hare объявляет через последовательность.
 - В SQLite hare объявляет колонку `BooleanField` как `INT`, так же, как `IntField`: такая колонка
-  восстанавливается как `IntField` с `# TODO`, где сказано, что она может быть `BooleanField`.
+  восстанавливается как `IntField` с `# TODO`, где сказано, что она может быть `BooleanField`. Колонка
+  SQLite с синонимом, который SQLite хранит так же, — `DATETIME` для `TIMESTAMP` hare,
+  `DOUBLE`/`DOUBLE PRECISION`/`FLOAT` для его `REAL` — читается так, как её объявляет hare: её поле
+  восстанавливается без заметки, а `drift` ничего не сообщает.
 - Промежуточная таблица связи многие-ко-многим — две колонки, каждая внешний ключ на первичный ключ
   таблицы того же запуска — восстанавливается как `ManyToManyField` на модели таблицы её первой колонки:
   `through=` называет таблицу, `forward_key`/`backward_key` — её колонки, поле названо по таблице без
@@ -155,10 +160,12 @@ hare inspectdb --connection default --schema public books authors > library/mode
   которой нет в `Privilege`, получает `# TODO`), а последовательности, которыми владеет её колонка
   (`OWNED BY`) или из которых, без владельца, она берёт значение по умолчанию, — как `Meta.sequences`;
   последовательность `SERIAL` или identity первичного ключа из одной колонки к ним не относится:
-  генерируемый ключ берёт свою. Другая колонка `SERIAL` — вне первичного ключа или колонка составного
+  генерируемый ключ берёт свою, — если только из неё не берёт значение по умолчанию и другая колонка.
+  Другая колонка `SERIAL` — вне первичного ключа или колонка составного
   ключа — сохраняет там свою последовательность и `db_default=SqlDefault("nextval(...)")`.
   Последовательность без владельца, из которой берут значения по умолчанию несколько таблиц, объявляет
-  модель первой из них по имени; у остальных — `# TODO` с именем этой таблицы.
+  модель первой из них по имени — из тех, что читают её не первичным ключом из одной колонки; у
+  остальных — `# TODO` с именем этой таблицы.
 - Движок ClickHouse `Distributed`, читающий таблицы инспектируемой базы, называет её `currentDatabase()`,
   как пишет hare, — модель создаёт его над таблицами той базы, в которой её мигрируют.
 - Колонка ClickHouse `EPHEMERAL`, которую пишут, но нигде не хранят, восстанавливается своим полем с

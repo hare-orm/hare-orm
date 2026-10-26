@@ -150,6 +150,7 @@ async def test_a_wall_clock_before_1970_is_kept_as_written(at):
         assert await WallClockEntry.objects.filter(at=at).count() == 1
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_the_timestamp_codec_drops_the_zone_given_to_a_value_before_1970():
     """The zone the asyncpg client gives a naive value before 1970 isn't the value's - the codec of a

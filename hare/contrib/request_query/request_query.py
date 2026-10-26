@@ -1268,7 +1268,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         """
         with self.refusing_invalid_values():
             queryset = await self.get_filtered_queryset()
-            return await queryset.count()
+            # Counted without the relations a fetch prefetches.
+            return await queryset.prefetch_related(None).count()
 
     async def exists(self) -> bool:
         """Whether any row matches the request.
@@ -1281,7 +1282,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         """
         with self.refusing_invalid_values():
             queryset = await self.get_filtered_queryset()
-            return await queryset.exists()
+            return await queryset.prefetch_related(None).exists()
 
     async def delete(self) -> int | None:
         """Deletes the rows the request asks for. The request's parameters or the handler's

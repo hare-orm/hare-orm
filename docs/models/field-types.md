@@ -191,6 +191,7 @@ to it.
 | `TimeDeltaField` | `datetime.timedelta` | — | `BIGINT` (stored as microseconds); a number given instead of a `timedelta` raises `ValidationError` |
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
 | `JSONField[T]` | `dict` / `list` (or a Pydantic model class) | `encoder`, `decoder`, `field_type` (for OpenAPI docs) | `JSON` (PostgreSQL: `JSONB`); no btree index (`unique=True`/`db_index=True`/`Index(fields=...)`), but a non-btree `Meta.indexes` entry such as `GinIndex(fields=[...])` is accepted |
+| `JSONTextField` | `dict` / `list` / any JSON value | as `JSONField` | `JSONField`'s column, but a `String` of the JSON text on ClickHouse, whose `JSON` type drops a key's null and a list at the top: every value reads back as written (the outbox's `payload` and `headers`) |
 | `UUIDField` | `uuid.UUID` | — (`primary_key=True` without an explicit `default` auto-sets `default=uuid4`) | `CHAR(36)` (PostgreSQL: `UUID`); read back as a plain `uuid.UUID` on every driver |
 | `BinaryField` | `bytes` (`bytearray`, `memoryview` too; anything else raises `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); filters by equality, `__in`, `__isnull` and the comparisons (byte order) — a text lookup (`__contains`, ...) raises `FieldError` — set by `update()`, takes `unique=True`/`db_index=True` (a B-tree index — on PostgreSQL a value over about 2.7 KB can't be indexed) |
 
@@ -231,8 +232,10 @@ compares it exactly: `number__gt=2.5` matches `3`.
 
 A `FloatField` takes an `int`, a `float` or a `Decimal`; a `bool`, a text, and an `int` or a finite
 `Decimal` past the float range (`Decimal("1e500")`) raise `ValidationError`. It
-refuses `NaN` on SQLite on every write path — SQLite would store it as NULL; PostgreSQL and ClickHouse
-store it. A negative zero
+refuses `NaN` on SQLite on every write path and as a filter's operand — SQLite would store it, and bind
+it, as NULL; PostgreSQL and ClickHouse store it. A filter by `NaN` compares as the database does: on
+PostgreSQL `NaN` equals `NaN` and is greater than every number, on ClickHouse it equals nothing (`__not=NaN`
+takes every row). A negative zero
 (`-0.0`) keeps its sign on PostgreSQL and ClickHouse and reads back as `0.0` on SQLite, which stores it
 so; the two compare equal everywhere.
 
@@ -296,6 +299,12 @@ becomes the model right away, so memory holds the same value a later read return
 validated one by one. `pydantic_model_creator()` puts that type into the schema. Without `field_type`
 (including the static-only `JSONField[T]` generic) values stay plain JSON.
 
+A migration writes `field_type` as code importing it: a class by the name its module gives it, a
+parameterized type by its origin and arguments (`dict[str, list[int]]`, `int | None`,
+`typing.Literal["a"]`, `typing.List[int]`). A type no import statement reaches — a class Pydantic
+makes for `GenericModel[int]`, a `type` alias statement — is refused by `makemigrations` with
+`ConfigurationError`; declare a subclass (`class IntItems(GenericModel[int]): pass`) and give that.
+
 A value JSON can't hold raises `ValidationError` on every write path (`create()`, `save()`, `update()`,
 `bulk_create()` including `use_copy=True`, `bulk_update()`): a `NaN`/`Infinity` float anywhere inside it. A
 null byte inside a JSON value is stored as the database stores it where it can hold one; PostgreSQL
@@ -341,14 +350,15 @@ class Book(Model):
     )
 ```
 
-- `expression` — an expression of hare over the model's fields (`F`, functions, arithmetic): each
-  database's DDL writes it in its own SQL, a migration renaming a field it reads renames it there too, and
-  a migration changing the type of a column it reads drops the generated column before the change and
-  adds it after. Or `RawSQLTerm` of the SQL written into the DDL as it is (**never build it from untrusted
-  input**), or one per dialect: `{"sqlite": RawSQLTerm(...), "postgresql": RawSQLTerm(...)}`; a dialect
-  the mapping doesn't name raises `ConfigurationError`, and so does plain text. Raw SQL is yours: hare
-  neither renames a field in it nor reads which columns it uses — a migration changing such a column is
-  refused by the database where it refuses the change under a generated column.
+- `expression` — an expression of hare over the model's fields (`F`, functions, arithmetic; a relation's
+  own column as `F("owner_id")` — one reading a related model raises `ConfigurationError` when the model
+  is bound): each database's DDL writes it in its own SQL, a migration renaming a field it reads renames
+  it there too, and a migration changing the type of a column it reads drops the generated column before
+  the change and adds it after. Or `RawSQLTerm` of the SQL written into the DDL as it is (**never build it
+  from untrusted input**), or one per dialect: `{"sqlite": RawSQLTerm(...), "postgresql": RawSQLTerm(...)}`;
+  a dialect the mapping doesn't name raises `ConfigurationError`, and so does plain text. Raw SQL is yours:
+  hare neither renames a field in it nor reads which columns it uses — a migration changing such a column
+  is refused by the database where it refuses the change under a generated column.
 - `output_field` — a field giving the column's type and how its value is read, compared, filtered and
   described in a schema.
 - `stored=True` computes the value on write; `stored=False` — a `VIRTUAL` column, computed on read —

@@ -321,6 +321,37 @@ async def test_a_configuration_no_listen_runs_on_is_raised_by_start(db_simple):
     assert not listener.is_listening
 
 
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_a_refused_reconnect_after_listening_is_retried(db_simple):
+    """Once it listened, a reconnect refused as configuration (its database dropped, asyncpg's
+    ConfigurationError) is the server's state - retried as rust_pg's error is, not the listener's end."""
+    outcomes: list[str] = []
+
+    class DeadOnArrivalConnection:
+        def is_closed(self) -> bool:
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    async def listen(channel: str, callback: object) -> DeadOnArrivalConnection:
+        if outcomes:
+            outcomes.append("refused")
+            raise ConfigurationError('database "dropped" does not exist')
+        outcomes.append("listened")
+        return DeadOnArrivalConnection()
+
+    async def fast_pause(self: NotificationListener, delay: float) -> None:
+        return None
+
+    listener = NotificationListener(CONNECTION_ALIAS, "dropped", Collector(), reconnect_attempts=2)
+    with fake_notification_channels(listen), mock.patch.object(NotificationListener, "pause", fast_pause):
+        await listener.run()
+
+    assert outcomes == ["listened", "refused", "refused"]
+
+
 @pytest.mark.database_independent
 def test_exponential_backoff_is_clamped():
     listener = NotificationListener(CONNECTION_ALIAS, "c", Collector(), backoff=0.5, max_backoff_seconds=3)

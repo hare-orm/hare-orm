@@ -62,7 +62,9 @@ Other reconstruction rules:
   `UniqueConstraint` otherwise — with its `condition=` (a partial unique index, predicate as raw SQL) and
   `deferrable=`/`initially_deferred=` (a single-column `DEFERRABLE UNIQUE` included).
 - A `CHECK` predicate comes back without the pair of parentheses PostgreSQL wraps it in
-  (`CheckConstraint(check=RawSQLTerm("age >= 0"))`).
+  (`CheckConstraint(check=RawSQLTerm("age >= 0"))`); an `IN` list over a `varchar` column — a
+  `CharEnumField`'s — comes back as it was declared (`color IN ('red', 'blue')`), not as PostgreSQL's
+  `(color)::text = ANY (...)`, a text PostgreSQL gives otherwise once it is declared again.
 - An index comes back with its `INCLUDE (...)` columns (`include=`), each key's `DESC`/`NULLS FIRST`
   order (`"-a"`, `F("a").desc(nulls_last=True)`, an expression key as
   `OrderedIndexKey(RawSQLTerm("lower(c)"), Order.DESC_NULLS_FIRST)`), a collated key as an expression
@@ -111,7 +113,10 @@ Other reconstruction rules:
   domain, which comes back as the field of the domain's type, and an identity primary key
   (`GENERATED ... AS IDENTITY`), which comes back as the generated key hare declares from a sequence.
 - On SQLite hare declares a `BooleanField` column `INT`, as an `IntField` is declared: such a column
-  comes back as an `IntField` with a `# TODO` saying it may be a `BooleanField`.
+  comes back as an `IntField` with a `# TODO` saying it may be a `BooleanField`. A SQLite column of a
+  synonym SQLite stores alike — `DATETIME` for hare's `TIMESTAMP`, `DOUBLE`/`DOUBLE PRECISION`/`FLOAT` for
+  its `REAL` — is read as hare declares it: its field comes back without a note, and `drift` reports
+  nothing.
 - A many-to-many through table — two columns, each a foreign key to the primary key of a table of the
   same run — comes back as a `ManyToManyField` on the model of its first column's table:
   `through=` naming the table, `forward_key`/`backward_key` its columns, the field named after the
@@ -149,10 +154,12 @@ Other reconstruction rules:
   option; a column grant per set of columns given the same privileges; a privilege no `Privilege` names
   gets a `# TODO`), and the sequences a column of it owns (`OWNED BY`) or, owned by none, takes its
   default from as `Meta.sequences` — the sequence of the `SERIAL` or identity of a primary key of one
-  column isn't one: the generated key takes its own. Another `SERIAL` column — outside the primary key,
+  column isn't one: the generated key takes its own — unless the default of another column reads it too.
+  Another `SERIAL` column — outside the primary key,
   or a column of a composite one — keeps its sequence there and its
   `db_default=SqlDefault("nextval(...)")`. A sequence no column owns that defaults of several tables read
-  is declared by the model of the first of them by name; the others get a `# TODO` naming that table.
+  is declared by the model of the first of them by name — of a table reading it outside a primary key of one
+  column; the others get a `# TODO` naming that table.
 - A ClickHouse `Distributed` engine reading tables of the inspected database names it
   `currentDatabase()`, as hare writes it — the model creates it over the tables of the database it is
   migrated in.

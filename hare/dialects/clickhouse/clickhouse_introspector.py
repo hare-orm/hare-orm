@@ -17,6 +17,7 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_EPHEMERAL_COLUMN_TODO,
     CLICKHOUSE_EPHEMERAL_COLUMN_TYPE,
     CLICKHOUSE_GENERATED_COLUMN_TYPES,
+    CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS,
     CLICKHOUSE_INDEX_TYPE_ARGUMENTS,
     CLICKHOUSE_INDEXES_SQL,
     CLICKHOUSE_OBJECT_DEFINITIONS_SQL,
@@ -95,11 +96,15 @@ class ClickhouseIntrospector(SchemaIntrospector):
             granularity: The index's granularity.
 
         Returns:
-            The text of each argument by its name, with the granularity.
+            The text of each argument by its name - ClickHouse's default of one left out - with the granularity.
         """
         _, arguments = ClickhouseTypeNames.get_type_parts(type_sql)
         argument_names = CLICKHOUSE_INDEX_TYPE_ARGUMENTS.get(index_type, ())
-        return {"granularity": str(granularity), **dict(zip(argument_names, arguments, strict=False))}
+        return {
+            "granularity": str(granularity),
+            **CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS.get(index_type, {}),
+            **dict(zip(argument_names, arguments, strict=False)),
+        }
 
     @classmethod
     def parse_db_default(cls, raw_sql: str) -> Any:

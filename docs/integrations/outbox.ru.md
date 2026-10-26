@@ -33,7 +33,7 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | Колонка | Значение |
 |---|---|
 | `sequence` | Первичный ключ, `BIGINT`, который выдаёт база, — порядок доставки |
-| `id` | `UUID` события — по нему получатель отбрасывает повторы |
+| `id` | `UUID` события — по нему получатель отбрасывает повторы; UUID версии 7 (`Uuid7.new`), упорядоченный по времени |
 | `topic` | До 255 символов — по нему доставки выбирают получателя |
 | `payload` | Значение JSON |
 | `headers` | Объект JSON — метаданные помимо payload (контекст трассировки, автор изменения), переходят в заголовки сообщения Kafka, RabbitMQ или HTTP |
@@ -79,7 +79,8 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 
 Любое другое значение даёт `ValidationError` (с причиной `TypeError`) при записи события — оно никогда
 молча не превращается в свой `str()`. Число с плавающей точкой NaN или бесконечность в `enqueue()` тоже
-даёт `ValidationError`: в JSON для него нет числа.
+даёт `ValidationError` — на любой глубине payload: в JSON для него нет числа, и событие никогда не
+записывается текстом, который не прочтёт ни один читатель JSON.
 
 ## <a id="enqueue"></a>`enqueue()`
 
@@ -156,6 +157,42 @@ async with Transactions.atomic():
 `extra_field_values=`. Арендатор берётся из активного `Tenancy.scope()` или из этих значений — явно
 названный арендатор принимается и без активной области, как это делает `create()`.
 
+### <a id="enqueue-many"></a>Несколько событий: `enqueue_many()`
+
+```python
+class OutboxEvent(Model):
+    @classmethod
+    async def enqueue_many(
+        cls,
+        messages: Iterable[OutboxMessage],
+        *,
+        using: str | DatabaseClient | None = None,
+        wakeup: OutboxWakeup | None = None,
+    ) -> list[Self]: ...
+```
+
+```python
+from hare.contrib.outbox import OutboxMessage
+
+await WebhookOutboxEvent.enqueue_many(
+    OutboxMessage(event_topic, payload, extra_field_values={"webhook": webhook}) for webhook in subscriptions
+)
+```
+
+`OutboxMessage(topic, payload, idempotency_key=None, ordering_key=None, headers=None,
+extra_field_values=None)` принимает то же, что `enqueue()` для одного события, и проверяется так же.
+События пишутся в одной транзакции — точке сохранения транзакции вызывающего — одним `INSERT` на каждую
+серию подряд идущих одинаковых сообщений (с ключом идемпотентности или без, одного арендатора, названного
+в `extra_field_values`, когда область арендатора не активна), в переданном порядке, поэтому события
+одного ключа порядка доставляются в этом порядке. Вызов возвращает события в том же порядке: для ключа
+идемпотентности, который уже хранится или передан дважды, — событие, хранящееся под ним (для всех таких
+ключей — одним `SELECT`). Будильник срабатывает один раз — по темам записанных событий.
+
+Ключи берутся в порядке сообщений — порядке событий, поэтому два одновременных вызова с одними
+ключами в разном порядке могут взаимно заблокироваться на PostgreSQL: один из них даёт
+`TransactionRetryError` — повторите его (`Transactions.atomic(retries=...)`) или передавайте общие
+ключи в одном порядке.
+
 ## <a id="change-capture"></a>Захват изменений модели: `ChangeCapture`
 
 ```python
@@ -185,7 +222,9 @@ class Loan(Model):
 
 Написанный вручную SQL не захватывается. У автоматически созданной промежуточной таблицы нет модели,
 поэтому для захвата связей объявите промежуточную модель. Запись вне транзакции открывает транзакцию
-вокруг себя и своих событий — только у захватываемой модели; на базе без транзакций события пишутся сразу
+вокруг себя и своих событий — только у захватываемой модели, — а запись внутри транзакции открывает точку
+сохранения: событие, упавшее после записи строки, отменяет запись, даже если вызывающий поймал ошибку и
+продолжил транзакцию; на базе без транзакций события пишутся сразу
 после записи, а `bulk_create()`, упавший или отменённый после части партий, захватывает строки, которые
 они оставили. Там же отменённая запись захватываемой модели — и удаление, `on_delete` которого выполняет
 hare, — доводится до конца вместе со своими событиями, а отмена поднимается после них. `bulk_update()`
@@ -213,7 +252,13 @@ class ChangeCapture:
         topic: KeyDeclaration = "{app}.{model}.{operation}",
         ordering_key: KeyDeclaration | None = "{label}:{pk}",
         extend: Callable[[CapturedChange], ChangeExtension | None | Awaitable[ChangeExtension | None]] | None = None,
+        extend_many: Callable[
+            [list[CapturedChange]],
+            Sequence[ChangeExtension | None] | Awaitable[Sequence[ChangeExtension | None]],
+        ] | None = None,
     ) -> None: ...
+
+    def replace(self, **options: Any) -> Self: ...
 ```
 
 | Аргумент | Что задаёт |
@@ -226,6 +271,7 @@ class ChangeCapture:
 | `topic` | Шаблон из `{app}`, `{model}`, `{table}` и `{operation}` (`inserted`, `updated`, `deleted`) или функция изменения. По умолчанию `"{app}.{model}.{operation}"` в нижнем регистре — `library.loan.updated` |
 | `ordering_key` | Шаблон из `{label}` (`library.Loan`), `{pk}` (части составного ключа через `:`), `{app}`, `{model}` и `{table}` или функция изменения — см. [`ordering_key`](#ordering-key) |
 | `extend` | Функция изменения — обычная или асинхронная — дающая `ChangeExtension` или `None`; выполняется при записи, в её транзакции |
+| `extend_many` | Функция изменений одного оператора записи, дающая дополнение каждого, — см. [`extend_many`](#extend-many); не вместе с `extend` |
 
 <a id="ordering-key"></a>**`ordering_key`.** Шаблон из `{label}` (`library.Loan`), `{pk}` (части
 составного ключа через `:`), `{app}`, `{model}` и `{table}` или функция изменения; по умолчанию ключ
@@ -239,6 +285,20 @@ class ChangeCapture:
 модель outbox, модель outbox, которая сама захватывает изменения. Объявленное у абстрактной базовой
 модели, оно захватывает каждую построенную на ней модель — каждую под своим именем, — так что одно
 объявление покрывает весь сервис.
+
+<a id="change-capture-replace"></a>**`replace(**options)`** даёт копию с другими опциями и тем же outbox —
+для модели, уточняющей захват своей базовой модели:
+
+```python
+class Account(CapturedModel):
+    class Meta(CapturedModel.Meta):
+        change_capture = CapturedModel.Meta.change_capture.replace(exclude=("token",))
+```
+
+Принимает опции конструктора, кроме `outbox` (другое имя — `TypeError`), и проверяет их значения так же,
+как конструктор. `fields` заменяет `exclude` и наоборот, `extend` заменяет `extend_many` и наоборот. Копия —
+того же класса, что захват, атрибуты подкласса `ChangeCapture` сохраняются; сам копируемый захват не
+меняется.
 
 Тема — это метка модели, а не её таблица: она уникальна между приложениями и подключениями, та же в
 миграциях и обобщённых связях и ничего не говорит о хранении (схема арендатора, разделы).
@@ -269,8 +329,23 @@ Payload события — конверт:
 | `AFTER` | `after` — строка, какой её оставила запись; у удаления — `before`, строка, какой она была |
 | `BEFORE_AND_AFTER` | оба; `before` равен `null` у вставки, `after` — у удаления |
 
-Число с плавающей точкой из строки, для которого в JSON нет числа, пишется текстом: `"Infinity"`,
-`"-Infinity"`, `"NaN"`.
+Каждое значение `before` и `after` — JSON-форма его поля, `Field.get_json_value()`:
+
+| Поле | В событии |
+|---|---|
+| `FloatField`, `Float32Field`, число с плавающей точкой в любом контейнере или `VectorField` | число; NaN или бесконечность — текстом, `"NaN"`, `"Infinity"`, `"-Infinity"` |
+| `DecimalField`, `UUIDField`, даты и время, `TimeDeltaField`, поля IP, `BinaryField`, поля перечислений | как в таблице выше |
+| `ArrayField`, `TupleField` | список, каждый элемент — в форме своего поля элемента |
+| `NestedField` | список объектов, каждое значение — в форме своего поля элемента |
+| `MapField` | список пар `[ключ, значение]` — ключ не обязан быть текстом (`UUID`, дата, кортеж) |
+| `JSONField` с `field_type` | значение так, как pydantic пишет его в JSON (`model_dump(mode="json")`) |
+| `RangeField` и его виды | `{"lower", "upper", "lower_inc", "upper_inc", "is_empty"}` — отображение, которое поле читает обратно, границы — как выше |
+| `MultiRangeField` и его виды | список таких отображений |
+| `GeometryField` и его виды (`PointField`, …) | его объект геометрии GeoJSON, который поле читает обратно — координаты в `srid` поля; GeoJSON (RFC 7946) не называет систему координат |
+| `LowCardinalityField` | форма его базового поля |
+
+Своё поле, у значений которого нет формы в JSON, задаёт свой `get_json_value()` — см. [Своё
+поле](../models/field-types.ru.md#writing-your-own-field).
 
 Что каждый режим добавляет к записи:
 
@@ -329,6 +404,23 @@ class CapturedModel(Model):
 | `headers` | Заголовки события |
 | `extra_field_values` | Колонки модели outbox помимо собственных колонок `OutboxEvent` |
 
+<a id="extend-many"></a>**`extend_many`** — для дополнения, прочитанного из базы: функция изменений
+одного оператора записи — обычная или асинхронная, — дающая `ChangeExtension` (или `None`) каждого из
+них, в их порядке. Она вызывается один раз на оператор каждой модели — `bulk_create`, `update()`, пакет
+`bulk_update`, `MERGE`, удаление одной модели в каскаде, — где `extend` вызывается на каждую строку, так
+что один запрос обслуживает все строки оператора. Число дополнений, не равное числу изменений, — запись
+падает с `ValidationError`; каждое дополнение проверяется, как дополнение `extend`. Не вместе с `extend`
+(`ConfigurationError`).
+
+```python
+async def add_recipients(changes):
+    recipients = await get_recipients_of(change.pk for change in changes)
+    return [ChangeExtension(payload={"recipients": recipients[change.pk]}) for change in changes]
+
+
+change_capture = ChangeCapture(MyOutboxEvent, extend_many=add_recipients)
+```
+
 У изменения — `CapturedChange` (`hare.contrib.outbox`) — есть `model`, `operation`, `pk`, `changed`,
 `before`, `after`, `occurred_at` и `tenant` (`Meta.tenant_field` строки). Если у модели outbox тоже есть
 поле арендатора, в него пишется арендатор строки, если его не задал `extra_field_values`. В строках
@@ -351,6 +443,7 @@ relay = OutboxRelay(
     delivery_timeout_seconds=30.0,
     concurrency=10,
     topics=None,
+    exclude_topics=(),
     wakeup=None,                       # по умолчанию Meta.outbox_wakeup модели
     name=None,                         # по умолчанию host:pid:случайная часть
 )
@@ -398,7 +491,16 @@ async with relay:
 Время аренды и повторов — по часам relay.
 
 `topics` ограничивает relay событиями этих тем — их он забирает, доставляет, считает и чистит, — поэтому
-relay разных тем делят одну таблицу.
+relay разных тем делят одну таблицу; `exclude_topics` оставляет эти темы другим relay. Оба принимают имена
+тем и шаблоны-префиксы, оканчивающиеся на `*`: `"library.*"` — каждая тема, начинающаяся с `library.`
+(`_` и `%` в нём — обычные символы). `*` или `?` в любом другом месте шаблона — `ConfigurationError`.
+Будильник, назвавший темы, будит relay, если одна из них — его. Изменения модели и задачи
+[`TaskiqDelivery`](taskiq.ru.md) в одном outbox, каждые своим relay:
+
+```python
+change_relay = OutboxRelay(MyOutboxEvent, KafkaDelivery("localhost:9092"), exclude_topics=["taskiq"])
+task_relay = TaskiqDelivery(broker, model=MyOutboxEvent).get_relay()   # topics=["taskiq"]
+```
 
 ### <a id="dead-letters"></a>«Мёртвые» события, очередь и очистка
 
@@ -408,6 +510,7 @@ relay разных тем делят одну таблицу.
 ```python
 await relay.retry_dead_lettered()                       # все
 await relay.retry_dead_lettered(topics=["library.loan.updated"], ids=[event_id])
+await relay.retry_dead_lettered(topics=["library.*"])      # те же шаблоны, что у topics=
 await relay.cleanup_dead_lettered(older_than=timedelta(days=30))
 await relay.cleanup_published(older_than=timedelta(days=7))
 ```
@@ -449,19 +552,20 @@ Observers.observe(OutboxDeadLettered, alert_on_call)
 
 | Будильник | Extra | Как устроен |
 |---|---|---|
-| `InProcessWakeup()` | — | relay того же процесса, сразу после фиксации |
+| `InProcessWakeup()` | — | relay того же процесса, сразу после фиксации — каждый в своём цикле событий, и для записи из другого потока |
 | `ListenNotifyWakeup(channel="hare_outbox")` | — | `NOTIFY` на тему в транзакции событий — PostgreSQL доставляет его при фиксации; relay слушают `LISTEN` через [`NotificationListener`](../dialects/postgresql/listen-notify.ru.md) |
 | `RedisWakeup(url, channel=...)` или `RedisWakeup(client=...)` | `redis` | pub/sub |
 | `KafkaWakeup(bootstrap_servers, topic=..., create_topic=True, replication_factor=1)` | `kafka` | тема сигналов, которую каждый relay читает с конца, вне групп потребителей; создаётся с хранением сигналов в течение минуты |
 | `RabbitMQWakeup(url, exchange=...)` | `rabbitmq` | fanout exchange, у каждого relay своя эксклюзивная автоудаляемая очередь |
 
 На соединении без `LISTEN`/`NOTIFY` (`Features.supports_listen_notify` выключен) запись, подающая сигнал
-`ListenNotifyWakeup`, даёт `ConfigurationError`, а relay, который слушает, — `UnSupportedError`; там
-оставьте outbox без него, его relay опрашивают таблицу.
+`ListenNotifyWakeup`, даёт `ConfigurationError` до записи событий, а relay, который слушает, —
+`UnSupportedError`; там оставьте outbox без него, его relay опрашивают таблицу.
 
 Свой будильник — подкласс `OutboxWakeup`: `signal(topics)` отправляет сигнал, `listen(connection_alias)`
 слушает до отмены и передаёт каждый сигнал в `dispatch(topics)`, `close()` освобождает то, что они
-открыли.
+открыли; `raise_if_unsupported(connection)` отклоняет соединение, на котором он не может подать сигнал,
+до записи событий.
 
 ## <a id="deliveries"></a>Доставки
 
@@ -479,8 +583,57 @@ Observers.observe(OutboxDeadLettered, alert_on_call)
 | `KafkaDelivery(bootstrap_servers, topic=None)` или `KafkaDelivery(producer=...)` | `kafka` | в `topic` или тему события, с ключом порядка как ключом сообщения — события одного ключа остаются в одном разделе; партия уходит целиком, `acks="all"` |
 | `RabbitMQDelivery(url, exchange="", routing_key=None)` | `rabbitmq` | постоянные сообщения через существующий exchange (при пустом — стандартный), ключ маршрутизации по умолчанию — тема события; каждое подтверждается брокером (publisher confirms) |
 | `RedisStreamsDelivery(url, stream=None, max_length=None)` или `(client=...)` | `redis` | `XADD` в `stream` или тему события — id, тема, ключ порядка, заголовки и payload события в JSON; партия — одним конвейером, потоки подрезаются до `max_length` |
-| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | `POST`; с `secret` — `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; значения заголовков — байты UTF-8; любой ответ, кроме 2xx, — неудача |
+| [`WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)`](#webhookdelivery) или `(target=...)` | `http` | `POST`; с ключом — `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; значения заголовков — байты UTF-8; любой ответ, кроме 2xx, — неудача, перенаправление не выполняется |
 | [`TaskiqDelivery`](taskiq.ru.md#kiq-on-commit) | `taskiq` | задача taskiq |
+
+### <a id="webhookdelivery"></a>`WebhookDelivery` подписчикам
+
+```python
+class WebhookDelivery(OutboxDelivery):
+    def __init__(
+        self,
+        url: str | None = None,
+        *,
+        target: Callable[[OutboxEvent], WebhookTarget | Awaitable[WebhookTarget]] | None = None,
+        secret: str | bytes | None = None,
+        timeout_seconds: float = 10.0,
+        headers: Mapping[str, str] | None = None,
+        allows_url: Callable[[str], bool | Awaitable[bool]] | None = None,
+        signature_header: str = "hare-outbox-signature",
+        result_field: str | None = None,
+    ) -> None: ...
+```
+
+| Аргумент | Значение |
+|---|---|
+| `url` | Адрес каждого события, подпись ключом `secret`, — или `target` |
+| `target` | Функция события — обычная или асинхронная — дающая его `WebhookTarget(url, secret=None, headers={})`: адрес, ключ подписи и заголовки подписчика события. Ключ подписи — у цели, не вместе с `secret` (`ConfigurationError`) |
+| `headers` | Заголовки каждого запроса; заголовки цели и самого события их перекрывают |
+| `allows_url` | Функция адреса — обычная или асинхронная, — отказывающая ему ответом `False`; вызывается перед каждым запросом: событие отклонённого адреса не отправляется, не доставлено и повторяется, как любая неудача, — для проверки от запросов во внутреннюю сеть сервиса. Перенаправление не выполняется никогда, поэтому проверенный адрес — тот, по которому идёт запрос |
+| `signature_header` | Заголовок, в котором идёт подпись `sha256=<HMAC-SHA256 тела>`, — по умолчанию `hare-outbox-signature`, другое имя для получателей, которые ждут своё (`X-Webhook-Signature`) |
+| `result_field` | Поле модели outbox — `JSONField` вашего подкласса, — в которое пишется результат каждой попытки: `{"status_code", "body", "error"}`; тело и ошибка обрезаются до 4000 символов (`WEBHOOK_RESULT_BODY_MAX_LENGTH`), символ NUL пишется как U+FFFD (JSON PostgreSQL его не хранит); статус и тело — `None` без ответа |
+
+Ни `url`, ни `target` или оба сразу — `ConfigurationError`.
+
+```python
+from hare.contrib.outbox import WebhookDelivery, WebhookTarget
+
+
+class SubscriberOutboxEvent(OutboxEvent):
+    subscription = fields.ForeignKeyField("app.Subscription", on_delete=OnDelete.CASCADE)
+    webhook_result = fields.JSONField(null=True)
+
+    class Meta(OutboxEvent.Meta):
+        pass
+
+
+async def get_target(event):
+    subscription = await event.subscription
+    return WebhookTarget(subscription.url, subscription.secret)
+
+
+delivery = WebhookDelivery(target=get_target, allows_url=is_public_url, result_field="webhook_result")
+```
 
 ### <a id="topicrouter"></a>`TopicRouter`
 

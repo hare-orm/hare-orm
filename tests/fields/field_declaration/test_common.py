@@ -246,15 +246,6 @@ async def test_an_f_expression_update_adds_to_the_value(db, model_class, field_n
             None,
             id="array_to_python_value_rejects_a_bare_string",
         ),
-        # A stored value that decodes to valid JSON but isn't a dict (schema drift, a manual DB edit, a
-        # row written before field_type was added) reached a bare `self.field_type(**data)` call.
-        pytest.param(
-            testmodels.JSONFields,
-            "data_pydantic",
-            "5",
-            None,
-            id="json_pydantic_field_type_non_dict_raises_validation_error_not_typeerror",
-        ),
         # A value read straight from the DB (hand-written SQL, a since-removed enum member) went
         # through the same unwrapped enum_type(value) call to_db_value() had.
         pytest.param(

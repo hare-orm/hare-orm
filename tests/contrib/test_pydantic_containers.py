@@ -4,6 +4,7 @@ values, a document validated through them."""
 
 import datetime
 import decimal
+import math
 import typing
 import uuid
 
@@ -13,6 +14,8 @@ from pydantic import ValidationError
 from hare.contrib.pydantic import pydantic_model_creator
 from tests.dialects.clickhouse.dynamic_types.models import Sample
 from tests.dialects.clickhouse.models import Shipment
+
+REQUIRES = ("pydantic",)
 
 pytestmark = pytest.mark.database_independent
 
@@ -60,3 +63,26 @@ def test_values_of_several_types():
     assert annotations["anything"] == typing.Any | None
     assert annotations["reading"] == int | str | list[float] | None
     assert annotations["bag"] == list[typing.Any | None]
+
+
+@pytest.mark.database_independent
+def test_a_float_json_has_no_number_for_reads_back_from_the_schemas_json():
+    """NaN and infinity were dumped as null, which list[float] refused - a schema couldn't read its own JSON."""
+    from hare import fields
+    from hare.models import Model
+
+    class Measurement(Model):
+        id = fields.IntField(primary_key=True)
+        readings = fields.ArrayField(fields.FloatField())
+
+        class Meta:
+            app = "contract_nan"
+
+    schema = pydantic_model_creator(Measurement, name="MeasurementNaN")
+    dumped = schema(id=1, readings=[1.5, float("nan"), float("inf")]).model_dump_json()
+    assert '"NaN"' in dumped
+    assert '"Infinity"' in dumped
+    readings = schema.model_validate_json(dumped).readings
+    assert readings[0] == 1.5
+    assert math.isnan(readings[1])
+    assert readings[2] == float("inf")

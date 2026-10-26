@@ -22,6 +22,9 @@ pip install hare-orm[tzlocal]        # the machine's own zone for date/time func
 pip install hare-orm[encryption]     # EncryptedTextField / EncryptedJSONField
 pip install hare-orm[phone]          # PhoneField reading a number in any form (phonenumbers)
 pip install hare-orm[opentelemetry]  # an OpenTelemetry span around every query
+pip install hare-orm[pydantic]       # JSONField(field_type=...) and hare.contrib.pydantic's schemas of models
+pip install hare-orm[yaml]           # a .yml/.yaml config file (PyYAML)
+pip install hare-orm[faker]          # Faker() declarations of hare.contrib.factories
 pip install hare-orm[request-query]  # hare.contrib.request_query
 pip install hare-orm[litestar]       # hare.contrib.frameworks.litestar
 pip install hare-orm[fastapi]        # hare.contrib.frameworks.fastapi

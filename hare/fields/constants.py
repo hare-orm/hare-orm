@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import uuid
 
 from hare.fields.db_default_not_set import DbDefaultNotSet
 from hare.fields.enums import OnDelete
@@ -118,3 +119,16 @@ EXPORTED_MODULES = {
 SCHEMA_TEXT_NULL_BYTE_MESSAGE = (
     "{owner}: {parameter} is written into the schema, which can't hold a null byte ('\\x00')"
 )
+
+#: The refusal of a JSONField declaring field_type without pydantic - the type is validated through it.
+JSON_FIELD_TYPE_PACKAGE_MESSAGE = "JSONField(field_type=...) validates through pydantic - install hare-orm[pydantic]"
+#: The JSON form of a float JSON has no number for - a value's JSON form (``Field.get_json_value()``) holds
+#: its text.
+NAN_FLOAT_TEXT = "NaN"
+NON_FINITE_FLOAT_TEXTS = {float("inf"): "Infinity", float("-inf"): "-Infinity"}
+
+#: Python's own version 7 UUIDs (3.14 and newer), None where Python has none - Uuid7 makes them then.
+UUID7_FACTORY = getattr(uuid, "uuid7", None)
+#: The 74 random bits of a version 7 UUID, and the 62 of them after its variant.
+UUID7_RANDOM_MASK = (1 << 74) - 1
+UUID7_RANDOM_B_MASK = (1 << 62) - 1

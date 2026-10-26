@@ -1,0 +1,22 @@
+import asyncio
+
+from fastapi.testclient import TestClient
+
+from hare.contrib.frameworks.fastapi import HareFastAPI
+from plugin_models import Note
+
+application = HareFastAPI(hare_config="plugin_settings.HARE_ORM")
+
+
+@application.post("/notes/{note_id}", status_code=201)
+async def create_note(note_id: int) -> None:
+    await Note.objects.create(id=note_id, text="written by the application")
+
+
+def post_note(note_id):
+    with TestClient(application) as client:
+        return client.post(f"/notes/{note_id}").status_code
+
+
+async def write_through_application(note_id):
+    assert await asyncio.to_thread(post_note, note_id) == 201

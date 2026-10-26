@@ -22,6 +22,9 @@ pip install hare-orm[tzlocal]        # часовой пояс машины дл
 pip install hare-orm[encryption]     # EncryptedTextField / EncryptedJSONField
 pip install hare-orm[phone]          # PhoneField читает номер в любом виде (phonenumbers)
 pip install hare-orm[opentelemetry]  # трассировка каждого запроса через OpenTelemetry
+pip install hare-orm[pydantic]       # JSONField(field_type=...) и схемы моделей hare.contrib.pydantic
+pip install hare-orm[yaml]           # файл настроек .yml/.yaml (PyYAML)
+pip install hare-orm[faker]          # объявления Faker() в hare.contrib.factories
 pip install hare-orm[request-query]  # hare.contrib.request_query
 pip install hare-orm[litestar]       # hare.contrib.frameworks.litestar
 pip install hare-orm[fastapi]        # hare.contrib.frameworks.fastapi

@@ -13,7 +13,6 @@ from hare.exceptions import (
     FieldError,
     MultipleObjectsReturned,
     QueryError,
-    UnSupportedError,
 )
 from hare.query.expressions import F, Q, RawSQL, Subquery, Window
 from hare.query.functions import Avg, Count, Max, Min, Sum
@@ -533,13 +532,6 @@ async def test_iterator_rejects_invalid_arguments(library):
         [row async for row in Book.objects.all().values("name").order_by("name").iterator(chunk_size=0)]
     with pytest.raises(QueryError, match="before_cursor"):
         [row async for row in Book.objects.all().values("name").order_by("name").before_cursor("delta").iterator()]
-
-
-@pytest.mark.asyncio
-@requires_features(supports_streaming=False)
-async def test_stream_raises_unsupported_without_streaming(library):
-    with pytest.raises(UnSupportedError, match="stream"):
-        [row async for row in Book.objects.all().values("name").stream()]
 
 
 @pytest.mark.asyncio

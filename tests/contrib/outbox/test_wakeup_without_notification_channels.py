@@ -3,7 +3,7 @@ for a signal that can't come."""
 
 import pytest
 
-from hare.contrib.outbox import ListenNotifyWakeup
+from hare.contrib.outbox import ListenNotifyWakeup, OutboxMessage
 from hare.contrib.test import assert_query_count, requires_features
 from hare.exceptions import ConfigurationError, UnSupportedError
 from tests.contrib.outbox.models import DemoOutboxEvent
@@ -16,6 +16,18 @@ async def test_a_signal_of_written_events_is_refused(db_outbox):
     async with assert_query_count(0):
         with pytest.raises(ConfigurationError, match="has none; leave the outbox without it"):
             await ListenNotifyWakeup(channel="hare_test_outbox_refused").signal_written(connection, ["widget.updated"])
+
+
+@requires_features(supports_listen_notify=False)
+@pytest.mark.asyncio
+async def test_events_signalling_it_are_refused_before_they_are_written(db_outbox):
+    wakeup = ListenNotifyWakeup(channel="hare_test_outbox_refused")
+
+    with pytest.raises(ConfigurationError, match="has none; leave the outbox without it"):
+        await DemoOutboxEvent.enqueue("widget.updated", {}, wakeup=wakeup)
+    with pytest.raises(ConfigurationError, match="has none; leave the outbox without it"):
+        await DemoOutboxEvent.enqueue_many([OutboxMessage("widget.updated", {})], wakeup=wakeup)
+    assert await DemoOutboxEvent.objects.count() == 0
 
 
 @requires_features(supports_listen_notify=False)

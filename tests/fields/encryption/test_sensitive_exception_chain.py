@@ -3,12 +3,10 @@ its exception chain - the original exception (whose text names the value) is nei
 ``__cause__`` nor ``__context__``, so logging/Sentry/OpenTelemetry tracebacks don't show it."""
 
 import traceback
-from collections.abc import Callable
 from enum import IntEnum, StrEnum
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 from hare import fields
 from hare.dialects.postgresql.fields.ranges import IntRangeField
@@ -30,13 +28,18 @@ class Level(IntEnum):
     LOW = 1
 
 
-class Card(BaseModel):
-    number: int
-
-
 def named_field(field: Field[Any]) -> Field[Any]:
     field.model_field_name = "secret"
     return field
+
+
+def write_to_a_declared_type() -> Any:
+    from pydantic import BaseModel
+
+    class Card(BaseModel):
+        number: int
+
+    return named_field(fields.JSONField(field_type=Card, sensitive=True)).to_db_value({"number": SECRET}, None)
 
 
 def get_error_chain(error: BaseException) -> list[BaseException]:
@@ -48,7 +51,7 @@ def get_error_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
-SENSITIVE_CONVERSIONS: list[tuple[str, Callable[[], Any]]] = [
+SENSITIVE_CONVERSIONS: list[Any] = [
     ("int", lambda: named_field(fields.IntField(sensitive=True)).to_db_value(SECRET, None)),
     ("int-read", lambda: named_field(fields.IntField(sensitive=True)).from_db_value(SECRET)),
     ("char-length", lambda: named_field(fields.CharField(max_length=4, sensitive=True)).to_db_value(SECRET, None)),
@@ -65,10 +68,7 @@ SENSITIVE_CONVERSIONS: list[tuple[str, Callable[[], Any]]] = [
     ("int-enum", lambda: named_field(fields.IntEnumField(Level, sensitive=True)).to_db_value(SECRET_NUMBER, None)),
     ("int-enum-read", lambda: named_field(fields.IntEnumField(Level, sensitive=True)).from_db_value(SECRET_NUMBER)),
     ("json-read", lambda: named_field(fields.JSONField(sensitive=True)).from_db_value(f'{{"card": "{SECRET}"')),
-    (
-        "json-declared-type",
-        lambda: named_field(fields.JSONField(field_type=Card, sensitive=True)).to_db_value({"number": SECRET}, None),
-    ),
+    pytest.param("json-declared-type", write_to_a_declared_type, marks=pytest.mark.requires("pydantic")),
     ("timedelta", lambda: named_field(fields.TimeDeltaField(sensitive=True)).get_timedelta(SECRET_NUMBER * 10**20)),
     (
         "array-element",
@@ -79,7 +79,11 @@ SENSITIVE_CONVERSIONS: list[tuple[str, Callable[[], Any]]] = [
 ]
 
 
-@pytest.mark.parametrize(("case", "convert"), SENSITIVE_CONVERSIONS, ids=[case for case, _ in SENSITIVE_CONVERSIONS])
+@pytest.mark.parametrize(
+    ("case", "convert"),
+    SENSITIVE_CONVERSIONS,
+    ids=[getattr(case, "values", case)[0] for case in SENSITIVE_CONVERSIONS],
+)
 def test_sensitive_validation_error_has_no_chained_exception(case, convert):
     with pytest.raises(ValidationError) as error_info:
         convert()

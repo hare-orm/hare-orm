@@ -33,6 +33,7 @@ from hare.contrib.outbox.relay.constants import (
 )
 from hare.contrib.outbox.relay.declarations import OutboxDeadLettered, OutboxDelivered, OutboxDeliveryFailed
 from hare.contrib.outbox.relay.outbox_backlog import OutboxBacklog
+from hare.contrib.outbox.relay.topic_selection import TopicSelection
 from hare.core.connections.connections import Connections
 from hare.core.hare_context import HareContext
 from hare.core.log import logger
@@ -88,12 +89,15 @@ class OutboxRelay(Generic[TOutboxEvent]):
         delivery_timeout_seconds: The longest the delivery of an event (of a batch, for a delivery
             sending batches) may take.
         concurrency: The most events delivered at a time.
-        topics: The topics of the events the relay delivers and cleans up - every event when None.
+        topics: The topics of the events the relay delivers and cleans up - names, or prefix patterns
+            ending in ``*`` (``shop.*``); every event when None.
+        exclude_topics: Topics - names or prefix patterns - the relay leaves to other relays.
         wakeup: The wakeup the relay subscribes to - the model's ``Meta.outbox_wakeup`` when None.
         name: The relay's name in ``leased_by`` - host, process and a random part by default.
 
     Raises:
-        ConfigurationError: ``batch_size`` is out of range.
+        ConfigurationError: ``batch_size`` is out of range, or a topic pattern has ``*`` or ``?``
+            anywhere but a ``*`` at its end.
     """
 
     #: The random spread of the retry pauses.
@@ -113,6 +117,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
         delivery_timeout_seconds: float = DEFAULT_DELIVERY_TIMEOUT_SECONDS,
         concurrency: int = DEFAULT_CONCURRENCY,
         topics: Sequence[str] | None = None,
+        exclude_topics: Sequence[str] = (),
         wakeup: OutboxWakeup | None = None,
         name: str | None = None,
     ) -> None:
@@ -129,7 +134,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
         self.lease_seconds = lease_seconds
         self.delivery_timeout_seconds = delivery_timeout_seconds
         self.concurrency = concurrency
-        self.topics = tuple(topics) if topics is not None else None
+        self.topic_selection = TopicSelection(topics, exclude_topics)
         self._wakeup = wakeup
         self.name = name or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"[:OUTBOX_KEY_MAX_LENGTH]
         self.task: asyncio.Task[None] | None = None
@@ -225,7 +230,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
         Args:
             topics: The topics the signal names.
         """
-        if self.topics is None or not topics or not topics.isdisjoint(self.topics):
+        if not topics or any(self.topic_selection.takes(topic) for topic in topics):
             self.woken.set()
 
     async def run(self) -> None:
@@ -246,11 +251,10 @@ class OutboxRelay(Generic[TOutboxEvent]):
         return self.model.objects.all()
 
     def get_topic_queryset(self) -> QuerySet[TOutboxEvent]:
-        """The relay's events - of its ``topics``."""
+        """The relay's events - of its ``topics``, none of its ``exclude_topics``."""
         queryset = self.get_base_queryset()
-        if self.topics is not None:
-            queryset = queryset.filter(topic__in=self.topics)
-        return queryset
+        condition = self.topic_selection.get_condition()
+        return queryset if condition is None else queryset.filter(condition)
 
     async def poll_once_safely(self) -> int:
         """``poll_once()``, a failure logged instead of ending the loop.
@@ -528,15 +532,19 @@ class OutboxRelay(Generic[TOutboxEvent]):
         """Gives dead-lettered events their attempts back - delivered again from the next poll.
 
         Args:
-            topics: Only events of these topics.
+            topics: Only events of these topics - names, or prefix patterns ending in ``*``.
             ids: Only these events.
 
         Returns:
             How many events were given back.
+
+        Raises:
+            ConfigurationError: A topic pattern has ``*`` or ``?`` anywhere but a ``*`` at its end.
         """
         queryset = self.get_topic_queryset().filter(dead_lettered_at__isnull=False)
-        if topics is not None:
-            queryset = queryset.filter(topic__in=list(topics))
+        topic_condition = TopicSelection(topics).get_condition()
+        if topic_condition is not None:
+            queryset = queryset.filter(topic_condition)
         if ids is not None:
             queryset = queryset.filter(id__in=list(ids))
         # The outbox's database reports the rows a write changed - its unique fields refuse any other.

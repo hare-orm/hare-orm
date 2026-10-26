@@ -11,7 +11,6 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from hare.contrib.pydantic import pydantic_model_creator
 from hare.contrib.test import requires_features, truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.hare_context import HareContext
@@ -723,8 +722,11 @@ async def test_a_router_sees_the_scope_of_the_query(stores):
     assert seen[3] == ("spb", "spb")
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_a_pydantic_input_names_the_tenant_under_several_values(stores):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     summary_input = pydantic_model_creator(ScopeSalesSummary, name="ScopeSalesSummaryInput", exclude_readonly=True)
     assert not summary_input.model_fields["store_id"].is_required()
     with Tenancy.scope({ScopeSalesSummary: 1}):

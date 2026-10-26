@@ -10,6 +10,8 @@ import math
 import subprocess  # nosec B404 - runs ruff only
 import sys
 import textwrap
+import types
+import typing
 import unicodedata
 import uuid
 import zoneinfo
@@ -95,8 +97,10 @@ class MigrationWriter:
         if not module_name:
             raise ConfigurationError(f"Cannot resolve import for {value!r}")
         module = importlib.import_module(module_name)
+        # Only a name an import statement takes - pydantic keeps the class it makes for
+        # GenericModel[int] in its module under "GenericModel[int]".
         for name, obj in module.__dict__.items():
-            if obj is value:
+            if obj is value and name.isidentifier():
                 return module_name, name, False
         qualname = getattr(value, "__qualname__", None)
         if qualname and "." in qualname:
@@ -104,7 +108,7 @@ class MigrationWriter:
                 raise ConfigurationError(f"Cannot resolve import for {value!r}")
             return module_name, f"{module_name}.{qualname}", True
         name = getattr(value, "__name__", None)
-        if name:
+        if name and name.isidentifier() and getattr(module, name, None) is value:
             return module_name, name, False
         raise ConfigurationError(f"Cannot resolve import for {value!r}")
 
@@ -184,6 +188,8 @@ class MigrationWriter:
             MigrationWriter.render_collection,
             MigrationWriter.render_standard_library_value,
             MigrationWriter.render_partial,
+            # a parameterized type passes for its class (isinstance(dict[str, int], type)), so it goes first
+            MigrationWriter.render_type_expression,
             # classes are callable too, so the class goes before the function
             MigrationWriter.render_class,
             MigrationWriter.render_function,
@@ -456,6 +462,80 @@ class MigrationWriter:
         function_reference = MigrationWriter.import_object(function, imports)
         imports.add_module("functools")
         return f"functools.partial({', '.join([function_reference, *arguments])})"
+
+    @staticmethod
+    def render_type_expression(value: Any, imports: ImportManager) -> str | None:
+        """A parameterized type as code - ``dict[str, int]``, ``list[Model]``, ``int | None``,
+        ``typing.Literal["a", "b"]``, ``typing.List[int]`` - its origin and each argument written by
+        their own renderers.
+
+        Args:
+            value: The value.
+            imports: Collects the imports the code needs.
+
+        Returns:
+            The code, None when the value isn't a parameterized type.
+
+        Raises:
+            ConfigurationError: Its origin can't be written into a migration - a type alias statement's.
+        """
+        origin = typing.get_origin(value)
+        if origin is None:
+            return None
+        arguments = typing.get_args(value)
+        if isinstance(value, types.UnionType) or origin is typing.Union:
+            return " | ".join(MigrationWriter.render_type_argument(argument, imports) for argument in arguments)
+        typing_name = MigrationWriter.get_typing_name(value, origin)
+        if typing_name is not None:
+            # A typing alias (List, Dict) or a special form (Literal, Annotated) - not equal to the
+            # builtin's own parameterized type, so written by its typing name.
+            imports.add_module("typing")
+            origin_text = f"typing.{typing_name}"
+        else:
+            origin_text = MigrationWriter.render_value(origin, imports)
+        if not arguments:
+            return f"{origin_text}[()]"
+        argument_texts = [MigrationWriter.render_type_argument(argument, imports) for argument in arguments]
+        return f"{origin_text}[{', '.join(argument_texts)}]"
+
+    @staticmethod
+    def get_typing_name(value: Any, origin: Any) -> str | None:
+        """The name the typing module gives a parameterized type's origin - ``List`` of
+        ``typing.List[int]``, ``Literal`` of ``typing.Literal["a"]``.
+
+        Args:
+            value: The parameterized type.
+            origin: Its origin.
+
+        Returns:
+            The name, None for a type parameterized by itself (``list[int]``, a generic class).
+        """
+        if isinstance(value, types.GenericAlias):
+            return None
+        name = getattr(value, "_name", None)
+        if name is None and not isinstance(origin, type):
+            name = getattr(origin, "_name", None)
+        if name is None or getattr(typing, name, None) is None:
+            return None
+        return str(name)
+
+    @staticmethod
+    def render_type_argument(value: Any, imports: ImportManager) -> str:
+        """An argument of a parameterized type as code - ``None`` for its ``NoneType``, ``...`` for the
+        ellipsis of ``tuple[int, ...]``.
+
+        Args:
+            value: The argument.
+            imports: Collects the imports the code needs.
+
+        Returns:
+            The code.
+        """
+        if value is type(None):
+            return "None"
+        if value is Ellipsis:
+            return "..."
+        return MigrationWriter.render_value(value, imports)
 
     @staticmethod
     def render_class(value: Any, imports: ImportManager) -> str | None:
@@ -751,6 +831,28 @@ class MigrationWriter:
         return package_name if hasattr(package, MigrationWriter.get_public_field_name(path)) else None
 
     @staticmethod
+    def is_fields_package_path(path: str) -> bool:
+        """Whether a ``hare.fields.*`` path is written as an attribute of the ``hare.fields`` package - the
+        package exports the class itself, or, for a ``*FieldInstance`` class, the factory of the same public
+        name (``ForeignKeyField``). A class the package doesn't export is imported from its own module.
+
+        Args:
+            path: Dotted path starting with ``hare.fields.``.
+
+        Returns:
+            True to write it as ``fields.<name>``.
+        """
+        module_name, class_name = path.rsplit(".", 1)
+        public_value = getattr(
+            importlib.import_module("hare.fields"), MigrationWriter.get_public_field_name(path), None
+        )
+        if class_name.endswith("FieldInstance"):
+            return callable(public_value)
+        return public_value is not None and public_value is getattr(
+            importlib.import_module(module_name), class_name, None
+        )
+
+    @staticmethod
     def get_callable(path: str) -> Any:
         """The object a ``render_call()`` expression for ``path`` calls once executed.
 
@@ -760,7 +862,7 @@ class MigrationWriter:
         Returns:
             The class or function the rendered call invokes.
         """
-        if path.startswith("hare.fields."):
+        if path.startswith("hare.fields.") and MigrationWriter.is_fields_package_path(path):
             return getattr(importlib.import_module("hare.fields"), MigrationWriter.get_public_field_name(path))
         module_name, name = path.rsplit(".", 1)
         return getattr(importlib.import_module(module_name), name)
@@ -779,7 +881,7 @@ class MigrationWriter:
         Returns:
             The source.
         """
-        if path.startswith("hare.fields."):
+        if path.startswith("hare.fields.") and MigrationWriter.is_fields_package_path(path):
             class_name = MigrationWriter.get_public_field_name(path)
             # For relational fields, move model_name to first positional arg
             if (

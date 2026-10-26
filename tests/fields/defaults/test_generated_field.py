@@ -551,18 +551,17 @@ async def test_meta_returning_true_on_sqlite_silently_does_not_populate(db_gener
 
 
 @pytest.mark.asyncio
-async def test_meta_returning_true_with_ignore_conflicts_and_no_on_conflict_silently_skips_returning(
+async def test_ignore_conflicts_with_keys_the_database_generates_and_no_on_conflict_is_refused(
     db_generated_field,
 ):
-    """An explicit `returning=True` + `ignore_conflicts=True` without `on_conflict=[...]` is
-    rejected up front, but `Meta.returning = True` is only a soft preference - it must never make
-    the very common plain `bulk_create(..., ignore_conflicts=True)` start raising on every model
-    that inherits it."""
+    """ignore_conflicts gives the objects inserted, told by their RETURNING rows - objects without keys
+    are matched by on_conflict, refused without it before anything is written."""
     items = [AutoReturningPricedItem(price=100, quantity=1)]
-    await AutoReturningPricedItem.objects.bulk_create(items, ignore_conflicts=True)
+    with pytest.raises(UnSupportedError, match="on_conflict"):
+        await AutoReturningPricedItem.objects.bulk_create(items, ignore_conflicts=True)
 
-    assert items[0].id is None, "the inherited Meta default must yield to ignore_conflicts without on_conflict"
-    assert await AutoReturningPricedItem.objects.all().count() == 1
+    assert items[0].id is None
+    assert await AutoReturningPricedItem.objects.all().count() == 0
 
 
 @requires_features(dialect="sqlite")

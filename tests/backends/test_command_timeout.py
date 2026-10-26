@@ -13,14 +13,11 @@ from hare import Connections
 from hare.contrib.test import requires_features
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.base.constants import COMMAND_TIMEOUT_METHOD_NAMES
-from hare.dialects.postgresql.drivers.asyncpg.client import (
-    AsyncpgClient,
-    AsyncpgTransactionClient,
-)
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient, RustPgTransactionClient
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
-CLIENT_CLASSES = [AsyncpgClient, RustPgClient]
+CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
 def make_client(client_class, **overrides):
@@ -41,14 +38,14 @@ async def hang_forever(*args, **kwargs):
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 def test_command_timeout_defaults_to_none(client_class):
     """Backward compatibility: nothing configured means no timeout at all, as before."""
     assert make_client(client_class).command_timeout is None
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 def test_command_timeout_from_credentials_is_cast_to_float(client_class):
     client = make_client(client_class, command_timeout="2.5")
     assert client.command_timeout == 2.5
@@ -56,8 +53,8 @@ def test_command_timeout_from_credentials_is_cast_to_float(client_class):
     assert "command_timeout" not in client.extra
 
 
-# The check is the clients' shared __init__: every value on the first client class, the first value
-# on each other one.
+# The check is the clients' shared __init__: every value on rust_pg's client class, the first value
+# on asyncpg's.
 INVALID_COMMAND_TIMEOUTS = [0, -1, "abc", float("nan"), float("inf"), 10**9, [1]]
 
 
@@ -65,9 +62,13 @@ INVALID_COMMAND_TIMEOUTS = [0, -1, "abc", float("nan"), float("inf"), 10**9, [1]
 @pytest.mark.parametrize(
     ("client_class", "invalid_value"),
     [
-        *[(CLIENT_CLASSES[0], invalid_value) for invalid_value in INVALID_COMMAND_TIMEOUTS],
-        *[(client_class, INVALID_COMMAND_TIMEOUTS[0]) for client_class in CLIENT_CLASSES[1:]],
+        *[
+            DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, invalid_value)
+            for invalid_value in INVALID_COMMAND_TIMEOUTS
+        ],
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, INVALID_COMMAND_TIMEOUTS[0]),
     ],
+    indirect=["client_class"],
 )
 def test_command_timeout_rejects_invalid_values(client_class, invalid_value):
     with pytest.raises(ConfigurationError):
@@ -84,13 +85,13 @@ def test_command_timeout_url_param_is_cast(scheme):
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 async def test_command_timeout_is_not_passed_to_the_driver(client_class):
     """Enforced on the hare side - handing it to the driver too would only race that layer."""
     client = make_client(client_class, command_timeout=2.5)
     driver_entry_point = (
         "hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client.asyncpg.create_pool"
-        if client_class is AsyncpgClient
+        if client_class.__name__ == "AsyncpgClient"
         else "hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_client.pg.connect"
     )
     with (
@@ -120,7 +121,7 @@ def make_client_with_fake_driver(client_class, driver_methods, **overrides):
     function mapping) - no server needed."""
     client = make_client(client_class, **overrides)
     fake_driver = SimpleNamespace(**driver_methods)
-    if client_class is AsyncpgClient:
+    if client_class.__name__ == "AsyncpgClient":
         client.acquire_connection = lambda: FakeConnectionContext(fake_driver)
     else:
         client._pool = fake_driver
@@ -129,7 +130,7 @@ def make_client_with_fake_driver(client_class, driver_methods, **overrides):
 
 @pytest.mark.timing
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 @pytest.mark.parametrize("method_name", ["execute", "execute_dicts"])
 async def test_command_timeout_bounds_a_hanging_query(client_class, method_name):
     # asyncpg's fetch/fetchrow are the rust_pg pool's fetch_all/fetch_one - both spellings hang.
@@ -148,7 +149,7 @@ async def test_command_timeout_bounds_a_hanging_query(client_class, method_name)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 async def test_command_timeout_bounds_a_hanging_write_and_script(client_class):
     client = make_client_with_fake_driver(
         client_class,
@@ -163,7 +164,7 @@ async def test_command_timeout_bounds_a_hanging_write_and_script(client_class):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 async def test_command_timeout_does_not_disturb_a_fast_query(client_class):
     async def fast_fetch(*args):
         # Suspends like a query waiting for the server.
@@ -177,7 +178,7 @@ async def test_command_timeout_does_not_disturb_a_fast_query(client_class):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 async def test_without_command_timeout_a_slow_query_is_never_cut_off(client_class):
     """Default None: a slow query just runs to completion, exactly as before."""
 
@@ -190,8 +191,11 @@ async def test_without_command_timeout_a_slow_query_is_never_cut_off(client_clas
     assert await client.execute("SELECT 1", []) == (1, ["row"])
 
 
+@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_rust_pg_command_timeout_applies_inside_a_transaction():
+    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient, RustPgTransactionClient
+
     client = make_client(RustPgClient, command_timeout=0.2)
     client._pool = SimpleNamespace()
     transaction_wrapper = RustPgTransactionClient(client)
@@ -201,8 +205,11 @@ async def test_rust_pg_command_timeout_applies_inside_a_transaction():
         await asyncio.wait_for(transaction_wrapper.execute("SELECT 1", []), 5)
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_asyncpg_command_timeout_applies_inside_a_transaction():
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient, AsyncpgTransactionClient
+
     client = make_client(AsyncpgClient, command_timeout=0.2)
     transaction_wrapper = AsyncpgTransactionClient(client)
     transaction_wrapper._connection = SimpleNamespace(fetch=hang_forever)

@@ -1,5 +1,6 @@
-"""Checks an installed hare-orm wheel: the extensions its tag promises import, and hare works on
-SQLite - and on PostgreSQL through the Rust driver when ``--postgres-url`` names a server.
+"""Checks an installed hare-orm wheel: the extensions its tag promises import, hare works on SQLite - and
+on PostgreSQL through the Rust driver when ``--postgres-url`` names a server - and ``hare makemigrations`` and
+``hare migrate`` work on a project of its models, with none of the extras installed.
 
 Run it with the interpreter the wheel is installed into, from outside the repository (so
 ``import rust`` finds the installed package, not the checkout):
@@ -13,7 +14,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from hare import Hare, HareConfig, fields
@@ -104,11 +107,58 @@ class WheelCheck:
         finally:
             await Hare.close_connections()
 
+    @staticmethod
+    def check_migrations() -> None:
+        """Writes a project's first migration, applies it, and finds no changes afterwards - the CLI of the
+        installed wheel, in a project of its own on a SQLite file.
+
+        Raises:
+            SystemExit: A command fails, or the second makemigrations writes a migration.
+        """
+        with tempfile.TemporaryDirectory() as project_directory:
+            project = Path(project_directory)
+            (project / "wheel_project").mkdir()
+            (project / "wheel_project" / "__init__.py").write_text("", encoding="utf-8")
+            (project / "wheel_project" / "models.py").write_text(
+                "from hare import fields\n"
+                "from hare.models import Model\n\n\n"
+                "class Note(Model):\n"
+                "    id = fields.IntField(primary_key=True)\n"
+                "    title = fields.CharField(max_length=40)\n",
+                encoding="utf-8",
+            )
+            (project / "wheel_settings.py").write_text(
+                "HARE_ORM = {\n"
+                f'    "connections": {{"default": "sqlite+aiosqlite://{(project / "project.sqlite3").as_posix()}"}},\n'
+                '    "apps": {"wheel_project": {"models": ["wheel_project.models"], '
+                '"default_connection": "default"}},\n'
+                "}\n",
+                encoding="utf-8",
+            )
+            outputs = []
+            for command in ("makemigrations", "migrate", "makemigrations"):
+                completed = subprocess.run(
+                    [sys.executable, "-m", "hare.cli", "-c", "wheel_settings.HARE_ORM", command],
+                    cwd=project,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    raise SystemExit(f"hare {command} failed:\n{completed.stdout}{completed.stderr}")
+                outputs.append(completed.stdout)
+            if not list((project / "wheel_project" / "migrations").glob("0001_*.py")):
+                raise SystemExit(f"makemigrations wrote no migration:\n{outputs[0]}")
+            if "No changes detected" not in outputs[2]:
+                raise SystemExit(f"makemigrations after migrate found changes:\n{outputs[2]}")
+        print("makemigrations, migrate: a project's migration written, applied, no changes after it")
+
     def run(self) -> None:
         """Runs every check."""
         print(f"Python {sys.version.split()[0]} on {sys.platform}")
         self.check_extensions()
         asyncio.run(self.check_database("sqlite+aiosqlite://:memory:"))
+        self.check_migrations()
         if self.postgres_url:
             if not self.platform_wheel:
                 raise SystemExit("--postgres-url checks the Rust driver, which only a platform wheel carries")

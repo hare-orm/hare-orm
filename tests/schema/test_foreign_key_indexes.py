@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 
-from tests.schema.test_generate_schema import _init_for_asyncpg, _init_for_sqlite, _reset_hare, _teardown_hare
+from tests.schema.test_generate_schema import _init_for_postgres, _init_for_sqlite, _reset_hare, _teardown_hare
 
 pytestmark = pytest.mark.database_independent
 
@@ -26,11 +26,11 @@ def get_plain_index_columns(sqls: list[str], table: str) -> list[tuple[str, ...]
     return index_columns
 
 
-@pytest_asyncio.fixture(params=["sqlite", "asyncpg"])
+@pytest_asyncio.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.requires("native"))])
 async def schema_sqls(request) -> AsyncGenerator[list[str]]:
     await _reset_hare()
     try:
-        initialize = _init_for_sqlite if request.param == "sqlite" else _init_for_asyncpg
+        initialize = _init_for_sqlite if request.param == "sqlite" else _init_for_postgres
         yield await initialize(MODELS_MODULE)
     finally:
         await _teardown_hare()

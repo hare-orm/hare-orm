@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Any, cast
 from typing_extensions import TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.exceptions import ValidationError
-from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
+from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.constants import JSON_FIELD_TYPE_PACKAGE_MESSAGE, SENSITIVE_VALUE_PLACEHOLDER
 from hare.fields.data.constants import (
     JSON_CIRCULAR_REFERENCE_CHECK_CONTAINERS,
     JSON_CIRCULAR_REFERENCE_MESSAGE,
@@ -24,6 +24,7 @@ from hare.fields.data.constants import (
 )
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.fields.field import Field
+from hare.fields.json_values import JsonValues
 from hare.lazy_loading.pydantic_classes import PydanticClasses
 
 if TYPE_CHECKING:
@@ -79,6 +80,24 @@ class JSONField(Field[T]):
         if self.declared_value_type:
             self.field_type = self.declared_value_type
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - a value of a declared ``field_type`` as pydantic writes it as JSON,
+        any other one as ``JsonValues`` does.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        type_adapter = self.get_value_type_adapter()
+        if type_adapter is not None and value is not None:
+            return type_adapter.dump_python(value, mode="json")
+        return JsonValues.get_json_value(value)
+
     def _get_constructor_argument_value(self, name: str) -> Any:
         # The class's own field_type is the value type of an undeclared document, not an argument.
         if name == "field_type":
@@ -86,14 +105,18 @@ class JSONField(Field[T]):
         return super()._get_constructor_argument_value(name)
 
     def get_value_type_adapter(self) -> Any:
-        """The pydantic TypeAdapter for ``declared_value_type``, or None when there's no declared
-        type or pydantic isn't installed."""
+        """The pydantic TypeAdapter for ``declared_value_type``, None without a declared type.
+
+        Raises:
+            ConfigurationError: A type is declared and pydantic isn't installed - its values would go
+                unvalidated.
+        """
         if not self.declared_value_type:
             return None
         if self._value_type_adapter is None:
             type_adapter = PydanticClasses.get_type_adapter()
             if type_adapter is None:
-                return None
+                raise ConfigurationError(JSON_FIELD_TYPE_PACKAGE_MESSAGE)
             self._value_type_adapter = type_adapter(self.declared_value_type)
         return self._value_type_adapter
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import struct
 
 from hare.dialects.clickhouse.keeper.constants import (
+    KEEPER_ANY_VERSION,
     KEEPER_NEW_SESSION_PASSWORD,
     KEEPER_OPEN_ACL_ID,
     KEEPER_OPEN_ACL_PERMISSIONS,
@@ -138,6 +139,50 @@ class KeeperCodec:
             + KeeperCodec.get_string(KEEPER_OPEN_ACL_ID)
         )
         return KeeperCodec.get_string(path) + KeeperCodec.get_buffer(b"") + acl + struct.pack("!i", flags)
+
+    @staticmethod
+    def get_delete_body(path: str) -> bytes:
+        """The arguments deleting a node of any version.
+
+        Args:
+            path: The node's path.
+
+        Returns:
+            The arguments.
+        """
+        return KeeperCodec.get_string(path) + struct.pack("!i", KEEPER_ANY_VERSION)
+
+    @staticmethod
+    def get_children_body(path: str) -> bytes:
+        """The arguments asking for the names of a node's children, watching nothing.
+
+        Args:
+            path: The node's path.
+
+        Returns:
+            The arguments.
+        """
+        return KeeperCodec.get_string(path) + b"\x00"
+
+    @staticmethod
+    def read_children(reply: bytes) -> list[str]:
+        """Reads the names of a node's children after the head of their reply.
+
+        Args:
+            reply: The reply after its head.
+
+        Returns:
+            The names.
+        """
+        (count,) = struct.unpack("!i", reply[:4])
+        names: list[str] = []
+        offset = 4
+        for _ in range(count):
+            (length,) = struct.unpack("!i", reply[offset : offset + 4])
+            offset += 4
+            names.append(reply[offset : offset + length].decode())
+            offset += length
+        return names
 
     @staticmethod
     def get_exists_body(path: str) -> bytes:

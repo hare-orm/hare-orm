@@ -1,29 +1,51 @@
 """Every name a hare package exports resolves, once in its ``__all__``, and ``dir()`` of a package
-exporting its names lazily lists them before they are imported."""
+exporting its names lazily lists them before they are imported - a package importing an optional library in
+the environment installing its extra."""
 
+import ast
 import importlib
-import pkgutil
+from pathlib import Path
 
 import pytest
 
 import hare
+from tests.utils.package_requirements import PackageRequirements
 
 pytestmark = pytest.mark.database_independent
 
-#: Packages importing a library hare doesn't require.
-OPTIONAL_PACKAGE_PARTS = ("frameworks", "taskiq", "opentelemetry", "mypy", "pytest")
-
 
 def get_exporting_packages() -> list[str]:
+    """The packages of hare declaring ``__all__`` - found by reading their ``__init__.py``, not importing it.
+
+    Returns:
+        Their dotted names.
+    """
+    hare_directory = Path(hare.__file__).parent
     names = []
-    for module_info in pkgutil.walk_packages(hare.__path__, "hare."):
-        if module_info.ispkg and not any(part in module_info.name for part in OPTIONAL_PACKAGE_PARTS):
-            if hasattr(importlib.import_module(module_info.name), "__all__"):
-                names.append(module_info.name)
+    for init_path in sorted(hare_directory.rglob("__init__.py")):
+        tree = ast.parse(init_path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(statement, (ast.Assign, ast.AnnAssign))
+            and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in (statement.targets if isinstance(statement, ast.Assign) else [statement.target])
+            )
+            for statement in tree.body
+        ):
+            relative_parts = init_path.parent.relative_to(hare_directory.parent).parts
+            names.append(".".join(relative_parts))
     return names
 
 
-@pytest.mark.parametrize("package_name", get_exporting_packages())
+@pytest.mark.parametrize(
+    "package_name",
+    [
+        pytest.param(name, marks=[pytest.mark.requires(*PackageRequirements.get(name))])
+        if PackageRequirements.get(name)
+        else name
+        for name in get_exporting_packages()
+    ],
+)
 def test_a_package_exports_each_name_once_and_lists_it(package_name):
     package = importlib.import_module(package_name)
 

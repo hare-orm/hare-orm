@@ -7,7 +7,6 @@ import uuid
 
 import pytest
 
-from hare.contrib.request_query import LatestVersions, RequestQuery
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import Exists, OuterReference, Subquery
@@ -45,8 +44,11 @@ async def test_a_subquery_correlated_by_a_comparison_is_the_servers_own_exists(c
     assert await Player.objects.filter(Exists(Player.objects.filter(id__lt=OuterReference("id")))).count() == 2
 
 
+@pytest.mark.requires("request-query")
 @pytest.mark.asyncio
 async def test_latest_versions_keep_the_latest_version_of_each_record(clickhouse_db):
+    from hare.contrib.request_query import LatestVersions, RequestQuery
+
     class LatestPageQuery(RequestQuery[PageVersion]):
         class Meta:
             queryset = PageVersion.objects.all()

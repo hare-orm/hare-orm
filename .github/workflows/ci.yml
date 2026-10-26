@@ -165,7 +165,7 @@ jobs:
       matrix:
         python: ["3.12", "3.13", "3.14"]
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
@@ -176,8 +176,11 @@ jobs:
         with:
           name: native-Linux
           path: rust/
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'sqlite-*'" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Prepare the SQLite versions
         run: make sqlite_versions matrix_python_versions=${{ matrix.python }}
       # The SpatiaLite tests read the library from HARE_TEST_SPATIALITE_PATH.
@@ -209,7 +212,7 @@ jobs:
         os: [ubuntu-24.04, windows-2025, macos-15]
         python: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -223,8 +226,11 @@ jobs:
         with:
           name: native-${{ runner.os }}
           path: rust/
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test what reads no database
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent --workers auto \
@@ -249,7 +255,7 @@ jobs:
         postgres: ["14", "15", "16", "17", "18"]
         python: ["3.12", "3.13", "3.14"]
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
@@ -262,8 +268,11 @@ jobs:
           path: rust/
       - name: Start PostgreSQL ${{ matrix.postgres }}
         run: make test_db_matrix_up matrix_postgres_versions=${{ matrix.postgres }}
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} --suite rust_pg-${{ matrix.postgres }}" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test PostgreSQL ${{ matrix.postgres }} through asyncpg and rust_pg
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} \
@@ -328,8 +337,11 @@ jobs:
           path: rust/
       - name: Start the brokers
         run: make test_brokers_matrix_up
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' --suite 'kafka-*'" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test the wakeups and deliveries
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' \
@@ -362,6 +374,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      # The server ports 4YYMM and 5YYMM fall in Linux's ephemeral range: an outgoing connection of the
+      # runner could hold one as the server starts - reserved, none takes them, nor the other three.
+      - name: Reserve the ClickHouse ${{ matrix.clickhouse }} ports
+        run: |
+          version="${{ matrix.clickhouse }}"
+          digits="$(printf %02d%02d "${version%%.*}" "${version#*.}")"
+          sudo sysctl -w "net.ipv4.ip_local_reserved_ports=2${digits},3${digits},4${digits},5${digits},6${digits}"
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -372,8 +391,11 @@ jobs:
           path: rust/
       - name: Start ClickHouse ${{ matrix.clickhouse }} and its cluster
         run: make test_clickhouse_matrix_up test_clickhouse_cluster_matrix_up matrix_clickhouse_versions=${{ matrix.clickhouse }}
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}'" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test ClickHouse ${{ matrix.clickhouse }} through both drivers
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}' \
@@ -403,7 +425,7 @@ jobs:
             postgres: "14"
             python: "3.14"
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
@@ -418,8 +440,11 @@ jobs:
         run: |
           make test_db_matrix_up test_pgbouncer_matrix_up matrix_postgres_versions=${{ matrix.postgres }} \
             matrix_pgbouncer_versions=${{ matrix.pgbouncer }}
-      - name: Create the virtualenv
-        run: make matrix_venvs matrix_python_versions=${{ matrix.python }} matrix_interpreter="${{ steps.python.outputs.python-path }}"
+      # The virtualenv of each environment and database driver of the runs below - tests/matrix.
+      - name: Create the virtualenvs
+        run: |
+          make matrix_venvs MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}'" \
+            matrix_interpreter="${{ steps.python.outputs.python-path }}"
       - name: Test through PgBouncer ${{ matrix.pgbouncer }} with asyncpg and rust_pg
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} \

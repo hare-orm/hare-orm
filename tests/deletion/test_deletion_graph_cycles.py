@@ -13,6 +13,8 @@ from hare.models import Model
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from tests.contrib.outbox.capture_models import CaptureOutboxEvent
 
+pytestmark = pytest.mark.sqlite_only
+
 
 def register_cycle_models(end_meta: type | None, end_delete: Any = None) -> dict[str, type[Model]]:
     """X cascades to Y, Y and Z cascade to each other, and Y cascades to W - the end of the walk.

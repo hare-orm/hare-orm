@@ -26,6 +26,14 @@ class MissingPytestAsyncioFixtures:
         pytest.fail(PYTEST_ASYNCIO_MISSING_MESSAGE, pytrace=False)
 
     @pytest.fixture
+    def hare_app_db(self) -> None:
+        pytest.fail(PYTEST_ASYNCIO_MISSING_MESSAGE, pytrace=False)
+
+    @pytest.fixture
+    def hare_app_transactional_db(self) -> None:
+        pytest.fail(PYTEST_ASYNCIO_MISSING_MESSAGE, pytrace=False)
+
+    @pytest.fixture
     def hare_assert_query_count(self) -> None:
         pytest.fail(PYTEST_ASYNCIO_MISSING_MESSAGE, pytrace=False)
 

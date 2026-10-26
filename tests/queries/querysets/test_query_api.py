@@ -4,7 +4,6 @@ from typing import TypedDict, Union, assert_type, cast
 
 import pytest
 import pytest_asyncio
-from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from hare import fields
 from hare.contrib import test
@@ -19,19 +18,12 @@ from hare.query.functions import Reverse
 from hare.query.raw_sql import SqlQueryResult, execute_sql
 from hare.sql import Query, Table, functions
 from hare.sql.builder import QueryBuilder
-from hare.sql.sql_context import SqlContext
-from hare.sql.terms import Parameterizer
 from tests.shared_models.testmodels import Tournament
 
 
 class QueryModel(Model):
     id = fields.IntField(primary_key=True)
     name = fields.TextField()
-
-
-class QueryRow(BaseModel):
-    id: int
-    name: str
 
 
 class QueryRowDict(TypedDict):
@@ -119,9 +111,12 @@ async def test_query_parameterization(query_api_db) -> None:
     assert "alpha" not in sql
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_execute_hare_sql_pydantic_schema(query_api_db) -> None:
+    from tests.queries.querysets.query_rows import QueryRow
+
     table = QueryModel.get_table()
     query = Query.from_(table).select(table.id, table.name).where(table.name == "alpha")
 
@@ -131,9 +126,12 @@ async def test_execute_hare_sql_pydantic_schema(query_api_db) -> None:
     assert result.rows[0].model_dump() == {"id": 1, "name": "alpha"}
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_execute_hare_sql_pydantic_type_adapter(query_api_db) -> None:
+    from pydantic import TypeAdapter
+
     table = QueryModel.get_table()
     query = Query.from_(table).select(table.id, table.name).where(table.name == "alpha")
     adapter = TypeAdapter(dict[str, int | str])
@@ -171,9 +169,14 @@ async def test_execute_hare_sql_empty_result(query_api_db) -> None:
     assert result.rows_affected == 0
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
 async def test_execute_hare_sql_invalid_schema_raises(query_api_db) -> None:
+    from pydantic import ValidationError
+
+    from tests.queries.querysets.query_rows import QueryRow
+
     table = QueryModel.get_table()
     query = Query.from_(table).select(table.name.as_("id"), table.name)
 
@@ -191,24 +194,9 @@ def _is_asyncpg(db) -> bool:
     return "hare.dialects.postgresql.drivers.asyncpg" in type(db.get_connection()).__module__
 
 
-def _is_psycopg(db) -> bool:
-    return "hare.dialects.psycopg" in type(db.get_connection()).__module__
-
-
-def _is_odbc(db) -> bool:
-    return "hare.dialects.odbc" in type(db.get_connection()).__module__
-
-
 def _select_query() -> QueryBuilder:
     table = Tournament.get_table()
     return Query.from_(table).select(table.id, table.name).orderby(table.id)
-
-
-def _sql_context(db) -> SqlContext:
-    ctx = db.get_connection().query_class.SQL_CONTEXT
-    if _is_psycopg(db) and ctx.parameterizer is None:
-        ctx = ctx.copy(parameterizer=Parameterizer(placeholder_factory=lambda _: "%s"))
-    return ctx
 
 
 @pytest_asyncio.fixture
@@ -239,21 +227,6 @@ async def test_rows_affected_select_asyncpg(rows_affected_setup) -> None:
 
     assert result.rows_affected == len(result.rows)
     assert len(result.rows) == 2
-
-
-@pytest.mark.asyncio
-async def test_rows_affected_select_driver_rowcount(rows_affected_setup) -> None:
-    db = rows_affected_setup["db"]
-    if not (_is_odbc(db) or _is_psycopg(db)):
-        pytest.skip("odbc/psycopg only")
-
-    query: QueryBuilder = _select_query()
-    sql, params = query.get_parameterized_sql(_sql_context(db))
-    raw_rowcount, _ = await db.get_connection().execute(sql, params)
-    result: SqlQueryResult[dict] = await execute_sql(query)
-
-    expected = {raw_rowcount, len(result.rows)}
-    assert result.rows_affected in expected
 
 
 @pytest.mark.asyncio

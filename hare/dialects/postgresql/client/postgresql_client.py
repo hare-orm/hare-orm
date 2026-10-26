@@ -31,7 +31,6 @@ from hare.dialects.postgresql.client.constants import (
     POSTGRES_DATABASE_OWNER_PUBLIC_SCHEMA_VERSION_NUMBER,
     POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL,
     POSTGRES_DATABASE_ROLE_SETTINGS_SQL,
-    POSTGRES_DROP_DATABASE_SQL,
     POSTGRES_DROP_SCHEMA_CASCADE_SQL,
     POSTGRES_FAILING_ROW_RE,
     POSTGRES_FORCED_DROP_DATABASE_SQL,
@@ -819,9 +818,14 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             await self._release_reusable_test_database()
             return
         await self._reconnect(with_db=False)
-        drop_sql = POSTGRES_FORCED_DROP_DATABASE_SQL if self.transaction_pooling else POSTGRES_DROP_DATABASE_SQL
+        # A test database is dropped with whatever sessions are still on it - a pooler's, or one an
+        # event loop closed in the middle of a query left running.
         try:
-            await self.execute_script(drop_sql.format(database=self.dialect.literals.quote_identifier(self.database)))
+            await self.execute_script(
+                POSTGRES_FORCED_DROP_DATABASE_SQL.format(
+                    database=self.dialect.literals.quote_identifier(self.database)
+                )
+            )
         finally:
             await self.close()
 

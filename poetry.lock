@@ -4,10 +4,10 @@
 name = "aio-pika"
 version = "10.1.0"
 description = "Wrapper around the aiormq for asyncio and humans"
-optional = false
+optional = true
 python-versions = "<4,>=3.11"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"rabbitmq\""
 files = [
     {file = "aio_pika-10.1.0-py3-none-any.whl", hash = "sha256:8dd8aa4514328876e9208970b7dae3a7650afb3373906a2a530286742ebe0f74"},
     {file = "aio_pika-10.1.0.tar.gz", hash = "sha256:ec340bff09d169a367717a4dd822969dac9cc5e835e22a67020e3613784f3139"},
@@ -21,10 +21,10 @@ yarl = "*"
 name = "aiohappyeyeballs"
 version = "2.7.1"
 description = "Happy Eyeballs for asyncio"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (extra == \"taskiq\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\") and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "aiohappyeyeballs-2.7.1-py3-none-any.whl", hash = "sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472"},
     {file = "aiohappyeyeballs-2.7.1.tar.gz", hash = "sha256:065665c041c42a5938ed220bdcd7230f22527fbec085e1853d2402c8a3615d9d"},
@@ -34,10 +34,10 @@ files = [
 name = "aiohttp"
 version = "3.14.4"
 description = "Async http client/server framework (asyncio)"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (extra == \"taskiq\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\") and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "aiohttp-3.14.4-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:dea3b3653c1d0d6babd8ce09cb9e5a7776864315d9cfb1c569f926389874a261"},
     {file = "aiohttp-3.14.4-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:3099a389e5b5900fc79c6f613015ff3f8fa06a519744e6001cc68a31ba418cac"},
@@ -219,9 +219,10 @@ speedups = ["Brotli (>=1.2) ; platform_python_implementation == \"CPython\" and 
 name = "aiokafka"
 version = "0.14.0"
 description = "Kafka integration with asyncio"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "extra == \"kafka\""
 files = [
     {file = "aiokafka-0.14.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:2c767f320c902b126b7b37afb4ade241dc96e7d74b3515f0d0c1c8a800065113"},
     {file = "aiokafka-0.14.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:f68e75acf03631ea046b00bc8cc9aca8e3eb89486468b884629586ae6f2c63bc"},
@@ -272,10 +273,10 @@ zstd = ["cramjam"]
 name = "aiormq"
 version = "7.2.1"
 description = "Pure python AMQP asynchronous client library"
-optional = false
+optional = true
 python-versions = "<4,>=3.11"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"rabbitmq\""
 files = [
     {file = "aiormq-7.2.1-py3-none-any.whl", hash = "sha256:4a96b0dce49880f3677976863b680414417eb00d0a9e3d381664bd86c64cea11"},
     {file = "aiormq-7.2.1.tar.gz", hash = "sha256:05d55dfbdba0c3854ceb5f118855b0d47fa15fbd08dae1b9c4c0415237c769aa"},
@@ -289,10 +290,10 @@ yarl = "*"
 name = "aiosignal"
 version = "1.4.0"
 description = "aiosignal: a list of registered asynchronous callbacks"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (extra == \"taskiq\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\") and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "aiosignal-1.4.0-py3-none-any.whl", hash = "sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e"},
     {file = "aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7"},
@@ -322,10 +323,10 @@ docs = ["sphinx (==8.1.3)", "sphinx-mdinclude (==0.6.2)"]
 name = "annotated-doc"
 version = "0.0.5"
 description = "Document parameters, class attributes, return types, and variables inline, with Annotated."
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"fastapi\""
 files = [
     {file = "annotated_doc-0.0.5-py3-none-any.whl", hash = "sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101"},
     {file = "annotated_doc-0.0.5.tar.gz", hash = "sha256:c7e58ce09192557605d8bbd92836d7e1d520ac9580096042c0bfd197efacf1bb"},
@@ -335,9 +336,10 @@ files = [
 name = "annotated-types"
 version = "0.8.0"
 description = "Reusable constraint types to use with typing.Annotated"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\") and (extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\" or extra == \"taskiq\")"
 files = [
     {file = "annotated_types-0.8.0-py3-none-any.whl", hash = "sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"},
     {file = "annotated_types-0.8.0.tar.gz", hash = "sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7"},
@@ -349,7 +351,7 @@ version = "4.14.2"
 description = "High-level concurrency and networking framework on top of asyncio or Trio"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
 files = [
     {file = "anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494"},
     {file = "anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f"},
@@ -383,9 +385,10 @@ test = ["astroid (>=2,<5)", "pytest (<9.0)", "pytest-cov", "pytest-xdist"]
 name = "async-timeout"
 version = "5.0.1"
 description = "Timeout context manager for asyncio programs"
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "extra == \"kafka\""
 files = [
     {file = "async_timeout-5.0.1-py3-none-any.whl", hash = "sha256:39e3809566ff85354557ec2398b55e096c8364bacac9405a7a1fa429e77fe76c"},
     {file = "async_timeout-5.0.1.tar.gz", hash = "sha256:d9321a7a3d5a6a5e187e824d2fa0793ce379a202935782d555d6e9d2735677d3"},
@@ -466,10 +469,10 @@ gssauth = ["gssapi ; platform_system != \"Windows\"", "sspilib ; platform_system
 name = "attrs"
 version = "26.1.0"
 description = "Classes Without Boilerplate"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (extra == \"taskiq\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\") and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309"},
     {file = "attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32"},
@@ -637,11 +640,12 @@ version = "2026.7.22"
 description = "Python package for providing Mozilla's CA Bundle."
 optional = false
 python-versions = ">=3.7"
-groups = ["main", "contrib", "dev", "docs"]
+groups = ["main", "dev", "docs"]
 files = [
     {file = "certifi-2026.7.22-py3-none-any.whl", hash = "sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"},
     {file = "certifi-2026.7.22.tar.gz", hash = "sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55"},
 ]
+markers = {main = "(python_version < \"4.0\" or extra == \"http\") and (python_version < \"3.15\" or extra == \"litestar\" or extra == \"http\") and (sys_platform != \"win32\" or python_version <= \"3.14\" or extra == \"litestar\" or extra == \"http\" or extra == \"clickhouse-connect\") and (extra == \"clickhouse-connect\" or extra == \"litestar\" or extra == \"http\") and (implementation_name == \"cpython\" or python_version <= \"3.14\" or extra == \"litestar\" or extra == \"http\" or extra == \"clickhouse-connect\")"}
 
 [[package]]
 name = "cffi"
@@ -649,8 +653,7 @@ version = "2.1.1"
 description = "Foreign Function Interface for Python calling C code."
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev", "test"]
-markers = "platform_python_implementation != \"PyPy\""
+groups = ["main", "dev"]
 files = [
     {file = "cffi-2.1.1-cp310-cp310-macosx_10_15_x86_64.whl", hash = "sha256:baed1e86cc735622097354b9d1281406caf42ff42a886d29faa8e8d1630333be"},
     {file = "cffi-2.1.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ca82be1a1d406ecfe1d25dc16cb33488e5a16bf4438c9fb590484ea29d92478b"},
@@ -753,6 +756,7 @@ files = [
     {file = "cffi-2.1.1-cp315-cp315t-win_arm64.whl", hash = "sha256:d18e5ac0f2f03f4f518d3e23db0f0cad7faa1da8620e9c09461d443bbf6e6692"},
     {file = "cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"},
 ]
+markers = {main = "extra == \"encryption\" and platform_python_implementation != \"PyPy\"", dev = "(extra == \"encryption\" or platform_machine != \"ppc64le\" and platform_machine != \"s390x\") and platform_python_implementation != \"PyPy\" and (extra == \"encryption\" or sys_platform == \"linux\")"}
 
 [package.dependencies]
 pycparser = {version = "*", markers = "implementation_name != \"PyPy\""}
@@ -1033,12 +1037,12 @@ version = "8.5.0"
 description = "Composable command line interface toolkit"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib", "docs"]
+groups = ["main", "docs"]
 files = [
     {file = "click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360"},
     {file = "click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "python_version < \"4.0\" and extra == \"litestar\""}
 
 [[package]]
 name = "clickhouse-cityhash"
@@ -1367,12 +1371,12 @@ version = "0.4.6"
 description = "Cross-platform colored terminal text."
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
-groups = ["main", "contrib", "dev", "docs", "test"]
+groups = ["main", "dev", "docs", "test"]
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
 ]
-markers = {main = "sys_platform == \"win32\" or python_version < \"4.0\" and platform_system == \"Windows\"", contrib = "sys_platform == \"win32\" or python_version < \"4.0\" and platform_system == \"Windows\"", dev = "platform_system == \"Windows\"", test = "sys_platform == \"win32\""}
+markers = {main = "sys_platform == \"win32\" or python_version < \"4.0\" and platform_system == \"Windows\" and extra == \"litestar\"", dev = "platform_system == \"Windows\"", test = "sys_platform == \"win32\""}
 
 [[package]]
 name = "coverage"
@@ -1514,7 +1518,7 @@ version = "50.0.1"
 description = "cryptography is a package which provides cryptographic recipes and primitives to Python developers."
 optional = false
 python-versions = "!=3.9.0,!=3.9.1,>=3.9"
-groups = ["main", "dev", "test"]
+groups = ["main", "dev"]
 files = [
     {file = "cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:b8f852c65863251b9e3a1b8c150ce21e59b522dbb6a7d4bc80e680d38388e986"},
     {file = "cryptography-50.0.1-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:53e279950892dc102c6b4e52af03ae5ea92fac572a1ddab78ca73a997f62b69f"},
@@ -1563,6 +1567,7 @@ files = [
     {file = "cryptography-50.0.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:693c99b49bd37d0d096e4334c10232c77248c415b98d35236094cdf96d57258b"},
     {file = "cryptography-50.0.1.tar.gz", hash = "sha256:5dd9bda1c12b4162f6ff568eeb5e0ff956c28d14406e875cfe8a63a2d414ff20"},
 ]
+markers = {main = "extra == \"encryption\"", dev = "(extra == \"encryption\" or platform_machine != \"ppc64le\" and platform_machine != \"s390x\") and (extra == \"encryption\" or sys_platform == \"linux\")"}
 
 [package.dependencies]
 cffi = {version = ">=2.0.0", markers = "platform_python_implementation != \"PyPy\""}
@@ -1574,10 +1579,10 @@ ssh = ["bcrypt (>=3.1.5)"]
 name = "dill"
 version = "0.4.1"
 description = "serialize all of Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "dill-0.4.1-py3-none-any.whl", hash = "sha256:1e1ce33e978ae97fcfcff5638477032b801c46c7c65cf717f95fbc2248f79a9d"},
     {file = "dill-0.4.1.tar.gz", hash = "sha256:423092df4182177d4d8ba8290c8a5b640c66ab35ec7da59ccfa00f6fa3eea5fa"},
@@ -1646,10 +1651,10 @@ tests = ["asttokens (>=2.1.0)", "coverage", "coverage-enable-subprocess", "ipyth
 name = "faker"
 version = "40.40.0"
 description = "Faker is a Python package that generates fake data for you."
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"faker\") and (extra == \"litestar\" or extra == \"faker\")"
 files = [
     {file = "faker-40.40.0-py3-none-any.whl", hash = "sha256:cd45ebdd1363f92a45740ac49945e49fa18f7e10771884a83c796a235550d7b7"},
     {file = "faker-40.40.0.tar.gz", hash = "sha256:803ee7f920679e7367c3f7b7f97752f5a9780aa5566c71723fbe57d591beafe1"},
@@ -1666,10 +1671,10 @@ tzdata = ["tzdata"]
 name = "fastapi"
 version = "0.141.1"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"fastapi\""
 files = [
     {file = "fastapi-0.141.1-py3-none-any.whl", hash = "sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3"},
     {file = "fastapi-0.141.1.tar.gz", hash = "sha256:e8822fc40db1e1858054d7a949a888695bc9bdce70139178e33bd2871a453ca1"},
@@ -1703,10 +1708,10 @@ files = [
 name = "frozenlist"
 version = "1.8.0"
 description = "A list-like structure which implements collections.abc.MutableSequence"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (extra == \"taskiq\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\") and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:b37f6d31b3dcea7deb5e9696e529a6aa4a898adc33db82da12e4c60a7c4d2011"},
     {file = "frozenlist-1.8.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:ef2b7b394f208233e471abc541cc6991f907ffd47dc72584acee3147899d6565"},
@@ -1862,9 +1867,10 @@ dev = ["flake8", "markdown", "twine", "wheel"]
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"http\") and (extra == \"litestar\" or extra == \"http\")"
 files = [
     {file = "h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"},
     {file = "h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1"},
@@ -1874,9 +1880,10 @@ files = [
 name = "httpcore"
 version = "1.0.9"
 description = "A minimal low-level HTTP client."
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"http\") and (extra == \"litestar\" or extra == \"http\")"
 files = [
     {file = "httpcore-1.0.9-py3-none-any.whl", hash = "sha256:2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55"},
     {file = "httpcore-1.0.9.tar.gz", hash = "sha256:6e34463af53fd2ab5d807f399a9b45ea31c3dfa2276f15a2c3f00afff6e176e8"},
@@ -1896,9 +1903,10 @@ trio = ["trio (>=0.22.0,<1.0)"]
 name = "httpx"
 version = "0.28.1"
 description = "The next generation HTTP client."
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"http\") and (extra == \"litestar\" or extra == \"http\")"
 files = [
     {file = "httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"},
     {file = "httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc"},
@@ -1958,7 +1966,7 @@ version = "3.19"
 description = "Internationalized Domain Names in Applications (IDNA)"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "dev", "docs"]
+groups = ["main", "dev", "docs"]
 files = [
     {file = "idna-3.19-py3-none-any.whl", hash = "sha256:815e7be7a7806d54abb586dc943addc79e8b2ee16915059658cbeff4b1b43bf4"},
     {file = "idna-3.19.tar.gz", hash = "sha256:5e0811a4383b21dc5838069f801c4fb62113b7447663d2530d2bd6e77b49bf15"},
@@ -1973,7 +1981,7 @@ version = "2.3.0"
 description = "brain-dead simple config-ini parsing"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib", "test"]
+groups = ["main", "test"]
 files = [
     {file = "iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12"},
     {file = "iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730"},
@@ -1983,10 +1991,10 @@ files = [
 name = "inquirerpy"
 version = "0.3.4"
 description = "Python port of Inquirer.js (A collection of common interactive command-line user interfaces)"
-optional = false
+optional = true
 python-versions = ">=3.7,<4.0"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "InquirerPy-0.3.4-py3-none-any.whl", hash = "sha256:c65fdfbac1fa00e3ee4fb10679f4d3ed7a012abf4833910e63c295827fe2a7d4"},
     {file = "InquirerPy-0.3.4.tar.gz", hash = "sha256:89d2ada0111f337483cb41ae31073108b2ec1e618a49d7110b0d7ade89fc197e"},
@@ -2363,10 +2371,10 @@ files = [
 name = "litestar"
 version = "2.24.0"
 description = "Litestar - A production-ready, highly performant, extensible ASGI API Framework"
-optional = false
+optional = true
 python-versions = "<4.0,>=3.8"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "litestar-2.24.0-py3-none-any.whl", hash = "sha256:0ef13630173ea147847363f03f0459877ab14a572e68b2af7a25796055513a31"},
     {file = "litestar-2.24.0.tar.gz", hash = "sha256:8f4b137cb115554b9fbc12bd01d398d5bb40ba85f2d333dd73f4b747308bbb46"},
@@ -2413,10 +2421,10 @@ valkey = ["valkey[libvalkey] (>=6.0.2)"]
 name = "litestar-htmx"
 version = "0.5.0"
 description = "HTMX Integration for Litestar"
-optional = false
+optional = true
 python-versions = "<4.0,>=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "litestar_htmx-0.5.0-py3-none-any.whl", hash = "sha256:92833aa47e0d0e868d2a7dbfab75261f124f4b83d4f9ad12b57b9a68f86c50e6"},
     {file = "litestar_htmx-0.5.0.tar.gz", hash = "sha256:e02d1a3a92172c874835fa3e6749d65ae9fc626d0df46719490a16293e2146fb"},
@@ -2429,7 +2437,7 @@ description = "LZ4 Bindings for Python"
 optional = true
 python-versions = ">=3.9"
 groups = ["main"]
-markers = "(extra == \"clickhouse-driver\" or python_version <= \"3.14\") and (extra == \"clickhouse-driver\" or extra == \"clickhouse-connect\" or python_version < \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"clickhouse-driver\")"
+markers = "(extra == \"clickhouse-driver\" or python_version <= \"3.14\") and (extra == \"clickhouse-connect\" or extra == \"clickhouse-driver\") and (python_version < \"3.15\" or extra == \"clickhouse-driver\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "lz4-4.4.5-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:d221fa421b389ab2345640a508db57da36947a437dfe31aeddb8d5c7b646c22d"},
     {file = "lz4-4.4.5-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:7dc1e1e2dbd872f8fae529acd5e4839efd0b141eaa8ae7ce835a9fe80fbad89f"},
@@ -2532,12 +2540,12 @@ version = "4.2.0"
 description = "Python port of markdown-it. Markdown parsing, done right!"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib", "dev"]
+groups = ["main", "dev"]
 files = [
     {file = "markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"},
     {file = "markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "python_version < \"4.0\" and extra == \"litestar\""}
 
 [package.dependencies]
 mdurl = ">=0.1,<1.0"
@@ -2703,12 +2711,12 @@ version = "0.1.2"
 description = "Markdown URL utilities"
 optional = false
 python-versions = ">=3.7"
-groups = ["main", "contrib", "dev"]
+groups = ["main", "dev"]
 files = [
     {file = "mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"},
     {file = "mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "python_version < \"4.0\" and extra == \"litestar\""}
 
 [[package]]
 name = "mergedeep"
@@ -2847,10 +2855,10 @@ files = [
 name = "msgspec"
 version = "0.21.1"
 description = "A fast serialization and validation library, with builtin support for JSON, MessagePack, YAML, and TOML."
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "msgspec-0.21.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:72d9cd03241b8b2edb2e12dcc66c500fa480d8cbd71a8bac105809d468882064"},
     {file = "msgspec-0.21.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ed2ab278200e743a1d2610a4e0c8fc74f6cecb8548544cdec43f927bd9265238"},
@@ -2911,10 +2919,10 @@ yaml = ["pyyaml"]
 name = "multidict"
 version = "6.9.1"
 description = "multidict implementation"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"litestar\") and (sys_platform != \"win32\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"litestar\" or extra == \"clickhouse-connect\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"litestar\") and (implementation_name == \"cpython\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"litestar\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "multidict-6.9.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:aef74e9beabbd6c4aafc091dabff86d046ccf013ce1e4396c0fbb01b4cad9de8"},
     {file = "multidict-6.9.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:1ca5ebe6d454f1e5496cf052386a559f1080bf2de75bf327ebca0a6003b79f19"},
@@ -3093,10 +3101,10 @@ files = [
 name = "multipart"
 version = "2.0.1"
 description = "Parser for multipart/form-data"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "multipart-2.0.1-py3-none-any.whl", hash = "sha256:ac54d6bd0353ee30d2703af75adacd8b2052d4adb634e9e74dc7c5b06e0bcd86"},
     {file = "multipart-2.0.1.tar.gz", hash = "sha256:5dfea7ce4260e10a9e620369449e7d41c269a94e192db9ea4af1a0059cddd370"},
@@ -3106,10 +3114,10 @@ files = [
 name = "multiprocess"
 version = "0.70.19"
 description = "better multiprocessing and multithreading in Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "multiprocess-0.70.19-pp310-pypy310_pp73-macosx_10_15_x86_64.whl", hash = "sha256:02e5c35d7d6cd2bdc89c1858867f7bde4012837411023a4696c148c1bdd7c80e"},
     {file = "multiprocess-0.70.19-pp310-pypy310_pp73-macosx_11_0_arm64.whl", hash = "sha256:79576c02d1207ec405b00cabf2c643c36070800cca433860e14539df7818b2aa"},
@@ -3261,7 +3269,7 @@ version = "1.10.0"
 description = "Node.js virtual environment builder"
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
-groups = ["dev", "test"]
+groups = ["dev", "pyright-cli"]
 files = [
     {file = "nodeenv-1.10.0-py2.py3-none-any.whl", hash = "sha256:5bb13e3eed2923615535339b3c620e76779af4cb4c6a90deccc9e36b274d3827"},
     {file = "nodeenv-1.10.0.tar.gz", hash = "sha256:996c191ad80897d076bdfba80a41994c2b47c68e224c542b48feba42ba00f8bb"},
@@ -3327,7 +3335,7 @@ version = "3.12.0"
 description = "Fast, correct Python JSON library supporting dataclasses, datetimes, and numpy"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
 files = [
     {file = "orjson-3.12.0-cp310-cp310-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl", hash = "sha256:747843254519dd43b93eee3153a19e5a509334320c4d2f823ec879232db5c796"},
     {file = "orjson-3.12.0-cp310-cp310-manylinux2014_armv7l.manylinux_2_17_armv7l.whl", hash = "sha256:7c2ad193c8004254f34b499f3bd2c80f043d10754aff2b38f93da574f4883f98"},
@@ -3395,7 +3403,6 @@ files = [
     {file = "orjson-3.12.0-cp315-cp315-win_arm64.whl", hash = "sha256:859fc4196855890150bb08e649b30d2c93b249b3e3edd0d3bb2231abf8aa8adc"},
     {file = "orjson-3.12.0.tar.gz", hash = "sha256:d14203fb1aae2ad9b3d52f8a0e82aeb10197ef1c9bc61da7f358bd70b00123d5"},
 ]
-markers = {contrib = "python_version < \"4.0\""}
 
 [[package]]
 name = "packaging"
@@ -3403,7 +3410,7 @@ version = "26.3"
 description = "Core utilities for Python packages"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "dev", "docs", "test"]
+groups = ["main", "dev", "docs", "test"]
 files = [
     {file = "packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"},
     {file = "packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79"},
@@ -3429,10 +3436,10 @@ lint = ["black"]
 name = "pamqp"
 version = "4.0.1"
 description = "RabbitMQ Focused AMQP low-level library"
-optional = false
+optional = true
 python-versions = ">=3.11"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"rabbitmq\""
 files = [
     {file = "pamqp-4.0.1-py3-none-any.whl", hash = "sha256:a547f45128b06e42ce8d7a739b0cfcc40f2c724770622eaaff4a3f587b1cf7d0"},
     {file = "pamqp-4.0.1.tar.gz", hash = "sha256:9dd13b828e346622793981f14a5df817fce5de998c746209d6c0154eb8403970"},
@@ -3495,10 +3502,10 @@ ptyprocess = ">=0.5"
 name = "pfzy"
 version = "0.3.4"
 description = "Python port of the fzy fuzzy string matching algorithm"
-optional = false
+optional = true
 python-versions = ">=3.7,<4.0"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "pfzy-0.3.4-py3-none-any.whl", hash = "sha256:5f50d5b2b3207fa72e7ec0ef08372ef652685470974a107d0d4999fc5a903a96"},
     {file = "pfzy-0.3.4.tar.gz", hash = "sha256:717ea765dd10b63618e7298b2d98efd819e0b30cd5905c9707223dceeb94b3f1"},
@@ -3511,9 +3518,10 @@ docs = ["Sphinx (>=4.1.2,<5.0.0)", "furo (>=2021.8.17-beta.43,<2022.0.0)", "myst
 name = "phonenumbers"
 version = "9.0.40"
 description = "Python version of Google's common library for parsing, formatting, storing and validating international phone numbers."
-optional = false
+optional = true
 python-versions = ">=2.5"
-groups = ["main", "test"]
+groups = ["main"]
+markers = "extra == \"phone\""
 files = [
     {file = "phonenumbers-9.0.40-py2.py3-none-any.whl", hash = "sha256:189c028c4acd41ee80782e50f74a91260bd76d9115c83be94302509e1cdb5e84"},
     {file = "phonenumbers-9.0.40.tar.gz", hash = "sha256:a0dd1bc98efa0b6f5839c7b1fface2ebdf0a811645dd8211ae3f037a17ec07ac"},
@@ -3537,7 +3545,7 @@ version = "1.6.0"
 description = "plugin and hook calling mechanisms for python"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "test"]
+groups = ["main", "test"]
 files = [
     {file = "pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746"},
     {file = "pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3"},
@@ -3551,10 +3559,10 @@ testing = ["coverage", "pytest", "pytest-benchmark"]
 name = "polyfactory"
 version = "3.3.0"
 description = "Mock data generation factories"
-optional = false
+optional = true
 python-versions = "<4.0,>=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "polyfactory-3.3.0-py3-none-any.whl", hash = "sha256:686abcaa761930d3df87b91e95b26b8d8cb9fdbbbe0b03d5f918acff5c72606e"},
     {file = "polyfactory-3.3.0.tar.gz", hash = "sha256:237258b6ff43edf362ffd1f68086bb796466f786adfa002b0ac256dbf2246e9a"},
@@ -3596,14 +3604,14 @@ virtualenv = ">=20.10.0"
 name = "prompt-toolkit"
 version = "3.0.53"
 description = "Library for building powerful interactive command lines in Python"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"ipython\") and (extra == \"robyn\" or extra == \"ipython\")"
 files = [
     {file = "prompt_toolkit-3.0.53-py3-none-any.whl", hash = "sha256:01c0891d7f9237d5e339f7d3e42cdae80b7534abb1c7c0e3352efba6231492f2"},
     {file = "prompt_toolkit-3.0.53.tar.gz", hash = "sha256:9ec8a0ad96d5c56148b3f914aa79c1564c3fde5d2e6b876e7bc327e353cf8fa6"},
 ]
-markers = {main = "python_version < \"4.0\" or extra == \"ipython\"", contrib = "python_version < \"4.0\""}
 
 [package.dependencies]
 wcwidth = ">=0.1.4"
@@ -3612,10 +3620,10 @@ wcwidth = ">=0.1.4"
 name = "propcache"
 version = "0.5.4"
 description = "Accelerated property cache"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"rabbitmq\") and (sys_platform != \"win32\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"clickhouse-connect\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\" or extra == \"rabbitmq\") and (implementation_name == \"cpython\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "propcache-0.5.4-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:b77c313314524ca9c38fbd70f73515d04597ac58c40c939bc0e71eeb4abff680"},
     {file = "propcache-0.5.4-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:8f911c395cef73c510bac566da9507bb6a43e7763d0c79138dc60ee53f11207e"},
@@ -3828,21 +3836,21 @@ version = "3.0"
 description = "C parser in Python"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "dev", "test"]
-markers = "platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\""
+groups = ["main", "dev"]
 files = [
     {file = "pycparser-3.0-py3-none-any.whl", hash = "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"},
     {file = "pycparser-3.0.tar.gz", hash = "sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29"},
 ]
+markers = {main = "extra == \"encryption\" and platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\"", dev = "(extra == \"encryption\" or platform_machine != \"ppc64le\" and platform_machine != \"s390x\") and (extra == \"encryption\" or sys_platform == \"linux\") and platform_python_implementation != \"PyPy\" and implementation_name != \"PyPy\""}
 
 [[package]]
 name = "pycron"
 version = "3.3.0"
 description = "Simple cron-like parser, which determines if current datetime matches conditions."
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"taskiq\""
 files = [
     {file = "pycron-3.3.0-py3-none-any.whl", hash = "sha256:ab04a1ffa01257cc809de777cad1bf2e1a329ec6986059585b730269b7a18806"},
     {file = "pycron-3.3.0.tar.gz", hash = "sha256:877017822a65b949713b4746dcd3a3ff5bbd8b26db55e20e472dc191ea539d69"},
@@ -3852,9 +3860,10 @@ files = [
 name = "pydantic"
 version = "2.13.5"
 description = "Data validation using Python type hints"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\") and (extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\" or extra == \"taskiq\")"
 files = [
     {file = "pydantic-2.13.5-py3-none-any.whl", hash = "sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"},
     {file = "pydantic-2.13.5.tar.gz", hash = "sha256:51a9c5f7b2f8e636f04c6cada605d9b6a3bf1348fdf945a3d8869b19bba0ee08"},
@@ -3874,9 +3883,10 @@ timezone = ["tzdata ; python_version >= \"3.9\" and platform_system == \"Windows
 name = "pydantic-core"
 version = "2.46.5"
 description = "Core functionality for Pydantic validation and serialization"
-optional = false
+optional = true
 python-versions = ">=3.9"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\") and (extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\" or extra == \"taskiq\")"
 files = [
     {file = "pydantic_core-2.46.5-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:657b40d6240c0a7b6a64b30f22d1e3aa631c7e846c621b0c0f6d1d75e2e15ea6"},
     {file = "pydantic_core-2.46.5-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ecb42011e12ee19cafbc312887cbf3546959fe02fbad44f272d4be5baa997615"},
@@ -4009,7 +4019,7 @@ version = "2.21.0"
 description = "Pygments is a syntax highlighting package written in Python."
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "dev", "docs", "test"]
+groups = ["main", "dev", "docs", "test"]
 files = [
     {file = "pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"},
     {file = "pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c"},
@@ -4043,7 +4053,7 @@ version = "1.1.414"
 description = "Command line wrapper for pyright"
 optional = false
 python-versions = ">=3.7"
-groups = ["test"]
+groups = ["pyright-cli"]
 files = [
     {file = "pyright-1.1.414-py3-none-any.whl", hash = "sha256:2a6b4b3298c9eec174c5ed83bd338de6eee82df2992f3e1930e6199d381be36f"},
     {file = "pyright-1.1.414.tar.gz", hash = "sha256:523c0a97c60da6333234955c277730c9cf4f5bd6d5399e7b7d2b0fc5d3599524"},
@@ -4064,7 +4074,7 @@ version = "9.1.1"
 description = "pytest: simple powerful testing with Python"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib", "test"]
+groups = ["main", "test"]
 files = [
     {file = "pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c"},
     {file = "pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313"},
@@ -4086,7 +4096,7 @@ version = "1.4.0"
 description = "Pytest support for asyncio"
 optional = false
 python-versions = ">=3.10"
-groups = ["main", "contrib", "test"]
+groups = ["main", "test"]
 files = [
     {file = "pytest_asyncio-1.4.0-py3-none-any.whl", hash = "sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1"},
     {file = "pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42"},
@@ -4222,12 +4232,11 @@ version = "2026.3.post1"
 description = "World timezone definitions, modern and historical"
 optional = false
 python-versions = "*"
-groups = ["main", "test"]
+groups = ["main", "pytz"]
 files = [
     {file = "pytz-2026.3.post1-py2.py3-none-any.whl", hash = "sha256:dd95840dd199baea12d9cc096a1d452caa6596a1c1e4b5f3dbd1541855d5e815"},
     {file = "pytz-2026.3.post1.tar.gz", hash = "sha256:2211d3fcf9a797d3405cac96ac7f61d80e6a644f72a3309607282fe8a2010c5d"},
 ]
-markers = {main = "python_version < \"4.0\""}
 
 [[package]]
 name = "pywin32-ctypes"
@@ -4248,7 +4257,7 @@ version = "6.0.3"
 description = "YAML parser and emitter for Python"
 optional = false
 python-versions = ">=3.8"
-groups = ["main", "contrib", "dev", "docs"]
+groups = ["main", "dev", "docs"]
 files = [
     {file = "PyYAML-6.0.3-cp38-cp38-macosx_10_13_x86_64.whl", hash = "sha256:c2514fceb77bc5e7a2f7adfaa1feb2fb311607c9cb518dbc378688ec73d8292f"},
     {file = "PyYAML-6.0.3-cp38-cp38-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9c57bb8c96f6d1808c030b1687b9b5fb476abaa47f0db9c0101f5e9f394e97f4"},
@@ -4324,7 +4333,7 @@ files = [
     {file = "pyyaml-6.0.3-cp39-cp39-win_amd64.whl", hash = "sha256:2e71d11abed7344e42a8849600193d15b6def118602c4c176f748e4583246007"},
     {file = "pyyaml-6.0.3.tar.gz", hash = "sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "(python_version < \"4.0\" or extra == \"yaml\") and (extra == \"litestar\" or extra == \"yaml\")"}
 
 [[package]]
 name = "pyyaml-env-tag"
@@ -4365,9 +4374,10 @@ md = ["comrak (>=0.0.13)"]
 name = "redis"
 version = "8.1.0"
 description = "Python client for Redis database and key-value store"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "extra == \"redis\""
 files = [
     {file = "redis-8.1.0-py3-none-any.whl", hash = "sha256:a4fe1aac3d3b3cc791d4b3d5931c5a956045dc951ee74d1c913ee3ac4d2ee9fb"},
     {file = "redis-8.1.0.tar.gz", hash = "sha256:6e1a19beef9225c83efd689c7e6b7da2d5215b1f42cd13b7fc3714d0a09c7b25"},
@@ -4439,12 +4449,12 @@ version = "15.0.0"
 description = "Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal"
 optional = false
 python-versions = ">=3.9.0"
-groups = ["main", "contrib", "dev"]
+groups = ["main", "dev"]
 files = [
     {file = "rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb"},
     {file = "rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "python_version < \"4.0\" and extra == \"litestar\""}
 
 [package.dependencies]
 markdown-it-py = ">=2.2.0"
@@ -4457,10 +4467,10 @@ jupyter = ["ipywidgets (>=7.5.1,<9)"]
 name = "rich-click"
 version = "1.9.9"
 description = "Format click help output nicely with rich"
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "rich_click-1.9.9-py3-none-any.whl", hash = "sha256:365e7a9d0adb42e41ea832a0a12e02c44c079a26536dee688125eb9814f97274"},
     {file = "rich_click-1.9.9.tar.gz", hash = "sha256:324cba7513cd4187ee92b2eef21f071714e45be062458c8b157bd7e0c81103e3"},
@@ -4475,10 +4485,10 @@ rich = ">=12"
 name = "robyn"
 version = "0.88.0"
 description = "A Super Fast Async Python Web Framework with a Rust runtime."
-optional = false
+optional = true
 python-versions = "*"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "robyn-0.88.0-cp310-cp310-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:fc87e7fde66093d78ce2bf8a8cd0eed19622bc33c79abf376f51ef511cdeb93d"},
     {file = "robyn-0.88.0-cp310-cp310-macosx_10_12_x86_64.whl", hash = "sha256:d59fecbbd7812a208d52b565a5cfd9c4bb7d9cd174b6621f4dc5d10ea3d7f037"},
@@ -4565,10 +4575,10 @@ files = [
 name = "rustimport"
 version = "1.3.4"
 description = "Import Rust files directly from Python!"
-optional = false
+optional = true
 python-versions = "*"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "rustimport-1.3.4-py3-none-any.whl", hash = "sha256:f2b931ff4e0fa931028066a7dacaae449b1a4601fe7a553c35f3dd63aba97ce0"},
     {file = "rustimport-1.3.4.tar.gz", hash = "sha256:ba80e3c28af07ba3910ad395613d01f9e421bfb59fbb1ac050e2b5d9b78b4980"},
@@ -4610,10 +4620,10 @@ files = [
 name = "sniffio"
 version = "1.3.1"
 description = "Sniff out which async library your code is running under"
-optional = false
+optional = true
 python-versions = ">=3.7"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"litestar\""
 files = [
     {file = "sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2"},
     {file = "sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc"},
@@ -4623,9 +4633,10 @@ files = [
 name = "sqlite-vec"
 version = "0.1.9"
 description = ""
-optional = false
+optional = true
 python-versions = "*"
-groups = ["main", "test"]
+groups = ["main"]
+markers = "extra == \"sqlite-vec\""
 files = [
     {file = "sqlite_vec-0.1.9-py3-none-macosx_10_6_x86_64.whl", hash = "sha256:1b62a7f0a060d9475575d4e599bbf94a13d85af896bc1ce86ee80d1b5b48e5fb"},
     {file = "sqlite_vec-0.1.9-py3-none-macosx_11_0_arm64.whl", hash = "sha256:1d52e30513bae4cc9778ddbf6145610434081be4c3afe57cd877893bad9f6b6c"},
@@ -4659,10 +4670,10 @@ tests = ["cython", "littleutils", "pygments", "pytest", "typeguard"]
 name = "starlette"
 version = "1.7.0"
 description = "The little ASGI library that shines."
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"fastapi\""
 files = [
     {file = "starlette-1.7.0-py3-none-any.whl", hash = "sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e"},
     {file = "starlette-1.7.0.tar.gz", hash = "sha256:c79f74ea63cff761804fbbfb182f1e0b440c2d07b164d24700c5a1bab5d6ff5d"},
@@ -4691,10 +4702,10 @@ files = [
 name = "taskiq"
 version = "0.13.0"
 description = "Distributed task queue with full async support"
-optional = false
+optional = true
 python-versions = "<4,>=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"taskiq\""
 files = [
     {file = "taskiq-0.13.0-py3-none-any.whl", hash = "sha256:b51e1961d8919bc897caa6f5484ac08d812341413a20a3704b69c597c4c154d2"},
     {file = "taskiq-0.13.0.tar.gz", hash = "sha256:7d56609a6c5a20b0c9da67e9f310ec9640266f620b8f81880bccd5f16913e687"},
@@ -4721,10 +4732,10 @@ zmq = ["pyzmq (>=26)"]
 name = "taskiq-dependencies"
 version = "1.5.7"
 description = "FastAPI like dependency injection implementation"
-optional = false
+optional = true
 python-versions = "<4.0,>=3.9"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"taskiq\""
 files = [
     {file = "taskiq_dependencies-1.5.7-py3-none-any.whl", hash = "sha256:6fcee5d159bdb035ef915d4d848826169b6f06fe57cc2297a39b62ea3e76036f"},
     {file = "taskiq_dependencies-1.5.7.tar.gz", hash = "sha256:0d3b240872ef152b719153b9526d866d2be978aeeaea6600e878414babc2dcb4"},
@@ -4734,10 +4745,10 @@ files = [
 name = "toml"
 version = "0.10.2"
 description = "Python Library for Tom's Obvious, Minimal Language"
-optional = false
+optional = true
 python-versions = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and extra == \"robyn\""
 files = [
     {file = "toml-0.10.2-py2.py3-none-any.whl", hash = "sha256:806143ae5bfb6a3c6e736a764057db0e6a0e05e338b5630894a5f779cabb4f9b"},
     {file = "toml-0.10.2.tar.gz", hash = "sha256:b3bda1d108d5dd99f4a20d24d9c348e91c4db7ab1b749200bded2f839ccbe68f"},
@@ -4816,19 +4827,21 @@ version = "4.16.0"
 description = "Backported and Experimental Type Hints for Python 3.9+"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "dev", "test"]
+groups = ["main", "dev", "pyright-cli", "test"]
 files = [
     {file = "typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"},
     {file = "typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5"},
 ]
+markers = {test = "python_version < \"3.14\" and (python_version == \"3.12\" or sys_platform == \"win32\" or implementation_name != \"cpython\")"}
 
 [[package]]
 name = "typing-inspection"
 version = "0.4.4"
 description = "Runtime typing introspection tools"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\") and (extra == \"pydantic\" or extra == \"request-query\" or extra == \"litestar\" or extra == \"fastapi\" or extra == \"robyn\" or extra == \"taskiq\")"
 files = [
     {file = "typing_inspection-0.4.4-py3-none-any.whl", hash = "sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"},
     {file = "typing_inspection-0.4.4.tar.gz", hash = "sha256:547274fa6b0a561ccf549cc9524b999a578e737d015d8709d021f9d0d13bea47"},
@@ -4843,20 +4856,21 @@ version = "2026.3"
 description = "Provider of IANA time zone data"
 optional = false
 python-versions = ">=2"
-groups = ["main", "contrib", "test"]
+groups = ["main"]
+markers = "(sys_platform == \"win32\" or platform_system == \"Windows\") and (sys_platform == \"win32\" or python_version < \"4.0\" or extra == \"tzlocal\" or extra == \"faker\") and (sys_platform == \"win32\" or python_version < \"3.15\" or extra == \"tzlocal\" or extra == \"faker\" or extra == \"litestar\") and (implementation_name == \"cpython\" or sys_platform == \"win32\" or python_version <= \"3.14\" or extra == \"tzlocal\" or extra == \"faker\" or extra == \"litestar\" or extra == \"clickhouse-driver\") and (sys_platform == \"win32\" or extra == \"clickhouse-driver\" or extra == \"tzlocal\" or extra == \"faker\" or extra == \"litestar\")"
 files = [
     {file = "tzdata-2026.3-py2.py3-none-any.whl", hash = "sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931"},
     {file = "tzdata-2026.3.tar.gz", hash = "sha256:4a1518b8993086a7982523e071643f3c0e5f213e75b21318e78bcabfff9d1415"},
 ]
-markers = {main = "sys_platform == \"win32\" or platform_system == \"Windows\"", contrib = "python_version < \"4.0\" and (sys_platform == \"win32\" or platform_system == \"Windows\")", test = "sys_platform == \"win32\" or platform_system == \"Windows\""}
 
 [[package]]
 name = "tzlocal"
 version = "5.4.4"
 description = "tzinfo object for the local timezone"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "test"]
+groups = ["main"]
+markers = "(extra == \"tzlocal\" or python_version <= \"3.14\") and (extra == \"clickhouse-driver\" or extra == \"tzlocal\") and (python_version < \"3.15\" or extra == \"tzlocal\" or extra == \"clickhouse-driver\")"
 files = [
     {file = "tzlocal-5.4.4-py3-none-any.whl", hash = "sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15"},
     {file = "tzlocal-5.4.4.tar.gz", hash = "sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4"},
@@ -4892,10 +4906,10 @@ zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
 name = "uvloop"
 version = "0.22.1"
 description = "Fast implementation of asyncio event loop on top of libuv"
-optional = false
+optional = true
 python-versions = ">=3.8.1"
-groups = ["main", "contrib"]
-markers = "sys_platform != \"win32\" and python_version < \"4.0\" and platform_python_implementation == \"CPython\" and platform_machine != \"armv7l\""
+groups = ["main"]
+markers = "sys_platform != \"win32\" and python_version < \"4.0\" and platform_machine != \"armv7l\" and platform_python_implementation == \"CPython\" and extra == \"robyn\""
 files = [
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:ef6f0d4cc8a9fa1f6a910230cd53545d9a14479311e87e3cb225495952eb672c"},
     {file = "uvloop-0.22.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:7cd375a12b71d33d46af85a3343b35d98e8116134ba404bd657b3b1d15988792"},
@@ -4977,7 +4991,7 @@ version = "6.0.0"
 description = "Filesystem events monitoring"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "contrib", "docs"]
+groups = ["main", "docs"]
 files = [
     {file = "watchdog-6.0.0-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:d1cdb490583ebd691c012b3d6dae011000fe42edb7a82ece80965b42abd61f26"},
     {file = "watchdog-6.0.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:bc64ab3bdb6a04d69d4023b29422170b74681784ffb9463ed4870cf2f3e66112"},
@@ -5010,7 +5024,7 @@ files = [
     {file = "watchdog-6.0.0-py3-none-win_ia64.whl", hash = "sha256:a1914259fa9e1454315171103c6a30961236f508b9b623eae470268bbcc6a22f"},
     {file = "watchdog-6.0.0.tar.gz", hash = "sha256:9ddf7c82fda3ae8e24decda1338ede66e1c99883db93711d8fb941eaa2d8c282"},
 ]
-markers = {main = "python_version < \"4.0\"", contrib = "python_version < \"4.0\""}
+markers = {main = "python_version < \"4.0\" and extra == \"robyn\""}
 
 [package.extras]
 watchmedo = ["PyYAML (>=3.10)"]
@@ -5019,23 +5033,23 @@ watchmedo = ["PyYAML (>=3.10)"]
 name = "wcwidth"
 version = "0.8.3"
 description = "Measures the displayed width of unicode strings in a terminal"
-optional = false
+optional = true
 python-versions = ">=3.8"
-groups = ["main", "contrib"]
+groups = ["main"]
+markers = "(python_version < \"4.0\" or extra == \"ipython\") and (extra == \"robyn\" or extra == \"ipython\")"
 files = [
     {file = "wcwidth-0.8.3-py3-none-any.whl", hash = "sha256:d5b73dba6158a595ec9370350e7f2637bcac8d6c5e4fde34f30fcffb6103a5e4"},
     {file = "wcwidth-0.8.3.tar.gz", hash = "sha256:d128512515fbf4612e0ff21fd6380399210318b7b54a9af59dff8454cf9730eb"},
 ]
-markers = {main = "python_version < \"4.0\" or extra == \"ipython\"", contrib = "python_version < \"4.0\""}
 
 [[package]]
 name = "yarl"
 version = "1.25.1"
 description = "Yet another URL library"
-optional = false
+optional = true
 python-versions = ">=3.10"
-groups = ["main", "contrib"]
-markers = "python_version < \"4.0\""
+groups = ["main"]
+markers = "python_version < \"4.0\" and (python_version < \"3.15\" or extra == \"taskiq\" or extra == \"rabbitmq\") and (sys_platform != \"win32\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"clickhouse-connect\") and (extra == \"clickhouse-connect\" or extra == \"taskiq\" or extra == \"rabbitmq\") and (implementation_name == \"cpython\" or python_version <= \"3.14\" or extra == \"taskiq\" or extra == \"rabbitmq\" or extra == \"clickhouse-connect\")"
 files = [
     {file = "yarl-1.25.1-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:142c06c4d6a35ee3ec5da08499805e879cb3ca7c1fbfbecb0140fe72403818d6"},
     {file = "yarl-1.25.1-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:24ce942011a61953e7d313438038f4d32ff21387b775f58a957f7a07dd55ef95"},
@@ -5187,6 +5201,7 @@ asyncpg = ["asyncpg", "asyncpg"]
 clickhouse-connect = ["clickhouse-connect"]
 clickhouse-driver = ["clickhouse-cityhash", "clickhouse-driver", "lz4", "lz4", "lz4"]
 encryption = ["cryptography"]
+faker = ["faker"]
 fastapi = ["fastapi", "pydantic", "pydantic"]
 http = ["httpx"]
 ipython = ["ipython", "nest-asyncio"]
@@ -5195,6 +5210,7 @@ litestar = ["litestar", "pydantic", "pydantic"]
 mypy = ["mypy"]
 opentelemetry = ["opentelemetry-api", "opentelemetry-sdk"]
 phone = ["phonenumbers"]
+pydantic = ["pydantic", "pydantic"]
 pyright = ["mypy"]
 pytest = ["pytest", "pytest-asyncio"]
 rabbitmq = ["aio-pika"]
@@ -5204,8 +5220,9 @@ robyn = ["pydantic", "pydantic", "robyn"]
 sqlite-vec = ["sqlite-vec"]
 taskiq = ["taskiq"]
 tzlocal = ["tzlocal"]
+yaml = ["pyyaml"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "a46e5519ce350d40351212e0dda5fea7920212924fe9279e053f5e366b83cae8"
+content-hash = "1833f296bf3bf6212ce3d345ed4b3dcd009ebe8344d8bb09aa1cf4e676a6af52"

@@ -575,6 +575,7 @@ async def test_a_bool_or_nan_bound_is_refused(db_ranges):
     assert await DecimalRangeThing.objects.count() == 0
 
 
+@pytest.mark.requires("pydantic")
 @test.requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_a_range_given_as_its_schema_writes_it(db_ranges):

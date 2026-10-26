@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 from hare import Connections, Hare
 from hare.contrib.test import requires_features
@@ -42,6 +41,7 @@ from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields, Tournament
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.server_session import ServerSession
 from tests.utils.waiting import wait_until
 
 
@@ -351,6 +351,7 @@ async def test_rust_pg_cancelled_query_on_an_acquired_connection_frees_it(db_iso
             await Hare.get_context().drop_databases()
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_pool_failing_to_open_closes_a_connection_it_still_prepared(db_isolated_no_schema):
@@ -412,6 +413,7 @@ async def test_asyncpg_pool_failing_to_open_closes_a_connection_it_still_prepare
         gc.enable()
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_pool_failing_to_open_closes_the_connections_it_opened(db_isolated_no_schema):
@@ -713,9 +715,12 @@ async def test_explain_format_text(db_simple):
     assert isinstance(result[0]["QUERY PLAN"], str)
 
 
+@pytest.mark.requires("yaml")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_explain_format_yaml(db_simple):
+    import yaml
+
     await Tournament.objects.create(name="Test")
     result = await Tournament.objects.all().explain(output_format="yaml")
     plan = yaml.safe_load(result[0]["QUERY PLAN"])
@@ -838,6 +843,7 @@ async def test_explain_default_verbose(db_simple):
     assert "Output" in query_plan["Plan"]
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_connection_loss_raises_db_connection_error(db_simple):
@@ -899,6 +905,7 @@ async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
     assert len(shielded_calls) >= 2, "begin() must route its real BEGIN through _run_shielded_from_cancellation too"
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_query_cancel_deadlock_and_shutdown_exceptions_translated(db_simple):
@@ -1028,13 +1035,13 @@ async def test_bad_pool_size_kwarg_raises_configuration_error_at_construction_ti
         )
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_asyncpg_db_delete_with_active_connection_raises_operational_error(db_simple):
-    """db_delete() (PostgresqlClient.db_delete -> DROP DATABASE) against a database another
-    session still holds a connection to used to raise asyncpg's raw, untyped ObjectInUseError -
-    confirmed live here against a real second connection rather than a mocked one, since the
-    fix is a genuine SQLSTATE-class-55 mapping, not just an exception-translation unit test."""
+async def test_db_delete_ends_the_sessions_still_on_the_test_database(db_simple):
+    """db_delete() of a test database another session still holds - one an event loop closed in the
+    middle of a query left running - refused the drop ("being accessed by other users") and failed the
+    test run's teardown; the server now ends the sessions first."""
     _, is_asyncpg, _, _ = _get_db_config()
     if not is_asyncpg:
         pytest.skip("asyncpg-specific _translate_exceptions mapping")
@@ -1073,8 +1080,8 @@ async def test_asyncpg_db_delete_with_active_connection_raises_operational_error
                 host=shared.host,
                 port=shared.port,
             )
-            with pytest.raises(OperationalError):
-                await target.db_delete()
+            await target.db_delete()
+            assert await admin.execute_dicts("SELECT 1 FROM pg_database WHERE datname = $1", [db_name]) == []
         finally:
             await other_session.close()
     finally:
@@ -1221,10 +1228,9 @@ async def test_rust_pg_mid_query_connection_loss_raises_db_connection_error(db_s
 async def test_closing_the_pool_under_a_checked_out_connection_does_not_break_its_release(
     db_isolated_no_schema, monkeypatch
 ):
-    import hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client as asyncpg_client_module
-
     # close() stops waiting for the busy connection and terminates the pool almost at once.
-    monkeypatch.setattr(asyncpg_client_module, "POOL_CLOSE_TIMEOUT_SECONDS", 0.2)
+    client_class = DatabaseUnderTest.get_driver().get_client_class({})
+    monkeypatch.setattr(sys.modules[client_class.__module__], "POOL_CLOSE_TIMEOUT_SECONDS", 0.2)
     conn = db_isolated_no_schema.get_connection()
     await conn.execute("SELECT 1")
 
@@ -2362,8 +2368,6 @@ async def test_rust_pg_closing_the_pool_ends_a_transaction_still_open(db_isolate
     db_config, _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("the pool of rust_pg")
-    import asyncpg
-
     from hare.dialects.postgresql.drivers.rust_pg.client import rust_pg_client
 
     monkeypatch.setattr(rust_pg_client, "POOL_CLOSE_TIMEOUT_SECONDS", 0.2)
@@ -2381,13 +2385,7 @@ async def test_rust_pg_closing_the_pool_ends_a_transaction_still_open(db_isolate
         holder = asyncio.create_task(hold_transaction())
         await holding.wait()
         await connection.close()
-        observer = await asyncpg.connect(
-            host=connection.direct_host or connection.host,
-            port=connection.direct_port or connection.port,
-            user=connection.user,
-            password=connection.password,
-            database="postgres",
-        )
+        observer = await ServerSession.open(DatabaseUnderTest.get_url(), "postgres")
         try:
 
             async def has_no_sessions() -> bool:
@@ -2454,12 +2452,9 @@ async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_rou
 def _make_pool_client(application_name: str, **options: Any) -> Any:
     """A client of the configured Postgres driver on the server's own database, its sessions told
     apart by ``application_name``."""
-    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
-    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
-
-    db_config, _, _, is_rust_pg = _get_db_config()
+    db_config, _, _, _ = _get_db_config()
     credentials = db_config["connections"]["models"]["credentials"]
-    client_class = RustPgClient if is_rust_pg else AsyncpgClient
+    client_class = DatabaseUnderTest.get_driver().get_client_class(credentials)
     return client_class(
         connection_alias="pool_closing",
         user=credentials["user"],
@@ -2486,22 +2481,12 @@ async def _is_running(conn, query_start: str) -> bool:
 
 
 async def _count_sessions(application_name: str) -> int:
-    import asyncpg
-
     if DatabaseUnderTest.pools_server_sessions():
         pytest.skip(
             "a transaction pooler keeps its server sessions, with the client's application_name, after the "
             "client's connections close"
         )
-    db_config, _, _, _ = _get_db_config()
-    credentials = db_config["connections"]["models"]["credentials"]
-    counter = await asyncpg.connect(
-        user=credentials["user"],
-        password=credentials["password"],
-        host=credentials["host"],
-        port=credentials["port"],
-        database="postgres",
-    )
+    counter = await ServerSession.open(DatabaseUnderTest.get_url(), "postgres")
     try:
         return await counter.fetchval(
             "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", application_name
@@ -2565,6 +2550,7 @@ async def test_a_close_while_the_pool_sets_itself_up_opens_it_anew(db_isolated_n
     await wait_until(lambda: _has_no_sessions(application_name))
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_connections_still_opening_when_the_pool_closes_are_closed(db_isolated_no_schema):

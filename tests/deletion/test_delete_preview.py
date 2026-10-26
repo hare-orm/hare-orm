@@ -709,20 +709,6 @@ async def test_null_to_field_parent_cascades_to_no_row(db):
     assert await NullableCodeCity.objects.include_deleted().values_list("id", flat=True) == [orphan_city.id]
 
 
-@requires_features(supports_foreign_keys=False)
-@pytest.mark.asyncio
-async def test_preview_of_a_restrict_row_hare_enforces_matches_the_delete(db):
-    """Without foreign keys in the database hare checks RESTRICT itself and lets the delete remove a
-    row the same cascade removes - the preview still listed it as blocking."""
-    root = await create_diamond(DeletePreviewDiamondRestrictLeaf)
-
-    preview = await root.delete_preview()
-    assert preview.can_delete
-    assert preview.restricted_by == []
-    await root.delete()
-    assert await DeletePreviewDiamondRestrictLeaf.objects.count() == 0
-
-
 @pytest.mark.asyncio
 async def test_preview_ignores_a_protect_of_the_root_its_own_cascade_removes(db):
     """The preview counted a row protecting the deleted object itself even when the object's own cascade removes

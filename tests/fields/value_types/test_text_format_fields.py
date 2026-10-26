@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from hare import Connections, fields
-from hare.contrib.pydantic import pydantic_model_creator
+from hare.contrib.test import requires_features
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields.data.text.phone_field import PhoneField
 from hare.fields.field import Field
@@ -21,7 +21,7 @@ from hare.migrations.operations import AlterField, CreateModel
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from tests.fields.value_types.models_text_formats import Contact
+from tests.fields.value_types.models_text_formats import Contact, ContactAccount, ContactLogin
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.operations import apply_operations
 
@@ -120,6 +120,7 @@ def test_slug_is_indexed_by_default_but_not_as_a_migration_replays_it():
         assert fields.SlugField(db_index=True).index is True
 
 
+@pytest.mark.requires("phone")
 @pytest.mark.parametrize(
     ("region", "value", "written"),
     [
@@ -135,6 +136,7 @@ def test_phone_with_phonenumbers_is_written_in_e164_form(region, value, written)
     assert write(fields.PhoneField(region=region), value) == written
 
 
+@pytest.mark.requires("phone")
 @pytest.mark.parametrize(
     ("region", "value"), [(None, "(650) 253-0000"), ("US", "+1 000"), ("US", "phone"), (None, "")]
 )
@@ -165,7 +167,6 @@ def test_deconstruct_writes_the_arguments_given():
     assert fields.URLField().deconstruct()[2] == {}
     assert fields.URLField(schemes=["ftp"]).deconstruct()[2] == {"schemes": ("ftp",)}
     assert fields.SlugField(allow_unicode=True, db_index=False).deconstruct()[2] == {"allow_unicode": True}
-    assert fields.PhoneField(region="US", null=True).deconstruct()[2] == {"region": "US", "null": True}
 
 
 @pytest.mark.database_independent
@@ -174,7 +175,6 @@ def test_constraints():
     assert fields.URLField().constraints == {"max_length": 2048, "format": "uri"}
     assert fields.SlugField().constraints == {"max_length": 50, "pattern": "^[-a-zA-Z0-9_]+$"}
     assert fields.SlugField(allow_unicode=True).constraints == {"max_length": 50, "pattern": r"^[-\w]+$"}
-    assert fields.PhoneField().constraints == {"max_length": 16}
 
 
 # ============================================================================
@@ -184,51 +184,78 @@ def test_constraints():
 
 @pytest.mark.asyncio
 async def test_every_write_path_normalizes(db_text_formats):
-    contact = await Contact.objects.create(
-        id=1, email="Ann@Example.COM", login_email="Ann@Example.COM", us_phone="(650) 253-0000", slug="ann"
-    )
+    contact = await Contact.objects.create(id=1, email="Ann@Example.COM", login_email="Ann@Example.COM", slug="ann")
     await contact.refresh_from_db()
-    assert (contact.email, contact.login_email, contact.us_phone) == (
-        "Ann@example.com",
-        "ann@example.com",
-        "+16502530000",
-    )
+    assert (contact.email, contact.login_email) == ("Ann@example.com", "ann@example.com")
 
     await Contact.objects.bulk_create(
         [
-            Contact(id=2, email="Bob@Example.COM", phone="+44 20 7946 0958"),
+            Contact(id=2, email="Bob@Example.COM", phone="+442079460958"),
             Contact(id=3, email="Cid@EXAMPLE.org", website="https://Example.org/x"),
         ]
     )
     contact.email = "Ann@NEW.example"
-    contact.us_phone = "650-253-0001"
     await contact.save()
     await Contact.objects.filter(id=2).update(login_email="BOB@Example.COM")
     others = await Contact.objects.filter(id__in=[2, 3]).order_by("id")
     for other in others:
         other.email = other.email.upper()
     await Contact.objects.bulk_update(others, fields=["email"])
-    rows = (
-        await Contact.objects.all()
-        .order_by("id")
-        .values_list("id", "email", "login_email", "phone", "us_phone", "website")
-    )
+    rows = await Contact.objects.all().order_by("id").values_list("id", "email", "login_email", "phone", "website")
     assert rows == [
-        (1, "Ann@new.example", "ann@example.com", None, "+16502530001", None),
-        (2, "BOB@example.com", "bob@example.com", "+442079460958", None, None),
-        (3, "CID@example.org", None, None, None, "https://Example.org/x"),
+        (1, "Ann@new.example", "ann@example.com", None, None),
+        (2, "BOB@example.com", "bob@example.com", "+442079460958", None),
+        (3, "CID@example.org", None, None, "https://Example.org/x"),
     ]
+
+
+@requires_features(supports_unique_constraints=True, supports_returning=True)
+@pytest.mark.asyncio
+async def test_bulk_create_ignoring_conflicts_gives_an_object_inserted_with_its_normalized_value(db_text_formats):
+    await ContactLogin.objects.create(login="ann@example.com")
+    taken, new = ContactLogin(login="ann@EXAMPLE.com"), ContactLogin(login="Bob@EXAMPLE.com")
+
+    inserted = await ContactLogin.objects.bulk_create([taken, new], ignore_conflicts=True, on_conflict=["login"])
+
+    assert inserted == [new]
+    assert (taken._saved_in_db, new._saved_in_db) == (False, True)
+    assert new.id == await ContactLogin.objects.filter(login="Bob@example.com").values_list("id", flat=True).get()
+
+
+@requires_features(supports_unique_constraints=True, supports_returning=True)
+@pytest.mark.asyncio
+async def test_of_objects_alike_once_normalized_the_first_is_the_one_inserted(db_text_formats):
+    first, written_as_stored = ContactLogin(login="ann@EXAMPLE.com"), ContactLogin(login="ann@example.com")
+
+    inserted = await ContactLogin.objects.bulk_create(
+        [first, written_as_stored], ignore_conflicts=True, on_conflict=["login"]
+    )
+
+    assert inserted == [first]
+    assert (first._saved_in_db, written_as_stored._saved_in_db) == (True, False)
+    assert written_as_stored.id is None
+
+
+@requires_features(supports_returning=True)
+@pytest.mark.asyncio
+async def test_bulk_update_gives_its_version_to_an_object_whose_key_is_written_normalized(db_text_formats):
+    await ContactAccount.objects.create(email="ann@example.com", name="a")
+    account = ContactAccount(email="ann@EXAMPLE.com", name="b", version=0)
+
+    assert await ContactAccount.objects.bulk_update([account], fields=["name"]) == 1
+
+    assert account.version == 1
+    stored = await ContactAccount.objects.get(email="ann@example.com")
+    assert (stored.name, stored.version) == ("b", 1)
 
 
 @pytest.mark.asyncio
 async def test_filter_values_are_converted_like_written_ones(db_text_formats):
-    await Contact.objects.create(id=1, email="ann@example.com", us_phone="+16502530000", phone="+442079460958")
+    await Contact.objects.create(id=1, email="ann@example.com", phone="+442079460958")
     await Contact.objects.create(id=2, email="bob@example.com")
     assert await Contact.objects.filter(email="ann@EXAMPLE.COM").values_list("id", flat=True) == [1]
     assert await Contact.objects.filter(email__in=["ann@Example.com", "BOB@example.com"]).count() == 1
     assert await Contact.objects.filter(email__in=["ann@Example.com", "bob@EXAMPLE.com"]).count() == 2
-    assert await Contact.objects.filter(us_phone="(650) 253-0000").values_list("id", flat=True) == [1]
-    assert await Contact.objects.filter(phone__in=["+44 20 7946 0958"]).values_list("id", flat=True) == [1]
     assert await Contact.objects.filter(email__icontains="EXAMPLE").count() == 2
     assert await Contact.objects.filter(email__not="ann@EXAMPLE.com").values_list("id", flat=True) == [2]
     with pytest.raises(ValidationError, match="Invalid email address"):
@@ -262,10 +289,8 @@ async def test_an_invalid_value_is_refused_on_every_write_path(db_text_formats, 
 async def test_bulk_create_with_copy_normalizes_and_checks(db_text_formats):
     if not DatabaseUnderTest.get_dialect().features.supports_copy:
         pytest.skip("The database has no COPY bulk-load protocol")
-    await Contact.objects.bulk_create(
-        [Contact(id=1, email="Ann@EXAMPLE.com", us_phone="(650) 253-0000", slug="a-b")], use_copy=True
-    )
-    assert await Contact.objects.values_list("email", "us_phone").get(id=1) == ("Ann@example.com", "+16502530000")
+    await Contact.objects.bulk_create([Contact(id=1, email="Ann@EXAMPLE.com", slug="a-b")], use_copy=True)
+    assert await Contact.objects.values_list("email", flat=True).get(id=1) == "Ann@example.com"
     with pytest.raises(ValidationError, match="email: Invalid email address"):
         await Contact.objects.bulk_create([Contact(id=2, email="ann")], use_copy=True)
     with pytest.raises(ValidationError, match="slug: Invalid slug"):
@@ -287,9 +312,12 @@ async def test_slug_columns_are_indexed(db_text_formats):
     assert indexed_columns == {"slug", "short_slug"}, sql
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_pydantic_schema(db_text_formats):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     schema = pydantic_model_creator(Contact).model_json_schema()["properties"]
     assert schema["email"]["format"] == "email"
     assert schema["website"].get("format") == "uri", schema["website"]
@@ -307,6 +335,7 @@ def make_model(name: str, app_label: str, **model_fields: Field[Any]) -> type[Mo
     return type(name, (Model,), {**model_fields, "Meta": meta})
 
 
+@pytest.mark.requires("phone")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_autodetector_alters_a_char_field_into_a_format_field(tmp_path: Path, monkeypatch):

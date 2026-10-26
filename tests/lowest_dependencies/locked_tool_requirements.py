@@ -3,9 +3,11 @@
 
 The run resolves hare's own dependencies - the ``[project]`` dependencies and every extra - to the
 lowest versions their declared bounds allow (``uv pip compile --resolution lowest-direct``). The test
-tools (the ``test`` poetry group) aren't hare's dependencies and declare no useful lower bound, so
-they are pinned to the versions the project is developed with; a tool that is also one of hare's
-dependencies (``cryptography``, ``phonenumbers``, ``tzlocal``) stays at its lowest version.
+tools (the ``test`` poetry group, and the groups the test environments install - ``pytz``,
+``pyright-cli``: the run takes the tests of every environment) aren't hare's dependencies and declare
+no useful lower bound, so they are pinned to the versions the project is developed with; a tool that is
+also one of hare's dependencies (``cryptography``, ``phonenumbers``, ``tzlocal``) stays at its lowest
+version.
 
 Usage:
     python -m tests.lowest_dependencies.locked_tool_requirements > test-tools.in
@@ -22,6 +24,7 @@ from tests.lowest_dependencies.constants import (
     REQUIREMENT_NAME_PATTERN,
     TEST_TOOL_GROUP,
 )
+from tests.matrix.constants import SUITE_ENVIRONMENTS
 
 
 class LockedToolRequirements:
@@ -52,6 +55,12 @@ class LockedToolRequirements:
             names.add(self.normalize_name(name_match.group(0)))
         return names
 
+    @staticmethod
+    def get_tool_groups() -> list[str]:
+        """The poetry groups of the test tools - the test group and the groups of the test environments."""
+        environment_groups = (group for environment in SUITE_ENVIRONMENTS for group in environment.groups)
+        return list(dict.fromkeys((TEST_TOOL_GROUP, *environment_groups)))
+
     def get_lines(self) -> list[str]:
         """The pinned requirements, one per test tool that isn't one of hare's dependencies.
 
@@ -62,14 +71,17 @@ class LockedToolRequirements:
             self.normalize_name(package["name"]): package["version"] for package in self.lock["package"]
         }
         project_dependency_names = self.get_project_dependency_names()
-        tool_names = self.pyproject["tool"]["poetry"]["group"][TEST_TOOL_GROUP]["dependencies"]
+        poetry_groups = self.pyproject["tool"]["poetry"]["group"]
+        tool_names = [
+            tool_name for group in self.get_tool_groups() for tool_name in poetry_groups[group]["dependencies"]
+        ]
         lines = []
         for tool_name in tool_names:
             normalized_name = self.normalize_name(tool_name)
             if normalized_name in project_dependency_names:
                 continue
             if normalized_name not in locked_versions:
-                raise SystemExit(f"{tool_name} of the {TEST_TOOL_GROUP} group isn't in poetry.lock")
+                raise SystemExit(f"The test tool {tool_name} isn't in poetry.lock")
             lines.append(f"{normalized_name}=={locked_versions[normalized_name]}")
         return lines
 

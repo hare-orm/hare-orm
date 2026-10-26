@@ -776,3 +776,50 @@ async def test_sqlite_integer_column_reads_as_int_but_the_row_id(db, connection)
     assert [column.db_type for column in composite.columns] == ["INT", "INT"]
     assert [column.db_type for column in row_id.columns] == ["INTEGER", "INT"]
     assert "UniqueConstraint(fields=['id'])" in await generated_source(connection, "ix_row_id_key")
+
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_sqlite_synonyms_of_types_hare_declares_read_as_hare_declares_them(db, connection):
+    """A DATETIME column another tool wrote - the field of a DatetimeField, generated with no note - was read
+    as DATETIME, and drift reported the model's TIMESTAMP column as altered."""
+    await recreate_tables(
+        connection,
+        ["ix_type_synonyms"],
+        [
+            "CREATE TABLE ix_type_synonyms (id INTEGER PRIMARY KEY, seen DATETIME, at datetime DEFAULT "
+            "CURRENT_TIMESTAMP, ratio DOUBLE, share DOUBLE PRECISION, weight FLOAT)"
+        ],
+    )
+    table = await DatabaseCatalog.inspect_table(connection, "ix_type_synonyms")
+    assert [column.db_type for column in table.columns] == [
+        "INTEGER",
+        "TIMESTAMP",
+        "TIMESTAMP",
+        "REAL",
+        "REAL",
+        "REAL",
+    ]
+    source = await generated_source(connection, "ix_type_synonyms")
+    assert "seen = fields.DatetimeField(null=True)" in source
+    assert "ratio = fields.FloatField(null=True)" in source
+    assert "TODO" not in source
+
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_sqlite_indexes_are_read_back_by_name(db, connection):
+    """They came back in the order they were made - a migrate of the model read back makes them in another
+    order, and inspectdb then wrote the model otherwise."""
+    await recreate_tables(
+        connection,
+        ["ix_index_order"],
+        [
+            "CREATE TABLE ix_index_order (id INTEGER PRIMARY KEY, a INT, b TEXT)",
+            "CREATE INDEX ix_order_c ON ix_index_order (a DESC)",
+            "CREATE INDEX ix_order_a ON ix_index_order (LOWER(b))",
+            "CREATE INDEX ix_order_b ON ix_index_order (a) WHERE a > 0",
+        ],
+    )
+    table = await DatabaseCatalog.inspect_table(connection, "ix_index_order")
+    assert [index.name for index in table.indexes] == ["ix_order_a", "ix_order_b", "ix_order_c"]

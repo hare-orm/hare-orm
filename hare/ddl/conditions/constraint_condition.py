@@ -8,8 +8,7 @@ from hare.ddl.conditions.enum_members_condition import EnumMembersCondition
 from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
 from hare.ddl.ddl_term_sql import DdlTermSql
 from hare.ddl.raw_sql_term import RawSQLTerm
-from hare.exceptions import ConfigurationError, FieldError, QueryError
-from hare.query.enums import LookupTarget
+from hare.exceptions import ConfigurationError, FieldError, QueryError, UnSupportedError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -102,55 +101,58 @@ class ConstraintCondition:
 
     @staticmethod
     def raise_if_reads_other_columns(condition: Any, model: type[Model]) -> None:
-        """Refuses a ``Q`` condition reading anything but the model's own columns - another model's field
-        through a relation, an aggregate, an expression; a condition of another type isn't read.
+        """Refuses a ``Q`` condition reading anything but the model's own columns - another model's column
+        through a relation (a join), an aggregate, an expression - as the DDL of every database refuses it,
+        when the model is defined: a relation compared by its own column (``owner=1``, ``owner__isnull``)
+        reads the model's column. A condition of another type isn't read; one a dialect can't write is
+        refused by that dialect's DDL.
 
         Args:
             condition: The declared condition.
             model: The model declaring it.
 
         Raises:
-            ConfigurationError: The ``Q`` reads something else.
+            ConfigurationError: The ``Q`` reads something else, or names no field of the model.
         """
-        # Local import: the query package imports the ddl package.
+        # Local imports: the query package imports the ddl package.
+        from hare.dialects.base.constants import SQL_DIALECT
         from hare.query.expressions import Q
+        from hare.query.expressions.expression_context import ExpressionContext
+        from hare.sql import Table as SqlTable
 
         if not isinstance(condition, Q):
             return
-        if condition.expression is not None or any(
-            not ConstraintCondition.reads_model_column(model, key)
-            for key in ConstraintCondition.get_lookup_keys(condition)
-        ):
-            raise ConfigurationError(
-                f"{model.__name__}: a constraint or index condition reads only the model's own columns, "
-                f"got {condition!r}"
-            )
+        if not ConstraintCondition.has_expression(condition):
+            try:
+                modifier = condition.get_result(
+                    ExpressionContext(
+                        model=model,
+                        table=SqlTable(model._meta.db_table),
+                        annotations={},
+                        dialect=SQL_DIALECT,
+                        connection=None,
+                    )
+                )
+            except UnSupportedError:
+                return
+            except (FieldError, QueryError):
+                modifier = None
+            if modifier is not None and not modifier.joins and not modifier.having_criterion:
+                return
+        raise ConfigurationError(
+            f"{model.__name__}: a constraint or index condition reads only the model's own columns, got {condition!r}"
+        )
 
     @staticmethod
-    def get_lookup_keys(condition: Q) -> list[str]:
-        """Every lookup key of a ``Q`` tree."""
-        return [
-            *condition.filters,
-            *(key for child in condition.children for key in ConstraintCondition.get_lookup_keys(child)),
-        ]
-
-    @staticmethod
-    def reads_model_column(model: type[Model], key: str) -> bool:
-        """Whether a filter key compares one of the model's own columns.
+    def has_expression(condition: Q) -> bool:
+        """Whether a ``Q`` tree holds an expression - ``Q(Exists(...))`` - anywhere.
 
         Args:
-            model: The model.
-            key: The filter key.
+            condition: The condition.
 
         Returns:
-            True for a lookup of a field stored in the model's own table.
+            True when it or a child of it wraps an expression.
         """
-        field_name = key.partition("__")[0]
-        field = model._meta.fields_map.get(field_name) if field_name != "pk" else model._meta.pk
-        if field is None or not field.has_db_field:
-            return False
-        try:
-            lookup_info = model._meta._get_lookup_info(key)
-        except (FieldError, QueryError):
-            return False
-        return not lookup_info.relations and lookup_info.target == LookupTarget.FIELD
+        return condition.expression is not None or any(
+            ConstraintCondition.has_expression(child) for child in condition.children
+        )

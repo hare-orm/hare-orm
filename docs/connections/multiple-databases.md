@@ -80,6 +80,12 @@ Register via `Hare.init(routers=[...])` — a list of dotted-path strings
 `HareContext` holds its routers in a `ConnectionRouter` of its own (`context.router`), which asks them in
 turn — so the routers of different contexts never mix.
 
+A router chooses where queries go, not where tables are: `makemigrations`, `migrate` and `drift` work on
+the `default_connection` of each app and never ask a router. So a router routes between connections holding
+the same tables — a primary and its replicas; a model whose table lives in another database belongs to an
+app whose `default_connection` is that database. A router sending a model to a connection without its
+table makes its queries fail there (`no such table`).
+
 ### <a id="read-your-writes"></a>Reading your own writes
 
 A replica gets a write later than the primary — a request that lends a book and reads the loan back at

@@ -1,4 +1,5 @@
-"""The ZooKeeper protocol ClickHouse Keeper speaks, as far as hare's migration lock uses it."""
+"""The ZooKeeper protocol ClickHouse Keeper speaks, as far as hare's migration lock and the deletion of a
+database's nodes use it."""
 
 #: The protocol version of the connect request.
 KEEPER_PROTOCOL_VERSION = 0
@@ -11,7 +12,9 @@ KEEPER_PINGS_PER_SESSION_TIMEOUT = 3
 
 #: The operations of a request.
 KEEPER_CREATE_OPERATION = 1
+KEEPER_DELETE_OPERATION = 2
 KEEPER_EXISTS_OPERATION = 3
+KEEPER_GET_CHILDREN_OPERATION = 8
 KEEPER_PING_OPERATION = 11
 KEEPER_CLOSE_SESSION_OPERATION = -11
 
@@ -23,6 +26,9 @@ KEEPER_PING_REQUEST_ID = -2
 KEEPER_NO_ERROR = 0
 KEEPER_NO_NODE_ERROR = -101
 KEEPER_NODE_EXISTS_ERROR = -110
+KEEPER_NOT_EMPTY_ERROR = -111
+#: The version a deletion asks for - any.
+KEEPER_ANY_VERSION = -1
 
 #: The flags of a node - kept, or deleted as its session ends.
 KEEPER_PERSISTENT_NODE = 0

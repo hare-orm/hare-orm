@@ -261,25 +261,19 @@ async def test_distinct_on_only_same_field(db):
 
 
 @test.requires_features(supports_distinct_on=True)
+@pytest.mark.parametrize(
+    ("desc_ordering", "expected"),
+    [("desc", [("1", "a"), ("2", "c")]), ("-desc", [("1", "b"), ("2", "c")])],
+    ids=["ascending", "descending"],
+)
 @pytest.mark.asyncio
-async def test_distinct_on_only_extra_field(db):
+async def test_distinct_on_only_extra_field_keeps_the_first_row_of_the_order(db, desc_ordering, expected):
     await Tournament.objects.create(name="1", desc="a")
     await Tournament.objects.create(name="1", desc="b")
     await Tournament.objects.create(name="2", desc="c")
 
-    tournaments = await Tournament.objects.all().distinct("name").order_by("name", "desc").only("name", "desc")
-    assert [(t.name, t.desc) for t in tournaments] == [("1", "a"), ("2", "c")]
-
-
-@test.requires_features(supports_distinct_on=True)
-@pytest.mark.asyncio
-async def test_distinct_on_only_with_order_by(db):
-    await Tournament.objects.create(name="1", desc="a")
-    await Tournament.objects.create(name="1", desc="b")
-    await Tournament.objects.create(name="2", desc="c")
-
-    tournaments = await Tournament.objects.all().distinct("name").order_by("name", "-desc").only("name", "desc")
-    assert [(t.name, t.desc) for t in tournaments] == [("1", "b"), ("2", "c")]
+    tournaments = await Tournament.objects.all().distinct("name").order_by("name", desc_ordering).only("name", "desc")
+    assert [(t.name, t.desc) for t in tournaments] == expected
 
 
 @test.requires_features(supports_distinct_on=True)

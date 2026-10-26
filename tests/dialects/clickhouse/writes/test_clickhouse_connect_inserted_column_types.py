@@ -2,9 +2,6 @@
 library asks before every insert - and again after a script, or a statement that may change a schema."""
 
 import pytest
-
-pytest.importorskip("clickhouse_connect")
-
 from clickhouse_connect.driver.asyncclient import AsyncClient  # noqa: E402
 
 from hare.core.connections.connections import Connections  # noqa: E402
@@ -12,6 +9,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_conne
     ClickhouseConnectClient,
 )
 from tests.dialects.clickhouse.models import Skill  # noqa: E402
+
+REQUIRES = ("clickhouse-connect",)
 
 PROBE_TABLE_SQL = "CREATE TABLE IF NOT EXISTS hare_column_types_probe (value Int8) ENGINE = Memory"
 DROP_PROBE_TABLE_SQL = "DROP TABLE IF EXISTS hare_column_types_probe"

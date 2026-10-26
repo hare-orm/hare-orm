@@ -5,14 +5,16 @@ connection needed."""
 
 import pytest
 
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
+from tests.utils.constants import POSTGRES_CLIENT_PATHS
+from tests.utils.driver_classes import DriverClasses
 from tests.utils.waiting import wait_until
 
 pytestmark = pytest.mark.database_independent
 
 
 def _make_asyncpg_client(**overrides):
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     kwargs = {
         "connection_alias": "default",
         "user": "postgres",
@@ -25,6 +27,7 @@ def _make_asyncpg_client(**overrides):
     return AsyncpgClient(**kwargs)
 
 
+@pytest.mark.requires("asyncpg")
 def test_connect_max_retries_defaults_to_zero():
     """Backward compatibility: a caller that never set connect_max_retries gets today's
     behavior - the very first connection failure propagates immediately."""
@@ -33,12 +36,14 @@ def test_connect_max_retries_defaults_to_zero():
     assert client.connect_retry_backoff_base_seconds == 0.1
 
 
+@pytest.mark.requires("asyncpg")
 def test_connect_max_retries_and_backoff_from_credentials():
     client = _make_asyncpg_client(connect_max_retries=3, connect_retry_backoff_base_seconds=0.05)
     assert client.connect_max_retries == 3
     assert client.connect_retry_backoff_base_seconds == 0.05
 
 
+@pytest.mark.requires("asyncpg")
 def test_pool_acquire_timeout_defaults_to_none():
     """Backward compatibility: a caller that never set pool_acquire_timeout gets today's
     behavior - acquire() waits indefinitely for a pool slot."""
@@ -46,12 +51,14 @@ def test_pool_acquire_timeout_defaults_to_none():
     assert client.pool_acquire_timeout is None
 
 
+@pytest.mark.requires("asyncpg")
 def test_pool_acquire_timeout_from_credentials_is_cast_to_float():
     client = _make_asyncpg_client(pool_acquire_timeout="2.5")
     assert client.pool_acquire_timeout == 2.5
     assert isinstance(client.pool_acquire_timeout, float)
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_create_pool_with_retry_succeeds_after_transient_failures():
     client = _make_asyncpg_client(connect_max_retries=3, connect_retry_backoff_base_seconds=0.001)
@@ -71,6 +78,7 @@ async def test_create_pool_with_retry_succeeds_after_transient_failures():
     assert len(attempts) == 3
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_create_pool_with_retry_retries_on_postgres_starting_up():
     """asyncpg.exceptions.CannotConnectNowError (SQLSTATE 57P03, "the database system is
@@ -97,6 +105,7 @@ async def test_create_pool_with_retry_retries_on_postgres_starting_up():
     assert len(attempts) == 3
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_create_pool_with_retry_reraises_after_exhausting_retries():
     client = _make_asyncpg_client(connect_max_retries=2, connect_retry_backoff_base_seconds=0.001)
@@ -115,6 +124,7 @@ async def test_create_pool_with_retry_reraises_after_exhausting_retries():
     assert len(attempts) == 3
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_create_pool_with_retry_does_not_retry_non_retryable_exception():
     client = _make_asyncpg_client(connect_max_retries=5, connect_retry_backoff_base_seconds=0.001)
@@ -132,11 +142,14 @@ async def test_create_pool_with_retry_does_not_retry_non_retryable_exception():
     assert len(attempts) == 1
 
 
+@pytest.mark.requires("asyncpg")
 def test_asyncpg_and_rust_pg_declare_distinct_retryable_exceptions():
     """Each driver raises its own exception type for a failed connect - retry must be
     keyed off the driver actually in use, not a single shared type."""
     import asyncpg
 
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
     from rust.native import pg
 
     assert OSError in AsyncpgClient.RETRYABLE_CONNECT_EXCEPTIONS
@@ -151,6 +164,7 @@ def test_asyncpg_and_rust_pg_declare_distinct_retryable_exceptions():
     assert RustPgClient.RETRYABLE_CONNECT_EXCEPTIONS == (pg.ConnectionError,)
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_a_connect_cancelled_in_flight_finishes_and_its_connection_is_closed():
     """asyncpg cancelled in the middle of its TLS negotiation left a future failing with
@@ -185,7 +199,7 @@ async def test_a_connect_cancelled_in_flight_finishes_and_its_connection_is_clos
     assert client.connects_left_running == set()
 
 
-@pytest.mark.parametrize("client_class", [AsyncpgClient, RustPgClient])
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS), indirect=True)
 def test_a_server_out_of_connections_is_a_failure_to_connect(client_class):
     """ "Too many clients" (SQLSTATE 53300) at connect came out as the driver's raw exception."""
     from hare.dialects.postgresql.client.postgresql_connect_errors import PostgresqlConnectErrors

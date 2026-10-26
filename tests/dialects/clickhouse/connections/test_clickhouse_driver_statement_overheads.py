@@ -8,9 +8,6 @@ import socket
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("clickhouse_driver")
-
 from clickhouse_driver import connection, defines  # noqa: E402
 from clickhouse_driver.block import BlockInfo  # noqa: E402
 from clickhouse_driver.bufferedreader import BufferedSocketReader  # noqa: E402
@@ -49,6 +46,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver
 from hare.dialects.clickhouse.drivers.constants import (  # noqa: E402
     CLICKHOUSE_SESSION_SETTINGS,
 )
+
+REQUIRES = ("clickhouse-driver",)
 
 pytestmark = pytest.mark.database_independent
 

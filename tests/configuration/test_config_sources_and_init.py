@@ -18,7 +18,6 @@ from hare.core.config import AppConfig, ConfigSecrets, ConnectionConfig, DBUrlCo
 from hare.core.hare_context import HareContext
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.observers.observers import Observers
 from hare.models import Model
@@ -53,10 +52,13 @@ async def test_connection_given_as_a_db_url_mapping_works(config):
         assert (await ctx.get_connection().execute_dicts("SELECT 1 AS one")) == [{"one": 1}]
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_postgres_driver_choice_survives_building_a_second_client():
     """A second client for the same alias (create_independent(), a loop switch) gets the same
     driver as the first."""
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     config = {
         "connections": {
             "default": {
@@ -387,6 +389,7 @@ def test_db_url_setting_a_value_both_in_the_address_and_the_query_is_refused(db_
         DbUrlConfigGenerator.expand(db_url)
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_db_url_port_zero_is_refused():
@@ -394,7 +397,7 @@ async def test_db_url_port_zero_is_refused():
         with pytest.raises(ConfigurationError, match="port must be between 1 and 65535"):
             await ctx.init(
                 HareConfig.from_db_url(
-                    "postgresql+asyncpg://user:pass@localhost:0/db", {"models": ["tests.shared_models.testmodels"]}
+                    "postgresql://user:pass@localhost:0/db", {"models": ["tests.shared_models.testmodels"]}
                 )
             )
 
@@ -421,3 +424,25 @@ def test_config_file_extension_is_case_insensitive(tmp_path):
     )
 
     assert HareConfig.from_config_file(str(config_file)).apps["models"].models == ["m"]
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("config_text", "message"),
+    [
+        ("", "The config must be a mapping, got None"),
+        ("[1]", r"The config must be a mapping, got \[1\]"),
+        ('{"connections": ["sqlite://:memory:"], "apps": {}}', 'The "connections" section must be a mapping'),
+        ('{"connections": {}, "apps": ["models"]}', 'The "apps" section must be a mapping'),
+        ('{"connections": {"default": 5}, "apps": {}}', "Connection 'default' must be a mapping, got 5"),
+        ('{"connections": {}, "apps": {"models": "m"}}', "App 'models' must be a mapping, got 'm'"),
+    ],
+    ids=["empty file", "list", "connections list", "apps list", "connection number", "app text"],
+)
+def test_a_config_or_section_that_is_no_mapping_is_a_configuration_error(tmp_path, config_text, message):
+    """A raw TypeError/AttributeError came out of HareConfig.load() - the CLI printed a traceback."""
+    config_file = tmp_path / "hare.json"
+    config_file.write_text(config_text or "null")
+
+    with pytest.raises(ConfigurationError, match=message):
+        HareConfig.load(str(config_file))

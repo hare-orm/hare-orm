@@ -71,4 +71,7 @@ async def test_enqueue_writes_and_refuses_through_it(db_outbox):
         await DemoOutboxEvent.enqueue("widget.created", [float("-inf")])
     with pytest.raises(ValidationError, match="not a finite number"):
         await DemoOutboxEvent.enqueue("widget.created", {}, headers={"value": float("inf")})
+    # Inside a list too - json.dumps wrote a NaN token there, which no JSON reader reads.
+    with pytest.raises(ValidationError):
+        await DemoOutboxEvent.enqueue("widget.created", {"values": [1.5, float("nan")]})
     assert await DemoOutboxEvent.objects.all().count() == 1

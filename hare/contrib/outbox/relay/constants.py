@@ -33,3 +33,9 @@ MAX_BATCH_SIZE = 10000
 
 #: The longest ``last_error`` kept of a failed delivery.
 LAST_ERROR_MAX_LENGTH = 4000
+
+#: The end of a prefix pattern of topics: ``shop.*`` takes every topic starting with ``shop.``.
+TOPIC_PREFIX_WILDCARD = "*"
+
+#: The wildcard characters of topic patterns - each a ConfigurationError but a trailing ``*``.
+TOPIC_PATTERN_WILDCARDS = frozenset("*?")

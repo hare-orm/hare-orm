@@ -24,6 +24,8 @@ SWAPPABLE_SETTING_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*")
 
 #: File extensions from_config_file() accepts, and which loader each maps to.
 YAML_CONFIG_FILE_EXTENSIONS = (".yml", ".yaml")
+#: The refusal of a YAML config file without PyYAML installed.
+YAML_CONFIG_FILE_PACKAGE_MESSAGE = "A YAML config file needs the PyYAML package - install hare-orm[yaml]"
 
 JSON_CONFIG_FILE_EXTENSIONS = (".json",)
 
@@ -36,3 +38,10 @@ CACHE_MISS = object()
 #: The rows from which a table counts as large for the migration safety check, by default - an
 #: operation locking a table this big keeps its readers or writers waiting noticeably.
 DEFAULT_LARGE_TABLE_ROWS = 100_000
+
+#: Why a connection whose database lives in it can't be opened again on another event loop.
+CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE = (
+    "Hare connection {connection_alias!r} was opened on another event loop, and its database lives in that "
+    "connection only - a connection of this loop would open an empty database of its own. Use the database "
+    "from one event loop, or a database that outlives its connections"
+)

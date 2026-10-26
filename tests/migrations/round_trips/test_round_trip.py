@@ -23,6 +23,7 @@ import pytest_asyncio
 from hare.cli import hare_cli as cli_module
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.server_session import ServerSession
 
 APP_LABEL = "rtapp"
 MODELS_PACKAGE = "rt_models_pkg"
@@ -121,20 +122,12 @@ async def database_url(tmp_path: Path) -> AsyncGenerator[str]:
         scheme = raw_database_url.split("://", 1)[0]
         yield f"{scheme}:///{(tmp_path / 'round_trip.sqlite3').as_posix()}"
         return
-    import asyncpg
-
     raw_database_url = raw_database_url.replace("\\{", "{").replace("\\}", "}")
     resolved_database_url = raw_database_url.format(f"rt_{uuid.uuid4().hex}")
     credentials = DbUrlConfigGenerator.expand(resolved_database_url, testing=False)["credentials"]
     # The template may carry a per-run prefix (test_<run tag>_{}) - create exactly the database the URL names.
     database_name = credentials["database"]
-    administrative_connection = await asyncpg.connect(
-        host=credentials["host"],
-        port=credentials["port"],
-        user=credentials["user"],
-        password=credentials["password"],
-        database="postgres",
-    )
+    administrative_connection = await ServerSession.open(resolved_database_url, "postgres")
     try:
         await administrative_connection.execute(f'CREATE DATABASE "{database_name}"')
         yield resolved_database_url

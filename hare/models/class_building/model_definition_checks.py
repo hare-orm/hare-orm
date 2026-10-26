@@ -5,15 +5,21 @@ from typing import TYPE_CHECKING, Any, cast
 
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.conditions.tenant_condition import TenantCondition
+from hare.ddl.constraints.check_constraint import CheckConstraint
+from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import TriggerTiming
+from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.indexes.index import Index
+from hare.ddl.indexes.partial_index import PartialIndex
+from hare.dialects.base.constants import SQL_DIALECT
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
-from hare.exceptions import ConfigurationError
+from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.temporal.datetime_field import DatetimeField
+from hare.fields.generated_field import GeneratedField
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models.class_building.constants import (
     LOOKUP_SEPARATOR,
@@ -25,6 +31,7 @@ from hare.models.class_building.constants import (
 )
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
 from hare.models.enums import ModelOption
+from hare.query.expressions import Expression
 from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 
 if TYPE_CHECKING:
@@ -633,9 +640,43 @@ class ModelDefinitionChecks:
                         f"Meta.constraints: UniqueConstraint include {field_name!r} is not a field stored on "
                         f"{meta._model.__name__}"
                     )
-            # Refused when the model is defined, alike on every database - not only by the DDL of a database
-            # writing the condition.
-            ConstraintCondition.raise_if_reads_other_columns(constraint.condition, meta._model)
+
+    @staticmethod
+    def validate_declarations_read_model_columns(meta: MetaInfo) -> None:
+        """Refuses a condition of a constraint, an index or a policy, and an expression of a generated field,
+        reading another model's columns - when the model is defined, alike on every database, not when a
+        migration of it is applied: the DDL of a table reads its own columns only.
+
+        Args:
+            meta: The model's meta.
+
+        Raises:
+            ConfigurationError: A declaration reads another model's column, an aggregate or an expression
+                in a condition.
+        """
+        model = meta._model
+        conditions: list[Any] = []
+        for constraint in meta.constraints:
+            if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)):
+                conditions.append(constraint.condition)
+            elif isinstance(constraint, CheckConstraint):
+                conditions.append(constraint.check)
+        conditions.extend(index.condition for index in meta.indexes if isinstance(index, PartialIndex))
+        for policy in meta.policies:
+            conditions.extend(
+                condition
+                for condition in (policy.using, policy.with_check)
+                if not isinstance(condition, TenantCondition)
+            )
+        for condition in conditions:
+            ConstraintCondition.raise_if_reads_other_columns(condition, model)
+        for field in meta.fields_map.values():
+            if isinstance(field, GeneratedField) and isinstance(field.expression, Expression):
+                try:
+                    DeclaredExpressions.get_term(field.expression, model, SQL_DIALECT)
+                except UnSupportedError:
+                    # What a dialect can't write is refused by its DDL.
+                    continue
 
     @staticmethod
     def validate_declared_names_are_distinct(meta: MetaInfo) -> None:

@@ -20,11 +20,10 @@ SAMPLES = {
 }
 
 
+@pytest.mark.requires("native")
 @pytest.mark.parametrize("stores_json_natively", [True, False])
 @pytest.mark.parametrize("field_class", list(SAMPLES))
 def test_a_lookup_value_is_the_field_s_own(stores_json_natively, field_class):
-    if HydrateAccelerator.module is None:
-        pytest.skip("the native module isn't built")
     types = ClickhouseDialect(stores_json_natively=stores_json_natively).types
     field = field_class(null=True)
     field.model = UUIDFkRelatedModel

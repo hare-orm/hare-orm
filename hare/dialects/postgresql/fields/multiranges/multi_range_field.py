@@ -50,6 +50,23 @@ class MultiRangeField(Field[list[Range[Any]]]):
             # A member's own error message must hide the member the same way.
             self.range_field.sensitive = True
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - a list of the JSON forms of its ranges.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        ranges = self.to_python(value)
+        if ranges is None:
+            return None
+        return [self.range_field.get_json_value(range_value) for range_value in ranges]
+
     @classmethod
     def get_field_for_range_field(cls, range_field: Field[Any]) -> MultiRangeField:
         """The multirange field holding ranges of ``range_field``'s class - ``RangeAgg``'s result.

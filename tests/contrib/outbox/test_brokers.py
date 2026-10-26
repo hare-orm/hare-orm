@@ -50,12 +50,14 @@ async def assert_wakes_the_relay(wakeup) -> None:
 
 
 @needs_redis
+@pytest.mark.requires("redis")
 @pytest.mark.asyncio
 async def test_redis_wakeup(db_outbox):
     await assert_wakes_the_relay(RedisWakeup(REDIS_URL, channel=get_unique_name("hare-wakeup")))
 
 
 @needs_redis
+@pytest.mark.requires("redis")
 @pytest.mark.asyncio
 async def test_redis_streams_delivery(db_outbox):
     stream = get_unique_name("hare-stream")
@@ -76,12 +78,14 @@ async def test_redis_streams_delivery(db_outbox):
 
 
 @needs_kafka
+@pytest.mark.requires("kafka")
 @pytest.mark.asyncio
 async def test_kafka_wakeup(db_outbox):
     await assert_wakes_the_relay(KafkaWakeup(KAFKA_BOOTSTRAP, topic=get_unique_name("hare-wakeup")))
 
 
 @needs_kafka
+@pytest.mark.requires("kafka")
 @pytest.mark.asyncio
 async def test_kafka_delivery(db_outbox):
     import aiokafka
@@ -108,12 +112,14 @@ async def test_kafka_delivery(db_outbox):
 
 
 @needs_rabbitmq
+@pytest.mark.requires("rabbitmq")
 @pytest.mark.asyncio
 async def test_rabbitmq_wakeup(db_outbox):
     await assert_wakes_the_relay(RabbitMQWakeup(RABBITMQ_URL, exchange=get_unique_name("hare-wakeup")))
 
 
 @needs_rabbitmq
+@pytest.mark.requires("rabbitmq")
 @pytest.mark.asyncio
 async def test_rabbitmq_delivery(db_outbox):
     import aio_pika

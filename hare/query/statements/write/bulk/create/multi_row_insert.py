@@ -68,6 +68,12 @@ class MultiRowInsert:
                 bulk_create.model._meta.fields_db_projection[field_name] for field_name in bulk_create._on_conflict
             ]
             returning_columns = list(dict.fromkeys([*returning_columns, *conflict_source_columns]))
+        # Rows of an insert skipping conflicts that come in no order are told apart by every column written.
+        written_field_names = field_names if populate_returned_fields and bulk_create._ignore_conflicts else []
+        # The columns set on the objects - not those returned only to match the rows.
+        applied_columns = list(returning_columns)
+        if written_field_names and not bulk_create.dialect.features.guarantees_returning_order:
+            returning_columns = list(dict.fromkeys([*returning_columns, *db_columns]))
         statement_objects = [
             statement_objects_item
             for objects_item in BulkWriteBatches.get_batches(objects, batch_size)
@@ -135,7 +141,12 @@ class MultiRowInsert:
             )
             if populate_returned_fields:
                 ReturnedRowsMatching.populate_returned_fields_from_returning_rows(
-                    bulk_create, objects_item, returned_rows, conflict_field_names
+                    bulk_create,
+                    objects_item,
+                    returned_rows,
+                    conflict_field_names,
+                    written_field_names,
+                    applied_columns,
                 )
             if bulk_create._reported_rows is not None:
                 bulk_create._reported_rows.extend(dict(row) for row in returned_rows)

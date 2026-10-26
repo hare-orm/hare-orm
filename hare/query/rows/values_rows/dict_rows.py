@@ -66,6 +66,10 @@ class DictRows(ValuesRows):
                 return []
             return self.convert_batch(connection, result, column_converters, model, value_fields)
         rows = await connection.execute_dicts(sql, parameters)
+        aliases = [alias for alias, _converter in column_converters]
+        if rows and len(rows[0]) != len(aliases):
+            # Columns besides the requested ones - an ordering column a DISTINCT selects - stay out of the rows.
+            rows = [{alias: row[alias] for alias in aliases} for row in rows]
         converted_columns = [(alias, converter) for alias, converter in column_converters if converter is not None]
         if converted_columns:
             for row in rows:

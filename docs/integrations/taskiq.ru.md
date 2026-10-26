@@ -117,7 +117,8 @@ async with tasks.get_relay(poll_interval_seconds=1.0):
 арендатора события, поэтому задача выполняется в арендаторе отправителя, а не relay. Возвращает событие.
 
 Задачи отправляет relay из `get_relay(**relay_options)` — только события темы доставки, поэтому в таблице
-могут быть и другие темы. Будильник доставки — по умолчанию свой `InProcessWakeup` — запускает relay
+могут быть и другие темы — relay остальных событий таблицы получает
+`exclude_topics=[delivery.topic]`. Будильник доставки — по умолчанию свой `InProcessWakeup` — запускает relay
 сразу после фиксации, поэтому запускайте relay в процессе, который отправляет задачи; чтобы отправлять
 сразу из другого процесса, передайте будильник брокера (`RedisWakeup` и т. п.). Задачу, которую брокер не
 принял (был недоступен), relay повторяет, как любое событие outbox.
@@ -136,3 +137,7 @@ async with tasks.get_relay(poll_interval_seconds=1.0):
 broker = InMemoryBroker(await_inplace=True)
 broker.add_middlewares(HareTaskiqMiddleware(atomic_tasks=True))
 ```
+
+`HareTaskiq`, запущенный в тесте под `hare_app_db` pytest-плагина hare, берёт контекст теста вместо баз
+своей конфигурации — записи задач откатываются вместе с записями теста; см.
+[Тесты приложения](../testing/setup.ru.md#application-tests).

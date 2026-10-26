@@ -139,6 +139,10 @@ class DecimalField(Field[TDecimal]):
         self.validate(value)
         return value
 
+    def get_json_value(self, value: Any) -> Any:
+        # The value as to_db_value() writes it - an event of save() holds what the column holds (1.50, not 1.5).
+        return super().get_json_value(None if value is None else self._quantize(value))
+
     def to_lookup_value(self, value: Any, instance: type[Model] | Model | None) -> Decimal | None:
         if value is None:
             return None

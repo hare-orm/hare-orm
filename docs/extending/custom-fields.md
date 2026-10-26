@@ -16,6 +16,11 @@ What you typically override:
   a fresh value should get the same treatment `from_db_value` gives a value read from the database (see
   below) — leave it alone for an asymmetric `to_db_value`/`from_db_value` pair (encryption, masking,
   ...).
+- `get_json_value(self, value)` — the value's JSON form, what an outbox event of a captured change holds
+  of it. The default writes JSON's own values and the table of
+  [OutboxJsonEncoding](../integrations/outbox.md#encoding), elements of lists and mappings too; a field
+  whose values have no form there (an object of its own) returns one its consumers read — it raises
+  `TypeError` otherwise, and the write fails instead of the event.
 - `deconstruct()` — returns `(path, args, kwargs)`: what a migration file writes and the autodetector
   compares. Extend it if your field takes constructor args beyond the base ones.
 - `migration_import_path` — a stable dotted path, if the field's module might move.

@@ -24,7 +24,10 @@ async def get_ids(**lookup: Any) -> list[int]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("use_timezone", "zone"), [(True, "UTC"), (True, "Asia/Tokyo"), (False, "UTC")])
+@pytest.mark.parametrize(
+    ("use_timezone", "zone"),
+    [(True, "UTC"), (True, "Asia/Tokyo"), pytest.param(False, "UTC", marks=pytest.mark.requires("tzlocal"))],
+)
 async def test_date_field_compares_with_timestamp_as_its_first_moment(use_timezone, zone):
     async with hare_test_context(
         ["tests.shared_models.typed_row_models"], db_url=get_test_db_url(), use_timezone=use_timezone, timezone=zone
@@ -47,6 +50,7 @@ async def test_date_field_compares_with_timestamp_as_its_first_moment(use_timezo
         assert await get_ids(day=F("at")) == [1]
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo"])
 async def test_naive_timestamp_converts_as_its_wall_clock(zone):

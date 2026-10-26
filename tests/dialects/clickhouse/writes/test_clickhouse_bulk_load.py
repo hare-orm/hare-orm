@@ -11,8 +11,6 @@ import uuid
 
 import pytest
 
-pytest.importorskip("clickhouse_connect")
-
 from hare.contrib.test import capture_queries  # noqa: E402
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT  # noqa: E402
 from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (  # noqa: E402
@@ -23,6 +21,8 @@ from hare.exceptions import (
     ValidationError,  # noqa: E402
 )
 from tests.dialects.clickhouse.models import Player, Team  # noqa: E402
+
+REQUIRES = ("clickhouse-connect",)
 
 PLAYER_FIELDS = ("name", "team_id", "score", "rating", "joined", "born", "active", "notes", "data")
 PLAYER_INSERT = (

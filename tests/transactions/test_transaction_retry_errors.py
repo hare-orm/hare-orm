@@ -3,11 +3,10 @@ the connection's driver says can succeed when the whole transaction runs again."
 
 import sqlite3
 
-import asyncpg
 import pytest
 
 from hare.contrib.test import requires_features
-from hare.dialects.postgresql.drivers.asyncpg.asyncpg_driver import AsyncpgDriver
+from hare.dialects.postgresql.drivers.rust_pg.rust_pg_driver import RustPgDriver
 from hare.dialects.sqlite.drivers.aiosqlite.aiosqlite_driver import AiosqliteDriver
 from hare.exceptions import IntegrityError, OperationalError, TransactionRetryError
 from hare.transactions.enums import IsolationLevel
@@ -42,11 +41,6 @@ def get_sqlite_busy_error(tmp_path) -> sqlite3.OperationalError:
 @pytest.mark.parametrize(
     ("error", "is_retryable"),
     [
-        (asyncpg.exceptions.SerializationError("could not serialize access"), True),
-        (asyncpg.exceptions.DeadlockDetectedError("deadlock detected"), True),
-        (asyncpg.exceptions.TransactionIntegrityConstraintViolationError("integrity"), False),
-        (asyncpg.exceptions.LockNotAvailableError("could not obtain lock"), False),
-        (asyncpg.exceptions.QueryCanceledError("canceling statement"), False),
         (ServerErrorWithSqlstate("40001"), True),
         (ServerErrorWithSqlstate("40P01"), True),
         (ServerErrorWithSqlstate("40003"), False),
@@ -55,6 +49,27 @@ def get_sqlite_busy_error(tmp_path) -> sqlite3.OperationalError:
     ],
 )
 def test_postgresql_driver_classifies_by_sqlstate(error, is_retryable):
+    assert RustPgDriver().is_retryable(error) is is_retryable
+
+
+@pytest.mark.requires("asyncpg")
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("error_class_name", "message", "is_retryable"),
+    [
+        ("SerializationError", "could not serialize access", True),
+        ("DeadlockDetectedError", "deadlock detected", True),
+        ("TransactionIntegrityConstraintViolationError", "integrity", False),
+        ("LockNotAvailableError", "could not obtain lock", False),
+        ("QueryCanceledError", "canceling statement", False),
+    ],
+)
+def test_postgresql_driver_classifies_asyncpg_errors_by_sqlstate(error_class_name, message, is_retryable):
+    import asyncpg
+
+    from hare.dialects.postgresql.drivers.asyncpg.asyncpg_driver import AsyncpgDriver
+
+    error = getattr(asyncpg.exceptions, error_class_name)(message)
     assert AsyncpgDriver().is_retryable(error) is is_retryable
 
 

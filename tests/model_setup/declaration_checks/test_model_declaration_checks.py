@@ -4,11 +4,14 @@ mistake - not by a raw error of the database or of the first query reaching it."
 import pytest
 
 from hare import fields
-from hare.ddl import Index, UniqueConstraint
+from hare.ddl import CheckConstraint, Index, PartialIndex, Policy, UniqueConstraint
+from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.exceptions import ConfigurationError
+from hare.fields.generated_field import GeneratedField
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from hare.query.expressions import Q
+from hare.query.expressions import Exists, Q
+from hare.query.functions import Lower
 
 pytestmark = pytest.mark.database_independent
 
@@ -281,3 +284,82 @@ def test_a_unique_constraint_condition_reading_no_column_is_refused():
 
     with pytest.raises(ConfigurationError, match="ConditionalUnique: a constraint or index condition reads only"):
         bind(ConditionalUnique)
+
+
+def make_relating_model(meta_options: dict, fields_of_model: dict | None = None) -> tuple[type[Model], type[Model]]:
+    """An owner and a model of it declaring Meta options and fields of its own - classes of the test."""
+
+    class Owner(Model):
+        id = fields.IntField(primary_key=True)
+        name = fields.CharField(max_length=20)
+
+    meta = type("Meta", (), meta_options)
+    relating_model = type(
+        "Relating",
+        (Model,),
+        {
+            "__module__": __name__,
+            "id": fields.IntField(primary_key=True),
+            "slot": fields.IntField(default=0),
+            "owner": fields.ForeignKeyField("models.Owner", related_name="relating", null=True),
+            "Meta": meta,
+            **(fields_of_model or {}),
+        },
+    )
+    return Owner, relating_model
+
+
+@pytest.mark.parametrize(
+    ("meta_options", "fields_of_model"),
+    [
+        ({"constraints": (CheckConstraint(check=Q(owner__name="a"), name="relating_check"),)}, None),
+        (
+            {
+                "constraints": (
+                    UniqueConstraint(fields=("slot",), condition=Q(owner__name="a"), name="relating_unique"),
+                )
+            },
+            None,
+        ),
+        ({"indexes": (PartialIndex(fields=["slot"], condition=Q(owner__id__gt=1), name="relating_partial"),)}, None),
+        (
+            {"row_level_security": "enabled", "policies": (Policy("relating_policy", using=Q(owner__name="a")),)},
+            None,
+        ),
+        ({}, {"shown": GeneratedField(Lower("owner__name"), output_field=fields.CharField(max_length=20))}),
+    ],
+    ids=["check", "unique condition", "partial index", "policy", "generated field"],
+)
+def test_a_declaration_reading_a_related_model_is_refused_when_the_model_is_bound(meta_options, fields_of_model):
+    """Only a migration of it failed - makemigrations wrote one no database could apply."""
+    owner, relating_model = make_relating_model(meta_options, fields_of_model)
+
+    with pytest.raises(ConfigurationError, match="Relating: .*(reads only the model's own columns|related model)"):
+        bind(owner, relating_model)
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [Q(owner__isnull=True), Q(owner=1), Q(owner__in=[1, 2]), Q(owner_id__gt=1)],
+    ids=["isnull", "exact", "in", "column"],
+)
+def test_a_condition_comparing_a_relation_by_its_column_is_taken(condition):
+    """A relation compared by its own column was refused as reading the related model - the DDL writes it
+    over the column of the relation."""
+    owner, relating_model = make_relating_model(
+        {
+            "constraints": (UniqueConstraint(fields=("slot",), condition=condition, name="relating_unique"),),
+            "indexes": (PartialIndex(fields=["slot"], condition=condition, name="relating_partial"),),
+        }
+    )
+
+    bind(owner, relating_model)
+
+
+def test_an_expression_nested_in_a_condition_is_refused():
+    """Only an expression at the top of the Q tree was refused."""
+    owner, relating_model = make_relating_model({})
+    condition = Q(Q(Exists(owner.objects.all())), slot=1)
+
+    with pytest.raises(ConfigurationError, match="reads only the model's own columns"):
+        ConstraintCondition.raise_if_reads_other_columns(condition, relating_model)

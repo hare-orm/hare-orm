@@ -38,9 +38,9 @@ def native_rows():
     return NativeModules.rows
 
 
+@pytest.mark.requires("clickhouse-driver")
 @pytest.mark.parametrize("moment_scale", range(10))
 def test_clickhouse_driver_ticks_are_the_python_conversion_s(native_rows, monkeypatch, moment_scale):
-    pytest.importorskip("clickhouse_driver")
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_client import (
         ClickhouseDriverLibraryClient,
     )
@@ -56,8 +56,8 @@ def test_clickhouse_driver_ticks_are_the_python_conversion_s(native_rows, monkey
     assert ClickhouseDriverLibraryClient._get_moment_ticks(tuple(values), moment_scale) == expected
 
 
+@pytest.mark.requires("clickhouse-driver")
 def test_a_naive_moment_fails_as_in_the_python_conversion(native_rows, monkeypatch):
-    pytest.importorskip("clickhouse_driver")
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_client import (
         ClickhouseDriverLibraryClient,
     )
@@ -71,9 +71,9 @@ def test_a_naive_moment_fails_as_in_the_python_conversion(native_rows, monkeypat
     assert messages[0] == messages[1]
 
 
+@pytest.mark.requires("clickhouse-connect")
 @pytest.mark.parametrize("moment_scale", range(10))
 def test_clickhouse_connect_ticks_are_the_library_s(native_rows, moment_scale):
-    pytest.importorskip("clickhouse_connect")
     from clickhouse_connect.datatypes.registry import get_from_name
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (
@@ -86,8 +86,8 @@ def test_clickhouse_connect_ticks_are_the_library_s(native_rows, moment_scale):
     assert columns[0] == [*(column_type._datetime64_ticks(moment) for moment in moments), None]
 
 
+@pytest.mark.requires("clickhouse-connect")
 def test_clickhouse_connect_leaves_other_columns_to_the_library(native_rows):
-    pytest.importorskip("clickhouse_connect")
     from clickhouse_connect.datatypes.registry import get_from_name
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (

@@ -55,6 +55,14 @@ class ChangeSink(abc.ABC):
         """
         return ()
 
+    def check_connection(self, connection: DatabaseClient) -> None:
+        """Refuses a connection the sink can't write the changes of a write on - checked before the write runs,
+        so a refusal leaves no row written without its changes. Accepts every connection by default.
+
+        Args:
+            connection: The connection of the write.
+        """
+
     @abc.abstractmethod
     async def write(self, connection: DatabaseClient, model: type[Model], changes: list[CapturedChange]) -> None:
         """Writes the changes of one write, in its transaction.

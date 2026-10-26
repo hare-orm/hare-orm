@@ -34,6 +34,8 @@ from hare.contrib.request_query.api_getter.api_http_requests import ApiHttpReque
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.observers.observers import Observers
 
+REQUIRES = ("http",)
+
 pytestmark = pytest.mark.database_independent
 
 USERS = {

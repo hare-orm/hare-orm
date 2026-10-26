@@ -52,7 +52,8 @@ class DeclaredExpressions:
             The term - a field's unqualified column, as the database reads a declaration back.
 
         Raises:
-            ConfigurationError: A name is no field of the model.
+            ConfigurationError: A name is no field of the model, or the expression reads a related model's
+                column - a table's DDL reads its own columns only.
         """
         if isinstance(expression, str) or (type(expression) is F and expression.name in model._meta.fields_map):
             field_name = expression if isinstance(expression, str) else expression.name
@@ -63,7 +64,13 @@ class DeclaredExpressions:
         expression_context = ExpressionContext(
             model=model, table=model.get_table(), annotations={}, dialect=dialect, connection=None
         )
-        return expression.get_result(expression_context).term
+        result = expression.get_result(expression_context)
+        if result.joins:
+            raise ConfigurationError(
+                f"{model.__name__}: {expression!r} reads a column of a related model, which a declaration of the "
+                "table can't - name the model's own column of the relation (F('owner_id') for owner)"
+            )
+        return result.term
 
     @staticmethod
     def get_sql(expression: DeclaredExpression, model: type[Model], dialect: Dialect) -> str:

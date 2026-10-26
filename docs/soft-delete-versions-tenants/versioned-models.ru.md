@@ -6,7 +6,7 @@
 
 ```python
 class VersionedModel(Model):
-    id = fields.UUIDField(default=uuid4, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True)
     version = fields.PositiveSmallIntField(default=1)
     pk = CompositePrimaryKey("id", "version")
 
@@ -17,10 +17,18 @@ class VersionedModel(Model):
     async def get_last_version_or_exception(
         cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
     ) -> Self: ...
+    @classmethod
+    async def get_last_visible_version_or_exception(
+        cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
+    ) -> Self: ...
 
     def get_new_version(self, **kwargs: Any) -> Self: ...      # QueryError, если в kwargs есть "id"/"version"
     async def create_new_version(self, **kwargs: Any) -> Self: ...
 ```
+
+`id` новой записи — UUID версии 7 (`hare.fields.uuid7.Uuid7.new`): упорядочен по времени и в пределах
+процесса растёт даже внутри одной миллисекунды — индекс по id растёт с конца. На Python 3.14 и новее это
+собственный `uuid.uuid7`, на 3.12 и 3.13 — та же раскладка, которую делает hare.
 
 `id` и `version` вместе — настоящий первичный ключ таблицы, а не искусственный ключ с добавленным сбоку
 ограничением уникальности. Поэтому внешний ключ может ссылаться на конкретную версию настоящим,
@@ -51,7 +59,11 @@ revised = await current.create_new_version(title="Updated title")
 ```
 
 `get_last_version_or_exception()` возвращает наибольшую версию, подходящую под фильтры, — или
-`DoesNotExist` (либо переданное `exception`), если такой нет. `get_new_version`/`create_new_version`
+`DoesNotExist` (либо переданное `exception`), если такой нет. Он видит все версии, в том числе мягко
+удалённые: следующая версия не должна с ними совпасть. `get_last_visible_version_or_exception()`
+возвращает наибольшую из версий, которые показывает менеджер модели, — мягко удалённые скрыты, область
+арендатора применена — чтобы читать текущее состояние записи, удаление которой пометило её версии.
+`get_new_version`/`create_new_version`
 копируют каждое поле самой модели через `deepcopy`, кроме `id`, `version` и всего, что перечислено в
 `Meta.new_version_excluded_fields`, и увеличивают `version` на 1; `get_new_version()` строит версию, не
 сохраняя её. Колонка, которую вычисляет база (`GeneratedField`, любое поле с `generated=True`), и колонка

@@ -34,6 +34,19 @@ class SqliteTypes:
             raise ValidationError(f"{field.model_field_name}: value is NaN, which SQLite stores as NULL")
         return value
 
+    @staticmethod
+    def to_lookup_float(field: Field[Any], value: Any, instance: Any) -> Any:
+        """A float a filter compares the column with - NaN refused: SQLite binds it as NULL, so ``__not=NaN``
+        matched the NULL rows alone.
+
+        Raises:
+            ValidationError: The value is NaN.
+        """
+        value = field.to_lookup_value(value, instance)
+        if isinstance(value, float) and math.isnan(value):
+            raise ValidationError(f"{field.model_field_name}: a filter by NaN, which SQLite binds as NULL")
+        return value
+
     @classmethod
     def build(cls) -> TypeRegistry:
         """The SQLite type registry.
@@ -44,7 +57,12 @@ class SqliteTypes:
         types = TypeRegistry()
         types.register(IntField, TypeMapping(generated_sql="INTEGER"))
         types.register(BooleanField, TypeMapping(column_type="INT"))
-        types.register(FloatField, TypeMapping(column_type="REAL", to_db=cls.to_db_float, to_db_refuses_only=True))
+        types.register(
+            FloatField,
+            TypeMapping(
+                column_type="REAL", to_db=cls.to_db_float, to_db_refuses_only=True, to_lookup=cls.to_lookup_float
+            ),
+        )
         # TEXT affinity (the declared type contains "TEXT") - a plain "JSON" column gets NUMERIC
         # affinity, which turns a stored top-level number into INTEGER/REAL.
         types.register(JSONField, TypeMapping(column_type="JSON_TEXT"))

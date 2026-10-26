@@ -13,7 +13,6 @@ import pytest_asyncio
 
 from hare import fields
 from hare.cli.plugins import CLIContext
-from hare.contrib.pydantic.descriptions import ModelDescription
 from hare.contrib.test import requires_features
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.exceptions import UnSupportedError
@@ -208,7 +207,10 @@ def test_meta_names_and_columns(db):
     assert set(meta.db_fields) == set(meta.fields_db_projection.values())
 
 
+@pytest.mark.requires("pydantic")
 def test_model_description_groups_fields_by_type(db):
+    from hare.contrib.pydantic.descriptions import ModelDescription
+
     description = ModelDescription.from_model(Event)
     assert [field.model_field_name for field in description.pk_fields] == ["event_id"]
     assert {field.model_field_name for field in description.data_fields} == {

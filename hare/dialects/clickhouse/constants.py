@@ -6,6 +6,7 @@ from typing import Any
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
+from hare.dialects.clickhouse.indexes.constants import CLICKHOUSE_BLOOM_FILTER_FALSE_POSITIVE
 from hare.dialects.enums import ConnectionOptionType
 from hare.inspectdb.introspection.enums import SchemaPartType
 
@@ -182,6 +183,11 @@ CLICKHOUSE_INDEX_TYPE_ARGUMENTS = {
     "bloom_filter": ("false_positive",),
     "ngrambf_v1": ("ngram_size", "filter_size", "hash_functions", "seed"),
     "tokenbf_v1": ("filter_size", "hash_functions", "seed"),
+}
+#: The text of each argument ClickHouse gives a data skipping index type written without it - a
+#: ``bloom_filter`` index of another tool reads as hare's ``bloom_filter(0.025)``.
+CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS = {
+    "bloom_filter": {"false_positive": str(CLICKHOUSE_BLOOM_FILTER_FALSE_POSITIVE)},
 }
 #: A table's data skipping indexes.
 CLICKHOUSE_INDEXES_SQL = (

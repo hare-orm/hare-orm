@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.core.hare_context import HareContext
-from hare.exceptions import FieldError, QueryError
+from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -57,13 +57,19 @@ class LookupPaths:
             related_field: The relation.
 
         Returns:
-            True when the two models resolve to different connections; False outside a Hare context.
+            True when the two models resolve to different connections; False outside a Hare context, and for a
+            model of no connection.
         """
         if HareContext.get_current() is None:
             return False
-        return related_field.model.get_connection(for_write=False) is not related_field.related_model.get_connection(
-            for_write=False
-        )
+        try:
+            connection = related_field.model.get_connection(for_write=False)
+            related_connection = related_field.related_model.get_connection(for_write=False)
+        except ConfigurationError:
+            # A model of no connection - one of a migration's state, its DDL written - crosses none; a query of
+            # it fails asking for its connection.
+            return False
+        return connection is not related_connection
 
     @staticmethod
     def holds_through_table(related_field: RelationalField[Model]) -> bool:

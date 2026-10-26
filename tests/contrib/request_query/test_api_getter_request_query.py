@@ -30,6 +30,8 @@ from hare.exceptions import ConfigurationError
 from hare.transactions.transactions import Transactions
 from tests.contrib.request_query.models import Book
 
+REQUIRES = ("http",)
+
 PEOPLE = {1: "Anna Petrova", 2: "Boris Ivanov", 3: "Clara Smirnova"}
 
 PEOPLE_SOURCE = ApiSource(

@@ -22,6 +22,55 @@ renames that section to its version and date.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-27
+
+### Breaking changes
+
+- `bulk_create(ignore_conflicts=True)` returns the objects it inserted, and only they are marked saved;
+  objects whose keys the database generates need `on_conflict=[...]`.
+- `JSONField(field_type=...)`, YAML configuration files and `Faker()` need the `pydantic`, `yaml` and
+  `faker` extras.
+- A transaction of `postgresql+asyncpg` refuses a statement from another event loop, and an in-memory
+  SQLite database refuses another event loop - both with `ConfigurationError`.
+- `bulk_update()` of a sliced queryset, or one of `distinct(*fields)`, raises `QueryError`, as `update()`
+  does; it wrote objects outside the slice.
+- A constraint or index condition, a policy or a `GeneratedField` reading a related model is refused when
+  the model is bound (`ConfigurationError`), not by its migration.
+- A `FloatField` filter by `NaN` on SQLite raises `ValidationError` - SQLite bound it as `NULL`.
+
+### Added
+
+- Outbox: `ChangeCapture(extend_many=...)` and `ChangeCapture.replace()`, `OutboxEvent.enqueue_many()`,
+  topic patterns and `exclude_topics` of `OutboxRelay`, `WebhookDelivery` of subscribers (`target`,
+  `allows_url`, `result_field`, `signature_header`).
+- A `Q` as a value in `annotate()`, `alias()`, `values()`, `values_list()` and `update()` (`ConditionValue`).
+- The pytest plugin's `hare_app_db` and `hare_app_transactional_db` for the application under test.
+- `VersionedModel.get_last_visible_version_or_exception()`, `Uuid7`, `ClickhouseRequestQuery`,
+  `Field.get_json_value()`, `prefetch_related(None)`.
+
+### Changed
+
+- The ids of `VersionedModel` and `OutboxEvent` are version 7 UUIDs; `ListenNotifyWakeup` sends one `NOTIFY`
+  per topic and transaction; a PostgreSQL test database is dropped with its sessions.
+
+### Fixed
+
+- Migrations of outbox models, of a parameterized `field_type` and of an expression index over a foreign
+  key; `makemigrations` without `asyncpg`; the change events of every field type; the pure wheel; the
+  validators of a `UUIDField` given text; the JSON of a pydantic schema with NaN or infinity; the count,
+  `exists()` and offset page of a request query that prefetches, `Exists()` of a queryset that prefetches.
+- ClickHouse: the first `atomic()` of a process on a connection with `transactions=true`, and
+  `autonomous()` with an option, which ran without a transaction; the Keeper migration lock of a database
+  named with `/`; the key series of a database named as the prefix of another one, and a test database's
+  series left in the Keeper; a `bloom_filter` index written without its argument reported as drift.
+- Change capture: a write inside an open transaction whose event failed kept its row; `InProcessWakeup`
+  signalled from a thread with an event loop of its own.
+- `bulk_create(ignore_conflicts=True)` matching rows by a mapping's key order (hstore, jsonb).
+- `inspectdb` and drift: SQLite `DATETIME`/`DOUBLE`/`FLOAT` columns and index order; a PostgreSQL `IN`
+  check over `varchar` and a sequence shared by tables.
+- A configuration, or a section of it, that isn't a mapping raises `ConfigurationError`, not `TypeError`;
+  the `transactions` option of the application integrations is checked.
+
 ## [0.10.0] - 2026-10-26
 
 ### Breaking changes
@@ -141,6 +190,7 @@ Wheels with the Rust extension are built for Linux (glibc and musl), macOS and W
 - **Documentation** in English and Russian, and benchmarks against SQLAlchemy, Tortoise ORM,
   yara-orm and Django - see [Benchmarks](https://hare-orm.github.io/hare-orm/benchmarks/).
 
-[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...dev
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...dev
+[0.11.0]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/hare-orm/hare-orm/releases/tag/v0.9.0

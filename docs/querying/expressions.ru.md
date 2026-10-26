@@ -40,6 +40,26 @@ Book.objects.filter(Q.with_connector(Connector.OR, title__icontains="wizard", au
 меняется), `.negate()` (меняет `_is_negated` на месте), `bool(q)` (`True`, если есть хотя бы один фильтр,
 `Exists` или истинный вложенный `Q`; `False` для пустого `Q()`).
 
+### <a id="condition-value"></a>Условие как значение: `ConditionValue`
+
+```python
+class ConditionValue(Expression):
+    def __init__(self, condition: Q | Exists) -> None: ...
+```
+
+```python
+tickets = Ticket.objects.annotate(is_open=Q(closed_at__isnull=True))
+reports = Report.objects.annotate(is_shared=Exists(shared_with_user) | Exists(shared_with_team))
+await Ticket.objects.filter(due_at__lt=now).update(is_late=Q(closed_at__isnull=True))
+```
+
+Условие, прочитанное как значение каждой строки: истина там, где `filter()` с ним берёт строку, ложь там,
+где не берёт, `None` там, где трёхзначная логика SQL даёт NULL (`Q(desc="x")` у строки, где `desc` — NULL).
+`Q` — в том числе `Exists(...) | Exists(...)`, — переданный в `annotate()`, `alias()`, `values()`,
+`values_list()` или `update()`, становится `ConditionValue`; по аннотированному условию фильтруют и
+сортируют, как по любой логической аннотации (`.filter(is_open=True)`). Значение читается через
+`BooleanField(null=True)` — база, которая пишет условие как `0`/`1` (SQLite, ClickHouse), тоже даёт `bool`.
+
 ## <a id="f"></a>`F`
 
 ```python

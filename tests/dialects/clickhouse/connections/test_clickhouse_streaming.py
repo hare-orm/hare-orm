@@ -78,12 +78,12 @@ async def test_a_failing_stream_raises_hares_error(clickhouse_db):
     assert (await connection.execute_dicts("SELECT 1 AS one"))[0]["one"] == 1
 
 
+@pytest.mark.requires("clickhouse-connect")
 @pytest.mark.database_independent
 def test_a_server_error_unreadable_out_of_the_stream_is_the_statements_error():
     """The server's error split between blocks of the stream came back from clickhouse-connect as a
     failed connection - DBConnectionError, while the connection was fine and the statement had
     failed."""
-    pytest.importorskip("clickhouse_connect")
     from clickhouse_connect.driver.exceptions import StreamFailureError
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (

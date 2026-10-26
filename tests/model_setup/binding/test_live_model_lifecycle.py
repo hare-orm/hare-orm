@@ -259,6 +259,7 @@ async def test_unregister_model_that_is_not_registered_raises(db):
         Hare.unregister_live_models([NeverRegistered])
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_pydantic_model_of_reregistered_class_points_at_the_new_class(db, connection):
     """A structurally identical class re-registered for the same table used to get the old class's

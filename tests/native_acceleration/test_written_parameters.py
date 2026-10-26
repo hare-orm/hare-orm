@@ -12,6 +12,7 @@ import pytest
 
 from hare.instrumentation import Observers, QueryExecuted
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
+from rust.native import pg
 from tests.shared_models.testmodels import (
     DatetimeFields,
     IntFields,
@@ -21,11 +22,11 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
 
-pg = pytest.importorskip("rust.native.pg")
+REQUIRES = ("native",)
 
 
 def skip_unless_written_parameters(model) -> None:
-    if HydrateAccelerator.module is None or not model.get_connection().features.binds_written_parameters:
+    if not model.get_connection().features.binds_written_parameters:
         pytest.skip("for a driver that binds written parameters")
 
 

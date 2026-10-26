@@ -46,6 +46,7 @@ from tests.dialects.clickhouse.models import (
     TenantLabel,
     TenantNote,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @pytest.mark.database_independent
@@ -60,7 +61,9 @@ def test_the_option_is_checked():
 async def test_a_connection_inserts_asynchronously(clickhouse_db):
     connection = Team._meta.connection
     url = os.environ["HARE_TEST_DB"]
-    config = DbUrlConfigGenerator.expand(f"{url.replace('{}', 'x')}?async_insert=true")
+    config = DbUrlConfigGenerator.expand(
+        DatabaseUnderTest.get_url_with_options("async_insert=true", url.replace("{}", "x"))
+    )
     assert config["credentials"]["async_insert"] is True
     credentials = {**config["credentials"], "database": connection.database}
     client = type(connection)(connection_alias="async_inserts", **credentials)

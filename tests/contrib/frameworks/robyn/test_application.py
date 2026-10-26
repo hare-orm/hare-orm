@@ -28,6 +28,8 @@ from hare.query.enums import Lookup
 from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
 
+REQUIRES = ("robyn",)
+
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {

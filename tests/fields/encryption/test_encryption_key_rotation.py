@@ -30,6 +30,7 @@ async def fetch_raw_secrets() -> list[str]:
     return [row["secret"] for row in rows]
 
 
+@pytest.mark.requires("encryption")
 @pytest.mark.asyncio
 async def test_the_key_changes_without_losing_data(db_encrypted_fields):
     FieldEncryption.configure(OLD_SECRET)
@@ -65,6 +66,7 @@ def test_wrong_keys_and_batch_sizes_are_refused():
         FieldEncryption.configure(NEW_SECRET, previous_keys=[""])
 
 
+@pytest.mark.requires("encryption")
 @pytest.mark.asyncio
 async def test_reencrypt_needs_a_positive_batch_size(db_encrypted_fields):
     FieldEncryption.configure(NEW_SECRET)

@@ -3,7 +3,7 @@ import pytest_asyncio
 
 from hare.query.expressions import Case, Exists, OuterReference, Q, Value, When
 from hare.query.functions import Sum
-from tests.shared_models.testmodels import Author, Book
+from tests.shared_models.testmodels import Author, Book, Event, Tournament
 
 
 @pytest_asyncio.fixture
@@ -111,3 +111,15 @@ async def test_exists_of_a_slice_of_no_rows_matches_none(library):
     assert await Author.objects.filter(Exists(Book.objects.all()[:0])).count() == 0
     assert await Author.objects.filter(~Exists(books[:0])).count() == 3
     assert await Author.objects.filter(Exists(books[:1])).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_an_exists_of_a_queryset_prefetching_ignores_its_prefetch(db):
+    """Exists() of a queryset prefetching - a base queryset reused in a condition - refused the query: the
+    subquery was built by exists(), which refuses a prefetch it has no instances to attach to."""
+    tournament = await Tournament.objects.create(name="With an event")
+    await Tournament.objects.create(name="Without")
+    await Event.objects.create(name="Final", tournament_id=tournament.id)
+    events = Event.objects.filter(tournament_id=OuterReference("id")).prefetch_related("participants")
+
+    assert await Tournament.objects.filter(Exists(events)).values_list("name", flat=True) == ["With an event"]

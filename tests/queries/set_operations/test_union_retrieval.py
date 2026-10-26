@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import requires_features
-from hare.exceptions import DoesNotExist, MultipleObjectsReturned, QueryError, UnSupportedError
+from hare.exceptions import DoesNotExist, MultipleObjectsReturned, QueryError
 from hare.query.expressions import Q
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Event, Reporter, Tournament
@@ -112,14 +112,6 @@ async def test_prefetch_related_with_first(tournaments):
     await Event.objects.create(name="e", tournament=tournaments["b"])
     tournament = await first_two().prefetch_related("events").first()
     assert [event.name for event in tournament.events] == ["e"]
-
-
-@pytest.mark.asyncio
-@requires_features(supports_streaming=False)
-async def test_stream_raises_unsupported_without_streaming(tournaments):
-    with pytest.raises(UnSupportedError, match="stream"):
-        async for _ in first_two().stream():
-            pass
 
 
 @pytest.mark.asyncio

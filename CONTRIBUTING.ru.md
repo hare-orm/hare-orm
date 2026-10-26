@@ -201,8 +201,8 @@ CI, — rustup ставит её при первом вызове `cargo` в che
 ```bash
 make build_native           # rust.native для текущей ОС и текущего Python, в rust/
 make build_native_linux     # rust.native для Linux и Python 3.12-3.14, в Docker
-make build_native_windows   # rust.native для Windows и Python 3.12-3.14 (.venv-3.X)
-make build_native_macos     # rust.native для macOS и Python 3.12-3.14 (.venv-3.X), universal2
+make build_native_windows   # rust.native для Windows и Python 3.12-3.14 (.venv-3.X-core)
+make build_native_macos     # rust.native для macOS и Python 3.12-3.14 (.venv-3.X-core), universal2
 make rust_check             # cargo fmt --check, clippy и модульные тесты Rust (входит в make check)
 ```
 
@@ -251,6 +251,65 @@ universal2 на версию Python для Apple silicon и Intel) и перед
 останавливается до первого теста, если загружена другая SQLite, — прогон никогда молча не
 переходит на системную SQLite.
 
+### Окружения тестов
+
+Каждый тест идёт в одном окружении `SUITE_ENVIRONMENTS` из `tests/matrix/constants.py` — в том, что ставит
+ровно нужные ему пакеты: `core` не ставит ни одного extra, `litestar` — extra `litestar`, `pure` — ничего
+необязательного и без `rust.native` (чистый wheel). Код, который ломается без пакета, ловят окружения без
+него, а тест никогда не пропускается из-за того, что пакета нет.
+
+Матрица гоняет окружения extras на тестах, которые не читают базу, — один раз на Python и ОС; каждое
+собирает только модули, где могут быть его тесты (`tests/matrix/extra_test_modules.py`): модуль, чей
+`REQUIRES`, `conftest.py` над ним или то, что он импортирует из набора тестов, называет строкой один из extras
+окружения; окружение, тестов которого не может быть ни в одном модуле, не запускается. На базе
+каждый тест идёт в `all`, где стоят все extras, на каждой версии сервера — один прогон на версию и
+драйвер; `core` и `pure` идут там только на новейшем сервере каждой базы и новейшем Python.
+
+- Модуль тестов, которому нужен extra, объявляет это перед остальным кодом: `REQUIRES = ("litestar",)` —
+  читается без импорта модуля, поэтому прогон без пакета его и не импортирует. `conftest.py` объявляет так
+  требование для всего каталога.
+- Отдельный тест или параметр добавляет своё через `@pytest.mark.requires("encryption")` или
+  `pytest.param(..., marks=pytest.mark.requires("yaml"))` и импортирует пакет внутри теста.
+- `native` — требование теста, которому нужен `rust.native`: такой тест не идёт в `pure`.
+- Тест, требующий того, что ни одно окружение не ставит в точности, роняет сбор: добавьте окружение.
+- Тест, параметризованный драйверами PostgreSQL, берёт их классы по пути
+  (`DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)`, фикстура `client_class` с `indirect=True`), и
+  параметр asyncpg идёт только там, где asyncpg установлен.
+
+`pytest --hare-suite-environment=<имя>` выполняет тесты одного окружения; без параметра идут тесты всех
+окружений (`all`), для этого нужно виртуальное окружение со всем — `make deps`. Матрица выполняет каждое
+окружение в своём виртуальном окружении `.venv-<python>-<окружение>[-<extra драйвера>]`; для прогона на базе
+к нему добавляется extra её драйвера:
+
+```bash
+make matrix_venvs MATRIX_OPTIONS="--python 3.14 --environment core --environment litestar"
+make test_environment ENVIRONMENT=litestar HARE_TEST_DB=postgresql://postgres:postgres@127.0.0.1:5433/test_{}
+```
+
+### Контрактные матрицы
+
+`tests/contracts/` проверяет каждую возможность hare против каждого места, где она используется, — матрицей:
+строки перебираются из самого hare (`HareRegistry` обходит его пакеты), поэтому класс, добавленный в hare,
+проверяется сразу, а строка без ожидаемого результата валит тест полноты, а не пропускается.
+
+| Матрица | Строки × столбцы | Где |
+| --- | --- | --- |
+| Поле × место значения | каждый конкретный класс поля (`field_samples.py`) × миграция, событие изменения (строгий JSON), схема pydantic, запрос из параметров, фабрика, inspectdb | `test_field_*.py` |
+| Путь записи × наблюдатель | каждый метод, пишущий строки (`writes/write_methods.py`), × `ChangeCapture`, `RowsChanged`, валидаторы, `auto_now`, оптимистическая блокировка, область арендатора, шифрование, `GeneratedField` | `writes/` |
+| Extra × точка входа | каждый модуль, импортируемый в окружении, реестр диалектов, CLI, URL драйвера без его пакета | `entry_points/` |
+| Модель contrib × миграции | модели outbox, версионные, с арендатором, с шифрованием, gis, векторы, общий и составной ключ, many-to-many | `contrib_models/` |
+| Интеграция × фикстура тестов | Robyn, Litestar, FastAPI, taskiq × `hare_app_db`, `hare_app_transactional_db` × драйвер | `applications/` |
+| Документация × код | каждый `from hare… import …` в `docs/**/*.md` | `documentation/` |
+| Опция `Meta` × наследование | каждая опция модели и опция расширения × без `Meta`, пустой, `Meta(Base.Meta)`, переопределённая, `None` | `meta_options/` |
+| Исключение × ответ интеграции | каждое публичное исключение × статус каждой интеграции, без текста базы | `exceptions/` |
+
+Новому классу поля нужен свой `FieldSample` (значения и их JSON-формы), новому методу записи — путь записи,
+новой опции `Meta` — образец, либо запись с причиной в `tests/contracts/constants.py`. Ячейка, падающая
+из-за hare, — ошибка, которую чинят, а не ожидание, которое правят. Матрицы идут в каждом окружении и на
+каждой базе матрицы (`MATRIX_CLICKHOUSE_TEST_PATHS` их включает). Тестовые URL ClickHouse называют Keeper
+сервера (`keeper_hosts`): серии `generateSerialID` тестовой базы удаляются вместе с ней, и локальные прогоны не
+доходят до `max_autoincrement_series` сервера (1000).
+
 ### Матрица на своей машине
 
 Нужны Python 3.12, 3.13 и 3.14 (`py -3.X` на Windows, `python3.X` на остальных системах), Docker для
@@ -260,14 +319,14 @@ universal2 на версию Python для Apple silicon и Intel) и перед
 `rust/`.
 
 ```bash
-make matrix_venvs         # .venv-3.12, .venv-3.13, .venv-3.14 со всеми группами зависимостей
+make matrix_venvs         # виртуальное окружение каждого Python, окружения и драйвера базы прогонов
 make sqlite_versions      # все версии SQLite, подготовленные для каждого из этих Python
 make test_db_matrix_up    # PostgreSQL 14-18: hare-orm-test-db-14 ... -18 на портах 5414-5418
 make test_pgbouncer_matrix_up          # PgBouncer 1.22-1.26 перед PostgreSQL 18, 1.26 ещё и перед 14
 make test_clickhouse_matrix_up         # сервер ClickHouse на версию: HTTP 3YYMM, родной протокол 4YYMM, Keeper 6YYMM
 make test_clickhouse_cluster_matrix_up # кластер ClickHouse из двух серверов на версию: HTTP 5YYMM, родной протокол 2YYMM
 make test_brokers_matrix_up            # Redis 7.2/8.10 (16XYY), RabbitMQ 4.0/4.3 (15XYY), Kafka 3.9/4.3 (19XYY)
-make test_matrix          # все прогоны, затем таблица: Python x набор -> прошёл/упал, счётчики, время
+make test_matrix          # все прогоны, затем таблица: Python x окружение x набор -> прошёл/упал, счётчики, время
 make test_db_matrix_down test_pgbouncer_matrix_down test_clickhouse_matrix_down \
     test_clickhouse_cluster_matrix_down test_brokers_matrix_down   # удаляет серверы
 ```
@@ -276,8 +335,9 @@ make test_db_matrix_down test_pgbouncer_matrix_down test_clickhouse_matrix_down 
 25.8, `12218` — PgBouncer 1.22 перед PostgreSQL 18. Запускайте только серверы тех наборов, которые
 выполняете: все серверы и кластеры ClickHouse сразу требуют много памяти.
 
-Каждый прогон пишет вывод pytest в `.test-matrix/<python>-<набор>.log`; `make test_matrix` падает,
-если упал хотя бы один прогон. Наборы — `database-independent`, `sqlite-<версия>`,
+Прогон — это тесты одного окружения в одном наборе. Каждый прогон пишет вывод pytest в
+`.test-matrix/<python>-<окружение>-<набор>.log`; `make test_matrix` падает, если упал хотя бы один
+прогон; прогон, в котором у окружения нет тестов, проходит. Наборы — `database-independent`, `sqlite-<версия>`,
 `sqlite-regexp`, `asyncpg-<postgres>`, `rust_pg-<postgres>`, `pgbouncer-<asyncpg|rust_pg>-<pgbouncer>-<postgres>`,
 `clickhouse-connect-<clickhouse>`, `clickhouse-driver-<clickhouse>`, `clickhouse-connect-cluster-<clickhouse>`,
 `clickhouse-driver-cluster-<clickhouse>`, `redis-<версия>`, `rabbitmq-<версия>` и `kafka-<версия>`. Часть
@@ -290,8 +350,9 @@ make test_matrix MATRIX_OPTIONS="--workers auto --print-failed-logs"   # по у
 make test_matrix MATRIX_OPTIONS="--jobs 4 --workers 4 --suite 'asyncpg-*'"   # четыре прогона сразу, по 4 процесса
 make test_matrix MATRIX_OPTIONS="--newest"   # только новейший Python и новейшая версия каждого сервера
 make test_matrix MATRIX_OPTIONS="--python 3.14 --suite 'clickhouse-*-26.3'"   # ClickHouse 26.3, сервер и кластер
+make test_matrix MATRIX_OPTIONS="--environment core --environment 'clickhouse-*'"   # тесты этих окружений
 make sqlite_versions matrix_sqlite_versions=newest
-make matrix_venvs matrix_python_versions=3.13 matrix_interpreter=/usr/bin/python3.13
+make matrix_venvs MATRIX_OPTIONS="--python 3.13" matrix_interpreter=/usr/bin/python3.13
 make sqlite_versions matrix_python_versions=3.13 matrix_sqlite_versions=3.35.5
 make test_db_matrix_up matrix_postgres_versions=16
 make test_clickhouse_matrix_up test_clickhouse_cluster_matrix_up matrix_clickhouse_versions=26.3
@@ -338,7 +399,8 @@ CI (`.github/workflows/ci.yml`) запускается для каждого п�
 базовой. Пуш в `main` публикует документацию (`.github/workflows/docs.yml`, `make docs`).
 
 Каждое задание выполняет цели Makefile, описанные выше, — задания тестов вместе и есть
-`make test_matrix`, каждое — его часть:
+`make test_matrix`, каждое — его часть: тесты каждого [окружения](#окружения-тестов) в его наборах, в
+собственном виртуальном окружении этого окружения:
 
 | Задание | Что делает | Цели Makefile |
 | --- | --- | --- |

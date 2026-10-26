@@ -17,6 +17,8 @@ from hare.contrib.test import requires_features
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
 from tests.utils.database_under_test import DatabaseUnderTest
 
+REQUIRES = ("opentelemetry",)
+
 
 @pytest.fixture
 def metric_reader():

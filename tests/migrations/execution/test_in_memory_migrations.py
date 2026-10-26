@@ -12,8 +12,6 @@ from typing import Any
 import pytest
 
 from hare import Hare, fields
-from hare.contrib.pydantic import pydantic_model_creator
-from hare.contrib.request_query import FilterField, RequestQuery
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.exceptions import ConfigurationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
@@ -106,8 +104,12 @@ def content(db_isolated) -> Iterator[ContentTypes]:
     content_types.register(None)
 
 
+@pytest.mark.requires("request-query")
 @pytest.mark.asyncio
 async def test_a_content_type_through_its_whole_life(db_isolated, content):
+    from hare.contrib.pydantic import pydantic_model_creator
+    from hare.contrib.request_query import FilterField, RequestQuery
+
     connection = db_isolated.get_connection(CONNECTION)
     await content.runner.ensure_journal()
     status = build_status()

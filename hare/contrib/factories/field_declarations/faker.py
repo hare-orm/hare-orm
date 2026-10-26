@@ -10,7 +10,7 @@ from hare.exceptions import ConfigurationError
 
 
 class Faker(Declaration):
-    """A value of the ``faker`` library's provider - ``pip install faker``::
+    """A value of the ``faker`` library's provider - the ``faker`` extra (``hare-orm[faker]``)::
 
         name = Faker("name")
         city = Faker("city", locale="de_DE")

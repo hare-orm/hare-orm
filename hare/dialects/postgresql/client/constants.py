@@ -140,11 +140,8 @@ LEADING_WORD_RE = LazyPattern(r"\s*(\w+)")
 #: Whether a database of the name exists.
 POSTGRES_DATABASE_EXISTS_SQL = "SELECT 1 AS database_exists FROM pg_database WHERE datname = $1"
 
-#: Drops a database - and, behind a transaction pooler, the sessions the pooler keeps on it open
-#: after its clients leave.
-POSTGRES_DROP_DATABASE_SQL = "DROP DATABASE {database}"
-
-#: Drops a database, the server ending its sessions first.
+#: Drops a test database, the server ending its sessions first - a pooler's, or one a closed event loop
+#: left running.
 POSTGRES_FORCED_DROP_DATABASE_SQL = "DROP DATABASE {database} WITH (FORCE)"
 
 #: Ends every other session of the current database.

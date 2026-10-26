@@ -127,7 +127,7 @@ def test_exclusion_constraint_extensions_come_from_the_dialect():
     ) == ("btree_gist")
 
 
-@pytest.mark.parametrize("dialect_name", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("dialect_name", ["sqlite", pytest.param("postgresql", marks=pytest.mark.requires("native"))])
 def test_every_registered_driver_names_its_client_classes(dialect_name):
     drivers = [driver for driver in DialectRegistry.get_drivers() if driver.dialect.name == dialect_name]
     assert drivers

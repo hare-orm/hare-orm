@@ -3,6 +3,7 @@ the wakeup: a signal after commit - never for a rollback - starts a poll at once
 transaction joined."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -11,7 +12,7 @@ from hare.contrib.test import requires_features
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import DemoOutboxEvent
 from tests.contrib.outbox.wakeup_signals import signal_until_arrived
-from tests.utils.waiting import wait_until
+from tests.utils.waiting import WAIT_DEADLINE_SECONDS, wait_until
 
 
 async def no_op_deliver(_event: DemoOutboxEvent) -> None:
@@ -97,7 +98,7 @@ async def test_a_wakeup_delivers_long_before_the_poll_interval(db_outbox):
         await signal_until_arrived(wakeup, "widget.created", lambda: delivered)
 
     assert delivered == ["widget.created"]
-    assert wakeup.callbacks == []
+    assert wakeup.subscriptions == []
 
 
 @requires_features(supports_transactions=True)
@@ -155,3 +156,28 @@ async def test_a_signal_of_other_topics_doesnt_wake_a_relay_of_its_topics(db_out
     assert not relay.woken.is_set()
     relay.on_wakeup(frozenset({"gadget.updated", "widget.updated"}))
     assert relay.woken.is_set()
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_a_signal_of_another_thread_calls_the_relay_on_the_event_loop_it_subscribed_in():
+    """A write of a thread with an event loop of its own called the relay's callback in that thread - its
+    asyncio.Event isn't thread-safe, and a relay's idle loop slept on to the next poll."""
+    wakeup = InProcessWakeup()
+    called = asyncio.Event()
+    calls: list[tuple[int, frozenset[str]]] = []
+
+    def callback(topics: frozenset[str]) -> None:
+        calls.append((threading.get_ident(), topics))
+        called.set()
+
+    await wakeup.subscribe(callback, "models")
+    try:
+        thread = threading.Thread(target=lambda: asyncio.run(wakeup.signal(frozenset({"widget.created"}))))
+        thread.start()
+        await asyncio.wait_for(called.wait(), WAIT_DEADLINE_SECONDS)
+        thread.join()
+    finally:
+        await wakeup.unsubscribe(callback)
+
+    assert calls == [(threading.get_ident(), frozenset({"widget.created"}))]

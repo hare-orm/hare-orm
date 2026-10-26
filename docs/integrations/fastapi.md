@@ -141,3 +141,11 @@ app = HareFastAPI(hare_config=HARE_CONFIG, health_routes=HealthRoutes(HealthChec
 ```
 
 The readiness and liveness routes it adds — see [Web frameworks](web-frameworks.md#health-routes).
+
+## <a id="tests"></a>Tests
+
+With hare's pytest plugin the application under test runs on the test databases: started in the test's
+event loop (its lifespan, with an httpx `ASGITransport` client), under `hare_app_db` it takes the test's
+context and its writes are rolled back with the test's — see
+[Application tests](../testing/setup.md#application-tests). Starlette's `TestClient` runs the application
+in a thread of its own — take `hare_app_transactional_db` with it.

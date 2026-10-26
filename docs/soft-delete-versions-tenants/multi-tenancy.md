@@ -203,7 +203,7 @@ scope's value" below is the one value of that scope, and "inside the scope" mean
 - **`bulk_create(update_fields=...)` only overwrites rows inside the scope.** `ON CONFLICT` matches the
   table's physical unique constraint regardless of tenant, so the `DO UPDATE` carries
   `WHERE <tenant column> = <value>` (`IN (<values>)` for several): a conflicting row of a tenant outside
-  the scope is left untouched. As with `ignore_conflicts=True`, the objects are then not marked saved
+  the scope is left untouched. The objects are then not marked saved
   (the call can't tell which of them were written) unless `returning=True` with `on_conflict=[...]`
   matches the written rows back to them; an object whose row was skipped gets nothing from `RETURNING`.
   Not applied under `Tenancy.ALL` and `.all_tenants()`.
