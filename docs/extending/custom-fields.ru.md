@@ -148,6 +148,7 @@ DialectRegistry.get_dialect("postgresql").types.register(
 | `get_like_text_function()` | Как значение превращается в текст для `contains`/`icontains`/`startswith`/... и операторов по шаблону; `None` приводит его к `VARCHAR`. |
 | `get_generated_from_field_names()` / `with_renamed_generated_from_field(old, new)` | Другие поля модели (по имени), из которых вычисляется генерируемая колонка: миграция не даст удалить такое поле, пока эта колонка его читает, а переименование поля переименовывает его и здесь. |
 | `holds_container_value` | `True` для массива, диапазона или значения вроде JSON: вычисляемое значение такого поля получает его собственные операторы фильтра. |
+| `holds_intervals` | `True` для колонки интервального типа базы: длительность прибавляется к моменту так, как это делает база, а не как число микросекунд. |
 
 ```python
 import operator

@@ -31,9 +31,10 @@ class AddField(FieldAddRemoveOperation):
         name: The field's name.
         field: The field.
         not_valid: For a ``ForeignKeyField``/``OneToOneField`` with a database constraint: the
-            existing rows needn't satisfy the FOREIGN KEY yet (Postgres ``NOT VALID``) - adding it
-            doesn't scan the table while both tables' writes wait; a later ``ValidateConstraint``
-            checks the rows. SQLite never checks them as it adds the column.
+            existing rows needn't satisfy the FOREIGN KEY yet (``NOT VALID``, where
+            ``Features.supports_not_valid_constraints``) - adding it doesn't scan the table while both
+            tables' writes wait; a later ``ValidateConstraint`` checks the rows. Another database checks
+            them as it adds the column, or never.
 
     Raises:
         ConfigurationError: ``not_valid`` for a field that makes no FOREIGN KEY.

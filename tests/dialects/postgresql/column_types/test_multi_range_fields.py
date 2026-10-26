@@ -10,7 +10,7 @@ from decimal import Decimal
 import pytest
 
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.dialects.enums import DialectName
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.fields.multiranges import (
     DateMultiRangeField,
     DecimalMultiRangeField,
@@ -220,7 +220,7 @@ def test_a_range_field_without_a_multirange_type_is_refused():
 )
 def test_inspectdb_maps_multirange_columns(db_type, field_name):
     column = ColumnInfo(name="busy", db_type=db_type, nullable=True, is_pk=False, is_unique=False)
-    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(DialectName.POSTGRESQL, column)
+    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)
     assert (field_path, is_ambiguous) == (f"hare.dialects.postgresql.fields.multiranges.{field_name}", False)
 
 

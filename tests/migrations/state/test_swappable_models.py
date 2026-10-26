@@ -248,7 +248,6 @@ def test_config_accepts_swappable_settings_and_keeps_them_in_to_dict() -> None:
 @pytest.mark.parametrize(
     ("swappable_settings", "message"),
     [
-        pytest.param(["USER_MODEL"], "must be a mapping", id="not_a_mapping"),
         pytest.param({"user_model": "accounts.Author"}, "upper-case identifier", id="lower_case_name"),
         pytest.param({"": "accounts.Author"}, "upper-case identifier", id="empty_name"),
         pytest.param({"USER-MODEL": "accounts.Author"}, "upper-case identifier", id="dash_in_name"),
@@ -335,6 +334,7 @@ async def test_swappable_label_and_model_follow_the_setting(
     async with open_context(config, connect=False):
         assert Hare.swappable_label(SETTING) == "proj.Account"
         assert Hare.get_swappable_model(SETTING).__name__ == "Account"
+        assert HareContext.require_current().get_model(swappable(SETTING)) is Hare.get_swappable_model(SETTING)
 
 
 # Meta.swappable and relations
@@ -349,8 +349,8 @@ async def test_default_model_stays_regular_without_the_setting_or_with_the_setti
         apps_config = SwappableProject.get_apps_config(package)
         config = build_config(get_connection_config(tmp_path), apps_config, swappable_settings)
         async with open_context(config, create_db=True, drop_db=True) as context:
-            member_model = context.get_model(PACKAGE_APP, "Member")
-            consent_model = context.get_model(PACKAGE_APP, "Consent")
+            member_model = context.get_model(f"{PACKAGE_APP}.Member")
+            consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
             assert member_model._meta.swapped is None
             assert consent_model._meta.fields_map["member"].related_model is member_model  # type: ignore[attr-defined]
             await context.generate_schemas()
@@ -368,9 +368,9 @@ async def test_swapped_default_model_has_no_table_and_refuses_queries(
     apps_config = SwappableProject.get_apps_config(package, project)
     config = build_config(get_connection_config(tmp_path), apps_config, {SETTING: "proj.Account"})
     async with open_context(config, create_db=True, drop_db=True) as context:
-        member_model = context.get_model(PACKAGE_APP, "Member")
-        account_model = context.get_model(PROJECT_APP, "Account")
-        consent_model = context.get_model(PACKAGE_APP, "Consent")
+        member_model = context.get_model(f"{PACKAGE_APP}.Member")
+        account_model = context.get_model(f"{PROJECT_APP}.Account")
+        consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         assert member_model._meta.swapped == "proj.Account"
         assert account_model._meta.swapped is None
         for field_name in ("member", "owner", "witnesses"):
@@ -420,7 +420,7 @@ async def test_relation_fields_keep_the_swappable_reference(
     apps_config = SwappableProject.get_apps_config(package, project)
     config = build_config(get_connection_config(tmp_path), apps_config, {SETTING: "proj.Account"})
     async with open_context(config, connect=False) as context:
-        consent_model = context.get_model(PACKAGE_APP, "Consent")
+        consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         for field_name in ("member", "owner", "witnesses"):
             field = consent_model._meta.fields_map[field_name]
             assert field.model_name == swappable(SETTING)  # type: ignore[attr-defined]
@@ -509,9 +509,9 @@ async def migrate_package_and_project(
         await make_migrations(context, apps_config)
     async with open_context(config, create_db=True, drop_db=True) as context:
         await migrate(context, apps_config)
-        member_model = context.get_model(PACKAGE_APP, "Member")
-        account_model = context.get_model(PROJECT_APP, "Account")
-        consent_model = context.get_model(PACKAGE_APP, "Consent")
+        member_model = context.get_model(f"{PACKAGE_APP}.Member")
+        account_model = context.get_model(f"{PROJECT_APP}.Account")
+        consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         target_model = account_model if swappable_settings else member_model
         table_names = await get_table_names(context)
         assert target_model._meta.db_table in table_names
@@ -582,6 +582,25 @@ async def test_package_migration_depends_on_the_first_migration_of_the_setting_a
     assert plan.index("proj.0001_initial") < plan.index("pkg.0001_initial")
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_package_migrations_made_with_the_project_depend_on_the_setting_alone(
+    swappable_project: SwappableProject, tmp_path: Path
+) -> None:
+    """Made in one run with the project the setting points into, the package's migration depended on the
+    project's first migration as well - a project without that app couldn't load it."""
+    package = swappable_project.write_package(with_migrations=False)
+    project = swappable_project.write_project(package)
+    apps_config = SwappableProject.get_apps_config(package, project)
+    config = build_config(get_connection_config(tmp_path), apps_config, {SETTING: "proj.Account"})
+    async with open_context(config, connect=False) as context:
+        written = await make_migrations(context, apps_config)
+
+    [package_file] = [path for path in written if path.parent.parent.name == package]
+    source = package_file.read_text(encoding="utf-8")
+    assert 'dependencies = [migrations.swappable_dependency("MEMBER_MODEL")]' in source
+
+
 @pytest.mark.asyncio
 async def test_a_package_project_cycle_is_split_into_two_migrations(
     swappable_project: SwappableProject, tmp_path: Path
@@ -597,8 +616,8 @@ async def test_a_package_project_cycle_is_split_into_two_migrations(
     assert len(written) == 3
     async with open_context(config, create_db=True, drop_db=True) as context:
         await migrate(context, apps_config)
-        consent_model = context.get_model(PACKAGE_APP, "Consent")
-        account_model = context.get_model(PROJECT_APP, "Account")
+        consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
+        account_model = context.get_model(f"{PROJECT_APP}.Account")
         consent_targets = await get_foreign_key_target_tables(context, consent_model._meta.db_table)
         account_targets = await get_foreign_key_target_tables(context, account_model._meta.db_table)
         assert consent_targets["member_id"] == account_model._meta.db_table
@@ -639,11 +658,21 @@ async def test_changing_the_setting_after_migrating_is_reported(
     async with open_context(other_config, drop_db=True) as context:
         assert context.apps is not None
         drift = await detect_drift_for_alias(context.apps, other_apps_config, CONNECTION)
-        [mismatch] = [mismatch for mismatch in drift.mismatched_columns if mismatch.column == "member_id"]
+        through_table = "consent_witnesses"
+        [mismatch] = [
+            mismatch
+            for mismatch in drift.mismatched_columns
+            if mismatch.column == "member_id" and mismatch.table != through_table
+        ]
         assert "the MEMBER_MODEL setting points at" in mismatch.detail
+        [through_mismatch] = [mismatch for mismatch in drift.mismatched_columns if mismatch.table == through_table]
+        assert "the MEMBER_MODEL setting points at" in through_mismatch.detail
         message = "A swappable model setting changed after its tables were created"
-        with pytest.raises(ConfigurationError, match=message):
+        with pytest.raises(ConfigurationError, match=message) as refusal:
             await migrate(context, other_apps_config)
+        # The automatic through table of a many-to-many relation too - its column toward the model is named
+        # after the model, so the relation would read a column the table doesn't have.
+        assert "witnesses (" in str(refusal.value)
 
 
 @pytest.mark.database_independent
@@ -737,8 +766,8 @@ async def test_truncate_all_models_skips_the_swapped_model(
     config = build_config(get_connection_config(tmp_path), apps_config, {SETTING: "proj.Account"})
     async with open_context(config, create_db=True, drop_db=True) as context:
         await context.generate_schemas()
-        account_model = context.get_model(PROJECT_APP, "Account")
-        consent_model = context.get_model(PACKAGE_APP, "Consent")
+        account_model = context.get_model(f"{PROJECT_APP}.Account")
+        consent_model = context.get_model(f"{PACKAGE_APP}.Consent")
         account = await account_model.objects.create(id=1, name="ann")
         consent = await consent_model.objects.create(id=1, member=account, owner=account)
         await consent.witnesses.add(account)
@@ -770,3 +799,33 @@ async def test_a_swappable_dependency_is_copied_with_its_setting(
         dependency = SwappableDependency(SETTING)
         copied = copy_dependency(dependency)
         assert (tuple(copied), copied.setting) == (("proj", "__first__"), SETTING)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_heads_reads_a_migration_with_a_swappable_dependency(
+    swappable_project: SwappableProject, tmp_path: Path
+) -> None:
+    """`hare heads` read the migration files with Hare not initialized - a swappable_dependency() failed to
+    load, while every other command read it."""
+    import contextlib
+    import io
+
+    from hare.cli.hare_cli import HareCLI
+
+    await write_package_migrations(swappable_project, tmp_path)
+    package = swappable_project.write_package()
+    project = swappable_project.write_project(package)
+    apps_config = SwappableProject.get_apps_config(package, project)
+    config = build_config(get_connection_config(tmp_path), apps_config, {SETTING: "proj.Account"})
+    async with open_context(config, connect=False) as context:
+        await make_migrations(context, {PROJECT_APP: apps_config[PROJECT_APP]})
+    settings_module = f"swappable_settings_{project}"
+    (tmp_path / f"{settings_module}.py").write_text(f"HARE_ORM = {config!r}\n", encoding="utf-8")
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        exit_code = await HareCLI.run_cli_async(["-c", f"{settings_module}.HARE_ORM", "heads"])
+
+    assert exit_code in (0, None), output.getvalue()
+    assert f"{PACKAGE_APP}.0001" in output.getvalue() and f"{PROJECT_APP}.0001" in output.getvalue()

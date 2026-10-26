@@ -11,6 +11,11 @@ from hare.sql.types.sql_types import SqlTypes
 #: `max_digits` of the shared DecimalField a Decimal-typed expression result (a literal, or
 #: arithmetic involving one) is decoded through - generous enough to never reject a real result.
 DECIMAL_OUTPUT_FIELD_MAX_DIGITS = 1000
+#: The refusal of a Decimal on a database storing no exact decimals. {value}: the Decimal, {dialect}: the
+#: dialect's name.
+DECIMAL_WITHOUT_TYPE_MESSAGE = (
+    "A Decimal ({value}) has no type on {dialect}, which stores no exact decimals - use an int or a float"
+)
 
 
 #: Lookup suffixes whose value is a list of values - any other iterable is materialized into one.
@@ -76,8 +81,13 @@ LITERAL_CAST_SQL_TYPE: dict[type, str] = {
     Decimal: SqlTypes.NUMERIC,
 }
 
-#: The integers a database reads a bare integer literal as - its type taken from the column beside it,
-#: a 32-bit integer at least; one beyond is cast to a 64-bit integer, and one beyond that to a number.
+#: The integers a bare integer literal binds as beside any integer column - its type is taken from the
+#: column beside it, a smallint the narrowest; one beyond is cast to the integer type holding it
+#: (``INTEGER_LITERAL_RANGE``, ``BIG_INTEGER_LITERAL_RANGE``), and one beyond them to a number.
+#: The literals bound in the stored form of their field's type whose bare cast is text - a UUID, a dict as
+#: JSON: a function's main argument is cast to the field's column type, which a column beside it shares.
+FIELD_TYPED_LITERAL_TYPES = (UUID, dict)
+SMALL_INTEGER_LITERAL_RANGE = (-(2**15), 2**15 - 1)
 INTEGER_LITERAL_RANGE = (-(2**31), 2**31 - 1)
 BIG_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)
 

@@ -34,6 +34,7 @@ from hare.dialects.sqlite.constants import (
     SQLITE_FULL_TEXT_TABLE_PATTERN,
     SQLITE_FULL_TEXT_TOKENIZE_OPTION,
     SQLITE_FULL_TEXT_UPDATE_TRIGGER_SUFFIX,
+    SQLITE_IDENTIFIER_PATTERN,
     SQLITE_INDEX_ON_RE,
     SQLITE_INDEX_SQLS_SQL,
     SQLITE_INDEX_TERM_COLLATE_RE,
@@ -62,6 +63,7 @@ from hare.dialects.sqlite.constants import (
 )
 from hare.dialects.sqlite.indexes.full_text_index import FullTextIndex
 from hare.dialects.sqlite.indexes.spatialite_index import SpatialiteIndex
+from hare.dialects.sqlite.schema.constants import SQLITE_COMMENT_UNESCAPES
 from hare.dialects.sqlite.spatial.constants import SPATIALITE_COLUMN_TYPES
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import OnDelete
@@ -74,7 +76,7 @@ from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.table_info import TableInfo
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.ddl.table_options import TableOptions
@@ -444,6 +446,9 @@ class SqliteIntrospector(SchemaIntrospector):
         columns, unparsed_generated_columns = SqliteIntrospector._read_sqlite_columns(
             column_rows, table_sql, unique_columns, indexed_columns
         )
+        table_description, column_descriptions = SqliteIntrospector.get_comments(table_sql)
+        for column in columns:
+            column.description = column_descriptions.get(column.name)
         (
             foreign_keys,
             composite_foreign_keys,
@@ -478,6 +483,7 @@ class SqliteIntrospector(SchemaIntrospector):
             check_constraints=check_constraints,
             unparsed_check_constraints=unparsed_check_constraints,
             table_options=SqliteIntrospector._get_table_options(connection, table_sql),
+            table_description=table_description,
         )
 
     @staticmethod
@@ -634,10 +640,6 @@ class SqliteIntrospector(SchemaIntrospector):
         )
         for row in column_rows:
             length, scale = SqliteIntrospector._parse_sqlite_type_size(row["type"])
-            is_decimal_like = "numeric" in row["type"].lower() or "decimal" in row["type"].lower()
-            if is_decimal_like and length is not None and scale is None:
-                # DECIMAL(p) is DECIMAL(p, 0).
-                scale = 0
             # A generated column's expression is parsed out of the CREATE TABLE text; when it can't
             # be, the column is left out and listed as unparsed rather than kept as an ordinary
             # field.
@@ -668,9 +670,7 @@ class SqliteIntrospector(SchemaIntrospector):
                     pk_position=row["pk"] or None,
                     is_unique=row["name"] in unique_columns,
                     has_index=row["name"] in indexed_columns,
-                    max_length=None if is_decimal_like else length,
-                    numeric_precision=length if is_decimal_like else None,
-                    numeric_scale=scale if is_decimal_like else None,
+                    max_length=length,
                     db_default=(
                         SqliteIntrospector._parse_sqlite_db_default(row["dflt_value"])
                         if row["dflt_value"] is not None
@@ -839,6 +839,94 @@ class SqliteIntrospector(SchemaIntrospector):
             else:
                 unparsed_triggers.append((row["name"], row["sql"]))
         return triggers, unparsed_triggers
+
+    @staticmethod
+    def get_comments(table_sql: str) -> tuple[str | None, dict[str, str]]:
+        """The comments hare writes in a CREATE TABLE text - the table's first in its column list, each
+        column's after its definition - read through the quotes, the parentheses and the comments of the
+        text.
+
+        Args:
+            table_sql: The table's CREATE TABLE text from ``sqlite_master``.
+
+        Returns:
+            The table's comment, and the columns' comments by column name.
+        """
+        # Each term of the column list: its text without comments, and its comments with whether one
+        # came before any of its text.
+        terms: list[tuple[list[str], list[tuple[str, bool]]]] = []
+        depth = 0
+        position = 0
+        length = len(table_sql)
+        while position < length:
+            char = table_sql[position]
+            if char in "\"'`[":
+                closing = "]" if char == "[" else char
+                end = position + 1
+                while end < length:
+                    if table_sql[end] == closing:
+                        # A doubled quote is one quote of the text.
+                        if closing != "]" and end + 1 < length and table_sql[end + 1] == closing:
+                            end += 2
+                            continue
+                        break
+                    end += 1
+                if depth > 0:
+                    terms[-1][0].append(table_sql[position : end + 1])
+                position = end + 1
+                continue
+            if table_sql.startswith("/*", position):
+                end = table_sql.find("*/", position + 2)
+                end = length if end == -1 else end
+                if depth > 0:
+                    text, comments = terms[-1]
+                    comments.append((table_sql[position + 2 : end].strip(), not "".join(text).strip()))
+                position = end + 2
+                continue
+            if table_sql.startswith("--", position):
+                end = table_sql.find("\n", position)
+                position = length if end == -1 else end
+                continue
+            if char == "(":
+                depth += 1
+                if depth == 1:
+                    terms.append(([], []))
+                    position += 1
+                    continue
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif char == "," and depth == 1:
+                terms.append(([], []))
+                position += 1
+                continue
+            if depth > 0:
+                terms[-1][0].append(char)
+            position += 1
+        table_description = None
+        column_descriptions: dict[str, str] = {}
+        for index, (text, comments) in enumerate(terms):
+            if index == 0 and comments and comments[0][1]:
+                table_description = SqliteIntrospector.unescape_comment(comments[0][0])
+                comments = comments[1:]
+            name_match = re.match(rf"\s*({SQLITE_IDENTIFIER_PATTERN})", "".join(text))
+            if comments and name_match is not None:
+                name = SqliteIntrospector._unquote_sqlite_identifier(name_match[1])
+                column_descriptions[name] = SqliteIntrospector.unescape_comment(comments[-1][0])
+        return table_description, column_descriptions
+
+    @staticmethod
+    def unescape_comment(comment: str) -> str:
+        """A comment's text without the escapes hare writes it with.
+
+        Args:
+            comment: The text between ``/*`` and ``*/``, stripped.
+
+        Returns:
+            The text.
+        """
+        return re.sub(r"\\(.)", lambda match: SQLITE_COMMENT_UNESCAPES.get(match[1], match[0]), comment)
 
     @staticmethod
     def _get_table_options(connection: DatabaseClient, table_sql: str) -> TableOptions | None:

@@ -436,6 +436,19 @@ class TenantDocument(Model):
         tenant_field = "tenant_id"
 
 
+class TenantNote(Model):
+    """A note of a tenant's document - ClickHouse keeps no key unique: two tenants' documents may share one."""
+
+    id = fields.BigIntField(primary_key=True, generated=False)
+    tenant_id = fields.IntField()
+    document: fields.ForeignKeyRelation[TenantDocument] = fields.ForeignKeyField(
+        "models.TenantDocument", related_name="notes", on_delete=fields.CASCADE, db_constraint=False
+    )
+
+    class Meta:
+        tenant_field = "tenant_id"
+
+
 class DayCounter(Model):
     """A key of a day the database fills in by default, and a number."""
 

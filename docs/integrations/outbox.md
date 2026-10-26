@@ -78,7 +78,8 @@ a captured change. Besides JSON's own values it writes an explicit table:
 | an enum member | its value |
 
 Any other value raises `ValidationError` (its cause a `TypeError`) when the event is written — it never
-quietly becomes its `str()`.
+quietly becomes its `str()`. A float NaN or infinity of `enqueue()` raises `ValidationError` too: JSON
+has no number for it.
 
 ## <a id="enqueue"></a>`enqueue()`
 
@@ -122,11 +123,10 @@ relays — the model's `Meta.outbox_wakeup`, or `wakeup=`.
 > open transaction and another connection has one, `enqueue()` raises `ConfigurationError` instead of
 > committing the event on its own. Pass `using=` if that is intended.
 
-The arguments are checked before anything is written (`ValidationError`): `topic`, `idempotency_key` and
-`ordering_key` strings of 1 to 255 characters, `headers` a mapping of non-empty text names,
-`extra_field_values` setting none of `enqueue()`'s own fields nor those the ORM and the relay keep
-(`sequence`, `created_at`, `next_attempt_at`, `published_at`, `dead_lettered_at`, `attempts`,
-`last_error`, `lease_until`, `leased_by`).
+The arguments are checked before anything is written (`ValidationError`): `headers` a mapping of
+non-empty text names, `extra_field_values` setting none of `enqueue()`'s own fields nor those the ORM and
+the relay keep (`sequence`, `created_at`, `next_attempt_at`, `published_at`, `dead_lettered_at`,
+`attempts`, `last_error`, `lease_until`, `leased_by`).
 
 ### <a id="idempotency-key"></a>`idempotency_key=`
 
@@ -218,7 +218,7 @@ class ChangeCapture:
 
 | Argument | Meaning |
 |---|---|
-| `outbox` | The concrete `OutboxEvent` model — on the captured model's connection, checked by `Hare.init()` |
+| `outbox` | The concrete `OutboxEvent` model — its class or its `"app.Model"` label, found as the models are bound; on the captured model's connection, checked by `Hare.init()` |
 | `operations` | The `RowOperation`s captured |
 | `payload` | What an event holds of its row — below |
 | `fields` | The fields an event holds; a relation is held by its key (`reader_id`). By default every field written in the table but the `sensitive` and encrypted ones — those only when named here |
@@ -231,7 +231,8 @@ class ChangeCapture:
 composite key's parts joined by `:`), `{app}`, `{model}` and `{table}`, or a function of the change; the
 row's own by default, so one row's events are delivered in order. `None` for no ordering. A key a
 template makes longer than 255 characters (a long text primary key) keeps its start and ends with `#` and
-the SHA-256 of the whole key; a function's key over that raises `ValidationError`
+the SHA-256 of the whole key; a function's key over that fails the write with the `ValidationError` of
+the event's field
 
 The declaration is checked when the model is finalised (`ConfigurationError`): a field name that isn't
 written in the table, a template naming something else, `BEFORE_AND_AFTER` without
@@ -330,7 +331,10 @@ class CapturedModel(Model):
 
 The change — `CapturedChange` (`hare.contrib.outbox`) — has `model`, `operation`, `pk`, `changed`,
 `before`, `after`, `occurred_at` and `tenant` (the row's `Meta.tenant_field`). When the outbox model has
-a tenant field too, it is the row's tenant unless `extra_field_values` sets it.
+a tenant field too, it is the row's tenant unless `extra_field_values` sets it. A model of
+`Meta.tenant_schema` holds no tenant in its rows — `tenant` is `None`, and its events name no tenant
+(one row key of two tenants is one ordering key): declare its outbox with `Meta.tenant_schema = True`
+too, so each tenant's events stay in the tenant's schema.
 
 ## <a id="outboxrelay"></a>`OutboxRelay`
 
@@ -354,11 +358,11 @@ async with relay:
     ...
 ```
 
-The options are checked when the relay is made, type and range (`ConfigurationError`): the durations
-finite numbers up to 86400 (`poll_interval_seconds`, `lease_seconds` and `delivery_timeout_seconds` above
-0, the retry pauses from 0, `retry_max_seconds` at least `retry_base_seconds`, `delivery_timeout_seconds`
-below `lease_seconds`), `batch_size` and `max_delivery_attempts` ints in `1..10000`, `concurrency` in
-`1..1000`, `topics` `None` or a non-empty list of topics, `name` 1 to 255 characters.
+The model may be given by its `"app.Model"` label (`OutboxRelay("shop.MyOutboxEvent", ...)`) — looked up
+in the current context when the relay first needs it. `batch_size`, the `LIMIT` of a claim, is an int in
+`1..10000` (`ConfigurationError` otherwise).
+Keep `delivery_timeout_seconds` below `lease_seconds` — a lease running out mid-delivery lets another
+relay deliver the event too.
 
 `start()`/`stop()` are idempotent; `stop()` waits for the relay and closes the delivery's connections.
 `Hare.close_connections()` doesn't stop a relay — stop it yourself, or use `async with` for the
@@ -435,11 +439,12 @@ to a `DeliveryError`.
 ## <a id="wakeups"></a>Wakeups
 
 A wakeup starts a poll as soon as events are written, instead of the relay waiting out
-`poll_interval_seconds`. One object is given to the outbox model (`Meta.outbox_wakeup`, or
-`enqueue(wakeup=)`) and to the relays — nothing to keep in step by hand. The signals of one transaction
-are joined, one per topic, and sent once it commits — never for a rolled-back one. A lost signal is
-harmless: the relays poll anyway. A subscription that fails is retried with backoff and, after five
-failures in a row, given up with an ERROR — the relay keeps polling.
+`poll_interval_seconds`. One object is given to the outbox model (`Meta.outbox_wakeup`, or `enqueue(wakeup=)`)
+and to the relays — nothing to keep in step by hand. The signals of one transaction are joined, one per topic,
+and sent once it commits — never for a rolled-back one. A lost signal is harmless: the relays poll anyway. The
+first signal after a broker restart can be one — Redis's client sends it on the connection the server closed
+and doesn't send it again. A subscription that fails is retried with backoff and, after five failures in a
+row, given up with an ERROR — the relay keeps polling.
 
 | Wakeup | Extra | How |
 |---|---|---|
@@ -473,7 +478,7 @@ built-in deliveries send them.
 | `KafkaDelivery(bootstrap_servers, topic=None)` or `KafkaDelivery(producer=...)` | `kafka` | to `topic` or the event's topic, keyed by the ordering key — one key's events stay in one partition; a batch sent at once, `acks="all"` |
 | `RabbitMQDelivery(url, exchange="", routing_key=None)` | `rabbitmq` | persistent messages through an existing exchange (the default one when empty), the routing key the event's topic by default; each confirmed by the broker (publisher confirms) |
 | `RedisStreamsDelivery(url, stream=None, max_length=None)` or `(client=...)` | `redis` | an `XADD` to `stream` or the event's topic — the event's id, topic, ordering key, headers and payload as JSON; a batch through one pipeline, streams trimmed to `max_length` |
-| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | a `POST`; with `secret`, `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; any status other than 2xx fails the event |
+| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | a `POST`; with `secret`, `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; header values as UTF-8 bytes; any status other than 2xx fails the event |
 | [`TaskiqDelivery`](taskiq.md#kiq-on-commit) | `taskiq` | a taskiq task |
 
 ### <a id="topicrouter"></a>`TopicRouter`

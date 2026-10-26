@@ -40,13 +40,15 @@ await PageView.objects.aggregate(popular=TopK("path", 5))
   как в других базах; ClickHouse выполняет их как свои комбинаторы `-If` и `-Distinct`.
 - На пустом наборе `Max`, `Min`, `Avg`, `StdDev` и `Variance` дают `None`, как и агрегаты ниже: каждый
   пишется в форме `-OrNull` (`maxOrNull(amount)`) — список см. в [`NULL` от агрегата по пустому
-  набору](differences.ru.md#null-from-an-aggregate). `Sum` даёт собственный `0` ClickHouse (`0.00` для десятичного). В
+  набору](differences.ru.md#null-from-an-aggregate). `Sum` даёт собственный `0` ClickHouse (`0.00` для десятичного; `None` для поля с `null=True`,
+  и на наборе только из `NULL` тоже). В
   группирующем запросе, где в группе хотя бы одна строка, агрегат без `_filter` остаётся в простой и более
   быстрой форме. Выборочное отклонение или дисперсия по одному значению — `None`, а не NaN ClickHouse.
 - На пустом наборе (или только из `NULL`) `Quantile`, `Median`, `ArgMin`, `ArgMax`, `AnyValue` и
   `AnyLast` дают `None`; `Uniq`/`UniqExact` — `0` (`UniqCombined` от поля с `null=True` — `None`: так
   считает сам `uniqCombined` в ClickHouse), `GroupArray`, `GroupUniqArray` и `TopK` — пустой список, а
-  `Quantiles` — `NaN` для каждого уровня: внутри массива ClickHouse не хранит `NULL`.
+  `Quantiles` — `NaN` для каждого уровня: внутри массива ClickHouse не хранит `NULL`; с `exact=True`
+  по целочисленному полю — `0` для каждого уровня (так считает сам `quantilesExact` ClickHouse).
 - `ArgMin`/`ArgMax` читают только строки, где `field` не `NULL`: значение строки с наименьшим или
   наибольшим `by` среди них, а не `None`, когда строка с крайним `by` хранит `NULL`.
 - `ArrayAgg` из hare — это `groupArray` кортежей, каждый из которых держит значение: каждое значение —

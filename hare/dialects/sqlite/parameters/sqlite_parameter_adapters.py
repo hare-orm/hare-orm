@@ -11,15 +11,15 @@ class SqliteParameterAdapters:
 
     @staticmethod
     def adapt_decimal(value: Decimal) -> str:
-        """Decimal text in fixed-point notation - hare's stored text of a Decimal.
+        """Decimal text in fixed-point notation - SQLite has no decimal type to bind one as.
 
         Args:
             value: The bound decimal.
 
         Returns:
             ``0.0000000001`` rather than ``1E-10``; scientific text for a non-finite value or an
-            exponent past ``SQLITE_DECIMAL_FIXED_POINT_MAX_EXPONENT``. A zero without its sign - the
-            text is what a unique column compares, and ``-0.00`` is ``0.00``.
+            exponent past ``SQLITE_DECIMAL_FIXED_POINT_MAX_EXPONENT``. A zero without its sign -
+            ``-0.00`` is ``0.00``.
         """
         if value.is_zero():
             value = value.copy_abs()

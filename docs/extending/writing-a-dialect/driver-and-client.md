@@ -238,6 +238,9 @@ support. The dialect declares what the database supports (`Dialect.features`), t
 them and sets what its driver adds, and the server version adjusts them per connection. The core reads
 `connection.features` where it has a connection and `dialect.features` where it has only the dialect (DDL
 rendered for a migration file, a lookup list).
+A feature only the dialect's own parts read is a field of its own subclass of `Features` (as `SqliteFeatures`,
+`PostgresqlFeatures`, `ClickhouseFeatures`), which its `Dialect.features` is an instance of — the core
+reads none of them.
 
 | Feature | hare's reaction when it's off |
 |---|---|
@@ -279,8 +282,6 @@ rendered for a migration file, a lookup list).
 | `max_bind_parameters` | Bulk writes, prefetching and cascades split their statements to stay under it. |
 | `max_bulk_update_rows` | `bulk_update()` writes at most this many rows per statement. |
 | `supports_nulls_distinct` | `UniqueConstraint(nulls_distinct=...)` raises `UnSupportedError` before its DDL is sent. |
-| `supports_unhex` | A long `__in` of bytes binds one parameter per value instead of one JSON array. |
-| `supports_drop_column` | A schema editor that rebuilds tables (SQLite's) rebuilds one for every removed field. |
 | `explain_options` | An `EXPLAIN` option not listed raises `UnSupportedError` before the statement is sent. |
 | `supports_schemas` | Migrations create and drop no schema; a schema-qualified model's table is written as it is and has to exist. The schema editor's `get_index_name_sql()`, `get_indexed_table_sql()` and `get_referenced_table_sql()` write the names an index, a trigger and a foreign key take in the database's own form. |
 | `supports_distinct_on` | `distinct(*fields)` raises `UnSupportedError` when the query is built. |
@@ -289,26 +290,25 @@ rendered for a migration file, a lookup list).
 | `supports_table_sample` | `QuerySet.sample(...)` raises `UnSupportedError`. |
 | `supports_asof_join` | `AsofJoin(...)` raises `UnSupportedError`. |
 | `supports_array_join` | `ArrayJoin(...)` raises `UnSupportedError`. |
-| `supports_json_type` | ClickHouse's own: the `JSON` type, read by the connection's driver. |
 | `supports_dictionaries` | `Meta.dictionaries` raises `UnSupportedError` before its DDL; else the schema editor's `dictionaries_class` (`Dictionaries`: `get_dictionary_create_sqls()`, `drop_dictionary()`, `alter_dictionary()`, `rename_dictionary()`, `reload_dictionary()`). |
 | `supports_merge` | `QuerySet.merge()` raises `UnSupportedError`. |
 | `supports_merge_returning` | `merge().returning()` raises `UnSupportedError`. |
 | `supports_merge_not_matched_by_source` | `merge().when_not_matched_by_source()` raises `UnSupportedError`. |
-| `supports_partitioned_exclusion_constraints` | An `ExclusionConstraint` on a partitioned model raises `UnSupportedError`. |
 | `supports_pool_status` | `get_pool_status()` raises `UnSupportedError`, and the client's pools are left out of `Connections.get_pool_statuses()`. |
 | `sorts_nulls_first` | Where NULL sorts by default — `nulls_first`/`nulls_last` add the clause only where it changes the order. |
 | `divides_integers_exactly` | Set it where `/` of two integers gives the exact quotient: the expression's output field is a `FloatField` instead of the integer field. |
+| `computes_integer_statistics_exactly` | Set it where the database computes `AVG`, `STDDEV` and `VARIANCE` of integers as exact decimals: the result is read as a `Decimal`; without, hare reads it as a float. |
+| `computes_decimal_statistics_exactly` | On by default. Turn it off where the database computes `AVG`, `STDDEV` and `VARIANCE` of decimals as floats: hare then reads the result as a float, not a `Decimal`. |
+| `keeps_enum_columns` | Set it where an enum field's column is of an enum type holding only the members: hare then adds no `CHECK` of the members' values. |
 | `supports_conflict_constraint_names`, `supports_conflict_where` | `bulk_create(on_conflict_constraint=...)` / `conflict_where=` raise `UnSupportedError`. |
 | `matches_ordering_to_grouping_by_sql` | Set it when an ordering term that is also grouped by has to be written exactly as in `GROUP BY`. |
 | `supports_virtual_generated_columns` | `GeneratedField(stored=False)` raises `UnSupportedError`. |
-| `supports_strict_tables` | `SqliteTableOptions(strict=True)` raises `UnSupportedError` — a SQLite table option. |
 | `supports_text_search_configurations` | A text search configuration, a `SearchVector` value, lexemes, `SearchRank`'s label weights, `normalization` and `cover_density`, and `SearchHeadline`'s fragment options raise `UnSupportedError`. |
 | `supports_full_text_index` | `FullTextIndex` and `SearchRank`'s weights by field raise `UnSupportedError`. |
 | `supports_vector_search` | The vector distances and `__nearby` raise `UnSupportedError`. |
 | `supports_tenant_schemas` | `TenantSchemas.create()`/`drop()`/`get_tenants()` raise `UnSupportedError`; implement the client's `get_tenant_client_settings(schema_name)` (the search path of a tenant's schema), the connection option `tenant_schema_template` and the introspector's `fetch_schema_names()`. |
 | `supports_spatial` | The `hare.gis` lookups, paths, functions and aggregates raise `UnSupportedError`; register renderers of `GeometryValue`, `SpatialRelationTerm`, `SpatialFunctionTerm` and the names of `SpatialAggregateFunction`, and a `GeometryField` column type with its value conversions. |
 | `supports_geography` | The lookups and functions of a `GeometryField(geography=True)` raise `UnSupportedError`. |
-| `supports_spatial_index` | `SpatialiteIndex` raises `UnSupportedError` — it is SQLite's own; a dialect with a spatial index of its own declares its own index class. |
 | `spatial_reference_ids` | None: a geography and a spatial index take any SRID. A set of SRIDs — those of the database's spatial metadata, read when the connection opens — and a geography or a spatial index in another SRID raises `UnSupportedError`. |
 | `supports_ordered_aggregates` | An aggregate with `order_by=` that has no other form raises `UnSupportedError` (`MakeLine`). |
 | `supports_uuid_v7` | A `UuidV7()` `db_default` raises `UnSupportedError` before the DDL. |

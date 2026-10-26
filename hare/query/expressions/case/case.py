@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.generated_field import GeneratedField
+from hare.gis.geometries.geometry import Geometry
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
+from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
@@ -46,7 +48,12 @@ class Case(CombinableExpression):
         default: CaseBranchValue = None,
     ) -> None:
         self.args = args
-        self.default = default
+        # A geometry is written as Value() writes it - a driver binds none.
+        self.default = Value(default) if isinstance(default, Geometry) else default
+
+    def get_result_literals(self) -> list[Any]:
+        branch_values = [when.then for when in self.args if isinstance(when, When)] + [self.default]
+        return [literal for branch_value in branch_values for literal in self.get_literals_of(branch_value)]
 
     def _get_branch_encoder(self, value: Any, dialect: Dialect) -> Callable[[Any], Any] | None:
         """The conversion a literal branch needs before it is bound.
@@ -56,12 +63,12 @@ class Case(CombinableExpression):
             dialect: The dialect of the database the query runs on.
 
         Returns:
-            For a date literal among datetime literals a datetime at midnight; for a timedelta or
-            UUID literal its field's stored form; a dict as it is - encoded once the result's field
-            is known (``get_dict_literal_encoder()``); None otherwise.
+            For a date literal among datetime literals a datetime at midnight; for a UUID literal its
+            field's stored form; a dict, a naive datetime and a timedelta as they are - encoded once the
+            result's field is known; None otherwise.
         """
         literal = value.value if isinstance(value, Value) else value
-        if isinstance(literal, dict) or (isinstance(literal, datetime) and literal.tzinfo is None):
+        if isinstance(literal, (dict, timedelta)) or (isinstance(literal, datetime) and literal.tzinfo is None):
             return Case.keep_value
         if isinstance(literal, date) and not isinstance(literal, datetime):
             branch_values = [when.then for when in self.args if isinstance(when, When)] + [self.default]
@@ -102,11 +109,11 @@ class Case(CombinableExpression):
     @staticmethod
     def is_deferred_literal(value: Any, literal_type: type) -> bool:
         """Whether a branch is a literal encoded once the result's field is known - a dict, a naive
-        datetime.
+        datetime, a timedelta.
 
         Args:
             value: The branch's ``then=``/``default=`` value.
-            literal_type: ``dict`` or ``datetime``.
+            literal_type: ``dict``, ``datetime`` or ``timedelta``.
 
         Returns:
             Whether it is such a literal.
@@ -115,6 +122,24 @@ class Case(CombinableExpression):
         if literal_type is datetime:
             return isinstance(literal, datetime) and literal.tzinfo is None
         return isinstance(literal, literal_type)
+
+    @staticmethod
+    def get_timedelta_literal_encoder(
+        output_field: Field[Any] | None, dialect: Dialect
+    ) -> Callable[[Any], Any] | None:
+        """The conversion of a timedelta branch - as an interval beside one (a field that ``holds_intervals``),
+        else as a ``TimeDeltaField`` writes it.
+
+        Args:
+            output_field: The result's field.
+            dialect: The dialect of the database the query runs on.
+
+        Returns:
+            The encoder.
+        """
+        if TemporalArithmetic.get_field_temporal_type(output_field) is TemporalType.INTERVAL:
+            return TemporalArithmetic.get_field_encoder(output_field, dialect)  # type: ignore[arg-type]
+        return Value.get_literal_encoder(timedelta(0), dialect)
 
     @staticmethod
     def get_naive_datetime_literal_encoder(
@@ -185,6 +210,7 @@ class Case(CombinableExpression):
         for literal_type, deferred_encoder in (
             (dict, self.get_dict_literal_encoder(output_field, expression_context.dialect)),
             (datetime, self.get_naive_datetime_literal_encoder(output_field, expression_context.dialect)),
+            (timedelta, self.get_timedelta_literal_encoder(output_field, expression_context.dialect)),
         ):
             # A wall clock literal is typed by the wall clocks beside it - its own type is a moment's.
             types_literal = not (literal_type is datetime and is_wall_clock)
@@ -224,7 +250,7 @@ class Case(CombinableExpression):
             case = case.when(criterion, renderers.get_result_branch_term(then_term, output_field))
         case = case.else_(renderers.get_result_branch_term(default_result.term, output_field))
         return ExpressionResult(
-            term=renderers.get_result_term(case, output_field),
+            term=case,
             joins=ExpressionResult.dedup_joins(joins),
             output_field=output_field,
         )

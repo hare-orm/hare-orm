@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
 import aiosqlite
 
-from hare.dialects.sqlite.constants import SQLITE_INTEGER_MAX, SQLITE_INTEGER_MIN, SQLITE_MATH_FUNCTION_PREFIX
-from hare.dialects.sqlite.functions.decimal.sqlite_decimal_arithmetic import SqliteDecimalArithmetic
+from hare.dialects.sqlite.constants import SQLITE_MATH_FUNCTION_PREFIX
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 
@@ -16,29 +15,19 @@ from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeF
 class SqliteMathFunctions:
     """The math UDFs ``MathFunction`` renders calls to on SQLite - SQLite's own math functions are an
     optional build feature. Each gives what SQLite's own does: NULL outside the function's domain, an
-    infinity past a float, an integer of an integer where SQLite keeps one; a ``DecimalField``'s
-    stored text is worked out exactly."""
+    infinity past a float, an integer of an integer where SQLite keeps one; a text is read as SQLite
+    reads one, as a float."""
 
     @staticmethod
-    def get_number(value: int | float | str | bytes) -> int | float | Decimal:
-        """A column value as a number - a DecimalField's stored text as a Decimal.
+    def get_number(value: int | float | str | bytes) -> int | float:
+        """A column value as a number - a text as a float.
 
         Raises:
-            decimal.InvalidOperation: The stored text isn't a number.
+            ValueError: The text isn't a number.
         """
         if isinstance(value, (int, float)):
             return value
-        text = value.decode() if isinstance(value, bytes) else value
-        return Decimal(text)
-
-    @staticmethod
-    def get_integer_result(value: int | Decimal) -> int | str:
-        """A whole number as SQLite can hold it - an integer, or its exact text outside 64 bits, as a
-        Decimal is stored."""
-        whole_number = int(value)
-        if SQLITE_INTEGER_MIN <= whole_number <= SQLITE_INTEGER_MAX:
-            return whole_number
-        return str(whole_number)
+        return float(value.decode() if isinstance(value, bytes) else value)
 
     @classmethod
     def get_float(cls, value: Any) -> float:
@@ -47,15 +36,10 @@ class SqliteMathFunctions:
 
     @classmethod
     def absolute(cls, value: Any) -> int | float | str | None:
-        """``ABS`` - an integer of an integer, the exact text of a Decimal."""
+        """``ABS`` - an integer of an integer."""
         if value is None:
             return None
         number = cls.get_number(value)
-        if isinstance(number, int):
-            return abs(number)
-        if isinstance(number, Decimal):
-            # copy_abs() - abs() rounds to the context's 28 digits.
-            return SqliteDecimalArithmetic.get_text(number.copy_abs())
         return abs(number)
 
     @classmethod
@@ -66,12 +50,10 @@ class SqliteMathFunctions:
         number = cls.get_number(value)
         if isinstance(number, int):
             return number
-        if isinstance(number, float):
-            if not math.isfinite(number):
-                return number
-            # math.ceil() goes through an int - the sign of a zero, as C's ceil() keeps it, is put back.
-            return math.copysign(float(math.ceil(number) if rounding == ROUND_CEILING else math.floor(number)), number)
-        return cls.get_integer_result(number.to_integral_value(rounding=rounding))
+        if not math.isfinite(number):
+            return number
+        # math.ceil() goes through an int - the sign of a zero, as C's ceil() keeps it, is put back.
+        return math.copysign(float(math.ceil(number) if rounding == ROUND_CEILING else math.floor(number)), number)
 
     @classmethod
     def ceiling(cls, value: Any) -> int | float | str | None:
@@ -102,10 +84,7 @@ class SqliteMathFunctions:
         if isinstance(left, int) and isinstance(right, int):
             result = abs(left) % abs(right)
             return result if left >= 0 else -result
-        if isinstance(left, float) or isinstance(right, float):
-            return math.fmod(float(left), float(right))
-        remainder = SqliteDecimalArithmetic.remainder_numbers(Decimal(left), Decimal(right))
-        return None if remainder is None else SqliteDecimalArithmetic.get_text(remainder)
+        return math.fmod(float(left), float(right))
 
     @classmethod
     def power(cls, base: Any, exponent: Any) -> float | None:

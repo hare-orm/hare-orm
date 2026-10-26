@@ -148,9 +148,19 @@ types instead, for the code around them to handle without knowing hare:
 
 | Module | Exceptions |
 |---|---|
-| `hare.contrib.request_query.exceptions` | `InvalidRequestQuery` (a `ValueError`, `.errors`): the values of a request don't make a valid query — the Litestar adapter answers `400 Bad Request`, the FastAPI and Robyn ones `422 Unprocessable Content`. `RequestQueryForbidden` (a `PermissionError`, `.parameter`): the request asks for rows it may not see — `403 Forbidden`. |
+| `hare.contrib.request_query.exceptions` | `InvalidRequestQuery`, `RequestQueryForbidden`, `ApiGetterError` and its subclasses — see [Exceptions of request queries](#request-query-exceptions). |
 | `hare.contrib.outbox.exceptions` | `DeliveryError`: an outbox event wasn't delivered. |
 | `hare.cli.exceptions` | `CLIError`: a `hare` command failed — exit code 1. `CLIUsageError` (a `CLIError`): the command was called wrong — exit code 2. See [The `hare` command](../migrations/cli.md#adding-your-own-commands). |
+
+### <a id="request-query-exceptions"></a>Exceptions of request queries
+
+`InvalidRequestQuery` (a `ValueError`, `.errors`): the values of a request don't make a valid query — the
+Litestar adapter answers `400 Bad Request`, the FastAPI and Robyn ones `422 Unprocessable Content`.
+`RequestQueryForbidden` (a `PermissionError`, `.parameter`): the request asks for rows it may not see —
+`403 Forbidden`. `ApiGetterError` (a `HareError`, `.source_name`): a value of another service
+`Meta.api_getter` requires couldn't be loaded — `502 Bad Gateway`; its subclasses `ApiDataNotFoundError`,
+`ApiRequestError`, `ApiValueMissingError` and `ApiValueConversionError` say why — see
+[`Meta.api_getter`](../integrations/request-queries.md#api-getter).
 
 ## <a id="sqlerrormixin"></a>The SQL of a database error
 

@@ -8,7 +8,6 @@ from hare.contrib.taskiq.constants import (
     TENANT_LABEL_ANY_OF_KEY,
     TENANT_LABEL_MODELS_KEY,
 )
-from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.scopes.tenants.all_tenants import AllTenants
@@ -93,10 +92,9 @@ class TaskTenantLabels:
         if TENANT_LABEL_ANY_OF_KEY in label_value:
             return Tenancy.any_of(*label_value[TENANT_LABEL_ANY_OF_KEY])
         if TENANT_LABEL_MODELS_KEY in label_value:
-            context = HareContext.require_current()
-            scopes = {}
-            for full_name, model_label_value in label_value[TENANT_LABEL_MODELS_KEY].items():
-                app_label, _separator, model_name = full_name.rpartition(".")
-                scopes[context.get_model(app_label, model_name)] = TaskTenantLabels.get_scope(model_label_value)
-            return scopes
+            # Tenancy.scope() takes the models by their labels.
+            return {
+                full_name: TaskTenantLabels.get_scope(model_label_value)
+                for full_name, model_label_value in label_value[TENANT_LABEL_MODELS_KEY].items()
+            }
         raise ConfigurationError(f"The task's tenant label {label_value!r} names no tenant scope")

@@ -52,6 +52,12 @@ def test_the_relation_depth_bounds_the_keys(tmp_path):
     assert "'team':" in text
 
 
+def test_a_key_goes_back_to_a_model_it_crossed(stubs_path):
+    text = stubs_path.joinpath(*STUB_PATH).read_text(encoding="utf-8")
+    filters = text.partition("MemberFilters = TypedDict(")[2].partition(")")[0]
+    assert "'team__members__name':" in filters
+
+
 def test_a_stub_declares_the_methods_of_the_dialect(tmp_path, monkeypatch):
     def first_rows(builder, name_below, /, limit=10, *, inclusive=False):
         return builder
@@ -72,6 +78,13 @@ def test_a_stub_declares_the_methods_of_the_dialect(tmp_path, monkeypatch):
     assert "    def first_matching(self, *args: Q | Exists, **kwargs: Unpack[MemberFilters]) -> Self: ..." in text
     assert "only_on_postgresql" not in text
     compile(text, "factories_models.pyi", "exec")
+
+
+def test_an_enum_field_is_read_as_its_member(mypy_models_stub_text):
+    assert (
+        "Literal['status'], /, *, flat: Literal[True], named: Literal[False] = False) -> "
+        "QuerySet[Shelf, ShelfStatus, Any]: ..." in mypy_models_stub_text
+    )
 
 
 def test_a_stub_types_a_container_field_as_the_whole_container(mypy_models_stub_text):
@@ -117,5 +130,36 @@ def test_a_stub_takes_the_keys_of_a_generic_foreign_key_and_the_primary_key(mypy
     writes = text.partition("NoteWrites = TypedDict(")[2].partition(")")[0]
     assert "'subject': dict | Volume | Writer," in writes
     assert "'pk': int," in writes
+    updates = text.partition("NoteUpdates = TypedDict(")[2].partition(")")[0]
+    assert "'subject': dict | Volume | Writer | Expression | Term | QuerySpecification," in updates
     printing_writes = text.partition("PrintingWrites = TypedDict(")[2].partition(")")[0]
     assert "'pk': tuple[int, int]," in printing_writes
+
+
+def test_a_stub_takes_the_values_and_paths_of_ranges_geometries_and_addresses(postgresql_models_stub_text):
+    text = postgresql_models_stub_text
+    filters = text.partition("BookingFilters = TypedDict(")[2].partition(")")[0]
+    assert "'seats__overlap': tuple[int | None, int | None] | list[int | None] | Range[int] |" in filters
+    assert "'seats__contains': int | Range[int] | tuple[int | None, int | None] |" in filters
+    assert "'days__overlap': tuple[date | None, date | None] | list[date | None] | Range[date] | " in filters
+    assert "Sequence[Range[date] | tuple[date | None, date | None]] |" in filters
+    # A path reads inside the range - a date part of a bound is its number.
+    assert "'during__startswith__year': int |" in filters
+    assert "'during__isempty': bool |" in filters
+    assert "'days__span__upper_inf': bool |" in filters
+    assert "'place__dwithin': tuple[Geometry, float] |" in filters
+    assert "'place__relate': tuple[Geometry, str] |" in filters
+    assert "'area__contains': Geometry |" in filters
+    assert "'place__x': float |" in filters
+    assert "'address': str | IPv4Address | IPv6Address |" in filters
+    assert "'section__matches_any': Iterable[str] |" in filters
+    updates = text.partition("BookingUpdates = TypedDict(")[2].partition(")")[0]
+    assert "'seats': Range | tuple[int | None, int | None] |" in updates
+    assert (
+        "'network': str | IPv4Address | IPv6Address | IPv4Interface | IPv6Interface | IPv4Network | IPv6Network"
+        in updates
+    )
+    # An address is read as an ipaddress object - on an instance and from values_list().
+    assert "    address: Field[IPv4Address | IPv6Address]" in text
+    assert "def values_list(self, field: Literal['address'], /, *, flat: Literal[True], named: Literal[False] = "
+    assert "False) -> QuerySet[Booking, IPv4Address | IPv6Address, Any]: ..." in text

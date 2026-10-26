@@ -59,6 +59,18 @@ class SqlLiterals:
         escaped = name.replace(self.identifier_quote_char, self.identifier_quote_char * 2)
         return f"{self.identifier_quote_char}{escaped}{self.identifier_quote_char}"
 
+    def get_identifier_key(self, name: str) -> str:
+        """What a name is told apart by - two names of one key name one column or table. A quoted name is
+        compared as written by default.
+
+        Args:
+            name: The name.
+
+        Returns:
+            Its key.
+        """
+        return name
+
     def get_collation_sql(self, name: str) -> str:
         """A collation's name after ``COLLATE`` - quoted as a name by default.
 

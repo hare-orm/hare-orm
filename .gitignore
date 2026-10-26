@@ -133,3 +133,5 @@ site/
 
 # Logs of make test_matrix
 /.test-matrix/
+# A crash of Git for Windows' bash
+*.stackdump

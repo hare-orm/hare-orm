@@ -20,6 +20,16 @@ class InetField(NetworkField):
     def get_python_type(self) -> Any:
         return ipaddress.IPv4Address | ipaddress.IPv6Address | ipaddress.IPv4Interface | ipaddress.IPv6Interface
 
+    def get_accepted_value_types(self) -> tuple[Any, ...]:
+        return (
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+            ipaddress.IPv4Interface,
+            ipaddress.IPv6Interface,
+            ipaddress.IPv4Network,
+            ipaddress.IPv6Network,
+        )
+
     def parse(self, value: Any) -> Any:
         interface = ipaddress.ip_interface(str(value))
         return interface.ip if interface.network.prefixlen == interface.max_prefixlen else interface

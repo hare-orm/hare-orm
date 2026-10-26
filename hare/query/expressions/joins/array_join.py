@@ -68,7 +68,7 @@ class ArrayJoin(NamedJoin):
         Raises:
             QueryError: It is used before ``alias()``/``annotate()`` named it, or the array isn't an
                 ``ArrayField``.
-            UnSupportedError: The database has no ``ARRAY JOIN``.
+            UnSupportedError: The database has no join of an array's elements (``supports_array_join``).
         """
         if self.name is None:
             raise QueryError("An ArrayJoin is used through the name alias()/annotate() gives it")
@@ -76,7 +76,8 @@ class ArrayJoin(NamedJoin):
         connection = expression_context.connection
         if connection is not None and not connection.features.supports_array_join:
             raise UnSupportedError(
-                f"ArrayJoin {self.name!r} needs an ARRAY JOIN, which {expression_context.dialect} doesn't have"
+                f"ArrayJoin {self.name!r} needs a join of an array's elements to their row, which "
+                f"{expression_context.dialect} doesn't have (Features.supports_array_join)"
             )
         array_result = self.array.get_result(expression_context)
         array_field = array_result.output_field

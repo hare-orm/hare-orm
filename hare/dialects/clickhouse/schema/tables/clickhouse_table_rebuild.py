@@ -11,8 +11,11 @@ from hare.dialects.clickhouse.cluster.constants import (
     CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE,
     CLICKHOUSE_REPLICATED_ENGINE_PREFIX,
     CLICKHOUSE_SHARD_MACRO,
+    CLICKHOUSE_UUID_MACRO,
 )
+from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_TABLE_ENGINE_SQL
+from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.exceptions import UnSupportedError
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -20,7 +23,7 @@ from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.data.referencing_key_columns import ReferencingKeyColumns
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
 
 
 class ClickhouseTableRebuild(TableRebuild):
@@ -50,8 +53,10 @@ class ClickhouseTableRebuild(TableRebuild):
 
         Raises:
             UnSupportedError: The table keeps rows of its own on several servers of the connection's
-                cluster - neither replicated nor distributed.
+                cluster - neither replicated nor distributed; its replicated engine names a replica path
+                without ``{uuid}``.
         """
+        self.raise_if_replica_path_is_fixed(new_model)
         await self.raise_if_rows_are_scattered(new_model)
         materialized_views = self.editor.materialized_views
         await materialized_views.drop_model_materialized_views(old_model)
@@ -148,6 +153,30 @@ class ClickhouseTableRebuild(TableRebuild):
             return False
         # A raw SQL projection's columns are the ones it names in read_columns.
         return any(column_name in projection.get_read_columns() for projection in table_options.projections)
+
+    def raise_if_replica_path_is_fixed(self, model: type[Model]) -> None:
+        """Refuses to remake a replicated table whose replica path names no ``{uuid}`` - the new table,
+        created beside the old one, took the old one's path (the server refused it), or a path naming the new
+        table's name it kept once renamed.
+
+        Args:
+            model: The model.
+
+        Raises:
+            UnSupportedError: The table's replicated engine names a replica path without ``{uuid}``.
+        """
+        engine = ClickhouseTableOptions.get_for_model(model, self.editor.client.dialect).engine
+        if not engine.startswith(CLICKHOUSE_REPLICATED_ENGINE_PREFIX):
+            return
+        arguments = ClickhouseTypeNames.get_type_parts(engine)[1]
+        if not arguments or not arguments[0].strip().startswith("'"):
+            return
+        if CLICKHOUSE_UUID_MACRO not in ClickhouseSqlParts.get_string_text(arguments[0].strip()):
+            raise UnSupportedError(
+                f"{model.__name__}: the change remakes the table, whose replica path names no "
+                f"{CLICKHOUSE_UUID_MACRO} - the new table would take the path of the old one. Declare the engine "
+                f"without its path (the server's default_replica_path), or with a path naming {CLICKHOUSE_UUID_MACRO}"
+            )
 
     async def raise_if_rows_are_scattered(self, model: type[Model]) -> None:
         """Refuses to remake a table whose rows the connection's server holds only a part of.

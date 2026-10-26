@@ -48,10 +48,13 @@ class Foo(Model):
 ## <a id="abstract"></a>`abstract`
 
 `True`: no table is generated for the model; its fields and `Meta` are inherited by the concrete
-subclasses, each getting a deep copy of them rather than a shared object.
+subclasses, each getting a deep copy of them rather than a shared object. A model is abstract only when
+its own `Meta` says so: a `Meta` subclassing the abstract model's (`class Meta(Base.Meta)`) leaves it
+concrete.
 
-A concrete model subclassing another concrete model is a model of its own: a table of its own, with
-copies of the fields, and none of the other model's `Meta` options. A relation other models point at the
+A concrete model subclassing another concrete model is a model of its own: a table of its own, with copies of
+the fields, and none of the other model's `Meta` options but its [`manager`](#manager), copied for the
+subclass — its `Model.objects` filters the subclass's rows the same way. A relation other models point at the
 other model with isn't the subclass's — its rows aren't in that table — so reading it on the subclass
 (`child.refs`) raises `AttributeError`.
 

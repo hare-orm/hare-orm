@@ -137,8 +137,9 @@ class ConstraintStatements(SchemaEditorPart):
         """Adds a CHECK constraint that only new and updated rows must pass - the existing rows are
         checked later, by ``validate_constraint()``. A dialect that can't leave the existing rows
         unchecked (``Features.supports_not_valid_constraints`` False) adds the constraint as usual -
-        the database then checks the rows as its ``ADD CONSTRAINT`` does: every row on SQLite; only the
-        rows written later where that statement leaves the existing ones unchecked.
+        the database then checks the rows as its ``ADD CONSTRAINT`` does: every row where a table is
+        rebuilt for it; only the rows written later where that statement leaves the existing ones
+        unchecked.
 
         Args:
             model: The constrained model.
@@ -215,6 +216,20 @@ class ConstraintStatements(SchemaEditorPart):
             )
         )
         await self.editor.add_constraint(model, new_constraint)
+
+    @classmethod
+    def get_enum_members_check_sql(cls, quoted_column: str, value_sqls: list[str]) -> str:
+        """The predicate of an enum field's CHECK (``EnumMembersCondition``): the column holds one of the
+        members' values.
+
+        Args:
+            quoted_column: The quoted column.
+            value_sqls: The members' values as literals.
+
+        Returns:
+            The SQL predicate.
+        """
+        return f"{quoted_column} IN ({', '.join(value_sqls)})"
 
     @classmethod
     def get_nulls_distinct_sql(cls, nulls_distinct: bool) -> str:

@@ -359,6 +359,22 @@ def test_a_chain_of_one_connector_stays_one_level_deep():
     assert len(((first | second) & third).children) == 2
 
 
+@pytest.mark.database_independent
+def test_a_chain_extended_two_ways_keeps_each_branch():
+    """A chain gathers its children when they are first read - extending one link twice, or reading a link
+    before and after a later one is read, gives each its own conditions."""
+    first, second, third, fourth = Q(moo="cow"), Q(moo="bull"), Q(moo="ox"), Q(moo="yak")
+    trunk = first | second
+    left = trunk | third
+    right = trunk | fourth
+    longer = left | fourth
+    assert longer.children == (first, second, third, fourth)
+    assert left.children == (first, second, third)
+    assert right.children == (first, second, fourth)
+    assert trunk.children == (first, second)
+    assert longer == Q.with_connector(Connector.OR, first, second, third, fourth)
+
+
 @pytest.mark.asyncio
 async def test_thousands_of_conditions_joined_in_a_chain_run(db):
     for number in (1, 2, 3):
@@ -374,9 +390,24 @@ async def test_thousands_of_conditions_joined_in_a_chain_run(db):
 
 
 @pytest.mark.asyncio
+async def test_thousands_of_filter_calls_in_a_chain_run(db):
+    """Each filter() call's condition was joined to the ones before it - a chain as deep as it was long,
+    which SQLite refused past 1000 calls and ClickHouse past 500."""
+    for number in (1, 2, 3):
+        await IntFields.objects.create(id=number, intnum=number)
+    filtered = IntFields.objects.all()
+    excluded = IntFields.objects.all()
+    for number in range(2000):
+        filtered = filtered.filter(id__lt=10_000 + number)
+        excluded = excluded.exclude(id=-number - 1)
+    assert await filtered.count() == 3
+    assert await excluded.count() == 3
+
+
+@pytest.mark.asyncio
 async def test_an_expression_nested_deeper_than_can_be_built_is_refused(db):
     deep = F("intnum")
-    for _ in range(900):
+    for _ in range(990):
         deep = deep + 1
     with pytest.raises(QueryError, match="nested too deeply"):
         await IntFields.objects.annotate(value=deep).values_list("value", flat=True)

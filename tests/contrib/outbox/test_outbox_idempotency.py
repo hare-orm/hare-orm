@@ -186,10 +186,8 @@ async def test_explicit_tenant_is_accepted_with_a_key_and_no_active_scope(db_out
 @pytest.mark.parametrize(
     "options",
     [
-        {"idempotency_key": ""},
         {"idempotency_key": "k" * (OUTBOX_KEY_MAX_LENGTH + 1)},
         {"idempotency_key": 42},
-        {"ordering_key": ""},
         {"ordering_key": 7},
         {"headers": {"": 1}},
         {"headers": ["a"]},

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from http import HTTPStatus
 
-from hare.contrib.request_query.exceptions import RequestQueryForbidden
+from hare.contrib.request_query.exceptions import ApiGetterError, RequestQueryForbidden
 from hare.exceptions import DoesNotExist, IntegrityError, TransactionRetryError, ValidationError
 
 #: The status codes from which a response rolls the request's transaction back.
@@ -26,6 +26,7 @@ STATUS_BY_ERROR: dict[type[Exception], HTTPStatus] = {
     TransactionRetryError: HTTPStatus.CONFLICT,
     ValidationError: HTTPStatus.UNPROCESSABLE_ENTITY,
     RequestQueryForbidden: HTTPStatus.FORBIDDEN,
+    ApiGetterError: HTTPStatus.BAD_GATEWAY,
 }
 
 #: The paths of the health routes by default (``HealthRoutes``): readiness - can the application
@@ -34,9 +35,6 @@ DEFAULT_READINESS_PATH = "/health/ready"
 DEFAULT_LIVENESS_PATH = "/health/live"
 #: The status of the readiness answer of an unhealthy application.
 UNHEALTHY_STATUS_CODE = HTTPStatus.SERVICE_UNAVAILABLE.value
-#: The range of the status a degraded application's readiness answer may be given.
-MIN_HEALTH_STATUS_CODE = 200
-MAX_HEALTH_STATUS_CODE = 599
 #: The body of the liveness answer.
 LIVENESS_ANSWER = {"status": "alive"}
 

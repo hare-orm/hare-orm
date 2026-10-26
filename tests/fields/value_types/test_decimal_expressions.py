@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from hare.query.expressions import Case, F, Q, Value, When, Window
 from hare.query.functions import Abs, Avg, Ceil, Coalesce, Concat, Floor, Greatest, Mod, Round, StdDev, Sum
-from tests.shared_models.testmodels import HighPrecisionDecimalFields
+from tests.shared_models.testmodels_postgres import HighPrecisionDecimalFields
 
 BIG = Decimal("12345678901234567890.123456789012345678")
 OTHER = Decimal("-98765432109876543210.987654321098765432")
@@ -21,6 +21,7 @@ async def rows(db):
     return HighPrecisionDecimalFields.objects.order_by("id")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("expression", "expected"),
@@ -63,6 +64,7 @@ async def test_a_decimal_expression_keeps_every_digit(rows, expression, expected
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_decimal_quotient_keeps_every_digit_it_shows(rows):
     """Each database shows a quotient at its own places - the digits it shows are the quotient's."""
@@ -72,6 +74,7 @@ async def test_a_decimal_quotient_keeps_every_digit_it_shows(rows):
         assert abs(quotient - exact) < Decimal("1e-18")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_decimal_aggregate_keeps_every_digit(rows):
     assert await HighPrecisionDecimalFields.objects.all().aggregate(
@@ -83,6 +86,7 @@ async def test_a_decimal_aggregate_keeps_every_digit(rows):
     }
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_an_update_by_a_decimal_expression_writes_every_digit(rows):
     step = Decimal("0.000000000000000001")
@@ -95,6 +99,7 @@ async def test_an_update_by_a_decimal_expression_writes_every_digit(rows):
     ) == [OTHER, stepped]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_round_to_more_places_than_the_default_context_holds(rows):
     """SQLite's exact Round() quantized in the default context of 28 digits - more failed in its UDF."""
@@ -105,6 +110,7 @@ async def test_a_round_to_more_places_than_the_default_context_holds(rows):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_the_greatest_of_a_decimal_and_a_float_is_a_float(rows):
     """SQLite gave the Decimal's text for the float result - reading it raised ValidationError."""
@@ -112,17 +118,17 @@ async def test_the_greatest_of_a_decimal_and_a_float_is_a_float(rows):
     assert values == [float(BIG), 1.5]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_remainder_by_a_decimal_nan_is_nan(rows):
     """SQLite took Mod() of a NaN for a float remainder and returned the text 'NaN'; the % operator cast the
     NaN to a number, 0, and returned NULL."""
-    if rows.model._meta.connection.dialect.name == "clickhouse":
-        pytest.skip("a ClickHouse Decimal holds no NaN")
     for expression in (Mod("big", Value(Decimal("NaN"))), F("big") % Value(Decimal("NaN"))):
         values = await rows.annotate(value=expression).values_list("value", flat=True)
         assert all(isinstance(value, Decimal) and value.is_nan() for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_decimal_literal_is_concatenated_with_every_digit(rows):
     """ClickHouse wrote a Decimal literal as the number it read of it - 1.50 as 1.5."""

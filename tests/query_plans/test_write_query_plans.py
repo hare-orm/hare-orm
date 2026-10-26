@@ -17,15 +17,8 @@ from hare.query.expressions import F, Q, RawSQL
 from hare.query.functions import Count
 from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models import testmodels
-from tests.shared_models.testmodels import (
-    DatetimeFields,
-    DecimalFields,
-    Event,
-    IntFields,
-    Reporter,
-    Tournament,
-    VersionedThing,
-)
+from tests.shared_models.testmodels import DatetimeFields, Event, IntFields, Reporter, Tournament, VersionedThing
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 async def count_plan_hits(statement) -> tuple[int, int]:
@@ -100,6 +93,7 @@ async def test_update_of_datetime_auto_now_and_explicit_values(db):
         assert (await DatetimeFields.objects.get(id=obj.id)).datetime == moment
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_rounds_like_a_write(db):
     """An assigned value goes through the write conversion - a DecimalField value is rounded to

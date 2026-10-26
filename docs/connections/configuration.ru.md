@@ -41,11 +41,10 @@ await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models
 
 `HareConfig.from_db_url(db_url, modules)` строит настройки одного подключения (`"default"`) из адреса
 базы и `{app_label: [module paths]}`. Источник, который нельзя прочитать, — отсутствующий файл,
-несуществующий модуль или переменная, переменная с чем-то другим — даёт `ConfigurationError`.
+несуществующий модуль или переменная — даёт `ConfigurationError`.
 
-`slow_query_threshold_ms` тоже проверяется: это конечное число от `0` до `86400000`. Общие для всего
-процесса настройки (`slow_query_threshold_ms` и `table_name_generator`) меняются только после успешного
-`init()`; если `init()` завершился ошибкой, они остаются прежними.
+Общие для всего процесса настройки (`slow_query_threshold_ms` и `table_name_generator`) меняются только
+после успешного `init()`; если `init()` завершился ошибкой, они остаются прежними.
 
 | Аргумент | Что задаёт |
 |---|---|
@@ -230,7 +229,8 @@ async with HareContext() as context:
 `HareContext` задачи (новый, если у задачи его нет), а все остальные методы `Hare` работают с текущим.
 Всё определено один раз, в `HareContext`: `.init(config, ...)`, `.generate_schemas(safe=True)`,
 `.close_connections()`, `.connections` (`ConnectionHandler`), `.apps`, `.router`, `.routers`, `.inited`,
-`.default_connection`, `.use_timezone`, `.timezone`, `.get_model(app_label, model_name)`,
+`.default_connection`, `.use_timezone`, `.timezone`, `.get_model("app.Model")` (метка, класс модели или
+настройка `swappable()`),
 `.get_connection(connection_alias=None)`, `.bind_models(config, ...)`, `.swappable_label(setting)`,
 `.get_swappable_model(setting)`, `.register_live_models(...)`, `.unregister_live_models(...)` и
 `.observe(event_type, callback)`/`.unobserve(...)` (см. [Наблюдение за
@@ -284,8 +284,9 @@ Hare.bind_models(config, table_name_generator=None)   # синхронный
 | SQLite | Подключение до 10 секунд ждёт транзакцию или запрос, которые его используют, затем закрывается всё равно |
 | ClickHouse | `clickhouse_driver` до 10 секунд ждёт уже переданные команды; команда, которая ещё идёт, заканчивается сама. `clickhouse_connect` закрывает свой HTTP-клиент, когда на уже отправленные запросы пришли ответы, — они завершаются со своими результатами |
 
-Задача, которая ещё держит выброшенный объект подключения, на следующем запросе получает
-`DBConnectionError`, а не открывает новый пул. Контекст забывает свои подключения, даже если закрытие не
+Задача, которая ещё держит выброшенный объект подключения, на следующем запросе получает `DBConnectionError`,
+а не открывает новый пул; запрос через модель снова ищет своё подключение — и внутри транзакции тоже — и
+получает `ConfigurationError`, как до `Hare.init()`. Контекст забывает свои подключения, даже если закрытие не
 удалось, а первая ошибка поднимается после; наблюдателям, которые ещё отправляют метрику или трассировку,
 даётся до 10 секунд. `close_all()` у `ConnectionHandler` — то же закрытие для одного контекста — см.
 [Подключения](connections.ru.md#connections).

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import re
 import uuid
 
 from hare.dialects.enums import ParameterPosition
@@ -13,6 +14,9 @@ POSTGRESQL_MAX_BIND_PARAMETERS = 32767
 
 #: A rough cutoff: `= ANY($1)` beat `IN (...)` by ~9% at 500 values and was no better at 3-10.
 POSTGRES_IN_ARRAY_THRESHOLD = 20
+
+#: The modifier of a type's name - ``(255)`` of ``VARCHAR(255)``, ``(12, 3)`` of ``NUMERIC(12, 3)``.
+POSTGRESQL_TYPE_MODIFIER_PATTERN = re.compile(r"\s*\([^)]*\)")
 
 #: The column types bulk_create(use_copy=True) takes - SQL_TYPE without its size - the same on both
 #: drivers: COPY BINARY needs every type declared. Array, range and extension types aren't among

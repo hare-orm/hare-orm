@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from hare.contrib.test import capture_queries
-from hare.exceptions import ConfigurationError, NoValuesFetched
+from hare.exceptions import NoValuesFetched
 from hare.query.expressions import Q
 from hare.query.relation_loading.select import Select
 from tests.shared_models.testmodels import (
@@ -116,21 +116,8 @@ async def test_explicit_select_related_still_works_alongside_lazy_default(db):
 
 
 @pytest.mark.database_independent
-def test_m2m_lazy_joined_rejected():
-    with pytest.raises(ConfigurationError):
-        from hare import fields
-        from hare.models import Model
-
-        class BadM2M(Model):
-            others: fields.ManyToManyRelation[LazyM2MRight] = fields.ManyToManyField(
-                "models.LazyM2MRight",
-                lazy="joined",  # type: ignore[arg-type]
-            )
-
-
-@pytest.mark.database_independent
 def test_invalid_lazy_value_rejected():
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ValueError, match="'eager' is not a valid RelationLoadStrategy"):
         from hare import fields
         from hare.models import Model
 

@@ -26,7 +26,15 @@ class FilterValueTypes:
             The type.
         """
         compared_type = FilterValueTypes.get_compared_type(lookup_info, accepts_instances=True)
-        return dataclasses.replace(compared_type, shape=lookup_info.value_shape, accepts_expressions=True)
+        value_field = lookup_info.value_field
+        alternatives = (
+            value_field.get_lookup_value_alternatives(lookup_info.lookup)
+            if lookup_info.target is LookupTarget.FIELD and value_field is not None
+            else ()
+        )
+        return dataclasses.replace(
+            compared_type, shape=lookup_info.value_shape, accepts_expressions=True, alternatives=alternatives
+        )
 
     @staticmethod
     def get_selected_value_type(lookup_info: LookupInfo) -> ValueType:
@@ -45,12 +53,13 @@ class FilterValueTypes:
             and lookup_info.target is LookupTarget.FIELD
             and field is not None
             and not isinstance(field, tuple)
-            and field.holds_container_value
+            and (field.holds_container_value or field.get_python_type() is not field.field_type)
             and lookup_info.value_type is not object
         ):
             # The whole value of a container field (``list[str]``, a range) - its equality takes
-            # something else, the elements of an array or a range's bounds. A JSON document is any
-            # value.
+            # something else, the elements of an array or a range's bounds - or a value read as
+            # another type than its filters take (an address read as an ``ipaddress`` object). A JSON
+            # document is any value.
             selected_type = ValueType(
                 classes=(field.get_python_type(),), declared_in=(field.model, field.model_field_name)
             )
@@ -118,7 +127,7 @@ class FilterValueTypes:
         )
         if compares_field_value and field is not None and not isinstance(field, tuple):
             return ValueType(
-                classes=(lookup_info.value_type,),
+                classes=(lookup_info.value_type, *field.get_accepted_value_types()),
                 declared_in=(field.model, field.model_field_name),
                 accepts_enum_values=accepts_raw_values,
             )

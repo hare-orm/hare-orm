@@ -4,12 +4,11 @@ import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from hare.classes.value_descriptions import ValueDescriptions
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.brokers.redis_connection import RedisConnection
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, REDIS_STREAM_EVENT_FIELD
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
+from hare.contrib.package_checks import PackageChecks
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -29,8 +28,8 @@ class RedisStreamsDelivery(OutboxDelivery):
         max_length: Trim each stream to about this many entries (``MAXLEN ~``); None keeps all.
 
     Raises:
-        ConfigurationError: Neither or both of ``url`` and ``client``, an empty ``stream``, a
-            ``max_length`` below 1, or the ``redis`` package isn't installed.
+        ConfigurationError: Neither or both of ``url`` and ``client``, or the ``redis`` package isn't
+            installed.
     """
 
     def __init__(
@@ -41,17 +40,9 @@ class RedisStreamsDelivery(OutboxDelivery):
         stream: str | None = None,
         max_length: int | None = None,
     ) -> None:
-        BrokerArguments.require_package(RedisConnection.redis, "RedisStreamsDelivery", "redis", "redis")
+        PackageChecks.require_package(RedisConnection.redis, "RedisStreamsDelivery", "redis", "redis")
         if (url is None) == (client is None):
             raise ConfigurationError("RedisStreamsDelivery takes either url or client")
-        if stream is not None and (not isinstance(stream, str) or not stream):
-            raise ConfigurationError(f"stream must be None or a non-empty string, got {stream!r}")
-        if max_length is not None and (
-            isinstance(max_length, bool) or not isinstance(max_length, int) or max_length < 1
-        ):
-            raise ConfigurationError(
-                f"max_length must be None or an int of at least 1, got {ValueDescriptions.get_shown_value(max_length)}"
-            )
         self.stream = stream
         self.max_length = max_length
         self.broker_connection = RedisConnection(url, client)

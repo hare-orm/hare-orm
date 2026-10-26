@@ -517,7 +517,7 @@ async def test_connection_survives_a_ragged_nested_array_insert_attempt(db_array
     pinned_pool_db_url = db_url + ("&" if "?" in db_url else "?") + "min_size=1&max_size=1"
 
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels_postgres"],
+        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
         db_url=pinned_pool_db_url,
         app_label="models",
         connection_label="models",
@@ -688,3 +688,18 @@ async def test_array_item_accepts_the_extreme_in_range_indexes(db_array_fields):
     assert await queryset.filter(array__item=(2**31 - 2, 10)).count() == 0
     assert await queryset.filter(array__item=(-(2**31 - 1), 10)).count() == 0
     assert await queryset.annotate(last=ArrayItem("array", -1)).values_list("last", flat=True) == [30]
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    "base_field",
+    [fields.CharField(max_length=40), fields.DecimalField(max_digits=12, decimal_places=3), fields.IntField()],
+)
+def test_a_bulk_load_of_an_array_of_a_sized_type_is_refused_before_the_driver(base_field):
+    """An array of a type with a modifier (VARCHAR(40)[]) was named VARCHAR for COPY - the check let it through,
+    and the driver refused it with its own error."""
+    parameters = POSTGRESQL_DIALECT.parameters
+    column_type = parameters.get_copy_column_type(ArrayField(base_field=base_field))
+    assert column_type.endswith("[]")
+    assert not parameters.supports_copy_column_type(column_type)
+    assert parameters.supports_copy_column_type(parameters.get_copy_column_type(base_field))

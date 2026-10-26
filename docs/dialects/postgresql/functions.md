@@ -64,7 +64,9 @@ a `DatetimeField` element is in hare's time zone, a `TimeDeltaField` element is 
 `JSONBAgg` of a `DecimalField` gives a `Decimal` quantized to the field's `decimal_places` — JSON itself
 carries the number with float precision, so use `ArrayAgg` when exact digits matter. `JSONBAgg` of a
 range field gives `Range` values (an empty range, an unbounded side and inclusive/exclusive bounds
-included). `ArrayAgg` of an `ArrayField` builds one multi-dimensional array, whose rows PostgreSQL
+included). `JSONBAgg` of an `IntervalField` or a `BinaryField` raises `FieldError` — JSON holds no such
+value, only text of the server's `IntervalStyle`/`bytea_output`; `ArrayAgg` gives them exactly.
+`ArrayAgg` of an `ArrayField` builds one multi-dimensional array, whose rows PostgreSQL
 requires of one length: arrays of different lengths, or an empty one among others, raise
 `OperationalError` (`cannot accumulate arrays of different dimensionality`). `JSONBAgg` aggregates them
 as a list of lists — `[['a', 'b'], [], ['c']]` — as ClickHouse's `ArrayAgg` does.

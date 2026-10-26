@@ -4,7 +4,6 @@ without adapting each plain value, and the per-model flags save() reads."""
 
 import datetime
 import math
-import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -15,31 +14,29 @@ from hare.exceptions import ValidationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.write.instance_writer import InstanceWriter
-from tests.shared_models import testmodels
+from tests.shared_models import testmodels, testmodels_postgres
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_insert_values_match_the_field_by_field_conversion(db):
-    instance = testmodels.DecimalFields(decimal=Decimal("1.23456"), decimal_nodec=Decimal("7"))
-    connection = testmodels.DecimalFields.get_connection()
-    executor = InstanceWriter(testmodels.DecimalFields, connection)
+    instance = testmodels_postgres.DecimalFields(decimal=Decimal("1.23456"), decimal_nodec=Decimal("7"))
+    connection = testmodels_postgres.DecimalFields.get_connection()
+    executor = InstanceWriter(testmodels_postgres.DecimalFields, connection)
     for columns in (executor.regular_columns, executor.regular_columns_all):
         if "id" in columns:
             instance.id = 5
         expected = [
             connection.dialect.types.get_db_value(
-                testmodels.DecimalFields._meta.fields_map[name], getattr(instance, name), instance
+                testmodels_postgres.DecimalFields._meta.fields_map[name], getattr(instance, name), instance
             )
             for name in columns
         ]
-        if Decimal in connection.dialect.types.bound_as_text:
-            # The native writer binds the text the sqlite3 adapter would make of a value bound as text.
-            expected = [
-                sqlite3.adapters.get((type(value), sqlite3.PrepareProtocol), lambda v: v)(value) for value in expected
-            ]
         assert executor._get_insert_values(instance, columns) == expected
-    created = await testmodels.DecimalFields.objects.create(decimal=Decimal("1.23456"), decimal_nodec=Decimal("7"))
-    fetched = await testmodels.DecimalFields.objects.get(pk=created.pk)
+    created = await testmodels_postgres.DecimalFields.objects.create(
+        decimal=Decimal("1.23456"), decimal_nodec=Decimal("7")
+    )
+    fetched = await testmodels_postgres.DecimalFields.objects.get(pk=created.pk)
     assert fetched.decimal == Decimal("1.2346")
     assert fetched.decimal_nodec == Decimal("7")
 

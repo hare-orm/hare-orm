@@ -54,13 +54,6 @@ class PostgresqlRenderers(CheckedTermRenderers):
 
         return Star()
 
-    def get_integer_aggregate_as_float(self, term: Term) -> Term:
-        # The average or a statistic of integers is a NUMERIC here.
-        # Local import: hare.sql renders through the dialect.
-        from hare.sql.functions.cast import Cast
-
-        return Cast(term, "FLOAT")
-
     def get_concatenated_argument_sql(self, argument_sql: str, argument: Any) -> str:
         # Every CONCAT() argument needs a type: a number literal takes its own, everything else is
         # text.

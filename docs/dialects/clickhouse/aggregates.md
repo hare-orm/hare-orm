@@ -38,15 +38,17 @@ deterministic.
 
 - `_filter=Q(...)` is written `FILTER (WHERE ...)` and `distinct=True` as `DISTINCT` inside the call, as
   on other databases — ClickHouse runs them as its `-If` and `-Distinct` combinators.
-- Over no rows `Max`, `Min`, `Avg`, `StdDev` and `Variance` give `None`, as do the aggregates below:
-  each is written by its `-OrNull` form (`maxOrNull(amount)`) — the list is in [`NULL` from an aggregate
-  over no rows](differences.md#null-from-an-aggregate). `Sum` gives ClickHouse's own `0` (`0.00` for a decimal). In a
-  grouped statement, whose groups hold at least one row, an aggregate without `_filter` keeps its plain,
-  cheaper form. A sample deviation or variance over one value is `None`, not ClickHouse's NaN.
+- Over no rows `Max`, `Min`, `Avg`, `StdDev` and `Variance` give `None`, as do the aggregates below: each is
+  written by its `-OrNull` form (`maxOrNull(amount)`) — the list is in [`NULL` from an aggregate over no
+  rows](differences.md#null-from-an-aggregate). `Sum` gives ClickHouse's own `0` (`0.00` for a decimal; `None`
+  for a nullable field, and over only `NULL` values too). In a grouped statement, whose groups hold at least
+  one row, an aggregate without `_filter` keeps its plain, cheaper form. A sample deviation or variance over
+  one value is `None`, not ClickHouse's NaN.
 - Over no rows (or only `NULL` values) `Quantile`, `Median`, `ArgMin`, `ArgMax`, `AnyValue` and `AnyLast`
   give `None`; `Uniq`/`UniqExact` give `0` (`UniqCombined` of a nullable field gives `None` — ClickHouse's
   own `uniqCombined`), `GroupArray`, `GroupUniqArray` and `TopK` an empty list, and `Quantiles` a `NaN` for
-  each level — ClickHouse holds no `NULL` inside an array.
+  each level — ClickHouse holds no `NULL` inside an array; with `exact=True` over an integer field
+  a `0` for each level (ClickHouse's own `quantilesExact`).
 - `ArgMin`/`ArgMax` read only the rows whose `field` isn't `NULL`: the value of the row with the
   least/greatest `by` among them, not `None` when the row with the extreme `by` holds `NULL`.
 - `ArrayAgg` of hare is `groupArray` of a tuple holding each value — every value is an element of

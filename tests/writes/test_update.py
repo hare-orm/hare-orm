@@ -25,6 +25,7 @@ from hare.time import UTC, Timezone
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
     Author,
+    BinaryFields,
     Book,
     CompositePkThing,
     CompositePkTriple,
@@ -33,7 +34,6 @@ from tests.shared_models.testmodels import (
     DefaultUpdate,
     EnumFields,
     Event,
-    ExpressionTypeRow,
     IntFields,
     JSONFields,
     NumberSourceField,
@@ -45,6 +45,7 @@ from tests.shared_models.testmodels import (
     UUIDFields,
     VersionedThing,
 )
+from tests.shared_models.testmodels_postgres import ExpressionTypeParity, ExpressionTypeRow
 
 
 @pytest.mark.asyncio
@@ -737,10 +738,10 @@ async def test_update_across_a_relation_resolves_its_filters_each_time(db):
     assert (await Event.objects.get(pk=autumn_event.pk)).name == "autumn event"
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_an_integer_set_from_a_fraction_is_converted_as_its_database_converts(db):
-    """PostgreSQL rounds - a Decimal half away from zero, a float to even; SQLite cuts the fraction
-    off."""
+    """PostgreSQL rounds - a Decimal half away from zero, a float to even."""
     rows = [
         await ExpressionTypeRow.objects.create(
             num=0,
@@ -757,13 +758,12 @@ async def test_an_integer_set_from_a_fraction_is_converted_as_its_database_conve
     ]
     written = ExpressionTypeRow.objects.filter(id__in=[row.id for row in rows]).order_by("id")
 
-    is_sqlite = ExpressionTypeRow._meta.connection.dialect.name == "sqlite"
     await written.update(num=F("dec"))
-    assert await written.values_list("num", flat=True) == ([7, 2, -2] if is_sqlite else [7, 3, -3])
+    assert await written.values_list("num", flat=True) == [7, 3, -3]
     await written.update(num=F("fl"))
-    assert await written.values_list("num", flat=True) == ([2, 3, -2] if is_sqlite else [2, 4, -2])
+    assert await written.values_list("num", flat=True) == [2, 4, -2]
     await written.update(num=F("dec") * 2)
-    assert await written.values_list("num", flat=True) == [14 if is_sqlite else 15, 5, -5]
+    assert await written.values_list("num", flat=True) == [15, 5, -5]
 
 
 async def create_row_with_a_large_decimal() -> ExpressionTypeRow:
@@ -780,6 +780,7 @@ async def create_row_with_a_large_decimal() -> ExpressionTypeRow:
     )
 
 
+@pytest.mark.postgresql_models
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_an_integer_set_beyond_its_range_is_refused(db):
@@ -792,12 +793,69 @@ async def test_an_integer_set_beyond_its_range_is_refused(db):
     assert await ExpressionTypeRow.objects.filter(id=row.id).values_list("num", flat=True) == [1]
 
 
-@requires_features(supports_transactions=False)
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
-async def test_an_integer_set_beyond_its_range_is_refused_before_it_is_written(db):
-    """A database without transactions wrote the value before refusing it."""
-    row = await create_row_with_a_large_decimal()
+@pytest.mark.parametrize(
+    "field_name, largest, assigned",
+    [
+        ("num", 2**31 - 1, F("num") + 1),
+        ("num", 2**31 - 1, F("big")),
+        ("big", 2**63 - 1, F("big") + 1),
+        ("big", 2**63 - 1, F("big") * 2),
+    ],
+)
+async def test_integer_arithmetic_set_past_the_field_type_is_refused(db, field_name, largest, assigned):
+    """PostgreSQL refuses an integer set from arithmetic, or from a wider column, past the field's type
+    itself."""
+    row = await ExpressionTypeParity.objects.create(
+        num=2**31 - 1, big=2**63 - 1, dec=Decimal(1), flag=True, grp="a", ts=datetime(2020, 1, 1, tzinfo=UTC)
+    )
 
-    with pytest.raises(OperationalError, match="integer out of range"):
-        await ExpressionTypeRow.objects.filter(id=row.id).update(num=F("dec") * 100)
-    assert await ExpressionTypeRow.objects.filter(id=row.id).values_list("num", flat=True) == [1]
+    with pytest.raises(OperationalError, match="out of range|integer overflow"):
+        async with Transactions.atomic():
+            await ExpressionTypeParity.objects.filter(id=row.id).update(**{field_name: assigned})
+    assert await ExpressionTypeParity.objects.filter(id=row.id).values_list(field_name, flat=True) == [largest]
+
+
+@pytest.mark.postgresql_models
+@pytest.mark.asyncio
+async def test_integer_arithmetic_set_within_the_field_type_is_written(db):
+    row = await ExpressionTypeParity.objects.create(
+        num=2**31 - 2, big=2**63 - 2, dec=Decimal(1), flag=True, grp="a", ts=datetime(2020, 1, 1, tzinfo=UTC)
+    )
+
+    await ExpressionTypeParity.objects.filter(id=row.id).update(num=F("num") + 1, big=F("big") + 1)
+    assert await ExpressionTypeParity.objects.filter(id=row.id).values_list("num", "big") == [(2**31 - 1, 2**63 - 1)]
+
+
+@pytest.mark.asyncio
+async def test_a_field_set_to_a_value_of_another_family_is_refused(db):
+    """Bytes, JSON, an array, ... were set from any expression - a database keeping the value as it is
+    left a row the field reads back none of."""
+    await BinaryFields.objects.create(id=1, binary=b"ab")
+    await JSONFields.objects.create(id=1, data={"a": 1})
+
+    with pytest.raises(FieldError, match="sets bytes and a number"):
+        await BinaryFields.objects.filter(id=1).update(binary_null=F("id"))
+    with pytest.raises(FieldError, match="sets a JSON value and a number"):
+        await JSONFields.objects.filter(id=1).update(data_null=F("id") + 1)
+
+    await BinaryFields.objects.filter(id=1).update(binary_null=F("binary"))
+    await JSONFields.objects.filter(id=1).update(data_null=F("data"))
+    assert await BinaryFields.objects.values_list("binary_null", flat=True) == [b"ab"]
+    assert await JSONFields.objects.values_list("data_null", flat=True) == [{"a": 1}]
+
+
+@pytest.mark.asyncio
+async def test_an_integer_literal_past_a_smallint_beside_one_is_computed(db):
+    """A literal beside a smallint column took the column's type on PostgreSQL - 40000 failed to bind as an
+    int2."""
+    row = await SmallIntFields.objects.create(smallintnum=10)
+
+    assert await SmallIntFields.objects.annotate(value=F("smallintnum") + 40000).values_list("value", flat=True) == [
+        40010
+    ]
+    assert await SmallIntFields.objects.filter(id__lt=F("smallintnum") + 40000).count() == 1
+    await IntFields.objects.create(id=row.id, intnum=0)
+    await IntFields.objects.filter(id=row.id).update(intnum=F("intnum") + 40000)
+    assert await IntFields.objects.values_list("intnum", flat=True) == [40000]

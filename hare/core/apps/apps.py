@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
 from types import ModuleType
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
 from hare.core.apps.model_discovery import ModelDiscovery
@@ -28,6 +28,9 @@ from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetu
 from hare.sql import Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.identifiers import Identifiers
+
+if TYPE_CHECKING:
+    from hare.core.apps.declarations import ModelReference
 
 
 class Apps:
@@ -336,7 +339,25 @@ class Apps:
             (label for label, app_models in self.apps.items() if app_models.get(model.__name__) is model), None
         )
 
-    def get_model(self, app_label: str, model_name: str) -> type[Model]:
+    def get_model(self, reference: ModelReference) -> type[Model]:
+        """The model a reference names - an ``"app.Model"`` label, a ``swappable()`` setting (the model the
+        setting points at), or a class (the registry's own class of the model, the class itself when the
+        registry holds none).
+
+        Args:
+            reference: The reference.
+
+        Returns:
+            The model.
+
+        Raises:
+            ConfigurationError: The label isn't ``"app.Model"``, or names no registered app or model.
+        """
+        if isinstance(reference, SwappableModelReference):
+            reference = self.get_swappable_label(reference.setting)
+        if not isinstance(reference, str):
+            return self.apps.get(reference._meta.app or "", {}).get(reference.__name__) or reference
+        app_label, model_name = self.split_validated_reference(reference)
         try:
             return self.apps[app_label][model_name]
         except KeyError:
@@ -398,6 +419,11 @@ class Apps:
         built before the models were set up become ordinary ones.
         """
         self.link_relations()
+        # The models a Meta.change_capture names by its label, before the capture is worked out.
+        for app in self.apps.values():
+            for model in app.values():
+                if model._meta.change_capture is not None:
+                    model._meta.change_capture.link_models(self)
         # Every model's lookups, once all relations are wired - its filters and orderings are
         # described without a connection, right after early binding (Hare.bind_models()) too.
         for app in self.apps.values():
@@ -422,13 +448,14 @@ class Apps:
 
         self._check_object_names()
 
+        table_owners = RelationLinking.get_table_owners(self)
         for app_name, app in self.apps.items():
             for model_name, model in app.items():
                 if model._meta._inited:
                     continue
                 RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, model)
                 for field in sorted(model._meta.many_to_many_fields):
-                    self._link_many_to_many(app_name, model_name, model, field)
+                    self._link_many_to_many(app_name, model_name, model, field, table_owners)
                 for generic_field in model._meta.generic_foreign_key_fields.values():
                     if generic_field.branch_names:
                         generic_field.bind_branches()
@@ -492,7 +519,14 @@ class Apps:
                         )
                     constraint_by_name[constraint_key] = model
 
-    def _link_many_to_many(self, app_name: str, model_name: str, model: type[Model], field: str) -> None:
+    def _link_many_to_many(
+        self,
+        app_name: str,
+        model_name: str,
+        model: type[Model],
+        field: str,
+        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
+    ) -> None:
         """Links a many-to-many field declared on a model: its target, its through table and keys,
         its backward name, and the generated field of the other side.
 
@@ -501,6 +535,7 @@ class Apps:
             model_name: The model's name in it.
             model: The model.
             field: The field's name.
+            table_owners: Who holds each table name - ``RelationLinking.get_table_owners()``.
 
         Raises:
             ConfigurationError: A model of the relation has no primary key, a self-referential
@@ -539,7 +574,7 @@ class Apps:
             RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)
 
         self._set_many_to_many_through_table(
-            model, field, many_to_many_object, related_model, through_model, is_swapped
+            model, field, many_to_many_object, related_model, through_model, is_swapped, table_owners
         )
 
         # The through model is passed as the class, with its reconciled on_delete.
@@ -564,6 +599,19 @@ class Apps:
         LookupInfoBuilder.forget_descriptions()
         if not is_swapped:
             related_model._meta.add_field(backward_relation_name, many_to_many_relation)
+
+    def get_identifier_key(self, model: type[Model], name: str) -> str:
+        """What a name of a model's table is told apart by on the database of its connection.
+
+        Args:
+            model: The model.
+            name: The name.
+
+        Returns:
+            Its key.
+        """
+        connection_alias = cast("str", model._meta.default_connection)
+        return self._connections.get_dialect(connection_alias).literals.get_identifier_key(name)
 
     def _get_many_to_many_through_keys(
         self,
@@ -641,6 +689,16 @@ class Apps:
                 backward_keys = RelationLinking.expand_many_to_many_key(
                     "", f"{model._meta.db_table}_rel", model._meta.primary_key_attribute_names
                 )
+            # Both sides are columns of one table hare creates - a name twice, as its database tells names
+            # apart, failed its CREATE TABLE.
+            clashing_keys = {self.get_identifier_key(model, key) for key in forward_keys} & {
+                self.get_identifier_key(model, key) for key in backward_keys
+            }
+            if clashing_keys:
+                raise ConfigurationError(
+                    f'ManyToManyField "{model.__name__}.{field}": forward_key and backward_key name the same '
+                    f"column {sorted(clashing_keys)} of the through table - give the two sides different names"
+                )
             # The automatic through table has no foreign key field of its own - both
             # directions share the declared on_delete.
             generated_on_delete = many_to_many_object.on_delete
@@ -654,6 +712,7 @@ class Apps:
         related_model: type[Model],
         through_model: type[Model] | None,
         is_swapped: bool,
+        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
     ) -> None:
         """Sets a many-to-many field's through table and schema - the through model's, else the
         declared table, else one named after both models.
@@ -665,6 +724,7 @@ class Apps:
             related_model: The target.
             through_model: The through model, None for a through table of its own.
             is_swapped: Whether the model is swapped out.
+            table_owners: Who holds each table name - the field's automatic through table added.
 
         Raises:
             ConfigurationError: The generated table name is taken.
@@ -688,6 +748,6 @@ class Apps:
                 # Shortened with a digest to fit the identifier limit.
                 through = Identifiers.get_within_limit(through)
                 if not is_swapped:
-                    RelationLinking.check_auto_through_table_name_free(self, through, model, field)
+                    RelationLinking.check_auto_through_table_name_free(table_owners, through, model, field)
                 many_to_many_object.through = through
             many_to_many_object.through_schema = model._meta.schema

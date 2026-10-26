@@ -267,8 +267,15 @@ class ClickhouseConnectClient(ClickhouseClient):
             result = await ClickhouseConnectWholeResponseQuery.run(
                 connection, sql, self.get_external_data(external_sets)
             )
+            columns = tuple(result.column_names)
+            if not columns:
+                # An empty result sends no block, so no column of it - the server describes them.
+                described = await ClickhouseConnectWholeResponseQuery.run(
+                    connection, f"DESCRIBE ({sql})", self.get_external_data(external_sets)
+                )
+                columns = tuple(row[0] for row in described.result_rows)
         rows = tuple(tuple(row) for row in result.result_rows)
-        return DescribedResult(columns=tuple(result.column_names), rows=rows, row_count=len(rows))
+        return DescribedResult(columns=columns, rows=rows, row_count=len(rows))
 
     @ClickhouseClient.translate_exceptions
     async def execute_many(self, query: str, values: list[list[Any]]) -> None:

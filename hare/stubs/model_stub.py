@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import typing
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -14,6 +15,7 @@ from hare.stubs.constants import (
     LOOKUP_SEPARATOR,
     PRIMARY_KEY_ATTRIBUTE_NAME,
     QUERYSET_SUFFIX,
+    UPDATES_SUFFIX,
     WRITES_SUFFIX,
 )
 from hare.stubs.stub_imports import StubImports
@@ -30,8 +32,8 @@ if TYPE_CHECKING:
 
 class ModelStub:
     """What a stub declares for one model: the keys its filters take (``<Model>Filters``), the
-    values its writes take (``<Model>Writes``), and its queryset taking them (``<Model>QuerySet``,
-    the type of ``<Model>.objects``).
+    values its writes take (``<Model>Writes``, ``<Model>Updates`` of ``update()`` taking expressions
+    too), and its queryset taking them (``<Model>QuerySet``, the type of ``<Model>.objects``).
 
     Args:
         model: The model.
@@ -50,18 +52,18 @@ class ModelStub:
         #: The names of the model's declarations - free names of the stub's module.
         self.filters_name = imports.declare(f"{self.model_name}{FILTERS_SUFFIX}")
         self.writes_name = imports.declare(f"{self.model_name}{WRITES_SUFFIX}")
+        self.updates_name = imports.declare(f"{self.model_name}{UPDATES_SUFFIX}")
         self.queryset_name = imports.declare(f"{self.model_name}{QUERYSET_SUFFIX}")
 
-    def get_paths(self, model: type[Model], prefix: str, depth: int, crossed: frozenset[type[Model]]) -> list[str]:
+    def get_paths(self, model: type[Model], prefix: str, depth: int) -> list[str]:
         """The field paths a filter key may start with - the model's fields, and the fields of the
-        models its relations lead to, ``depth`` relations deep; a model already crossed is not
-        crossed again.
+        models its relations lead to, ``depth`` relations deep - back to a model crossed before too
+        (``shop__items__name``, ``parent__parent__name``).
 
         Args:
             model: The model the paths start at.
             prefix: The path to the model.
             depth: How many more relations a path crosses.
-            crossed: The models already crossed.
 
         Returns:
             The paths.
@@ -71,14 +73,14 @@ class ModelStub:
             path = f"{prefix}{name}"
             paths.append(path)
             related_model = getattr(field, "related_model", None)
-            if depth > 0 and isinstance(related_model, type) and related_model not in crossed:
-                paths.extend(self.get_paths(related_model, f"{path}__", depth - 1, crossed | {model}))
+            if depth > 0 and isinstance(related_model, type):
+                paths.extend(self.get_paths(related_model, f"{path}__", depth - 1))
         return paths
 
     def get_filter_types(self) -> dict[str, ValueType]:
         """The type of the value of each filter key."""
         filter_types: dict[str, ValueType] = {}
-        for path in [PRIMARY_KEY_ATTRIBUTE_NAME, *self.get_paths(self.model, "", self.relation_depth, frozenset())]:
+        for path in [PRIMARY_KEY_ATTRIBUTE_NAME, *self.get_paths(self.model, "", self.relation_depth)]:
             try:
                 lookups = self.get_generic_lookups(path) or self.model._meta.get_lookups(path, self.dialect)
             except FieldError:
@@ -120,7 +122,7 @@ class ModelStub:
         for name in meta.fields_db_projection:
             field = meta.fields_map[name]
             write_types[name] = ValueType(
-                classes=(field.field_type,),
+                classes=(field.field_type, *field.get_accepted_value_types()),
                 declared_in=(self.model, name),
                 accepts_enum_values=True,
                 nullable=field.null,
@@ -137,6 +139,13 @@ class ModelStub:
             key_type = meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME).value_type
             write_types[PRIMARY_KEY_ATTRIBUTE_NAME] = ValueType(classes=(key_type,))
         return write_types
+
+    def get_update_types(self) -> dict[str, ValueType]:
+        """The type of the value of each field ``update()`` takes - a write's, or an expression."""
+        return {
+            name: dataclasses.replace(value_type, accepts_expressions=True)
+            for name, value_type in self.get_write_types().items()
+        }
 
     def get_direct_relation_names(self) -> list[str]:
         """The model's foreign key and one-to-one relations, in the order the model declares them -
@@ -161,6 +170,7 @@ class ModelStub:
         model = self.imports.add_class(self.model)
         filters = self.filters_name
         writes = self.writes_name
+        updates = self.updates_name
         queryset_name = self.queryset_name
         queryset = self.imports.add("hare.query.queryset.queryset", "QuerySet")
         any_name = self.imports.add("typing", "Any")
@@ -177,6 +187,8 @@ class ModelStub:
             "",
             *self.get_typed_dict(writes, self.get_write_types()),
             "",
+            *self.get_typed_dict(updates, self.get_update_types()),
+            "",
             f"class {queryset_name}({self.get_queryset_base_text(self.model._meta.manager.queryset_class)}):",
             f"    def filter(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
             f"    def exclude(self, *args: {q_name} | {exists}, **kwargs: {unpack}[{filters}]) -> {self_name}: ...",
@@ -192,7 +204,7 @@ class ModelStub:
             f"**kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
             f"    async def update_or_create(self, defaults: dict[str, {any_name}] | None = None, create_defaults: "
             f"dict[str, {any_name}] | None = None, **kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
-            f"    def update(self, **kwargs: {unpack}[{writes}]) -> {update_query}: ...",
+            f"    def update(self, **kwargs: {unpack}[{updates}]) -> {update_query}: ...",
             *self.get_extension_method_lines(),
         ]
         for name, value_type in self.get_selected_types().items():
@@ -310,9 +322,7 @@ class ModelStub:
         annotations: dict[str, str] = {}
         for name in meta.fields_db_projection:
             field = meta.fields_map[name]
-            value_class = getattr(field, "enum_type", None) or (
-                field.get_python_type() if field.holds_container_value else field.field_type
-            )
+            value_class = getattr(field, "enum_type", None) or field.get_python_type()
             value_type = ValueType(classes=(value_class,), nullable=field.null)
             annotations[name] = f"{field_class}[{value_type_text.get_text(value_type)}]"
         for name in meta.fields_map:

@@ -46,7 +46,8 @@ The alias is looked up when the query runs, so inside an open `atomic()` on that
 transaction is used. An explicit `using=`/`.using()` always wins, and so does a router that has an
 opinion for the queried model. A related model whose default connection differs from the instance model's
 (a cross-database relation), or a relation read from an instance whose model the router routes, keeps its
-own connection choice.
+own connection choice. The queryset of a `Prefetch("books", Book.objects.filter(...))` reads on the parent's
+connection as the plain `prefetch_related("books")` does, unless it chose one with `.using()` itself.
 
 ## <a id="routers"></a>Routers
 
@@ -98,8 +99,8 @@ model's `default_connection` where `db_for_write` returns `None`. Asking
 which connection a model is written through (`Model.get_connection(for_write=True)`) writes nothing and
 changes no read.
 
-The config's `read_your_writes_seconds` — a number above 0 and up to 3600 — ends that this long after the
-task's last write, when the replica has caught up:
+The config's `read_your_writes_seconds` ends that this long after the task's last write, when the replica
+has caught up:
 
 ```python
 await Hare.init(

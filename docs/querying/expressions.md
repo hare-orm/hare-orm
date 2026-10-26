@@ -59,7 +59,10 @@ connector, right)`, its `connector` an `ArithmeticOperator` (`ADD`, `SUB`, `MUL`
 value, a decrypted `EncryptedTextField`/`EncryptedJSONField` — on model instances, in
 `.values()`/`.values_list()` and in `union()` results. `F("relation")` is the related row's primary key,
 `F("annotation")` keeps that annotation's own type. A JSON path into an `EncryptedJSONField`
-(`F("config__url")`) raises `FieldError`: the stored key value is a Fernet token.
+(`F("config__url")`) raises `FieldError`: the stored key value is a Fernet token. A part of a date, time
+or datetime is read as `values()` reads it — `F("created__year")`, `F("created__date")`, after a
+relation (`F("author__born__year")`) or a range or array path (`F("during__startswith__hour")`,
+`F("dates__0__month")`).
 
 A field compared with an expression of another type (`filter(code=F("number"))`, text with a number) is
 compared as the database compares the two: PostgreSQL refuses it, SQLite compares by its own rules. A
@@ -146,10 +149,11 @@ await Loan.objects.aggregate(longest=Max(F("returned_at") - F("lent_at")))   # a
 - A date is treated as midnight: `date ± timedelta` is the date of `midnight ± timedelta`, so a sub-day
   remainder is **floored** (`date + 23 hours` is the same date, `date - 1 hour` is the previous date).
 - A `NULL` operand gives `NULL`.
-- A result beyond the dates a database holds raises `OperationalError`: SQLite's and ClickHouse's
-  (`timestamp out of range`, `date out of range`; ClickHouse holds 1900 to 2299, where its own functions
-  would give the last date instead), and on PostgreSQL a result after the year 9999, which Python's
-  `datetime` can't hold, when it is read.
+- A result beyond the dates a database holds is the database's own: SQLite raises `OperationalError`
+  (`timestamp out of range`, `date out of range`), ClickHouse gives the nearest moment or day the column
+  holds (`DateTime` 1900-01-01 to 2299-12-31 23:00, `DateTime64` from ClickHouse 26.7 the years 1 to
+  9999, `Date32` up to 2299-12-31), and on PostgreSQL a
+  result after the year 9999, which Python's `datetime` can't hold, raises when it is read.
 - Under `use_timezone=False` a naive datetime is local wall-clock time and is shifted as absolute time in
   the system zone.
 - On SQLite the arithmetic runs in Python functions registered on every connection (SQLite has no
@@ -158,38 +162,47 @@ await Loan.objects.aggregate(longest=Max(F("returned_at") - F("lent_at")))   # a
   relies on `EXTRACT(EPOCH ...)` (exact on every PostgreSQL hare supports).
 - Anything else that involves a date/time operand — a number (`F("day") + 1`), `datetime * 2`,
   `date + datetime`, `datetime - date`, any `TimeField` arithmetic, a timedelta literal against a
-  non-date/time field — raises `FieldError` before anything is written. A `TimeDeltaField` scaled by a
-  number — a literal or a numeric column, `F("duration") * 2`, `F("duration") * F("count")`,
-  `F("duration") / 3` — is a `timedelta`, as in Python: its microseconds are scaled, and a quotient is
-  rounded to the nearest microsecond, a half to the even one, as Python divides a `timedelta` and
-  PostgreSQL an `interval`. `update(duration=F("duration") * 2)` writes it back. A number added to a
-  duration or taken from it (`F("duration") + 1`, `F("duration") - F("count")`) raises `FieldError` —
-  add a `timedelta`.
+  non-date/time field — raises `FieldError` before anything is written. A `TimeDeltaField` scaled by a number
+  — a literal or a numeric column, `F("duration") * 2`, `F("duration") * F("count")`, `F("duration") / 3` — is
+  a `timedelta`, as in Python: its microseconds are scaled, and a quotient is rounded to the nearest
+  microsecond, a half to the even one, as Python divides a `timedelta` and PostgreSQL an `interval`.
+  `update(duration=F("duration") * 2)` writes it back. A number added to a duration or taken from it
+  (`F("duration") + 1`, `F("duration") - F("count")`) raises `FieldError` — add a `timedelta`; so does any
+  other arithmetic of a duration (`3 / F("duration")`, `F("duration") % 2`, `F("duration") ** 2`, a product of
+  two durations). A PostgreSQL `IntervalField` follows the same rules: added to or taken from an interval or a
+  `timedelta` (`F("lasts") + timedelta(minutes=5)`, the `timedelta` bound as an interval), multiplied by a
+  number and divided by one (`F("lasts") * F("count")`). It also shifts a datetime or a date
+  (`F("at") + F("lasts")`, `F("day") - F("lasts")`) as PostgreSQL adds an `interval` — a month of it is a
+  calendar month, a day a calendar day in the session's zone, not the 30 days and 24 hours its `timedelta`
+  reads.
 
 ### <a id="result-type"></a>Result type
 
-An arithmetic result has the same Python type on every database, decided by its operands:
+An arithmetic result's Python type is decided by its operands:
 
-- any **float** operand (a `FloatField`, a float literal, an `Avg` of integers) makes it a `float` —
-  `F("size") * 1.5`, `F("price") * 0.5` and `Sum(F("size") * 1.5)` are floats;
-- otherwise any **Decimal** operand (a `DecimalField`, a `Decimal` literal) makes it a `Decimal`;
+- any **float** operand (a `FloatField`, a float literal, a statistic the database computes as a float)
+  makes it a `float` — `F("size") * 1.5`, `F("price") * 0.5` and `Sum(F("size") * 1.5)` are floats;
+- otherwise any **Decimal** operand (a `DecimalField`, a `Decimal` literal, a statistic the database
+  computes exactly) makes it a `Decimal`;
 - otherwise it is an **integer** (`Count`, `Length`, integer fields and literals).
+
+An `Avg`, a `StdDev` or a `Variance` of integers or Decimals is an exact `Decimal` where the database
+computes one — PostgreSQL (`Features.computes_integer_statistics_exactly`,
+`computes_decimal_statistics_exactly`) — and a `float` elsewhere.
 
 A `Decimal` result has the same scale everywhere: the larger of the operands' scales for `+ - % **`,
 their sum for `*` (an integer operand has scale 0). `F("price") + 1` on a `decimal_places=2` field is
 `Decimal("2.10")`, `F("price") * Decimal("1.5")` has 3 decimal places, `F("qty") * Decimal("0.5")` on an
-`IntField` is `Decimal("1.0")`, `Count("items") * F("price")` is `Decimal("2.20")`. A quotient is a real
-division on every database (`F("price") / 3` on `2.00` is `0.666...`, never `0`) and is **not** rounded —
-precision wins over dialect parity. On PostgreSQL `F("price") / 3` is the numeric
-`Decimal("0.36666666666666666667")`, at PostgreSQL's own division scale (at least 16 significant digits);
-on SQLite and ClickHouse hare computes the quotient exactly and cuts it (not rounded) to 20 digits after
-the point: `Decimal("0.36666666666666666666")`. When every database must return the same digits, round in
-the database: `Round(F("price") / 3, 2)` is `Decimal("0.37")` everywhere. ClickHouse works out a sum,
-difference and product of Decimals — a Decimal and an integer too — as `Decimal256`, so no digit is lost
-where a narrower type would overflow (a result past 76 digits raises `OperationalError`). SQLite works out
-every expression of Decimals - `+ - * / %`, `Abs`, `Ceil`, `Floor`, `Case`, `Coalesce`, `Sum`, `Avg`,
-`StdDev`/`Variance` - from their exact text with hare's functions, so no digit is lost to a double, an
-update by such an expression included. A division by zero is the database's own, and hare doesn't check
+`IntField` is `Decimal("1.0")`, `Count("items") * F("price")` is `Decimal("2.20")`. A quotient is the
+database's own: on PostgreSQL `F("price") / 3` of `1.10` is the numeric `Decimal("0.36666666666666666667")`,
+at PostgreSQL's own division scale (at least 16 significant digits); on ClickHouse it has the dividend's
+places, cut, not rounded: `Decimal("0.36")`. When every database must return the same digits, round in
+the database: `Round(F("price") / 3, 2)` is `Decimal("0.37")` everywhere. A sum, difference and product
+of Decimals is the database's own too — on ClickHouse one past its type's digits wraps around or raises
+ClickHouse's own error (see [ClickHouse](../dialects/clickhouse/differences.md#results)). SQLite stores
+no exact decimal: a `Decimal` in a query run on SQLite raises `UnSupportedError` — see
+[`DecimalField` (SQLite)](../models/field-types.md#decimal-field-sqlite). A division by zero is the
+database's own, and hare doesn't check
 it: PostgreSQL raises `OperationalError`, SQLite gives NULL, ClickHouse gives `inf`/`nan` for a Decimal or
 a float and its own error for integers; a NULL dividend or divisor gives NULL. Between integers `/` is the
 database's own: on PostgreSQL and SQLite an integer rounded towards zero — `F("qty") / 2` on `-7` is `-3`,
@@ -197,15 +210,17 @@ inside an aggregate too (`Avg(F("qty") / 3)` averages the integer quotients); on
 quotient, a fraction too (`-3.5`), read as a float (`Features.divides_integers_exactly`). PostgreSQL's sum
 of a `BigIntField` is a `NUMERIC`, so `Sum("big") / 2` keeps its fraction there (`Decimal("2.5")`): the
 value of an expression is the one the database gives, never cut to its output field. An integer
-sum, difference or product beyond its type raises `OperationalError`: on PostgreSQL its own
+sum, difference or product beyond its type is the database's own: PostgreSQL raises
 `integer out of range`, the type being the widest operand's (an `IntField` 32 bits, a `BigIntField` or a
-literal beyond 32 bits 64); on SQLite past 64 bits, where SQLite would silently make the result a float;
-on ClickHouse, which would wrap the result around, hare refuses it.
+literal beyond 32 bits 64); SQLite makes a result past 64 bits a float; ClickHouse wraps it around. An
+integer an `update()` writes from such arithmetic, or from a column of a wider type, is the database's
+too past the field's column type (`update(n=F("n") + 1)` of `2147483647` in an `IntField`): PostgreSQL's
+column refuses it, SQLite keeps the number, ClickHouse wraps it around.
 
 `%` follows the same types. Between integers it is an exact integer on every database (SQLite uses its
 integer `%` operator, PostgreSQL `MOD`), so `F("big") % 7` never loses precision. With a `Decimal` it is
-an exact `Decimal` remainder on every database — `Decimal("2.00") % Decimal("0.1")` is `0.00`, SQLite
-included (it computes on the operands scaled to whole numbers, up to 15 decimal places). With a float it
+an exact `Decimal` remainder on PostgreSQL and ClickHouse — `Decimal("2.00") % Decimal("0.1")` is
+`0.00`. With a float it
 is a float with the dividend's sign (`F("ratio") % 1.5`). Compound operands keep their grouping:
 `F("a") % (F("a") - 3)` is the remainder by `a - 3`.
 
@@ -364,7 +379,14 @@ Exists(Book.objects.filter(author_id=OuterReference("id")).group_by("author_id")
 Arithmetic with a `Subquery` on either side builds an ORM expression resolved inside the outer query, so
 its `OuterReference` keeps working: `Subquery(...) + 1`, `1 + Subquery(...)`, `Subquery(...) * F("qty")`
 in `annotate()`, as a filter value (`filter(age__gt=Subquery(...) + 5)`) and in
-`update(price=Subquery(...) + 1)`.
+`update(price=Subquery(...) + 1)` — an integer quotient and the arithmetic of a duration
+(`Subquery(...) / 2`, `Subquery(...) + F("delay")`) too.
+
+A queryset embedded into another query — by `Subquery`, `Exists`, `__in`, `with_cte()`, `insert_from()`
+or `merge()` — compiles into one SQL text with it, so it runs on the outer query's connection. A
+queryset pinned to another connection by `.using()`, or of a model living on another connection than
+the outer one, which runs on its own model's, raises `QueryError` — query each connection separately. An
+outer query sent to a connection of your choice by `.using()` (a shard) takes the inner one along.
 
 An `.annotate(x=Subquery(...))` over a `values()`/`values_list()` query selecting one column is decoded
 through that column's field on every database: a `date`/`datetime` (not text on SQLite), a `Decimal` (not

@@ -55,8 +55,10 @@ brought back.
 ## <a id="hard-delete"></a>Deleting for real: `hard_delete()`
 
 **`hard_delete()`** removes the row for real, whether it is live or already soft-deleted (emptying a
-trash); related rows follow their `on_delete` as a real `DELETE` would. `QuerySet.hard_delete()` does the
-same for every row a queryset matches:
+trash); related rows follow their `on_delete` as a real `DELETE` would — an `on_delete=CASCADE` row is
+deleted for real too, also of a model with a `soft_delete_field` and through a `db_constraint=False`
+relation. A delete of a model without a `soft_delete_field` cascades the same way.
+`QuerySet.hard_delete()` does the same for every row a queryset matches:
 
 ```python
 await Book.objects.only_deleted().filter(deleted_at__lt=cutoff).hard_delete()

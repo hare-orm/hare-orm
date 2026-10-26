@@ -325,6 +325,28 @@ async def test_unknown_app_label_exits_with_usage_error_code(blog_shop_project, 
     assert "Traceback" not in result.output
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        # An empty migration migrated every one, an empty connection was the default one.
+        ["migrate", "blog", ""],
+        ["sqlmigrate", "blog", " "],
+        ["squashmigrations", "blog", ""],
+        ["makemigrations", "blog", "--name", ""],
+        ["drift", "--connection", ""],
+        ["inspectdb", "--connection", ""],
+        ["inspectdb", "--schema", ""],
+    ],
+)
+async def test_an_empty_name_exits_with_usage_error_code(blog_shop_project, arguments: list[str]) -> None:
+    result = await _run_cli(["-c", blog_shop_project.config_argument, *arguments])
+
+    assert result.exit_code == 2, result.output
+    assert "takes a name" in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 @pytest.mark.parametrize("older_than", ["-1", "-99999999999999999999", "99999999999999999999", "abc", "1.5"])

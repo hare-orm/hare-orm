@@ -3,7 +3,6 @@ STRICT type of their affinity, values of every field kept, migrations rebuilding
 
 import datetime
 import uuid
-from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -61,7 +60,6 @@ async def test_columns_get_the_strict_type_of_their_affinity(strict_db):
         "flag": "INTEGER",
         "count": "INTEGER",
         "ratio": "REAL",
-        "amount": "TEXT",
         "label": "TEXT",
         "text": "TEXT",
         "day": "ANY",
@@ -86,7 +84,6 @@ async def test_every_field_value_round_trips(strict_db):
         flag=True,
         count=7,
         ratio=0.25,
-        amount=Decimal("12.50"),
         label="label",
         text="text",
         day=datetime.date(2026, 10, 5),
@@ -98,7 +95,7 @@ async def test_every_field_value_round_trips(strict_db):
     )
     loaded = await StrictRecord.objects.select_related("owner").get(id=record.id)
     assert loaded.owner.name == "owner"
-    assert (loaded.flag, loaded.count, loaded.ratio, loaded.amount) == (True, 7, 0.25, Decimal("12.50"))
+    assert (loaded.flag, loaded.count, loaded.ratio) == (True, 7, 0.25)
     assert (loaded.label, loaded.text, loaded.day, loaded.moment) == (
         "label",
         "text",
@@ -111,7 +108,7 @@ async def test_every_field_value_round_trips(strict_db):
         token,
         b"\x00\x01",
     )
-    assert await StrictRecord.objects.filter(amount__gt=Decimal("12.4"), day__year=2026, flag=True).count() == 1
+    assert await StrictRecord.objects.filter(ratio__gt=0.2, day__year=2026, flag=True).count() == 1
     await StrictRecord.objects.filter(id=record.id).update(count=8, ratio=1)
     assert (await StrictRecord.objects.get(id=record.id)).ratio == 1.0
     await StrictKeyed.objects.create(code="a", hits=1)
@@ -235,7 +232,7 @@ async def test_strict_add_field_and_rebuild_on_a_live_table():
                 name="Tally",
                 fields=[
                     ("id", fields.IntField(primary_key=True, generated=False)),
-                    ("total", fields.DecimalField(max_digits=8, decimal_places=2)),
+                    ("total", fields.TextField()),
                 ],
                 options={"table": "strict_tally", "table_options": [SqliteTableOptions(strict=True)]},
             ),

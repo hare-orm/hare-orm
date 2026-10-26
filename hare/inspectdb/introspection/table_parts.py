@@ -96,6 +96,9 @@ class TableParts:
         for sequence in table_info.sequences:
             parts.append(SchemaPart.of(SchemaPartType.SEQUENCE, table, sequence.name, sequence))
         parts.append(SchemaPart.of(SchemaPartType.TABLE_OPTIONS, table, table, table_info.table_options))
+        parts.append(
+            SchemaPart.of(SchemaPartType.UNPARSED_PARTITIONING, table, table, table_info.unparsed_partitioning or "")
+        )
         parts.append(SchemaPart.of(SchemaPartType.ROW_LEVEL_SECURITY, table, table, table_info.row_level_security))
         parts.append(SchemaPart.of(SchemaPartType.COMMENT, table, table, table_info.table_description or ""))
         return parts

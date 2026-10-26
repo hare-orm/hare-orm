@@ -358,6 +358,19 @@ async def test_a_field_the_query_left_out_is_null_not_its_default():
     assert badges == [{"id": 1, "level": None}]
 
 
+def test_the_soft_delete_field_is_read_only():
+    """A request's data set it - a POST inserted a row already hidden, a PATCH failed in save(), which writes
+    it through delete() and restore() alone."""
+    from litestar.dto import Mark
+
+    from tests.shared_models.testmodels import SoftDeleteParent
+
+    definitions = {definition.name: definition for definition in HareDTO.generate_field_definitions(SoftDeleteParent)}
+
+    assert definitions["deleted_at"].dto_field.mark is Mark.READ_ONLY
+    assert definitions["name"].dto_field.mark is None
+
+
 @pytest.mark.asyncio
 async def test_the_stamps_of_the_orm_are_read_only_and_a_partial_change_keeps_what_isnt_sent():
     async with AsyncTestClient(build_app()) as client:

@@ -22,6 +22,11 @@ class Operation(abc.ABC):
     #: Whether ``database_forward()`` reads the state before the operation - ``Migration.apply()``
     #: copies it only then.
     reads_old_state = True
+    #: Whether ``database_backward()`` reads the state the operation is undone from (``old_state``) -
+    #: ``Migration.unapply_in_place()`` copies the state only for an operation reading both sides.
+    backward_reads_state_left = True
+    #: Whether ``database_backward()`` reads the state the operation is undone to (``new_state``).
+    backward_reads_state_reached = True
     #: Whether an operation bound to no model runs in each tenant's schema instead of the shared one
     #: on a connection with ``tenant_schema_template`` - ``RunSQL``/``RunPython(tenant_schema=True)``.
     tenant_schema = False
@@ -125,11 +130,20 @@ class Operation(abc.ABC):
             app_label: The migrations' app.
 
         Returns:
-            Whether both name the models they touch and share none.
+            Whether both name the models they touch and share none, and neither needs what the other
+            does - an enum type a field's column is of.
         """
         model_labels = self.get_referenced_model_labels(app_label)
         other_model_labels = other.get_referenced_model_labels(app_label)
-        return model_labels is not None and other_model_labels is not None and not model_labels & other_model_labels
+        if model_labels is None or other_model_labels is None or model_labels & other_model_labels:
+            return False
+        empty_state = State()
+        return not (
+            set(self.get_provided_dependencies(app_label))
+            & set(other.get_required_dependencies(app_label, empty_state))
+            or set(other.get_provided_dependencies(app_label))
+            & set(self.get_required_dependencies(app_label, empty_state))
+        )
 
     def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
         """What this operation and a later one become when their migrations are squashed.
@@ -246,7 +260,7 @@ class Operation(abc.ABC):
 
         Args:
             app_label: The migration's app.
-            old_state: The state the operation is undone to.
-            new_state: The state it leaves.
+            old_state: The state after the operation - the one it is undone from.
+            new_state: The state before it - the one it is undone to.
             state_editor: The schema editor of the connection - None writes nothing.
         """

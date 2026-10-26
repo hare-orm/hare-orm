@@ -1,6 +1,7 @@
 # OpenTelemetry
 
-Opens a real OpenTelemetry span around every query hare's driver clients run, correctly nested under
+Opens a real OpenTelemetry span around every query hare's driver clients run — the statements of
+a transaction's own control (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`) aside — correctly nested under
 whatever span is already active — the same shape a hand-written `with tracer.start_as_current_span(...)`
 around the query would give — and reports the metrics of every pool of connections ([Pool metrics and
 health](pool-health.md#opentelemetry-metrics)).

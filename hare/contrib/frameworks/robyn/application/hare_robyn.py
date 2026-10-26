@@ -45,7 +45,7 @@ class HareRobyn(Robyn):
     - validates what a handler returns with its route's ``response_model`` - a row, a list, a page
       (``PageSchema[BookSchema]``) - read from its attributes;
     - answers ``InvalidRequestQuery`` with 422, ``DoesNotExist`` with 404, ``IntegrityError`` with
-      409 and ``RequestQueryForbidden`` with 403 (``HareExceptionHandlers``);
+      409, ``RequestQueryForbidden`` with 403 and ``ApiGetterError`` with 502 (``HareExceptionHandlers``);
     - starts each request with its own state (``RequestState``): an empty count of repeated
       queries, no writes of other requests;
     - with ``atomic_requests``, runs each handler in a transaction - a handler marked

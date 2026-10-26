@@ -102,7 +102,7 @@ class FieldWindowFunction(WindowFunction):
     ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:
         field_result, value_field = self._get_field_result(expression_context)
         self._raise_if_value_type_refused(value_field)
-        output_field = self._coerce_output_field(value_field)
+        output_field = self._coerce_output_field(value_field, expression_context)
         term = field_result.term
         if isinstance(term, ValueWrapper):
             # A literal annotation read by the window has no type the database could infer.
@@ -110,7 +110,6 @@ class FieldWindowFunction(WindowFunction):
                 term, term.value, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
             )
         analytic_term = self.get_analytic_term(term)
-        Aggregate.use_decimal_aggregate(analytic_term, value_field, expression_context)
         joins = field_result.joins
         if self.condition:
             # Only the window's rows matching the condition are aggregated - FILTER (WHERE ...).
@@ -137,7 +136,9 @@ class FieldWindowFunction(WindowFunction):
         if value_type in self.aggregate_class.refused_argument_value_types:
             raise FieldError(f"{type(self).__name__}() doesn't take {value_type} - convert it with Cast()")
 
-    def _coerce_output_field(self, field_object: Field[Any] | None) -> Field[Any] | None:
+    def _coerce_output_field(
+        self, field_object: Field[Any] | None, expression_context: ExpressionContext
+    ) -> Field[Any] | None:
         """The field this function's result decodes through.
 
         Args:

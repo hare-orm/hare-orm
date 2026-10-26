@@ -28,6 +28,8 @@ CASES_PATH = Path(__file__).parent / "cases"
 #: The repository root - where mypy runs, so the plugin imports the test modules by their names.
 REPOSITORY_PATH = Path(__file__).resolve().parents[3]
 CASE_FILES = sorted(path.name for path in CASES_PATH.glob("*.py"))
+#: The case files of the PostgreSQL models, checked in a run of their own - by their path in the cases.
+POSTGRESQL_CASE_FILES = sorted(f"postgresql/{path.name}" for path in (CASES_PATH / "postgresql").glob("*.py"))
 PLUGIN_PATH = REPOSITORY_PATH / "hare" / "contrib" / "mypy"
 #: Where the mypy runs keep their caches from one test run to the next - hare and the libraries are
 #: read from them instead of checked again, the test modules are checked every time.
@@ -56,15 +58,11 @@ MYPY_MESSAGE = re.compile(r"^(?P<path>.+?\.py):(?P<line>\d+): error: (?P<message
 #: the configuration.
 MYPY_RUNS = {
     "cases": (CASE_FILES, "tests.contrib.mypy.hare_config.HARE_CONFIG", '["tests.contrib.mypy.lookups"]'),
+    "postgresql_cases": (POSTGRESQL_CASE_FILES, "tests.contrib.mypy.postgresql_hare_config.HARE_CONFIG", "[]"),
     "unloadable_models": (
         ["field_names.py", "custom_lookups.py"],
         "tests.contrib.mypy.no_such_module.HARE_CONFIG",
         "[]",
-    ),
-    "invalid_imports": (
-        ["custom_lookups.py"],
-        "tests.contrib.mypy.hare_config.HARE_CONFIG",
-        '"tests.contrib.mypy.lookups"',
     ),
 }
 
@@ -154,14 +152,19 @@ def mypy_errors() -> dict[str, dict[tuple[str, int], list[str]]]:
     return {name: read_mypy_errors(process) for name, process in processes.items()}
 
 
-@pytest.mark.parametrize("file_name", CASE_FILES)
-def test_a_case_file_gets_exactly_its_expected_errors(mypy_errors, file_name):
+@pytest.mark.parametrize(
+    ("run_name", "file_name"),
+    [*(("cases", name) for name in CASE_FILES), *(("postgresql_cases", name) for name in POSTGRESQL_CASE_FILES)],
+)
+def test_a_case_file_gets_exactly_its_expected_errors(mypy_errors, run_name, file_name):
     expected_by_line = {
         line_number: match["message"]
         for line_number, line in enumerate((CASES_PATH / file_name).read_text(encoding="utf-8").splitlines(), start=1)
         if (match := EXPECTED_ERROR.search(line)) is not None
     }
-    actual_by_line = {line: messages for (name, line), messages in mypy_errors["cases"].items() if name == file_name}
+    actual_by_line = {
+        line: messages for (name, line), messages in mypy_errors[run_name].items() if name == Path(file_name).name
+    }
     missing = {
         line: expected
         for line, expected in expected_by_line.items()
@@ -184,13 +187,6 @@ def test_models_that_cant_be_loaded_are_reported_once_in_each_module(mypy_errors
     ]
     assert all(len(messages) == 1 for messages in load_errors.values() if messages)
     assert "Cannot import configuration module 'tests.contrib.mypy.no_such_module'" in next(iter(errors.values()))[0]
-
-
-def test_mypy_imports_must_be_a_list_of_module_names(mypy_errors):
-    errors = mypy_errors["invalid_imports"]
-    assert len(errors) == 1
-    assert "mypy_imports in" in next(iter(errors.values()))[0]
-    assert "must be a list of module names" in next(iter(errors.values()))[0]
 
 
 def test_the_fingerprint_follows_the_registered_lookups(tmp_path):

@@ -3,15 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.dialects.sqlite.constants import (
-    SQLITE_DECIMAL_COLLATION_NAME,
-    SQLITE_DECIMAL_ROUND_FUNCTION_NAME,
     SQLITE_GREATEST_FUNCTION_NAME,
     SQLITE_LEAST_FUNCTION_NAME,
     SQLITE_MATH_FUNCTION_PREFIX,
     SQLITE_STATISTICS_FUNCTION_NAMES,
 )
-from hare.dialects.sqlite.functions.constants import SQLITE_DECIMAL_MOD_FUNCTION_NAME
-from hare.dialects.sqlite.renderers.constants import SQLITE_DECIMAL_MOD_MAX_SCALE, SQLITE_RANDOM_FLOAT_SQL
+from hare.dialects.sqlite.renderers.constants import SQLITE_RANDOM_FLOAT_SQL
 from hare.sql import analytics, functions
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
@@ -23,8 +20,7 @@ if TYPE_CHECKING:
 
 class SqliteNumberRenderers:
     """How SQLite writes numbers: statistics, random numbers, the greatest and least of values,
-    remainders of integers, floats and decimals, rounding and the other math functions, and a float
-    or a decimal written as text."""
+    remainders of integers and floats, the math functions, and a float written as text."""
 
     @classmethod
     def register(cls, renderers: TermRenderers) -> None:
@@ -39,9 +35,7 @@ class SqliteNumberRenderers:
         renderers.register(functions.GreatestLeast, cls.render_greatest_least)
         renderers.register(term_functions.Mod, cls.render_mod)
         renderers.register(term_functions.FloatMod, cls.render_float_mod)
-        renderers.register(term_functions.DecimalMod, cls.render_decimal_mod)
         renderers.register(functions.MathFunction, cls.render_math_function)
-        renderers.register(functions.Round, cls.render_round)
 
     @staticmethod
     def render_statistic(function: functions.Statistic, sql_context: SqlContext) -> str:
@@ -91,47 +85,7 @@ class SqliteNumberRenderers:
         return term_functions.Function.get_function_sql(function, sql_context)
 
     @staticmethod
-    def render_decimal_mod(function: term_functions.DecimalMod, sql_context: SqlContext) -> str:
-        """hare's exact remainder of Decimals, kept as decimal text under the decimal collation -
-        SQLite's ``MOD()`` runs on doubles. SQL kept in DDL names no function: both operands are
-        scaled to whole numbers there and the integer remainder scaled back - beyond the scale a
-        64-bit integer holds, or with an unknown scale, hare's ``MOD`` UDF of doubles."""
-        if not sql_context.native_functions_only:
-            # Imported here: the renderers module imports this one.
-            from hare.dialects.sqlite.renderers.sqlite_renderers import SqliteRenderers
-
-            # The operands' text - a numeric cast would read NaN as 0.
-            left_sql, right_sql = (
-                function.get_arg_sql(SqliteRenderers.get_decimal_operand(arg), sql_context) for arg in function.args
-            )
-            return (
-                f"({SQLITE_DECIMAL_MOD_FUNCTION_NAME}({left_sql},{right_sql}) COLLATE {SQLITE_DECIMAL_COLLATION_NAME})"
-            )
-        if function.scale is None or function.scale > SQLITE_DECIMAL_MOD_MAX_SCALE:
-            left_sql, right_sql = (function.get_arg_sql(arg, sql_context) for arg in function.args)
-            mod_name = sql_context.note_connection_function(f"{SQLITE_MATH_FUNCTION_PREFIX}mod")
-            return f"({mod_name}({left_sql},{right_sql})+0.0)"
-        factor = 10**function.scale
-        left_sql, right_sql = (
-            f"CAST(ROUND(({function.get_arg_sql(arg, sql_context)})*{factor}) AS INTEGER)" for arg in function.args
-        )
-        return f"(({left_sql}%{right_sql})/{factor}.0)"
-
-    @staticmethod
     def render_math_function(function: functions.MathFunction, sql_context: SqlContext) -> str:
         args_sql = [function.get_arg_sql(arg, sql_context) for arg in function.args]
         name = sql_context.note_connection_function(f"{SQLITE_MATH_FUNCTION_PREFIX}{function.name.lower()}")
         return f"{name}({','.join(args_sql)})"
-
-    @staticmethod
-    def render_round(function: functions.Round, sql_context: SqlContext) -> str:
-        """A Decimal is rounded exactly from its stored text, a tie away from zero as SQLite's own
-        ``ROUND()`` rounds, and stays decimal text under the decimal collation - SQLite's ``ROUND()``
-        rounds a double, 7.35 to 7.3. SQL kept in DDL names no function: it rounds the double there."""
-        if not function.rounds_decimal or sql_context.native_functions_only:
-            return term_functions.Function.get_function_sql(function, sql_context)
-        term_sql = function.get_arg_sql(functions.Collate.strip(function.args[0]), sql_context)
-        return (
-            f"({SQLITE_DECIMAL_ROUND_FUNCTION_NAME}({term_sql},{function.precision}) "
-            f"COLLATE {SQLITE_DECIMAL_COLLATION_NAME})"
-        )

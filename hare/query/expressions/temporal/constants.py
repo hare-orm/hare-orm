@@ -36,8 +36,17 @@ TEMPORAL_RESULT_TYPES: dict[tuple[ArithmeticOperator, TemporalType, TemporalType
     (ArithmeticOperator.ADD, TemporalType.DATE, TemporalType.TIMEDELTA): TemporalType.DATE,
     (ArithmeticOperator.ADD, TemporalType.TIMEDELTA, TemporalType.DATE): TemporalType.DATE,
     (ArithmeticOperator.SUB, TemporalType.DATE, TemporalType.TIMEDELTA): TemporalType.DATE,
+    (ArithmeticOperator.ADD, TemporalType.DATETIME, TemporalType.INTERVAL): TemporalType.DATETIME,
+    (ArithmeticOperator.ADD, TemporalType.INTERVAL, TemporalType.DATETIME): TemporalType.DATETIME,
+    (ArithmeticOperator.SUB, TemporalType.DATETIME, TemporalType.INTERVAL): TemporalType.DATETIME,
+    (ArithmeticOperator.ADD, TemporalType.DATE, TemporalType.INTERVAL): TemporalType.DATE,
+    (ArithmeticOperator.ADD, TemporalType.INTERVAL, TemporalType.DATE): TemporalType.DATE,
+    (ArithmeticOperator.SUB, TemporalType.DATE, TemporalType.INTERVAL): TemporalType.DATE,
     (ArithmeticOperator.ADD, TemporalType.TIMEDELTA, TemporalType.TIMEDELTA): TemporalType.TIMEDELTA,
     (ArithmeticOperator.SUB, TemporalType.TIMEDELTA, TemporalType.TIMEDELTA): TemporalType.TIMEDELTA,
     (ArithmeticOperator.SUB, TemporalType.DATETIME, TemporalType.DATETIME): TemporalType.TIMEDELTA,
     (ArithmeticOperator.SUB, TemporalType.DATE, TemporalType.DATE): TemporalType.TIMEDELTA,
 }
+
+#: The temporal types of durations - a duration is scaled by a number.
+DURATION_TEMPORAL_TYPES = frozenset({TemporalType.TIMEDELTA, TemporalType.INTERVAL})

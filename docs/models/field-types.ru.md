@@ -185,7 +185,7 @@ class Review(Model):
 | `SlugField` | `str` | `max_length=50`, `allow_unicode: bool` | `VARCHAR(max_length)`, с индексом по умолчанию; буквы, цифры, `-` и `_` — см. [ниже](#format-fields) |
 | `PhoneField` | `str` | `region: str` | `VARCHAR(16)`; номер телефона, записывается в виде E.164 — см. [ниже](#format-fields) |
 | `BooleanField` | `bool` | — | `BOOL` (SQLite: `INT`); принимает только `bool` — `0`/`1` или текст дают `ValidationError` |
-| `DecimalField` | `Decimal` | **`max_digits: int`, `decimal_places: int`** (оба обязательны, `max_digits ≥ 1`, `0 ≤ decimal_places ≤ max_digits`) | `DECIMAL(max_digits, decimal_places)`; текст разбирается, `bool` даёт `ValidationError` |
+| `DecimalField` | `Decimal` | **`max_digits: int`, `decimal_places: int`** (оба обязательны, `max_digits ≥ 1`, `0 ≤ decimal_places ≤ max_digits`) | `DECIMAL(max_digits, decimal_places)` в PostgreSQL и ClickHouse, в SQLite колонки нет ([ниже](#decimal-field-sqlite)); текст разбирается, `bool` даёт `ValidationError` |
 | `DatetimeField` | `datetime.datetime` | `auto_now: bool`, `auto_now_add: bool` (только один из двух) | `TIMESTAMP` (PostgreSQL: `TIMESTAMPTZ`) |
 | `DateField` | `datetime.date` | — | `DATE` |
 | `TimeField` | `datetime.time` | `auto_now`, `auto_now_add` (местное время на часах со стандартным смещением настроенного пояса — тем же, что получает время без пояса) | `TIME` (PostgreSQL: `TIMETZ`); `timedelta` или текст `24:00` дают `ValidationError` |
@@ -240,31 +240,20 @@ class Book(Model):
 `max_digits` и `decimal_places` у `DecimalField` проверяются для каждого значения при `save()`, а не
 только при объявлении поля: `Decimal("12345.67")` в поле с `max_digits=6` даёт `ValidationError`, а не
 тихое обрезание или неожиданную ошибку базы. Значение с большим числом знаков после запятой на любой базе
-округляется от нуля: `Decimal("2.345")` в поле с `decimal_places=2` — `Decimal("2.35")`, в том числе
-в `update()` из выражения. Отрицательный ноль (`Decimal("-0.00")`) читается как `Decimal("0.00")`: у
+округляется от нуля: `Decimal("2.345")` в поле с `decimal_places=2` — `Decimal("2.35")`. `update()` из
+выражения записывает то, что из него делает база: PostgreSQL округляет от нуля, ClickHouse отбрасывает
+лишние знаки. Отрицательный ноль (`Decimal("-0.00")`) читается как `Decimal("0.00")`: у
 нуля в десятичной колонке знака нет.
 
 ### <a id="decimal-field-sqlite"></a>`DecimalField` (SQLite)
 
-В SQLite нет точного десятичного типа: колонка хранится текстом (`VARCHAR(40)`, в записи с фиксированной
-точкой и полным числом знаков после запятой — `2.0000`, `0.0000000001`; ноль без знака, поэтому
-уникальная колонка считает `Decimal("-0")` тем же `0`).
-Сравнения (`exact`, `gt`, `lt`, `in`, `range`, `not` — со значением или с другим `DecimalField` через
-`F()`), сортировка, `Min`/`Max` и простое копирование через `F()` (`update(price=F("price"))`,
-`annotate(copy=F("price"))`) работают с этим текстом как с точным десятичным числом, каким бы ни было
-`max_digits`. Фильтр по вычисляемому значению, сравниваемому с `Decimal`
-(`annotate(top=Max("price")).filter(top__gt=Decimal("10"))`, `__in`, `__range`), тоже точен. `contains`,
-`startswith`, `endswith`, `iexact` (и варианты без учёта регистра) сравнивают хранимый текст: `2.0000` у
-поля с `decimal_places=4` и текст `FloatField` в SQLite (`2.0`, а не `2`). Арифметика (`F("price") * 2`,
-`Sum`, `Avg`) и `Coalesce`/`Case` над `DecimalField` считаются точно по хранимому тексту функциями,
-которые регистрирует hare, поэтому ни одна цифра не теряется в double; частное (деление, `Avg`, `StdDev`,
-`Variance`) отсекается — не округляется — до 20 знаков после запятой. Вычисляемое значение, сравниваемое
-со смесью `Decimal` и других чисел, проходит через 64-битное число с плавающей точкой: сохраняется около
-15 значащих цифр. `update()` из такой арифметики записывает точный результат, округлённый от нуля до
-масштаба поля, — `update(price=F("price") - Decimal("2.005"))` при `1.50` сохраняет `-0.51` (точный
-результат — `-0.505`); выражение типа float берётся по кратчайшей записи (`F("price") + 0.005` при `1.50`
-сохраняет `1.51`). В PostgreSQL используется настоящий
-`NUMERIC` произвольной точности.
+В SQLite нет точного десятичного типа, поэтому колонки для `DecimalField` там нет: модель с таким полем
+даёт `UnSupportedError` при привязке к соединению SQLite, как и запрос к SQLite со значением `Decimal`
+или с `Cast()` к десятичному типу — до любого SQL. Храните деньги в целых младших единицах (`IntField`
+или `BigIntField` копеек) в SQLite либо используйте PostgreSQL или ClickHouse, которые хранят точные
+десятичные числа. [inspectdb](../migrations/inspectdb.ru.md) читает колонку SQLite `DECIMAL` или `NUMERIC`
+как `FloatField`: у такой колонки в SQLite числовое сродство (NUMERIC affinity), которое хранит целое
+или 64-битное число с плавающей точкой.
 
 ### <a id="date-and-time-values"></a>Дата и время
 
@@ -313,12 +302,12 @@ hare, где действует пояс UTC.
 значения остаются обычным JSON.
 
 Значение, которое JSON не может хранить, даёт `ValidationError` при любой записи (`create()`, `save()`,
-`update()`, `bulk_create()`, в том числе с `use_copy=True`, `bulk_update()`): число `NaN` или `Infinity`
-где угодно внутри значения. Нулевой байт внутри значения JSON хранится так, как его хранит база. Целое
-число любого размера
-сохраняется и читается точно — число вне 64-битного диапазона, с которым работает orjson, кодирует и
-раскодирует стандартная библиотека. `datetime`, `date`, `time` без пояса и `UUID` внутри значения
-записываются одинаковым текстом ISO/UUID по обоим путям, в том числе когда orjson не установлен вовсе.
+`update()`, `bulk_create()`, в том числе с `use_copy=True`, `bulk_update()`): число `NaN` или `Infinity` где
+угодно внутри значения. Нулевой байт внутри значения JSON хранится так, как его хранит база, там, где она его
+вмещает; PostgreSQL его не принимает, и hare даёт `ValidationError`. Целое число любого размера сохраняется и
+читается точно — число вне 64-битного диапазона, с которым работает orjson, кодирует и раскодирует стандартная
+библиотека. `datetime`, `date`, `time` без пояса и `UUID` внутри значения записываются одинаковым текстом
+ISO/UUID по обоим путям, в том числе когда orjson не установлен вовсе.
 
 `exact`/`not` по всему `JSONField` сравнивают так, как сравнивает база: PostgreSQL сравнивает значения
 `jsonb` (порядок ключей и разница между `1` и `1.0` не важны), SQLite сравнивает хранимый текст (они
@@ -436,14 +425,13 @@ class PhoneField:
 сохраняет регистр — почтовый сервер может отличать `Ann` от `ann`; если ваши адреса от регистра не
 зависят, задайте `lowercase=True` или сравнивайте через `email__iexact=`.
 
-- `schemes` — имена схем в нижнем регистре, хотя бы одно; иначе `ConfigurationError`.
+- `schemes` — имена схем в нижнем регистре.
 - `SlugField` индексируется, если не передан `db_index=False`. Файл миграции пишет для него
   `db_index=True`, а поле, объявленное в файле миграции без `db_index`, индекса не имеет — то же правило,
   что у `ForeignKeyField`.
-- `region` — код региона, который знает `phonenumbers` (`"US"`, `"GB"`, его `SUPPORTED_REGIONS`); другое
-  значение или `region` без установленного `phonenumbers` дают `ConfigurationError`. Какие номера
-  `phonenumbers` считает верными, задают его собственные данные, поэтому это может меняться с его
-  версией.
+- `region` — код региона, который знает `phonenumbers` (`"US"`, `"GB"`, его `SUPPORTED_REGIONS`);
+  `region` без установленного `phonenumbers` даёт `ConfigurationError`. Какие номера `phonenumbers`
+  считает верными, задают его собственные данные, поэтому это может меняться с его версией.
 
 Схема Pydantic (`pydantic_model_creator()`) и построенный по ней OpenAPI описывают их через
 `format: email`, `format: uri`, `pattern` символов слага, а `PhoneField` без `phonenumbers` — через
@@ -486,6 +474,13 @@ def CharEnumField(
 - Число, которому не соответствует ни один элемент, — `7` или дробное вроде `1.5`, — даёт
   `ValidationError` и при записи, и в фильтре; так же и целое вещественное (`1.0`) для `IntEnumField`,
   которое, как целое поле, принимает только `int`.
+- Там, где колонка хранит любое целое или текст (PostgreSQL, SQLite), `CHECK` ограничивает её значениями,
+  которыми хранятся элементы: значение без элемента, записанное в обход поля, — готовым SQL или вычисленное
+  `update(level=F("level") + 1)`, — даёт `IntegrityError`. Это `CheckConstraint` с
+  `EnumMembersCondition` по имени `<поле>_enum_members`, который добавляется к ограничениям модели при её
+  привязке: `makemigrations` пишет его вместе с моделью и заменяет, когда меняются элементы. Колонке
+  перечислимого типа он не нужен — `Enum8`/`Enum16` ClickHouse (`Features.keeps_enum_columns`),
+  `NativeEnumField` PostgreSQL.
 
 ```python
 from enum import Enum

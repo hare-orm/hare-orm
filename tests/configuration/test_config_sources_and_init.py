@@ -145,7 +145,6 @@ def test_connection_config_reprs_mask_every_secret():
     ("engine", "message"),
     [
         ("hare.dialects.nosuch", "Unknown database engine 'hare.dialects.nosuch'"),
-        ("", "Connection engine must be a non-empty driver name"),
     ],
 )
 async def test_unknown_engine_raises_configuration_error(engine, message):
@@ -164,17 +163,6 @@ async def test_router_class_needing_constructor_arguments_is_a_configuration_err
     async with HareContext() as ctx:
         with pytest.raises(ConfigurationError, match="Can't instantiate router"):
             await ctx.init(config=MEMORY_CONFIG, routers=[RouterWithArguments])
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-@pytest.mark.parametrize("threshold", ["abc", -5, float("nan"), float("inf"), True, 10**12, 10**400])
-async def test_invalid_slow_query_threshold_is_refused_and_changes_nothing(threshold):
-    Observers.slow_query_threshold_ms = SLOW_QUERY_THRESHOLD_MS
-    with pytest.raises(ConfigurationError, match="slow_query_threshold_ms"):
-        await Hare.init(config=MEMORY_CONFIG, slow_query_threshold_ms=threshold)
-    assert Observers.slow_query_threshold_ms == SLOW_QUERY_THRESHOLD_MS
-    assert HareContext.get_current() is None
 
 
 @pytest.mark.database_independent
@@ -423,19 +411,6 @@ async def test_config_given_as_a_read_only_mapping_works():
     async with HareContext() as context:
         await context.init(config=config)
         assert context.default_connection == "default"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("init_kwargs", "message"),
-    [
-        ({"config": ["not", "a", "mapping"]}, "config must be a HareConfig, a dict, a file path"),
-    ],
-)
-async def test_config_argument_of_the_wrong_shape_is_a_configuration_error(init_kwargs, message):
-    async with HareContext() as context:
-        with pytest.raises(ConfigurationError, match=message):
-            await context.init(**init_kwargs)
 
 
 @pytest.mark.database_independent

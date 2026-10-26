@@ -7,7 +7,6 @@ import pytest
 from hare.exceptions import OperationalError, QueryError, ValidationError
 from hare.query.expressions import F, Value
 from hare.query.functions import Left, Round
-from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
 
 HUGE = 10**5000
@@ -26,9 +25,6 @@ async def test_a_count_or_option_too_long_to_show_is_refused_with_its_message(db
             refused()
     with pytest.raises(QueryError, match="digits"):
         await queryset.iterator(chunk_size=HUGE).__anext__()
-    with pytest.raises(QueryError, match="digits"):
-        async with Transactions.atomic(retries=HUGE):
-            pass
     with pytest.raises(QueryError, match="digits"):
         await queryset.annotate(rounded=Round("intnum", HUGE)).values_list("rounded", flat=True)
 

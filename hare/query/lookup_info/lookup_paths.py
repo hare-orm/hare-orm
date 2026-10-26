@@ -22,6 +22,7 @@ from hare.query.scopes.row_visibility import RowVisibility
 from hare.query.scopes.scope_join_conditions import ScopeJoinConditions
 from hare.sql import Table
 from hare.sql.identifiers import Identifiers
+from hare.sql.terms.field import Field as SqlField
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -349,6 +350,7 @@ class LookupPaths:
                 connection=connection,
             )
             term, output_field = ValuePaths.get_value_path_term(term, path_field, path_segments, field, dialect)
+            LookupPaths.mark_sensitive_column(term, path_field)
             return term, joins, output_field
         joins = []
         fields = LookupPaths.expand_expression(model, field)
@@ -411,5 +413,20 @@ class LookupPaths:
             function_cast = last_field.get_function_cast(dialect)
             if function_cast:
                 term = function_cast(last_field, term)
-
+        LookupPaths.mark_sensitive_column(term, last_field)
         return term, joins, last_field
+
+    @staticmethod
+    def mark_sensitive_column(term: Term, field: Field[Any] | None) -> None:
+        """Marks the column a term reads as a sensitive field's (``Term.sensitive``) - a filter comparing
+        an expression over it binds its values hidden, as one on the field does.
+
+        Args:
+            term: The term reading the field's column.
+            field: The field read; None for a value of no field.
+        """
+        if field is not None and field.sensitive:
+            node: Any
+            for node in term.nodes_():
+                if isinstance(node, SqlField):
+                    node.sensitive = True

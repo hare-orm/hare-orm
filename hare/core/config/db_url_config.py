@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from hare.core.config.config_secrets import ConfigSecrets
-from hare.exceptions import ConfigurationError
 
 
 @dataclass(frozen=True)
@@ -11,10 +10,6 @@ class DBUrlConfig:
     """A connection of the configuration given by its database URL alone."""
 
     url: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.url, str) or not self.url:
-            raise ConfigurationError("DBUrlConfig.url must be a non-empty string")
 
     def __repr__(self) -> str:
         """Shows the URL with its password and secret query parameters masked."""

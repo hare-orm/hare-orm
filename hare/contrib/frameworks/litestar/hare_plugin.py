@@ -50,7 +50,8 @@ class HarePlugin(InitPluginProtocol, RequestQueryDIPlugin, SerializationPlugin):
       before Litestar's own pydantic DI plugin would take it as a plain pydantic model (without
       its request and its parameters' defaults);
     - answers ``DoesNotExist`` with 404, ``IntegrityError`` with 409, ``InvalidRequestQuery`` with
-      400 and ``RequestQueryForbidden`` with 403, unless the application answers them itself;
+      400, ``RequestQueryForbidden`` with 403 and ``ApiGetterError`` with 502, unless the application
+      answers them itself;
     - starts each request with an empty count of repeated queries (``RepeatedQueryDetector``);
     - with ``atomic_requests``, runs each HTTP request in a transaction (``TransactionMiddleware``),
       rolled back when the handler raises, even when an exception handler answers it.

@@ -96,7 +96,7 @@ async def test_a_json_value_nesting_past_254_containers_is_refused_alike(
     ("field_name", "value"),
     [
         ("name", "x" * 1_000_000),
-        ("amount", "x" * 1_000_000),
+        pytest.param("amount", "x" * 1_000_000, marks=pytest.mark.decimal_fields),
         ("data", set(range(200_000))),
         ("data", b"x" * 1_000_000),
         ("data", {"a": 10**5000}),
@@ -110,3 +110,13 @@ async def test_a_refused_value_is_shown_cut_short(db_write_paths, field_name, va
     with pytest.raises(ValidationError) as exc_info:
         await WritePathRecord.objects.create(**{field_name: value})
     assert len(str(exc_info.value)) < SHORT_MESSAGE_LENGTH
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_value", [lambda: make_deep_list(5_000), lambda: {"a": make_deep_list(5_000)}])
+async def test_an_update_to_a_json_value_nested_past_a_copy_is_refused_by_the_field(db_write_paths, make_value):
+    """update() copied the value at the call - a list nested 5000 deep raised RecursionError there, before the
+    field refused it as every other write does."""
+    record = await WritePathRecord.objects.create()
+    with pytest.raises(ValidationError, match="nests more than 254 lists, tuples and dicts"):
+        await WritePathRecord.objects.filter(id=record.id).update(data=make_value())

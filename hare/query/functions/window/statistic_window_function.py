@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from hare.query.expressions import Aggregate, Expression, Q
-from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.functions.window.statistic_result_window_function import StatisticResultWindowFunction
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import analytics
 from hare.sql.terms.functions.analytic_function import AnalyticFunction
 
-if TYPE_CHECKING:
-    from hare.fields.field import Field
-from hare.query.functions.window.field_window_function import FieldWindowFunction
 
-
-class StatisticWindowFunction(FieldWindowFunction):
-    """A population or sample statistic over the window - of integers a float, of Decimals an
-    unrounded Decimal."""
+class StatisticWindowFunction(StatisticResultWindowFunction):
+    """A population or sample statistic over the window."""
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
-        *FieldWindowFunction.plan_parts,
+        *StatisticResultWindowFunction.plan_parts,
         ("sample", PlanPartType.NONE),
     )
 
@@ -39,6 +34,3 @@ class StatisticWindowFunction(FieldWindowFunction):
 
     def get_analytic_term(self, *args: Any) -> AnalyticFunction:
         return analytics.Statistic(self.function_names[self.sample], *args)
-
-    def _coerce_output_field(self, field_object: Field[Any] | None) -> Field[Any] | None:
-        return NumericTyping.get_quotient_output_field(field_object)

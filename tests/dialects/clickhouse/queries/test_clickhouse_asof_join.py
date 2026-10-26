@@ -53,6 +53,11 @@ async def test_each_row_gets_the_closest_row(market):
 
 
 @pytest.mark.asyncio
+async def test_a_model_is_joined_by_its_label(market):
+    assert await priced("models.Quote").values_list("id", "quote") == [(1, 1), (2, 2), (3, None), (4, 2)]
+
+
+@pytest.mark.asyncio
 async def test_a_queryset_joins_its_rows(market):
     cheap = Quote.objects.filter(price__lt=2)
     assert await priced(cheap).values_list("id", "quote__price") == [

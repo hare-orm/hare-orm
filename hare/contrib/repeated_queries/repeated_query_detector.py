@@ -5,22 +5,15 @@ import os
 import time
 import traceback
 from types import TracebackType
-from typing import ClassVar
+from typing import ClassVar, cast
 
-from hare.classes.value_descriptions import ValueDescriptions
-from hare.contrib.repeated_queries.constants import (
-    REPEATED_QUERY_MAX_THRESHOLD,
-    REPEATED_QUERY_MAX_WINDOW_SECONDS,
-    WARN_ACTION,
-)
+from hare.contrib.repeated_queries.constants import WARN_ACTION
 from hare.contrib.repeated_queries.repeated_query_collection import RepeatedQueryCollection
 from hare.contrib.repeated_queries.repeated_query_report import RepeatedQueryReport, ReportAction
 from hare.contrib.repeated_queries.shape_stats import ShapeStats
 from hare.core.log import logger
-from hare.exceptions import ConfigurationError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
-from hare.numbers.finite_numbers import FiniteNumbers
 
 
 class RepeatedQueryDetector:
@@ -39,16 +32,10 @@ class RepeatedQueryDetector:
             ...
 
     Args:
-        threshold: How many queries of one shape within the window are repeated - an int in
-            ``1..REPEATED_QUERY_MAX_THRESHOLD``.
-        window_seconds: The window a shape is counted over - a number in
-            ``(0, REPEATED_QUERY_MAX_WINDOW_SECONDS]``. A shape below the threshold this long after
-            its first query starts counting fresh.
+        threshold: How many queries of one shape within the window are repeated.
+        window_seconds: The window a shape is counted over - a shape below the threshold this long
+            after its first query starts counting fresh.
         action: ``"warn"`` logs a warning; a callable gets each ``RepeatedQueryReport``.
-
-    Raises:
-        ConfigurationError: ``threshold``/``window_seconds`` has the wrong type or is out of range,
-            or ``action`` is a string other than ``"warn"``.
     """
 
     #: Each detector's shape counts in the current unit of work - None until the first query or
@@ -65,13 +52,9 @@ class RepeatedQueryDetector:
     def __init__(
         self, *, threshold: int = 10, window_seconds: float = 1.0, action: ReportAction | str = WARN_ACTION
     ) -> None:
-        RepeatedQueryDetector.validate_options(threshold, window_seconds)
-        if callable(action):
-            self.action: ReportAction = action
-        elif action == WARN_ACTION:
-            self.action = RepeatedQueryDetector.warn
-        else:
-            raise ConfigurationError(f"Unknown action {action!r} - pass {WARN_ACTION!r} or a callable")
+        self.action: ReportAction = (
+            RepeatedQueryDetector.warn if action == WARN_ACTION else cast("ReportAction", action)
+        )
         self.threshold = threshold
         self.window_seconds = window_seconds
 
@@ -184,31 +167,6 @@ class RepeatedQueryDetector:
     def is_library_frame(cls, frame: traceback.FrameSummary) -> bool:
         """Whether a frame belongs to the hare package itself."""
         return os.path.normcase(os.path.abspath(frame.filename)).startswith(cls.library_directory + os.sep)
-
-    @staticmethod
-    def validate_options(threshold: int, window_seconds: float) -> None:
-        """Checks the options for type and range.
-
-        Raises:
-            ConfigurationError: An option has the wrong type or is out of range.
-        """
-        if (
-            isinstance(threshold, bool)
-            or not isinstance(threshold, int)
-            or not 1 <= threshold <= REPEATED_QUERY_MAX_THRESHOLD
-        ):
-            raise ConfigurationError(
-                f"threshold must be an int in 1..{REPEATED_QUERY_MAX_THRESHOLD}, got "
-                f"{ValueDescriptions.get_shown_value(threshold)}"
-            )
-        if (
-            not FiniteNumbers.is_finite_number(window_seconds)
-            or not 0 < window_seconds <= REPEATED_QUERY_MAX_WINDOW_SECONDS
-        ):
-            raise ConfigurationError(
-                f"window_seconds must be a number > 0 and <= {REPEATED_QUERY_MAX_WINDOW_SECONDS}, "
-                f"got {ValueDescriptions.get_shown_value(window_seconds)}"
-            )
 
     @staticmethod
     def warn(report: RepeatedQueryReport) -> None:

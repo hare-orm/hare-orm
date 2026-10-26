@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.exceptions import ConfigurationError
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.inspectdb.introspection.table_info import TableInfo
 from hare.migrations.operations import CreateModel
@@ -19,8 +20,9 @@ if TYPE_CHECKING:
 
 class SwappableSettingCheck:
     """Refuses to migrate while a table an applied migration created has a foreign key declared with
-    ``swappable()`` referencing another table than the one of the model its setting points at now - the
-    setting changed after the table was created.
+    ``swappable()`` - a relation's own, or one of the automatic through table of a many-to-many relation -
+    referencing another table than the one of the model its setting points at now: the setting changed
+    after the table was created.
 
     Args:
         connection: The connection migrated.
@@ -78,6 +80,32 @@ class SwappableSettingCheck:
                     f"{model._meta.full_name}.{column_name}: {detail}"
                     for column_name, detail in self.get_foreign_key_mismatches(model._meta.fields_map, table_info)
                 )
+            through_relations = [
+                (model, field)
+                for model in models
+                for field in model._meta.fields_map.values()
+                if isinstance(field, ManyToManyFieldInstance)
+                and isinstance(field.model_name, SwappableModelReference)
+                and field.through_model is None
+                and not field._generated
+                and field.through in existing_tables
+            ]
+            if through_relations:
+                through_infos = await DatabaseCatalog.inspect_tables(
+                    self.connection,
+                    [field.through for _model, field in through_relations],
+                    schema=schema,
+                    verify_exists=False,
+                )
+                for (model, field), through_info in zip(through_relations, through_infos, strict=True):
+                    foreign_key_targets = {
+                        column_name: foreign_key.target_table
+                        for column_name, foreign_key in through_info.foreign_keys.items()
+                    }
+                    mismatch_lines.extend(
+                        f"{model._meta.full_name}.{field.model_field_name} ({field.through}.{column_name}): {detail}"
+                        for column_name, detail in self.get_through_table_mismatches(model, field, foreign_key_targets)
+                    )
         if mismatch_lines:
             raise ConfigurationError(
                 "A swappable model setting changed after its tables were created:\n  " + "\n  ".join(mismatch_lines)
@@ -135,6 +163,38 @@ class SwappableSettingCheck:
             if detail is not None:
                 mismatches.append((column_names[0], detail))
         return mismatches
+
+    @staticmethod
+    def get_through_table_mismatches(
+        model: type[Model], field: ManyToManyFieldInstance[Any], foreign_key_targets: Mapping[str, str]
+    ) -> list[tuple[str, str]]:
+        """Lists the foreign keys of a swappable many-to-many relation's automatic through table referencing
+        another table than the model's own and the one of the model the setting points at now.
+
+        Args:
+            model: The model declaring the relation.
+            field: The relation.
+            foreign_key_targets: The table each foreign key column of the through table references.
+
+        Returns:
+            (column name, what differs) pairs.
+        """
+        related_model = getattr(field, "related_model", None)
+        if related_model is None:
+            return []
+        expected_tables = {model._meta.db_table, related_model._meta.db_table}
+        setting_name = cast("SwappableModelReference", field.model_name).setting
+        return [
+            (
+                column_name,
+                f'its foreign key references table "{target_table}", but the '
+                f'{setting_name} setting points at "{related_model._meta.full_name}" (table '
+                f'"{related_model._meta.db_table}") - the setting changed after the table was created; move the '
+                f"rows to the new model and repoint the foreign key with a migration of your own",
+            )
+            for column_name, target_table in foreign_key_targets.items()
+            if target_table not in expected_tables
+        ]
 
     @staticmethod
     def get_foreign_key_mismatch(field: Field[Any], referenced_table: str | None) -> str | None:

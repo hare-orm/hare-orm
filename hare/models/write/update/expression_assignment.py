@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
-from hare.fields.data.numeric.decimal_field import DecimalField
+from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression, Value
+from hare.query.expressions.compatibility.constants import RANGE_VALUE_TYPE
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.constants import PLAIN_VALUE_TYPES
-from hare.query.expressions.enums import NumericValueType
-from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.term_expression import TermExpression
 from hare.query.filters.resolution.filter_values import FilterValues
-from hare.query.functions.comparison.cast import Cast
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.sql.terms.functions.aggregate_function import AggregateFunction
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.query.expressions import ExpressionContext
 
@@ -56,6 +55,36 @@ class ExpressionAssignment:
         return value
 
     @staticmethod
+    def raise_if_literal_refused(field_name: str, field: Field[Any], expression: Expression, dialect: Dialect) -> None:
+        """Refuses a literal the expression may set the field to (``Expression.get_result_literals()``)
+        which the field refuses as a plain value - a number of no member of an enum, a text past
+        ``max_length``. A NULL is the column's to refuse, and a literal of another type the check of
+        the expression's type.
+
+        Args:
+            field_name: The field's name.
+            field: The field set.
+            expression: The expression.
+            dialect: The dialect the update runs on.
+
+        Raises:
+            FieldError: A moment set into a wall clock in no zone.
+            ValidationError: The field refuses the literal.
+        """
+        field_branch = ResultBranch(None, field, is_literal=False)
+        field_value_type = OutputFieldCompatibility.get_value_type(field_branch)
+        for literal in expression.get_result_literals():
+            if literal is None:
+                continue
+            literal_value_type = OutputFieldCompatibility.get_value_type(ResultBranch(literal, None, is_literal=True))
+            if field_value_type is not None and literal_value_type not in {None, field_value_type}:
+                continue
+            OutputFieldCompatibility.raise_if_wall_clocks_mix_with_moments(
+                [field_branch, ResultBranch(literal, None, is_literal=True)], f"update({field_name}=...)", "sets"
+            )
+            dialect.types.get_db_value(field, literal, None)
+
+    @staticmethod
     def get_term(field_name: str, field: Field[Any], expression: Expression, context: ExpressionContext) -> Term:
         """The SQL the field is set to.
 
@@ -73,9 +102,7 @@ class ExpressionAssignment:
             FieldError: The expression is an aggregate, of another date/time type than the
                 field, or can't be written into (or read out of) an encrypted field.
         """
-
-        if not context.writes_column_value:
-            context = dataclasses.replace(context, writes_column_value=True)
+        ExpressionAssignment.raise_if_literal_refused(field_name, field, expression, context.dialect)
         result = expression.get_result(context)
         may_aggregate = ExpressionAssignment._has_window_aggregate_or_subquery(result.term)
         if may_aggregate and RowMultiplication.term_reads_window_function(result.term):
@@ -104,22 +131,13 @@ class ExpressionAssignment:
                 ".filter(...).values_list(...) plus a per-row .update() / bulk_update()."
             )
         value_field = result.output_field
-        if isinstance(field, DecimalField):
-            value_type = NumericTyping.get_field_type(value_field)
-            value_scale = (
-                value_type.scale if value_type is not None and value_type.type is NumericValueType.DECIMAL else None
-            )
-            return context.dialect.renderers.get_assigned_decimal_term(
-                result.term, field.max_digits, field.decimal_places, value_scale
-            )
         term = result.term
         if (
             isinstance(field, IntField)
             and FunctionArguments.get_cast_type(value_field) in FunctionArguments.FRACTIONAL_CAST_TYPES
         ):
-            # Converted as Cast() converts - by the database's own conversion, a value past the
-            # field's range refused - where a database would keep the fraction in the column.
-            term = Cast.get_cast_term(term, value_field, field)
+            # Converted where a database would keep the fraction in the column.
+            term = context.dialect.renderers.get_assigned_integer_term(term)
         if isinstance(field, IntEnumFieldInstance):
             return context.dialect.renderers.get_assigned_enum_term(
                 term, [int(member.value) for member in field.enum_type]
@@ -141,11 +159,48 @@ class ExpressionAssignment:
             FieldError: The field and the expression hold values of such types.
         """
         field_branch = ResultBranch(None, field, is_literal=False)
-        if value_field is None or OutputFieldCompatibility.get_value_type(field_branch) in {None, "text"}:
+        field_value_type = OutputFieldCompatibility.get_value_type(field_branch)
+        if value_field is None or field_value_type == "text":
             return
-        OutputFieldCompatibility.raise_if_value_types_mix(
-            [field_branch, ResultBranch(None, value_field, is_literal=False)], f"update({field_name}=...)", "sets"
+        expression_name = f"update({field_name}=...)"
+        if field_value_type is not None:
+            OutputFieldCompatibility.raise_if_value_types_mix(
+                [field_branch, ResultBranch(None, value_field, is_literal=False)], expression_name, "sets"
+            )
+        # The types of values only fields of their own family store - bytes, JSON, an array, ...
+        OutputFieldCompatibility.raise_if_types_differ(
+            [
+                ExpressionAssignment.get_stored_value_type(field),
+                ExpressionAssignment.get_stored_value_type(value_field),
+            ],
+            expression_name,
+            "sets",
         )
+
+    @staticmethod
+    def get_stored_value_type(field: Field[Any]) -> str | None:
+        """The type of the values a field stores - its family's own (``Field.argument_value_type``), an
+        array's with its elements' and a range's with its column type, else the type a CASE combines it
+        by.
+
+        Args:
+            field: The field.
+
+        Returns:
+            The name of the type, None for a field of no known type.
+        """
+        effective_field = GeneratedField.get_effective_field(field)
+        family_value_type = effective_field.argument_value_type
+        if family_value_type is None:
+            return OutputFieldCompatibility.get_value_type(ResultBranch(None, field, is_literal=False))
+        if isinstance(effective_field, ArrayField):
+            # An array takes another one whose elements its elements take - no text from numbers.
+            element_value_type = ExpressionAssignment.get_stored_value_type(effective_field.base_field)
+            return f"{family_value_type} of {element_value_type}" if element_value_type else family_value_type
+        if family_value_type == RANGE_VALUE_TYPE:
+            # A range of other bounds is another type of the database.
+            return f"{family_value_type} ({effective_field.SQL_TYPE})"
+        return family_value_type
 
     @staticmethod
     def _has_window_aggregate_or_subquery(term: Term) -> bool:

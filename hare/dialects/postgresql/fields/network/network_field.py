@@ -5,6 +5,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.postgresql.fields.constants import POSTGRESQL_NETWORK_PATH_FUNCTIONS
+from hare.fields.data.constants import IP_ADDRESS_VALUE_TYPE
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.field import Field
 
@@ -20,6 +21,8 @@ class NetworkField(Field[Any]):
     comparison they filter by subnet (``__net_contained``, ``__net_contains``, ...) and read their
     family and prefix length as paths (``ip__family``, ``ip__masklen``).
     """
+
+    argument_value_type = IP_ADDRESS_VALUE_TYPE
 
     COLUMN_TYPE_FROM_DIALECT = True
 

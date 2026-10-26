@@ -78,10 +78,7 @@ The application sending tasks keeps its own `HareContext` (`Hare.init()`, a web 
 Everything the middleware set up is undone when the task ends — the tags, the tenant scope, the running
 task. A synchronous task runs in a thread, where hare's asynchronous API isn't available.
 
-The options are checked when it's created, raising `ConfigurationError`: `atomic_tasks` a bool or a
-sequence of distinct connection aliases, `tenant_label` `None` or a non-empty string,
-`transaction_retries` an `int` in `0..100` (`hare.contrib.taskiq.constants.MAX_TRANSACTION_RETRIES`). A
-connection alias the configuration lacks is refused when the worker starts.
+A connection alias of `atomic_tasks` the configuration lacks is refused when the worker starts.
 
 ## <a id="kiq-on-commit"></a>Sending tasks after commit
 
@@ -108,13 +105,14 @@ async with tasks.get_relay(poll_interval_seconds=1.0):
     # send_due_date_reminder is sent here, right after the commit.
 ```
 
-`TaskiqDelivery(broker, *, model, topic="taskiq", using=None, wakeup=None)` is the outbox delivery
-sending tasks, and the sender writing them. `await kiq_on_commit(task, *args, labels=None, **kwargs)`
-takes the task or its name, its arguments — JSON values — and its labels, and writes the task as an
-outbox event of `topic` (`OutboxEvent.enqueue()`) — in the current transaction, so a rolled-back
-transaction leaves neither the event nor the task; outside a transaction it commits at once. The broker's
-`HareTaskiqMiddleware` writes the tenant scope active then into the tenant label of the event, so the
-task runs in the sender's tenant, not in the relay's. It returns the event.
+`TaskiqDelivery(broker, *, model, topic="taskiq", using=None, wakeup=None)` is the outbox delivery sending
+tasks, and the sender writing them; `model` is the outbox model's class or its `"app.Model"` label, looked up
+in the current context when it is first needed. `await kiq_on_commit(task, *args, labels=None, **kwargs)`
+takes the task or its name, its arguments — JSON values — and its labels, and writes the task as an outbox
+event of `topic` (`OutboxEvent.enqueue()`) — in the current transaction, so a rolled-back transaction leaves
+neither the event nor the task; outside a transaction it commits at once. The broker's `HareTaskiqMiddleware`
+writes the tenant scope active then into the tenant label of the event, so the task runs in the sender's
+tenant, not in the relay's. It returns the event.
 
 The relay of `get_relay(**relay_options)` sends the tasks — the events of the delivery's `topic` only, so
 the table can hold other topics too. The delivery's wakeup — an `InProcessWakeup` of its own by default —

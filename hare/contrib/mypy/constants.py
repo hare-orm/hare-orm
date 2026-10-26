@@ -64,7 +64,6 @@ CONFIG_NOT_SET_MESSAGE = (
     "[tool.hare] hare_orm in pyproject.toml (or the HARE_ORM environment variable) must name the "
     "configuration as 'module.VARIABLE'"
 )
-MYPY_IMPORTS_TYPE_MESSAGE = "[tool.hare] mypy_imports in {file} must be a list of module names, got {value!r}"
 UNSUPPORTED_LOOKUP_MESSAGE = "Filter param {key!r}: {model}.{path} has no lookup {lookup!r} on the {dialect} database"
 UNSUPPORTED_FIELD_MESSAGE = "Filter param {key!r}: {field} has no column type on the {dialect} database"
 UNKNOWN_NAME_MESSAGE = "{method}(): {model} has no field {name!r}"

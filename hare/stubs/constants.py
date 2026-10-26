@@ -9,6 +9,7 @@ MAX_RELATION_DEPTH = 5
 #: The names a stub gives a model's declarations, after the model's own name.
 FILTERS_SUFFIX = "Filters"
 WRITES_SUFFIX = "Writes"
+UPDATES_SUFFIX = "Updates"
 QUERYSET_SUFFIX = "QuerySet"
 #: The model instance attribute holding its key value.
 PRIMARY_KEY_ATTRIBUTE_NAME = "pk"

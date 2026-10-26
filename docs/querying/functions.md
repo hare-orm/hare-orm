@@ -3,7 +3,9 @@
 The functions of `hare.query.functions` go into `annotate()`, `filter()`, `order_by()`, aggregates and
 `update()` like any other expression — `from hare.query.functions import Count, Lower, TruncMonth`. Each
 one gives a result of the same Python type on every database, computed by the database itself (where the
-databases differ, a function says so below); where SQLite has no such function, hare registers its own on
+databases differ, a function says so below) — but for the statistics `Avg`, `StdDev` and `Variance`, an
+exact `Decimal` where the database computes one and a `float` elsewhere (see
+[Result type](expressions.md#result-type)); where SQLite has no such function, hare registers its own on
 every connection (see [SQLite: functions](../dialects/sqlite/functions.md)).
 Window functions are on [Aggregates, grouping and window functions](aggregation.md), the PostgreSQL-only
 ones on [PostgreSQL functions](../dialects/postgresql/functions.md). A function given more or fewer
@@ -32,9 +34,9 @@ and a column across a relation are counted as they are. A `_filter` reading an a
 
 The population statistic, or the sample one with `sample=True`; `distinct=`/`_filter=` as for the
 aggregates above. `NULL`s are skipped; with no value (with fewer than two for `sample=True`) the result
-is `None`. Typed like `Avg`: a `float` for integers and floats, an unrounded `Decimal` for a
-`DecimalField`. PostgreSQL computes a Decimal result by its own numeric rules; on SQLite and ClickHouse hare
-computes it exactly, the quotient cut (not rounded) to 20 digits after the point. SQLite has no such
+is `None`. Typed like `Avg`: a `float` for integers and floats; for a `DecimalField` an unrounded
+`Decimal` PostgreSQL computes by its own numeric rules, and a `float` on ClickHouse, which computes the
+statistics of decimals as floats (`Features.computes_decimal_statistics_exactly`). SQLite has no such
 functions — hare registers its own.
 
 ```python
@@ -82,7 +84,7 @@ await Loan.objects.filter(due_at__lt=Now()).update(overdue=True)
 |---|---|
 | `Abs(x)`, `Ceil(x)`, `Floor(x)`, `Sign(x)` | the argument's type |
 | `Mod(x, y)` | the remainder as the database gives it (`Mod(-7, 3)` is `-1`), as the `%` operator: an integer of two integers, an exact Decimal with the larger of the two scales when a Decimal is involved (`Mod(Decimal("12.345"), 7)` is `Decimal("5.345")`), a float when a float is |
-| `Power(x, y)`, `Sqrt(x)`, `Exp(x)`, `Ln(x)`, `Log(base, x)` | a `Decimal` when an argument is one, a float otherwise. PostgreSQL computes a `Decimal` result in exact numeric; SQLite and ClickHouse compute it in double, so its last digits can differ (`Power(Decimal("12.345"), 2)` is `152.399025` on PostgreSQL and `152.39902500000002` on SQLite and ClickHouse) |
+| `Power(x, y)`, `Sqrt(x)`, `Exp(x)`, `Ln(x)`, `Log(base, x)` | a `Decimal` when an argument is one, a float otherwise. PostgreSQL computes a `Decimal` result in exact numeric; ClickHouse computes it in double, so its last digits can differ (`Power(Decimal("12.345"), 2)` is `152.399025` on PostgreSQL and `152.39902500000002` on ClickHouse) |
 | `Sin`, `Cos`, `Tan`, `Cot`, `ASin`, `ACos`, `ATan(x)`, `ATan2(y, x)`, `Degrees(x)`, `Radians(x)`, `Pi()` | a float |
 | `Random()` | a float from 0 (included) to 1 (excluded), new for every row — `order_by('?')` orders by it |
 | `Round(field, precision=0)` | the value rounded to `precision` decimal places, 0 to 1000 — see [`Round()`](#round) |
@@ -94,8 +96,7 @@ places, an integer stays an integer, a float a float — also for a literal or a
 (`Round(Value(3), 1)` is `3`, `Round(F("qty") * 0.5, 1)` a float). A tie is rounded by the database's own
 `ROUND`: PostgreSQL rounds a Decimal away from zero (`7.35` → `7.4`, `-7.35` → `-7.4`); SQLite rounds a
 double half away from zero, and ClickHouse too to one place or more, but to a whole number half to even
-(`2.5` → `2.0`); SQLite rounds a Decimal exactly from its stored text, half away from zero too; inside
-SQL kept in the schema (a generated column, an index expression) SQLite rounds a Decimal as a double.
+(`2.5` → `2.0`).
 
 Every argument is a field name, an expression or a number literal (`Mod("copies", 3)`,
 `Power(2, "edition")`); a bool or any other literal raises `QueryError`. On SQLite they run through
@@ -178,27 +179,28 @@ on SQLite.
 | `NullIf(expression, other)` | NULL when the value equals `other`, the value otherwise |
 | `Collate(expression, collation)` | the text compared and sorted by a database collation |
 
-`Cast` converts as the database converts, and refuses what the database would silently turn into another
-value. A cast to an integer rounds on PostgreSQL (a Decimal half away from zero, a float half to even: `2.5` →
-`2`, `2.50` → `3`) and cuts the fraction off on SQLite and ClickHouse (`2.5` → `2`); a value past the target
-field's range (16, 32 or 64 bits) raises `OperationalError`. A Decimal target rounds half away from zero to
-its places and raises on more integer digits than it holds; a float becomes a Decimal by its shortest digits
-(`2.675` → `2.68` at 2 places). Text that isn't a value of the type raises (`"abc"` is not `0`; on ClickHouse
-a number padded with spaces, `" 42 "`, raises too), and so does an impossible date (`"2023-02-29"`), a
-text naming no whole date (`"12"`, `"2024-01"`) and, on ClickHouse, an impossible clock (`"25:00"`,
-`"12:60"`, rolled over by the server), a date outside the 1900-01-01 to 2299-12-31 it holds (read as the
-nearest one by the server) and a time of day from a text not starting with its hours and minutes (`""`,
-`"-1"`). A boolean
-is read from text as `true`, `false`, `1`, `0` (any case, trimmed) on SQLite, by `toBool()` on ClickHouse
-(`yes`, `no`, `on`, `off`, ...) and by PostgreSQL's own words there. Any other conversion is the database's
-own (a boolean to a float, a date to a number). A cast to text is the database's own text: SQLite `CAST(x AS
-TEXT)` (a float `2.0`, 15 significant digits — 17 from SQLite 3.53, a boolean `1`/`0`), ClickHouse
-`toString()` (`1e308`, `-inf`, a Decimal without trailing zeros, a moment `2024-01-02 03:04:05.678900`),
-PostgreSQL its own; a `CharField(max_length=n)` target cuts nothing on SQLite and ClickHouse. JSON becomes the
-database's own text (PostgreSQL's `jsonb` text `{"a": 1, "bb": [1, 2.5]}`, SQLite the stored text without
-spaces, ClickHouse its own — see [its differences](../dialects/clickhouse/differences.md#json)). An aware
-datetime is read in UTC and a naive one (`use_timezone=False`) as its wall clock. NULL stays NULL. SQLite
-can't store NaN, so casting the text `"NaN"` to a number raises there.
+`Cast` is the database's own conversion — PostgreSQL's and SQLite's `CAST`, ClickHouse's conversion
+functions; SQLite has no date types, so a date or a time is read from its stored text in UTC by hare. A cast
+to an integer rounds on PostgreSQL (a Decimal half away from zero, a float half to even: `2.5` → `2`,
+`2.50` → `3`) and cuts the fraction off on SQLite and ClickHouse (`2.5` → `2`); a value past the target
+field's range raises on PostgreSQL, is kept on SQLite and wraps around on ClickHouse. A Decimal target
+rounds half away from zero to its places on PostgreSQL, raising on more integer digits than it holds;
+ClickHouse cuts the places off, a float converted as the double it is (`2.675` → `2.67` at 2 places). Text
+that isn't a value of the type raises on PostgreSQL, is `NULL` on ClickHouse (a number padded with spaces,
+`" 42 "`, too) and on SQLite the number its text starts with (`"4x"` → `4`, `"1e3"` to an integer → `1`),
+`0` when it starts with none. A text date is read by PostgreSQL's own parser, as ISO text on SQLite
+and by `parseDateTime64BestEffort()` on ClickHouse, which completes a date missing a part (`"2024-01"`),
+rolls an impossible clock over (`"25:00"`) and reads a year outside 1900 to 2299 as the nearest day it
+holds; a day no calendar has (`"2023-02-29"`) raises everywhere. A boolean is PostgreSQL's own words,
+SQLite's value read as a number — true when it isn't `0` — and ClickHouse's `toBool()` (`yes`, `no`, `on`,
+`off`, ...). Any other conversion is the database's own (a boolean to a float, a date to a number). A cast to
+text is the database's own text: SQLite `CAST(x AS TEXT)` (a float `2.0`, 15 significant digits — 17 from
+SQLite 3.53, a boolean `1`/`0`), ClickHouse `toString()` (`1e308`, `-inf`, a Decimal without trailing zeros,
+a moment `2024-01-02 03:04:05.678900`), PostgreSQL its own; a `CharField(max_length=n)` target cuts nothing
+on SQLite and ClickHouse. JSON becomes the database's own text (PostgreSQL's `jsonb` text `{"a": 1, "bb": [1,
+2.5]}`, SQLite the stored text without spaces, ClickHouse its own — see [its
+differences](../dialects/clickhouse/differences.md#json)). An aware datetime is read in UTC and a naive one
+(`use_timezone=False`) as its wall clock. NULL stays NULL.
 
 `Greatest`/`Least` take field names, expressions or literals (`Greatest("updated_at", "created_at")`,
 `Least("price", 100)`). Numbers compare as numbers and the result has their common type. `NullIf`'s `other`
@@ -213,7 +215,7 @@ expression or a literal. Each database writes a value itself. PostgreSQL writes 
 boolean as `true`/`false`, a Decimal and a float as a number (an integral float as an integer, `2`), an aware
 datetime as ISO text in UTC (`2020-01-02T03:04:05.5+00:00`), a time with its offset (`12:30:00+00`), bytes as
 `\x` and hex. SQLite uses `json_object()`: a boolean as `1`/`0`, a float with 15 significant digits (17 from
-SQLite 3.53), a moment or time as its stored text, bytes as uppercase hex, a Decimal as a number. ClickHouse
+SQLite 3.53), a moment or time as its stored text, bytes as uppercase hex. ClickHouse
 uses `toJSONString()`: a Decimal without trailing zeros, a `DateTime64` as `2024-02-29 13:45:06.789000`, NaN
 as null, bytes as the hex the column holds. A JSON field or a nested `JSONObject` is nested JSON everywhere.
 The object's keys come back in the database's order — on PostgreSQL `jsonb`'s own (shorter keys first). A key

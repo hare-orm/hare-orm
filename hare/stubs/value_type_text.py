@@ -37,6 +37,10 @@ class ValueTypeText:
             text = f"tuple[{bound_text}, {bound_text}] | list[{bound_text}]"
         else:
             text = item_text
+        if value_type.alternatives:
+            text = self.get_union(
+                [text, *(self.get_class_text(alternative) for alternative in value_type.alternatives)]
+            )
         if value_type.accepts_expressions:
             accepted = [self.get_fullname_text(fullname) for fullname in ALWAYS_ACCEPTED_VALUE_FULLNAMES]
             text = self.get_union([text, *accepted])
@@ -52,9 +56,12 @@ class ValueTypeText:
         items = [self.get_class_text(cls) for cls in value_type.classes]
         declared_in = value_type.declared_in
         field = None if declared_in is None else declared_in[0]._meta.fields_map[declared_in[1]]
-        enum_type = getattr(field, "enum_type", None) if value_type.accepts_enum_values else None
-        if enum_type is not None:
+        enum_type = getattr(field, "enum_type", None)
+        if enum_type is not None and value_type.accepts_enum_values:
             items.insert(0, self.imports.add_class(enum_type))
+        elif enum_type is not None:
+            # A value read from an enum field is its member.
+            items = [self.imports.add_class(enum_type)]
         items.extend(self.imports.add_class(model) for model in value_type.models)
         if value_type.nullable:
             items.append("None")

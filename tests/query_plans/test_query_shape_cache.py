@@ -71,7 +71,6 @@ from tests.shared_models.testmodels import (
     CharFields,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     DoubleFK,
     Event,
     IntFields,
@@ -85,6 +84,7 @@ from tests.shared_models.testmodels import (
     TenantScopedWidget,
     Tournament,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.statement_plan_checks import StatementPlanChecks
 from tests.utils.timezone_context import override_timezone
@@ -169,7 +169,7 @@ async def db_array_fields_module():
     if DatabaseUnderTest.get_dialect().name != "postgresql":
         pytest.skip("ArrayField requires PostgreSQL")
     async with hare_test_context(
-        modules=["tests.shared_models.testmodels_postgres"],
+        modules=["tests.shared_models.testmodels", "tests.shared_models.testmodels_postgres"],
         db_url=db_url,
         app_label="models",
         connection_label="models",
@@ -2381,11 +2381,11 @@ async def test_coalesce_literal_default_now_fast_pathed_and_stays_correct(db):
     assert second == [{"c": 2.0}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_coalesce_decimal_default_stays_fast_pathed_and_substitutes_each_value(db):
-    """A Decimal default next to a DecimalField is cast to NUMERIC on SQLite (so it compares as
-    a number, not TEXT) - the cast wrapper must still expose the literal to the cache: a hit
-    replaces the value instead of reusing the first call's."""
+    """A Decimal default next to a DecimalField stays a literal of the cache: a hit replaces the value
+    instead of reusing the first call's."""
     await DecimalFields.objects.create(decimal=Decimal("1"), decimal_nodec=0, decimal_null=None)
 
     with _spy_on_plan_hits_of_any_type() as spy:
@@ -2397,6 +2397,7 @@ async def test_coalesce_decimal_default_stays_fast_pathed_and_substitutes_each_v
     assert second == [{"c": Decimal("7.2500")}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_case_decimal_literal_stays_fast_pathed_and_substitutes_each_value(db):
     await DecimalFields.objects.create(decimal=Decimal("1"), decimal_nodec=0)
@@ -2413,6 +2414,7 @@ async def test_case_decimal_literal_stays_fast_pathed_and_substitutes_each_value
     assert [Decimal(str(value)) for value in second] == [Decimal("7.25")]
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_coalesce_literal_default_type_is_part_of_the_shape_key(db):
     """`Coalesce` infers its output field from, and wraps an incompatible numeric literal in a
@@ -2431,6 +2433,7 @@ async def test_coalesce_literal_default_type_is_part_of_the_shape_key(db):
     assert third == [{"c": 7}]
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_coalesce_value_default_type_is_part_of_the_shape_key(db):
     """Same as above for a default wrapped in `Value(...)` - Value(1) and Value(Decimal("5.55"))
@@ -3015,6 +3018,7 @@ async def test_function_with_reordered_database_func_args_does_not_crash_and_sta
     assert first[0]["year"].day == 1
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_populate_field_object_annotation_decodes_correctly_on_a_cache_hit_too(db):
     """Real, live-caught bug: `_annotation_output_fields` (populated by `_get_annotate()` for any
@@ -3482,7 +3486,7 @@ async def test_query_shape_cache_matches_fresh_rebuild_across_fuzzed_combination
         "literal_int_1": literal_int_1,
         "literal_int_2": literal_int_2,
         "literal_float": literal_float,
-        "literal_decimal": literal_decimal,
+        **({"literal_decimal": literal_decimal} if DatabaseUnderTest.holds_decimal_fields() else {}),
         "cte_absent": cte_absent,
         "cte_present_a": cte_present_a,
         "cte_present_b": cte_present_b,
@@ -3539,6 +3543,7 @@ async def test_fractional_filter_value_after_an_integer_one_of_the_same_shape_is
         await IntFields.objects.filter(intnum=2.5).values_list("intnum", flat=True)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_filter_value_is_not_quantized_on_a_cache_hit(db):
     """Same type (Decimal) on the same shape, so only the hit-path conversion matters: a

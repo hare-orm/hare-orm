@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.brokers.rabbitmq_connection import RabbitMQConnection
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
-from hare.exceptions import ConfigurationError
+from hare.contrib.package_checks import PackageChecks
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -23,15 +22,11 @@ class RabbitMQDelivery(OutboxDelivery):
         routing_key: The routing key of every event; None for each event's own topic.
 
     Raises:
-        ConfigurationError: An empty ``url`` or ``routing_key``, or the ``aio-pika`` package isn't
-            installed.
+        ConfigurationError: The ``aio-pika`` package isn't installed.
     """
 
     def __init__(self, url: str, *, exchange: str = "", routing_key: str | None = None) -> None:
-        BrokerArguments.require_package(RabbitMQConnection.aio_pika, "RabbitMQDelivery", "aio-pika", "rabbitmq")
-        BrokerArguments.require_text("url", url, "AMQP URL")
-        if routing_key is not None and (not isinstance(routing_key, str) or not routing_key):
-            raise ConfigurationError(f"routing_key must be None or a non-empty string, got {routing_key!r}")
+        PackageChecks.require_package(RabbitMQConnection.aio_pika, "RabbitMQDelivery", "aio-pika", "rabbitmq")
         self.exchange_name = exchange
         self.routing_key = routing_key
         self.broker_connection = RabbitMQConnection(url, self.open_exchange)

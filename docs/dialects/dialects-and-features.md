@@ -95,13 +95,10 @@ wherever it has a connection.
 | `execute_many_scales_poorly` | `executemany()` is slower than one multi-row statement | no | yes | no | yes |
 | `binds_written_parameters` | The driver binds the rows hare's native writer builds as they are | no | yes | no | no |
 | `max_bind_parameters` | Most bind parameters one statement may carry | 32766 | 32767 | 32767 | 1000000 |
-| `max_expression_depth` | The deepest expression one statement may hold (`None`: no limit) - a long list of OR-ed key groups is split across statements | 1000 | `None` | `None` | `None` |
+| `max_expression_depth` | The deepest expression one statement may hold (`None`: no limit) — a long list of OR-ed key groups is split across statements | 1000 | `None` | `None` | `None` |
 | `max_bulk_update_rows` | Most rows one `bulk_update()` statement writes (`None`: as many as the parameters allow) | `None` | `None` | `None` | 1000 |
 | `cascade_depth_limit` | The recursion depth a native `ON DELETE CASCADE` stops at; the client then raises `CascadeDepthLimitError`, and hare finishes a deep cascade itself, fewer levels than this at a time | the build's `SQLITE_LIMIT_TRIGGER_DEPTH` (1000; 100 in the official 3.37.2 library) | none | none | none |
 | `supports_nulls_distinct` | A unique constraint takes `NULLS [NOT] DISTINCT` | no | from 15 | from 15 | no |
-| `supports_partitioned_exclusion_constraints` | A partitioned table takes an exclusion constraint | no | from 17 | from 17 | no |
-| `supports_unhex` | The SQL function `unhex()` — a long `__in` of bytes binds as one JSON array | from 3.41.0 | no | no | no |
-| `supports_drop_column` | `ALTER TABLE ... DROP COLUMN` — `RemoveField` of a plain column drops it in place instead of rebuilding the table | yes | yes | yes | yes |
 | `explain_options` | The options `explain(**options)` takes | none | those of the server's version (`GENERIC_PLAN` from 16, `MEMORY` and `SERIALIZE` from 17) | the same | none |
 | `supports_pool_status` | The client reports its pool's status and metrics — `get_pool_status()`, [pool metrics](../observability/pool-health.md) | yes | yes | yes | clickhouse-driver — yes, clickhouse-connect — no |
 
@@ -137,7 +134,10 @@ same values.
 | `supports_grants` | `Meta.grants`, `AddGrant`/`RemoveGrant` | no | yes | no |
 | `sorts_nulls_first` | NULL sorts before every value in ascending order by default | yes | no | no |
 | `guarantees_returning_order` | A multi-row `INSERT ... RETURNING` returns rows in insert order — `bulk_create(returning=True)` | no | yes | no |
-| `divides_integers_exactly` | `/` of two integers gives the exact quotient, a fraction too - the expression's output field is then a `FloatField` | no | no | yes |
+| `divides_integers_exactly` | `/` of two integers gives the exact quotient, a fraction too — the expression's output field is then a `FloatField` | no | no | yes |
+| `computes_integer_statistics_exactly` | `Avg()`, `StdDev()` and `Variance()` of integers are exact decimals the database computes — read as a `Decimal`; without, the database computes them as floats | no | yes | no |
+| `computes_decimal_statistics_exactly` | `Avg()`, `StdDev()` and `Variance()` of decimals are exact decimals the database computes — read as a `Decimal`; without, the database computes them as floats | yes | yes | no |
+| `keeps_enum_columns` | An `IntEnumField`'s and a `CharEnumField`'s column is of an enum type holding only the members; without, a `CHECK` (`EnumMembersCondition`) keeps the column to the members' values | no | no | yes |
 | `orders_json_values_in_aggregates` | `Max()`/`Min()` of a JSON value compare it as the database orders it; without, they are refused | yes | yes | no |
 | `supports_uuid_v7` | A `db_default` generating a time-ordered version 7 UUID (`UuidV7()`) | no | from 18 | no |
 | `supports_conflict_constraint_names` | `bulk_create(on_conflict_constraint=...)` | no | yes | no |
@@ -148,14 +148,12 @@ same values.
 | `supports_without_overlaps` | `UniqueConstraint(without_overlaps=True)` and `CompositePrimaryKey(without_overlaps=True)` — `WITHOUT OVERLAPS` on the last field, a range | no | yes (18+) | no |
 | `supports_returning_old_new` | `returning(old=...)` of `update()` and `merge()` — `RETURNING old.column` | no | yes (18+) | no |
 | `supports_json_table` | `JSON_TABLE` — `JsonTable(...)` | no | yes (17+) | no |
-| `supports_strict_tables` | `SqliteTableOptions(strict=True)` — `STRICT` tables | yes (3.37+) | no | no |
 | `supports_text_search_configurations` | [Full-text search](search-and-geodata/full-text-search.md) with text search configurations, `SearchVector` values, lexemes, label weights, rank normalization and the headline's fragment options | no | yes | no |
 | `supports_full_text_index` | `FullTextIndex` — an FTS5 table kept in step by triggers, which [full-text search](search-and-geodata/full-text-search.md) reads, and `SearchRank`'s weights by field | yes (a SQLite built with FTS5) | no (tsvector search) | no |
 | `supports_vector_search` | The distances and `__nearby` of [`hare.vectors`](search-and-geodata/vector-search.md) — pgvector on PostgreSQL, sqlite-vec on SQLite | with `load_sqlite_vec=true` | yes (pgvector) | no |
 | `supports_tenant_schemas` | A [schema per tenant](../soft-delete-versions-tenants/schema-per-tenant.md) — `tenant_schema_template`, `Meta.tenant_schema`, `TenantSchemas` | no | yes | no |
 | `supports_spatial` | The spatial lookups, paths, functions and aggregates of [`hare.gis`](search-and-geodata/gis.md) | with `load_spatialite=true` | yes (PostGIS) | yes (the geo types — see [Types](clickhouse/types.md#geo)) |
 | `supports_geography` | A `GeometryField(geography=True)` measured on the ellipsoid | with SpatiaLite's spatial metadata (`spatialite_metadata` other than `none`) | yes | yes (measured on a sphere) |
-| `supports_spatial_index` | [`SpatialiteIndex`](search-and-geodata/gis.md#spatial-index) — SpatiaLite's R*Tree, and the spatial lookups narrowed through it | with SpatiaLite's spatial metadata | no (`GistIndex`) | no |
 | `spatial_reference_ids` | The SRIDs of the spatial metadata a geography and a spatial index take — `None` for any | the metadata's, read when the connection opens | `None` | `None` |
 | `supports_ordered_aggregates` | `ORDER BY` inside an aggregate — `MakeLine(order_by=...)` | yes (3.44+) | yes | no |
 | `isolation_levels` | The isolation levels a transaction runs at — see [Isolation level](../connections/transactions.md#isolation-level) | `SERIALIZABLE` | all four | `REPEATABLE READ` — the snapshot the transaction began with |
@@ -166,7 +164,7 @@ same values.
 | `cuts_like_pattern_at_null_byte` | `LIKE` reads a pattern up to its first null byte, so a pattern holding one is refused | yes | no | no |
 | `supports_deferrable_constraints` | `deferrable=True` on a constraint or trigger | no | yes | no |
 | `supports_index_key_order` | An index key sorts ascending or descending | yes | yes | no |
-| `collates_in_ordering_only` | A collation (`Collate()`) is taken in an `ORDER BY` key alone - a `distinct()` selects the value and orders it collated | no | no | yes |
+| `collates_in_ordering_only` | A collation (`Collate()`) is taken in an `ORDER BY` key alone — a `distinct()` selects the value and orders it collated | no | no | yes |
 | `supports_index_nulls_order` | An index key sets where NULLs sort | no | yes | no |
 | `supports_concurrent_indexes` | `CONCURRENTLY` index operations | no | yes | no |
 | `supports_not_valid_constraints` | A constraint added `NOT VALID` and validated later | no | yes | no |
@@ -188,7 +186,6 @@ same values.
 | `supports_row_updates` | An `UPDATE` of stored rows | yes | yes | yes |
 | `supports_row_deletes` | A `DELETE` of stored rows | yes | yes | yes |
 | `supports_recursive_queries` | A recursive `WITH` query — `with_recursive()`; without, it raises `UnSupportedError` | yes | yes | yes |
-| `supports_json_type` | A JSON value is stored by a type of its own, its paths typed — a `JSONField` is a `JSON` column | no | no | yes (`String` over clickhouse-driver) |
 | `reads_trailing_comment_of_insert` | A comment ending an `INSERT ... VALUES` is a comment; without, query tags go before such a statement — ClickHouse reads what follows `VALUES` as data | yes | yes | no |
 | `supports_correlated_subqueries` | A correlated subquery; without, an `EXISTS` correlated by equal columns is written as an `IN` test and any other is refused | yes | yes | yes |
 | `rewrites_correlated_exists` | An `EXISTS` correlated by equal columns (a row of them for a composite key too) is written as an `IN` test even where correlated subqueries run — the server refuses its own in a join's `ON` and over a `UNION DISTINCT`; one correlated by more than equalities is the server's own there, and raises `UnSupportedError` elsewhere | no | no | yes |
@@ -201,6 +198,20 @@ Each field is documented on `hare.dialects.base.features.Features`.
 `UNLOGGED`, storage parameters and [partitioning](postgresql/indexes-and-tables.md#partitioning) (hash,
 list and range partitions, added and removed by migrations) — is set per model with
 [`Meta.table_options`](../models/meta-options.md#table_options).
+
+### <a id="features-of-one-database"></a>Features of one database
+
+A feature only one database has, read only by its own dialect, is a field of that dialect's subclass of
+`Features` — `connection.features` of a connection to it is one, and a dialect of another database has no
+such field.
+
+| Class | Field | Meaning | Value |
+|---|---|---|---|
+| `SqliteFeatures` | `supports_unhex` | The SQL function `unhex()` — a long `__in` of bytes binds as one JSON array | from 3.41.0 |
+| `SqliteFeatures` | `supports_strict_tables` | `SqliteTableOptions(strict=True)` — `STRICT` tables | from 3.37 |
+| `SqliteFeatures` | `supports_spatial_index` | [`SpatialiteIndex`](search-and-geodata/gis.md#spatial-index) — SpatiaLite's R*Tree, and the spatial lookups narrowed through it | with SpatiaLite's spatial metadata |
+| `PostgresqlFeatures` | `supports_partitioned_exclusion_constraints` | A partitioned table takes an exclusion constraint | from 17 |
+| `ClickhouseFeatures` | `supports_json_type` | A JSON value is stored by a type of its own, its paths typed — a `JSONField` is a `JSON` column | yes (`String` over clickhouse-driver) |
 
 ## <a id="dialectregistry"></a>`DialectRegistry`
 

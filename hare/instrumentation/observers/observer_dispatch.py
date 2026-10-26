@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import math
 import traceback
 import weakref
 from collections import deque
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.connections.connections import Connections
 from hare.core.log import logger
-from hare.exceptions import QueryError
 from hare.instrumentation.constants import MAX_PENDING_OBSERVER_DISPATCHES, MAX_STORED_OBSERVER_ERRORS
 
 if TYPE_CHECKING:
@@ -160,19 +157,10 @@ class ObserverDispatch:
             timeout_seconds: The wait bound, None to wait as long as they run.
 
         Raises:
-            QueryError: ``timeout_seconds`` is not a positive number.
             Exception: The one observer failure, when exactly one observer raised.
             ExceptionGroup: Every kept failure, when two or more observers raised; its message
                 counts the older ones that weren't kept.
         """
-        if timeout_seconds is not None and (
-            isinstance(timeout_seconds, bool)
-            or not isinstance(timeout_seconds, int | float)
-            or not 0 < timeout_seconds < math.inf
-        ):
-            raise QueryError(
-                f"timeout_seconds must be a positive number, got {ValueDescriptions.get_shown_value(timeout_seconds)}"
-            )
         tasks = list(cls.pending_tasks)
         if tasks:
             __, still_running = await asyncio.wait(tasks, timeout=timeout_seconds)

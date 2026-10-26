@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from hare.dialects.sqlite.constants import SPATIALITE_INDEX_RESULT_COLUMN, SPATIALITE_INDEX_TYPE
 from hare.dialects.sqlite.indexes.constants import (
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.dialects.sqlite.declarations import SqliteFeatures
     from hare.models import Model
 
 
@@ -125,7 +126,7 @@ class SpatialiteIndex(SeparateTableIndex):
         Raises:
             UnSupportedError: No ``features.supports_spatial_index``.
         """
-        if not features.supports_spatial_index:
+        if not cast("SqliteFeatures", features).supports_spatial_index:
             raise UnSupportedError(
                 f"SpatialiteIndex(fields={list(self.fields)!r}) can't be created on {database_name}: it needs "
                 "features.supports_spatial_index - SpatiaLite loaded with its spatial metadata"

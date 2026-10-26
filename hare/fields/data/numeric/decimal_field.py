@@ -20,7 +20,7 @@ TDecimal = TypeVar("TDecimal", Decimal, Decimal | None)
 
 
 class DecimalField(Field[TDecimal]):
-    """An exact decimal field.
+    """An exact decimal field - only on a database that stores exact decimals.
 
     Args:
         max_digits: The most significant digits.
@@ -29,6 +29,7 @@ class DecimalField(Field[TDecimal]):
 
     field_type = Decimal
 
+    COLUMN_TYPE_FROM_DIALECT = True
     keeps_native_db_values = True
 
     @overload
@@ -114,8 +115,16 @@ class DecimalField(Field[TDecimal]):
         return value
 
     def from_db_value(self, value: Any) -> Decimal | None:
-        # A value read back is no flag given for a number - the check is for given values.
-        return self.to_python(int(value) if isinstance(value, bool) else value)
+        if isinstance(value, bool):
+            # A value read back is no flag given for a number - the check is for given values.
+            value = int(value)
+        if type(value) is Decimal and value.is_finite():
+            digits = value.adjusted() + 1 + self.decimal_places
+            if digits > self.quantize_context.prec:
+                # A value the database computed (a SUM of the column) may hold more digits than the
+                # column does - read as it is.
+                return value.quantize(self.quant, context=Context(prec=digits, rounding=ROUND_HALF_UP))
+        return self.to_python(value)
 
     def get_assign_normalized_types(self) -> frozenset[type]:
         # Any Decimal may still need quantizing to this field's scale.

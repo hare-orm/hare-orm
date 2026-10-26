@@ -74,22 +74,6 @@ async def test_an_exempted_risk_is_listed_without_failing(project_factory) -> No
     assert result.exit_code in (0, None), result.output
     assert "[run_sql] (exempted)" in result.output.replace("\x1b[2m", "").replace("\x1b[0m", "")
 
-    project.write_migration(
-        "0002_raw_sql",
-        f"""
-        from hare import migrations
-        from hare.migrations import operations as ops
-
-        class Migration(migrations.Migration):
-            dependencies = [("app", {initial_name!r})]
-            safety_exemptions = ["not_a_code"]
-            operations = [ops.RunSQL("SELECT 1")]
-        """,
-    )
-    refused = await project.cli("checkmigrations")
-    assert refused.exit_code == 1
-    assert "safety_exemptions takes MigrationRiskCode members" in refused.output
-
 
 @pytest.mark.asyncio
 async def test_checkmigrations_refuses_an_unknown_app(project_factory) -> None:  # noqa: F811

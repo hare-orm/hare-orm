@@ -53,9 +53,8 @@ database are checked on all three systems.
 | RabbitMQ (outbox) | 4.0 and newer | 4.0 and 4.3, on Linux |
 | Kafka (outbox) | 3.9 and newer | 3.9 and 4.3, on Linux |
 
-The whole matrix runs on every pull request into `main`, every night and before a release — each version
-of each row at least once; a push to `dev` or `main` and a pull request into another branch run the
-newest Python and the newest version of each row.
+The whole matrix runs on every pull request into `dev`, every week and before a release — each version of
+each row at least once.
 
 A server older than the oldest supported version is refused when the connection opens. A feature that a
 newer version brings (PostgreSQL `MERGE` from 15, SQLite `STRICT` tables from 3.37, ...) is turned on by

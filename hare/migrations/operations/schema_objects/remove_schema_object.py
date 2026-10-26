@@ -25,6 +25,7 @@ class RemoveSchemaObject(ModelBoundOperation):
     """
 
     object_type: ClassVar[type[SchemaObjectType]]
+    backward_reads_state_left = False
 
     def __init__(self, model_name: str, name: str | None = None, fields: list[str] | None = None) -> None:
         if not name and not fields:
@@ -72,6 +73,11 @@ class RemoveSchemaObject(ModelBoundOperation):
         model_state = self.get_model_state(state, app_label, self.model_name)
         self.object_type.update_objects(model_state, removed=self.find(state, app_label))
         state.mark_models_changed([(app_label, self.model_name)])
+
+    def raise_if_unsupported(
+        self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor
+    ) -> None:
+        self.object_type.raise_if_unsupported(schema_editor)
 
     async def database_forward(
         self,

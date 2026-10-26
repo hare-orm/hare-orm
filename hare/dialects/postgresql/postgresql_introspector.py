@@ -16,6 +16,7 @@ from hare.dialects.postgresql.constants import (
     ARRAY_ELEMENT_NUMERIC_SIZE_RE,
     NATIVE_ENUM_FIELD_PATH,
     POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP,
+    POSTGRESQL_ARRAY_FIELD_PATH,
     POSTGRESQL_CANONICAL_TYPE_NAMES,
     POSTGRESQL_COLUMNS_SQL,
     POSTGRESQL_CONSTRAINTS_SQL,
@@ -98,10 +99,11 @@ from hare.inspectdb.introspection.composite_foreign_key_info import CompositeFor
 from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
+from hare.inspectdb.introspection.inspected_field_specification import InspectedFieldSpecification
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.ddl.schema_objects.database_function import DatabaseFunction
@@ -368,14 +370,23 @@ class PostgresqlIntrospector(SchemaIntrospector):
             element_kwargs = dict(element_kwargs)
             # information_schema reports length/precision/scale as NULL for an ARRAY column - the
             # real element size is recovered from format_type()'s own rendering instead.
-            if element_path == "hare.fields.data.text.CharField" and column.array_element_max_length is not None:
+            if (
+                element_path in {"hare.fields.data.text.CharField", POSTGRESQL_FIXED_CHAR_FIELD_PATH}
+                and column.array_element_max_length is not None
+            ):
                 element_kwargs["max_length"] = column.array_element_max_length
             if element_path == "hare.fields.data.numeric.DecimalField" and (
                 precision_scale := column.array_element_numeric_precision_scale
             ):
                 element_kwargs["max_digits"], element_kwargs["decimal_places"] = precision_scale
+            # An array of arrays per further dimension the column was declared with.
+            for _dimension in range(column.array_dimensions - 1):
+                element_path, element_kwargs = (
+                    POSTGRESQL_ARRAY_FIELD_PATH,
+                    {"base_field": InspectedFieldSpecification(element_path, element_kwargs)},
+                )
             return (
-                "hare.fields.data.containers.array_field.ArrayField",
+                POSTGRESQL_ARRAY_FIELD_PATH,
                 {BASE_FIELD_SENTINEL_KWARG: (element_path, element_kwargs)},
                 False,
             )
@@ -592,10 +603,13 @@ class PostgresqlIntrospector(SchemaIntrospector):
             table_info.grants, table_info.unparsed_grants = PostgresqlInspectedSchemaObjects.get_grants(
                 table_privilege_rows_by_table.get(table, []), column_privilege_rows_by_table.get(table, [])
             )
-            table_info.sequences = [
-                PostgresqlInspectedSchemaObjects.get_sequence(row, row["owner_column"])
-                for row in sequence_rows_by_table.get(table, [])
-            ]
+            for row in sequence_rows_by_table.get(table, []):
+                if row["declaring_table"] == table:
+                    table_info.sequences.append(
+                        PostgresqlInspectedSchemaObjects.get_sequence(row, row["owner_column"])
+                    )
+                else:
+                    table_info.sequences_of_other_tables.append((row["name"], row["declaring_table"]))
         return table_infos
 
     @staticmethod
@@ -644,6 +658,29 @@ class PostgresqlIntrospector(SchemaIntrospector):
                 "partitioning": ObservedPartitioning.build(table, partition_rows),
             }
         )
+
+    @staticmethod
+    def get_unparsed_partitioning(table: str, partition_rows: list[dict[str, Any]]) -> str | None:
+        """How a table is partitioned when hare declares no such partitioning - a key over an expression,
+        hash partitions of different moduli, a partition partitioned itself.
+
+        Args:
+            table: The table's name.
+            partition_rows: Its POSTGRESQL_PARTITIONS_SQL rows - none for a plain table.
+
+        Returns:
+            ``PARTITION BY ...`` as PostgreSQL writes it, with the partitions partitioned themselves; None for
+            a plain table and one ``PostgresqlTableOptions(partitioning=...)`` declares.
+        """
+        if not partition_rows:
+            return None
+        partitioned_partitions = [row["partition_table"] for row in partition_rows if row["partition_partitioned"]]
+        if ObservedPartitioning.build(table, partition_rows) is not None and not partitioned_partitions:
+            return None
+        unparsed_partitioning = f"PARTITION BY {partition_rows[0]['key_definition']}"
+        if partitioned_partitions:
+            unparsed_partitioning += f", partitioned partitions {', '.join(partitioned_partitions)}"
+        return unparsed_partitioning
 
     @staticmethod
     def _build_postgres_table_info(
@@ -714,25 +751,29 @@ class PostgresqlIntrospector(SchemaIntrospector):
             not_valid_constraint_names=not_valid_constraint_names,
             is_in_default_schema=bool(table_row["is_default_schema"]),
             table_options=PostgresqlIntrospector._get_table_options(table, table_row, partition_rows),
+            unparsed_partitioning=PostgresqlIntrospector.get_unparsed_partitioning(table, partition_rows),
             row_level_security=PostgresqlIntrospector.get_row_level_security(table_row),
             primary_key_without_overlaps=any(row["is_primary"] and row["without_overlaps"] for row in index_rows),
         )
 
     @staticmethod
-    def get_column_db_default(column_default: str | None, is_pk: bool) -> Any:
-        """A column's default - a sequence's next value only on a column outside the primary key: a
-        generated key takes its own sequence, another column (SERIAL) the declared one.
+    def get_column_db_default(column_default: str | None, is_generated_key: bool) -> Any:
+        """A column's default - a sequence's next value only on a column other than the primary key of one
+        column: a generated key takes its own sequence, another column (SERIAL, a column of a composite
+        key) the declared one.
 
         Args:
             column_default: The default's SQL, None for none.
-            is_pk: Whether the column is in the primary key.
+            is_generated_key: Whether the column is the table's primary key of one column.
 
         Returns:
             The default.
         """
         if not column_default:
             return None
-        if not is_pk and column_default.strip().lower().startswith(PostgresqlIntrospector.SEQUENCE_DEFAULT_PREFIXES):
+        if not is_generated_key and column_default.strip().lower().startswith(
+            PostgresqlIntrospector.SEQUENCE_DEFAULT_PREFIXES
+        ):
             return SqlDefault(column_default.strip())
         return PostgresqlIntrospector.parse_db_default(column_default)
 
@@ -800,6 +841,7 @@ class PostgresqlIntrospector(SchemaIntrospector):
                         condition_sql=SchemaIntrospector.strip_outer_parentheses(row["condition_sql"]),
                         include=list(row["include_columns"] or []),
                         nulls_not_distinct=row["nulls_not_distinct"],
+                        is_valid=row["is_valid"],
                     )
                 )
                 continue
@@ -822,6 +864,7 @@ class PostgresqlIntrospector(SchemaIntrospector):
                 and not row["include_columns"]
                 and not row["nulls_not_distinct"]
                 and not row["without_overlaps"]
+                and row["is_valid"]
             )
             index_info = IndexInfo(
                 columns=index_columns,
@@ -838,6 +881,7 @@ class PostgresqlIntrospector(SchemaIntrospector):
                 nulls_not_distinct=row["nulls_not_distinct"],
                 key_orders=key_orders,
                 without_overlaps=row["without_overlaps"],
+                is_valid=row["is_valid"],
             )
             if is_simple:
                 if row["is_unique"]:
@@ -887,10 +931,12 @@ class PostgresqlIntrospector(SchemaIntrospector):
                 numeric_precision=row["numeric_precision"],
                 numeric_scale=row["numeric_scale"],
                 db_default=PostgresqlIntrospector.get_column_db_default(
-                    row["column_default"], row["column_name"] in pk_columns
+                    row["column_default"], pk_columns == {row["column_name"]}
                 ),
                 description=row["description"],
                 udt_name=row["udt_name"],
+                # An array made with no declaration (CREATE TABLE AS) records none - one, as declared int[].
+                array_dimensions=max(row["attndims"], 1) if row["data_type"] == "ARRAY" else 0,
                 vector_dimensions=PostgresqlIntrospector._parse_vector_dimensions(row["udt_name"], row["full_type"]),
                 array_element_numeric_precision_scale=PostgresqlIntrospector._parse_array_element_numeric_precision_scale(
                     row["full_type"]

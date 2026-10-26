@@ -52,29 +52,6 @@ class Cast(Function):
         self.cast_output_field = output_field
         super().__init__(FunctionArguments.get_expression(expression))
 
-    @classmethod
-    def get_cast_term(cls, term: Term, source_field: Field[Any] | None, target_field: Field[Any]) -> CastTo:
-        """A term converted to a field's type, as ``Cast`` converts it.
-
-        Args:
-            term: The term.
-            source_field: The field the term's value is decoded through.
-            target_field: The field converted to.
-
-        Returns:
-            The cast.
-        """
-        target = FunctionArguments.get_cast_type(target_field)
-        cast_term = CastTo(
-            term,
-            target_field,
-            target,
-            FunctionArguments.get_cast_type(source_field),
-            cls.get_target_parameters(target_field, target),
-        )
-        cast_term.is_aware = Timezone.get_use_timezone()
-        return cast_term
-
     @staticmethod
     def get_target_parameters(field: Field[Any], target: CastType) -> tuple[int | None, int | None]:
         """An integer target's bits, a Decimal's digits and places, a text's max length.
@@ -102,9 +79,11 @@ class Cast(Function):
         return (self.target, type(self.cast_output_field), self.get_parameters())
 
     def _get_function_field(self, term: Term | str, *default_values: Any) -> CastTo:
-        return CastTo(term, self.cast_output_field, self.target, CastType.UNKNOWN, self.get_parameters())
+        return CastTo(term, self.cast_output_field, self.target, CastType.UNKNOWN)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        # A type the database has no column of - a DecimalField where no exact decimal is stored - is refused.
+        self.cast_output_field.check_dialect_supported(expression_context.dialect)
         result = super().get_result(expression_context)
         cast_term = result.term
         if isinstance(cast_term, CastTo):

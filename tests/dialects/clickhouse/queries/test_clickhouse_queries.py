@@ -29,7 +29,7 @@ from hare.query.functions import (
     Upper,
     Variance,
 )
-from hare.query.functions.window import RowNumber
+from hare.query.functions.window import NthValue, RowNumber
 from tests.dialects.clickhouse.models import Player, Revision, RevisionComment, Skill, Team
 
 JOINED = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456, tzinfo=datetime.UTC)
@@ -221,8 +221,8 @@ async def test_an_aggregate_of_a_group_keeps_its_plain_form(league):
         .order_by("-total")
     )
     sql = per_team.sql()
-    assert 'SUM(toDecimal256("score",2)) AS "total",AVG("rating") AS "rated"' in sql
-    assert 'SUM(toDecimal256("score",2)) FILTER(' in sql
+    assert 'SUM("score") AS "total",AVG("rating") AS "rated"' in sql
+    assert 'SUM("score") FILTER(' in sql
     assert 'toInt64(COUNT(*)) AS "players",toInt64(COUNT("rating")) AS "rated_players"' in sql
     blue, red = league["blue"], league["red"]
     assert await per_team == [
@@ -252,7 +252,7 @@ async def test_an_aggregate_of_a_group_keeps_its_plain_form(league):
         },
     ]
     over_five = Player.objects.values("team_id").annotate(total=Sum("score")).filter(total__gt=5)
-    assert 'HAVING SUM(toDecimal256("score",2))>' in over_five.sql()
+    assert 'HAVING SUM("score")>' in over_five.sql()
     assert sorted(row["total"] for row in await over_five) == [decimal.Decimal("7.00"), decimal.Decimal("15.75")]
 
 
@@ -620,3 +620,39 @@ async def test_a_json_column_and_a_dict_literal_make_one_result(league):
     )
     goal = {"position": "goal", "numbers": [1, 7], "captain": True}
     assert rows == [(goal, goal), ({"empty": True}, {"other": 1})]
+
+
+@pytest.mark.asyncio
+async def test_a_set_operation_of_ordered_branches_keeps_no_duplicate(clickhouse_db):
+    """ClickHouse's DISTINCT of ordered input kept duplicates of a UNION of ordered branches - also counted
+    in a subquery, whose own SETTINGS the set operation doesn't read."""
+    await Player.objects.bulk_create([Player(id=number, name=str(number)) for number in range(1, 9)])
+    first = Player.objects.order_by("id")[:4]
+    second = Player.objects.order_by("id")[2:6]
+
+    assert sorted(await first.union(second).values_list("id", flat=True)) == [1, 2, 3, 4, 5, 6]
+    assert await first.union(second).count() == 6
+    assert sorted(await first.intersection(second).values_list("id", flat=True)) == [3, 4]
+
+
+@pytest.mark.asyncio
+async def test_an_nth_value_past_the_partition_is_null(clickhouse_db):
+    """ClickHouse's NTH_VALUE past the partition gave the type's default, 0, not NULL."""
+    await Player.objects.bulk_create(
+        [Player(id=1, name="a", rating=None), Player(id=2, name="a", rating=2.5), Player(id=3, name="b", rating=1.0)]
+    )
+    rows = await (
+        Player.objects.order_by("id")
+        .annotate(third=Window(NthValue("id", 3), partition_by=["name"]))
+        .values_list("id", "third")
+    )
+    assert rows == [(1, None), (2, None), (3, None)]
+
+
+@pytest.mark.asyncio
+async def test_the_columns_of_an_empty_result_are_described(clickhouse_db):
+    """clickhouse-connect reads no block of an empty result - execute_described() gave no column."""
+    connection = Player.get_connection()
+    described = await connection.execute_described('SELECT "id", "name" FROM "player" WHERE "id" < 0')
+    assert described.columns == ("id", "name")
+    assert described.rows == ()

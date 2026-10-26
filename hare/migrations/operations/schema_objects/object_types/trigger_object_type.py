@@ -23,6 +23,11 @@ class TriggerObjectType(SchemaObjectType):
         return dataclasses.replace(schema_object, name=new_name)
 
     @classmethod
+    def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:
+        # A database without triggers refuses their statements, which no feature names - built, none sent.
+        editor.trigger_statements.get_trigger_create_sqls(model, schema_object)
+
+    @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
         await editor.trigger_statements.add_trigger(model, schema_object)
 

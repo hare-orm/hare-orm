@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from hare.dialects.postgresql.enums import PostgresqlJsonOperator
 from hare.dialects.postgresql.lookups.json.postgresql_json_filter_guards import PostgresqlJsonFilterGuards
 from hare.query.filters.lookups.json.json_filter_guards import JsonFilterGuards
-from hare.sql.enums import JSONOperators
 from hare.sql.terms.array import Array
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
@@ -17,11 +17,11 @@ class PostgresqlJsonLookups:
 
     @staticmethod
     def contains(term: Term, value: str) -> Criterion:
-        return BasicCriterion(JSONOperators.CONTAINS, term, ValueWrapper(value))
+        return BasicCriterion(PostgresqlJsonOperator.CONTAINS, term, ValueWrapper(value))
 
     @staticmethod
     def contained_by(term: Term, value: str) -> Criterion:
-        return BasicCriterion(JSONOperators.CONTAINED_BY, term, ValueWrapper(value))
+        return BasicCriterion(PostgresqlJsonOperator.CONTAINED_BY, term, ValueWrapper(value))
 
     @staticmethod
     def has_key(term: Term, value: str) -> Criterion:
@@ -32,7 +32,7 @@ class PostgresqlJsonLookups:
         Raises:
             UnSupportedError: `value` isn't a string.
         """
-        return BasicCriterion(JSONOperators.HAS_KEY, term, ValueWrapper(JsonFilterGuards.get_key(value)))
+        return BasicCriterion(PostgresqlJsonOperator.HAS_KEY, term, ValueWrapper(JsonFilterGuards.get_key(value)))
 
     @staticmethod
     def has_keys(term: Term, value: list[str]) -> Criterion:
@@ -41,7 +41,9 @@ class PostgresqlJsonLookups:
         Raises:
             UnSupportedError: `value` isn't a list of strings.
         """
-        return BasicCriterion(JSONOperators.HAS_KEYS, term, Array(*JsonFilterGuards.get_key_list("has_keys", value)))
+        return BasicCriterion(
+            PostgresqlJsonOperator.HAS_KEYS, term, Array(*JsonFilterGuards.get_key_list("has_keys", value))
+        )
 
     @staticmethod
     def has_any_keys(term: Term, value: list[str]) -> Criterion:
@@ -51,7 +53,7 @@ class PostgresqlJsonLookups:
             UnSupportedError: `value` isn't a list of strings.
         """
         return BasicCriterion(
-            JSONOperators.HAS_ANY_KEYS, term, Array(*JsonFilterGuards.get_key_list("has_any_keys", value))
+            PostgresqlJsonOperator.HAS_ANY_KEYS, term, Array(*JsonFilterGuards.get_key_list("has_any_keys", value))
         )
 
     @staticmethod

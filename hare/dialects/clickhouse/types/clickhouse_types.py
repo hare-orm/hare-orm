@@ -29,6 +29,7 @@ from hare.fields.data.choices.char_enum_field_instance import CharEnumFieldInsta
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.json.json_field import JSONField
+from hare.fields.data.json.json_path_field import JSONPathField
 from hare.fields.data.json.json_text_field import JSONTextField
 from hare.fields.data.network.ip_address_field import IPAddressField
 from hare.fields.data.network.ipv4_address_field import IPv4AddressField
@@ -128,11 +129,14 @@ class ClickhouseTypes:
         types.register(ClickhouseDateField, TypeMapping(column_type="Date"))
         types.register(ClickhouseIntegerField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
         types.register(FixedStringField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
+        # A moment is rounded to the column's precision as it is written - and as it is compared, so a filter by
+        # it finds the row it was written to.
         types.register(
             ClickhouseDatetimeField,
             TypeMapping(
                 column_type=lambda field: field.SQL_TYPE,
                 to_db=ClickhouseDatetimeField.to_db_rounded_value,
+                to_lookup=ClickhouseDatetimeField.to_db_rounded_value,
             ),
         )
         types.register(FloatField, TypeMapping(column_type="Float64"))
@@ -160,6 +164,8 @@ class ClickhouseTypes:
                 JSONTextField,
                 TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE, to_lookup=ClickhouseJsonValues.to_lookup),
             )
+            # The value at a path - any JSON value, as a literal beside it (Coalesce(F("data__n"), Value(0))).
+            types.register(JSONPathField, TypeMapping(to_db=ClickhouseJsonValues.to_db_path_value))
         else:
             # JSON text - on a server without the JSON type.
             types.register(JSONField, TypeMapping(column_type=CLICKHOUSE_JSON_TEXT_COLUMN_TYPE))

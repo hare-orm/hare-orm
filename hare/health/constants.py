@@ -2,12 +2,6 @@ from __future__ import annotations
 
 #: How long a health check waits for a connection's ping by default, in seconds.
 DEFAULT_HEALTH_TIMEOUT_SECONDS = 2.0
-#: The longest timeout of a health check's ping, in seconds - a sanity ceiling against typos.
-MAX_HEALTH_TIMEOUT_SECONDS = 60.0
-#: The longest wait for a connection ``AcquireWaitTime`` takes, in seconds.
-MAX_ACQUIRE_WAIT_SECONDS = 3600.0
-#: The longest ping ``PingLatency`` takes, in milliseconds.
-MAX_PING_LATENCY_MS = 60_000.0
 #: The default share of a pool's connections in use at which ``PoolSaturation`` holds.
 DEFAULT_POOL_SATURATION_RATIO = 0.9
 

@@ -16,8 +16,10 @@ class AddPartition(PartitionOperation):
     Args:
         model_name: The model.
         partition: The partition - a ``ListPartition``, ``RangePartition`` or ``DefaultPartition``
-            on PostgreSQL.
+            of the dialect's partitioning.
     """
+
+    backward_reads_state_reached = False
 
     def describe(self) -> str:
         return f"Add partition {self.partition.name} to {self.model_name}"

@@ -21,15 +21,8 @@ class ConnectionConfig(ConfigSection):
     db_url: str | None = None
 
     def __post_init__(self) -> None:
-        if self.db_url is not None:
-            if self.engine is not None or self.credentials:
-                raise ConfigurationError("ConnectionConfig cannot set db_url together with engine/credentials")
-            if not isinstance(self.db_url, str) or not self.db_url:
-                raise ConfigurationError("ConnectionConfig.db_url must be a non-empty string")
-            return
-
-        if not self.engine:
-            raise ConfigurationError("ConnectionConfig.engine must be a non-empty string")
+        if self.db_url is not None and (self.engine is not None or self.credentials):
+            raise ConfigurationError("ConnectionConfig cannot set db_url together with engine/credentials")
 
     def __repr__(self) -> str:
         """Shows the config with every secret credential and URL password masked."""
@@ -55,11 +48,8 @@ class ConnectionConfig(ConfigSection):
                 the connection alias.
 
         Raises:
-            ConfigurationError: If ``data`` isn't a mapping, holds an unknown key, or a value is
-                invalid.
+            ConfigurationError: If ``data`` holds an unknown key.
         """
-        if not isinstance(data, Mapping):
-            raise ConfigurationError("ConnectionConfig must be created from a mapping")
         cls.check_known_keys(data, section)
         credentials = data.get("credentials", {})
         return cls(

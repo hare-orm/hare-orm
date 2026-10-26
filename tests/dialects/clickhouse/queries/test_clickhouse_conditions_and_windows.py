@@ -6,7 +6,6 @@ import decimal
 
 import pytest
 
-from hare.exceptions import OperationalError
 from hare.query.expressions import Case, F, Value, When, Window
 from hare.query.functions import Coalesce, NullIf, Sum
 from hare.query.functions.window import Count, CumeDist, DenseRank, Lag, Lead, NTile, Rank, RowNumber
@@ -86,13 +85,9 @@ async def test_cume_dist(clickhouse_db):
 @pytest.mark.asyncio
 async def test_a_count_of_a_nullable_column_in_a_window(clickhouse_db):
     """ClickHouse up to 26.9 counts a Nullable column in a window through a subcolumn it then can't
-    find - refused with NOT_FOUND_COLUMN_IN_BLOCK, as the dialect's differences say."""
+    find (NOT_FOUND_COLUMN_IN_BLOCK) - the column is counted through identity()."""
     await create_players()
 
-    if (await Player.get_connection().get_server_version())[:2] <= (26, 9):
-        with pytest.raises(OperationalError, match="Not found column"):
-            await get_values(Window(Count("rating")))
-        return
     assert await get_values(Window(Count("rating"), partition_by=["active"])) == [2, 0, 2]
     assert await get_values(Window(Count("rating"))) == [2, 2, 2]
 

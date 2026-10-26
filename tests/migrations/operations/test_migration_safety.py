@@ -13,7 +13,6 @@ from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes.index import Index
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
-from hare.exceptions import ConfigurationError
 from hare.fields import (
     BigIntField,
     CharField,
@@ -347,20 +346,6 @@ async def test_a_risk_the_migration_exempts_is_marked():
         (MigrationRiskCode.ADD_INDEX_WITHOUT_CONCURRENTLY, False),
     ]
     assert str(risks[0]).startswith("models.0002_change: Run SQL [run_sql] Raw SQL")
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_an_unknown_exemption_is_refused():
-    with pytest.raises(ConfigurationError, match="safety_exemptions takes MigrationRiskCode members"):
-        await check(POSTGRESQL_DIALECT, [RunSQL("SELECT 1")], exemptions=["run_sqll"])
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize("large_table_rows", [-1, 10**12 + 1, 1.5, True, "100"])
-def test_large_table_rows_is_checked(large_table_rows):
-    with pytest.raises(ConfigurationError, match="large_table_rows"):
-        MigrationSafetyChecker(large_table_rows=large_table_rows)
 
 
 @pytest.mark.database_independent

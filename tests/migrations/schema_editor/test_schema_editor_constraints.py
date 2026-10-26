@@ -272,7 +272,7 @@ async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
 
     class Product(Model):
         id = fields.IntField(primary_key=True)
-        price = fields.DecimalField(max_digits=10, decimal_places=2)
+        price = fields.FloatField()
 
         class Meta:
             table = "product"
@@ -289,7 +289,7 @@ async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
     assert client.executed[0] == (
         'CREATE TABLE "new__product" ('
         '"id" INTEGER CONSTRAINT "pk_product_id_e67c4fd63155" PRIMARY KEY AUTOINCREMENT NOT NULL, '
-        '"price" VARCHAR(40) NOT NULL, '
+        '"price" REAL NOT NULL, '
         'CONSTRAINT "ck_price" CHECK (price > 0))'
     )
     assert client.executed[1] == (

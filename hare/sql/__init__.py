@@ -5,7 +5,7 @@ from hare.sql.builder.tables.aliased_query import AliasedQuery
 from hare.sql.builder.tables.database import Database
 from hare.sql.builder.tables.schema import Schema
 from hare.sql.builder.tables.table import Table
-from hare.sql.enums import DatePart, JoinType, Order
+from hare.sql.enums import DatePart, JoinType
 from hare.sql.exceptions import (
     CaseException,
     FunctionException,
@@ -14,6 +14,7 @@ from hare.sql.exceptions import (
     QueryException,
     SetOperationException,
 )
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.array import Array
 from hare.sql.terms.bracket import Bracket

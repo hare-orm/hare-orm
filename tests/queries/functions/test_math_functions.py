@@ -36,7 +36,7 @@ from hare.query.functions import (
     Tan,
 )
 from hare.transactions.transactions import Transactions
-from tests.shared_models.testmodels import ExpressionTypeRow
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
 
 
 async def create_row(num: int, fl: float, dec: str, num_null: int | None = None) -> ExpressionTypeRow:
@@ -60,6 +60,7 @@ async def get_value(row: ExpressionTypeRow, expression: Any) -> Any:
     )[0]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_rounding_functions_keep_the_argument_type(db):
     row = await create_row(-7, -2.5, "-1.25")
@@ -79,6 +80,7 @@ async def test_rounding_functions_keep_the_argument_type(db):
     assert isinstance(await get_value(row, Floor("dec")), Decimal)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_float_rounded_to_zero_keeps_its_sign(db):
     """C's ceil(-0.5) is -0 - hare's SQLite function gave 0."""
@@ -89,6 +91,7 @@ async def test_a_float_rounded_to_zero_keeps_its_sign(db):
     assert math.copysign(1, SqliteMathFunctions.ceiling(-0.5)) == -1
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_mod_takes_the_dividend_sign_and_keeps_integers(db):
     row = await create_row(-7, 7.5, "2.50")
@@ -100,6 +103,7 @@ async def test_mod_takes_the_dividend_sign_and_keeps_integers(db):
     assert await get_value(row, Mod("dec", Decimal("0.75"))) == Decimal("0.25")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_exponential_and_logarithmic_functions(db):
     row = await create_row(8, 0.5, "2.25")
@@ -114,6 +118,7 @@ async def test_exponential_and_logarithmic_functions(db):
     assert await get_value(row, Log(2, "num")) == pytest.approx(3.0)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_trigonometric_functions_are_floats(db):
     row = await create_row(1, 0.5, "1.00")
@@ -135,6 +140,7 @@ async def test_trigonometric_functions_are_floats(db):
         assert value == pytest.approx(expected)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_math_function_in_a_filter_and_with_null(db):
     first = await create_row(-9, 1.0, "4.00", num_null=None)
@@ -173,6 +179,7 @@ def test_the_sqlite_functions_give_what_the_sqlite_builtins_give():
     assert SqliteMathFunctions.remainder("1.5", "0") is None
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_null_dividend_or_divisor_divides_into_null(db):
     row = await create_row(3, 1.5, "2.50", num_null=None)
@@ -183,6 +190,7 @@ async def test_a_null_dividend_or_divisor_divides_into_null(db):
     assert await get_value(row, F("fl") / F("num")) == pytest.approx(0.5)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_mod_of_a_decimal_is_exact_at_the_larger_scale(db):
     row = await create_row(1, 1.0, "12.34")
@@ -194,6 +202,7 @@ async def test_mod_of_a_decimal_is_exact_at_the_larger_scale(db):
     assert await get_value(row, Mod("dec", "dec")) == Decimal("0")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_decimal_column_is_compared_with_another_numbers_expression_by_value(db):
     cheap = await create_row(100, 1.5, "0.01")
@@ -213,6 +222,7 @@ async def test_a_decimal_column_is_compared_with_another_numbers_expression_by_v
     assert excluded == [dear.id, huge.id]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_an_integer_literal_beyond_32_bits_meets_an_integer_column(db):
     row = await create_row(3, 1.5, "2.50", num_null=None)
@@ -224,12 +234,13 @@ async def test_an_integer_literal_beyond_32_bits_meets_an_integer_column(db):
     assert await get_value(row, F("num") * 2**40) == 3 * 2**40
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @requires_features(supports_transactions=True)
 async def test_an_integer_result_out_of_its_type_range_is_refused(db):
-    """A result past 64 bits raises - SQLite turned it into a REAL, ClickHouse wrapped it around."""
+    """PostgreSQL refuses a result past 64 bits itself."""
     row = await create_row(3, 1.5, "2.50")
-    with pytest.raises(OperationalError, match="out of range"):
+    with pytest.raises(OperationalError, match="out of range|integer overflow"):
         async with Transactions.atomic():
             await get_value(row, F("num") * 4 * 10**18)
     assert await get_value(row, F("num") + 2_147_483_644) == 2_147_483_647

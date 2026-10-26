@@ -30,6 +30,8 @@ class ValueType:
         nullable: Whether None is taken or given.
         shape: One value, an iterable or a two-item range of them.
         accepts_expressions: Whether an expression, a term or a subquery is taken too.
+        alternatives: Types the value may be instead, whole - outside its shape (a range lookup's
+            ``Range``).
         is_any: Whether any value is taken - every other attribute is then ignored.
     """
 
@@ -41,4 +43,5 @@ class ValueType:
     nullable: bool = False
     shape: LookupValueShape = LookupValueShape.VALUE
     accepts_expressions: bool = False
+    alternatives: tuple[Any, ...] = ()
     is_any: bool = False

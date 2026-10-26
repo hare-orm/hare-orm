@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import asyncpg
 
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
-from hare.dialects.base.client.pool.pool_timeouts import PoolTimeouts
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
+from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_connect_errors import PostgresqlConnectErrors
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
@@ -663,12 +663,41 @@ class AsyncpgClient(PostgresqlClient):
             transaction = connection.transaction()
             await transaction.start()
             try:
-                await connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+                await AsyncpgClient.run_ending_connection_on_cancel(
+                    connection, connection.executemany(query, [self._asyncpg_bind_values(row) for row in values])
+                )
             except Exception:
                 await transaction.rollback()
                 raise
             else:
                 await transaction.commit()
+
+    @staticmethod
+    async def run_ending_connection_on_cancel(connection: Any, call: Awaitable[Any]) -> Any:
+        """Awaits a call of a connection that asyncpg can't cancel - a cancelled ``executemany()`` waits
+        forever for the server, which waits for the rest of its rows, and stays waiting to write them
+        once the connection is gone: the connection is terminated instead, the server rolling its
+        transaction back, and the call is left.
+
+        Args:
+            connection: The connection.
+            call: The call.
+
+        Returns:
+            The call's result.
+        """
+        call_task = asyncio.ensure_future(call)
+        # The connection's own error, which a cancellation replaces, is never raised.
+        call_task.add_done_callback(lambda task: task.cancelled() or task.exception())
+        try:
+            # Waited for, not awaited - a cancellation of the caller leaves the call running.
+            await asyncio.wait((call_task,))
+        except asyncio.CancelledError:
+            if not call_task.done():
+                connection.terminate()
+                call_task.cancel()
+            raise
+        return call_task.result()
 
     @PostgresqlClient.translate_exceptions
     async def copy(

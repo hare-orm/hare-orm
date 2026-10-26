@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import QueryError
+from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.query.queryset.combination.combination import Combination
 from hare.sql.enums import SetOperation
 
@@ -48,6 +49,9 @@ class QuerySetCombination:
                     "Cannot combine model instances with .values()/.values_list() rows - call .values()/"
                     ".values_list() on every branch (the rows then take the first branch's shape)."
                 )
+        if selects_values and set_operation is not SetOperation.UNION_ALL:
+            for branch in (queryset, *other_querysets):
+                QuerySetCombination.raise_if_encrypted_values_compared(branch, set_operation)
         combined_rows_are_one_branch = selects_values and bool(
             queryset._orderings or queryset._limit is not None or queryset._offset or queryset._is_none
         )
@@ -77,6 +81,34 @@ class QuerySetCombination:
         from hare.query.statements.select.combined_query import CombinedQuery
 
         return CombinedQuery(queryset)
+
+    @staticmethod
+    def raise_if_encrypted_values_compared(queryset: QuerySet[Any, Any], set_operation: SetOperation) -> None:
+        """Refuses a set operation comparing rows of values one of which an encrypted field holds - each
+        ciphertext is random, so equal values never matched: a UNION kept them all, an INTERSECT found none.
+
+        Args:
+            queryset: A branch.
+            set_operation: The operation - ``UNION ALL`` compares no rows.
+
+        Raises:
+            FieldError: A selected field is encrypted.
+        """
+        # Local import: the annotations module imports the queryset package.
+        from hare.query.statements.building.query_annotations import QueryAnnotations
+
+        if queryset._combination is not None:
+            for branch in queryset._combination.branches:
+                QuerySetCombination.raise_if_encrypted_values_compared(branch, set_operation)
+            return
+        selection = queryset._selection
+        if selection is None or selection.selects_every_field:
+            return
+        for field_name in (*selection.field_names, *(name for _key, name in selection.renamed_fields)):
+            EncryptedFieldBase.raise_if_encrypted(
+                QueryAnnotations.get_field_object_by_path(queryset, field_name),  # type: ignore[arg-type]
+                set_operation.value,
+            )
 
     @staticmethod
     def selects_values(queryset: QuerySet[Any, Any]) -> bool:

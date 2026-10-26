@@ -3,9 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.dialects.base.schema.columns.column_narrowing_check import ColumnNarrowingCheck
-from hare.dialects.sqlite.constants import (
-    SQLITE_DECIMAL_OVERFLOWS_FUNCTION_NAME,
-)
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
@@ -18,7 +15,9 @@ class SqliteColumnNarrowingCheck(ColumnNarrowingCheck):
 
     editor: SqliteSchemaEditor
 
-    def get_decimal_overflow_predicate_sql(self, quoted_column: str, max_digits: int, decimal_places: int) -> str:
-        # Decimals are stored as text and CAST(... AS NUMERIC) gives a double - the value is read
-        # as its exact decimal text instead.
-        return f"{SQLITE_DECIMAL_OVERFLOWS_FUNCTION_NAME}({quoted_column}, {max_digits}, {decimal_places})"
+    def get_time_of_day_predicate_sql(self, quoted_column: str) -> str:
+        # A moment is its ISO text - its clock and the microseconds after its seconds.
+        return (
+            f"time({quoted_column}) <> '00:00:00' "
+            f"OR (substr({quoted_column}, 20, 1) = '.' AND CAST(substr({quoted_column}, 21, 6) AS INTEGER) <> 0)"
+        )

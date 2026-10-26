@@ -151,8 +151,7 @@ a remote collector) when your process wants to exit. `Hare.close_connections()` 
 you, waiting at most **10 s** — observers still running then are cancelled, with a warning, so a stuck
 observer can't block shutdown. Reach for it directly when you need every event delivered so far to be
 fully handled at some other point (e.g. asserting on an observer's effect in a test). `timeout_seconds`
-(a positive number; anything else raises `QueryError`) bounds the wait the same way; `None` waits as long
-as the observers run.
+bounds the wait the same way; `None` waits as long as the observers run.
 
 ```python
 Observers.observe(QueryExecuted, ship_metric)  # an async def
@@ -298,10 +297,13 @@ A `RowsChanged`:
   `unobserve(RowsChanged, callback, models=[Loan])` stops it hearing `Loan` only; once it hears no model,
   it is removed. An observer of every model can't drop one model — `QueryError`, and it stays as it is:
   unobserve it without models to remove it.
-- The models are model classes; a string (`"models.Loan"`) or an instance is a `TypeError`. `models=` for
-  `QueryExecuted`/`TransactionEvent`, which aren't about a model, is a `QueryError`.
-- A model registered again while the application runs (`Hare.register_live_models()`) is a new class: an
-  observer of that model is registered for the new class.
+- A model is given by its class, its `"app.Model"` label or a `swappable()` setting
+  (`models=["library.Loan"]`). A class hears that class; a label hears the model registered under it in any
+  context, a model registered again while the application runs (`Hare.register_live_models()`) included —
+  that is a new class, so an observer of the old class doesn't hear it. A label is looked up in the
+  current context when one is set up, else when a context binds its models: a label naming no model
+  raises `ConfigurationError` there. `models=` for `QueryExecuted`/`TransactionEvent`, which aren't about a
+  model, is a `QueryError`.
 - `Observers.is_observed(RowsChanged, Loan)` — whether any observer hears `Loan`. When none does, no
   event of a change of `Loan` is built or sent.
 
@@ -310,7 +312,9 @@ A `RowsChanged`:
 - `save()` — an insert or an update (with `update_fields` when given), `delete()`, `hard_delete()`,
   `restore()`.
 - `QuerySet.update()`, `QuerySet.delete()` and `QuerySet.hard_delete()` — when they changed at least one
-  row; on a database reporting no count of written rows (ClickHouse) always, as they may have.
+  row; on a database reporting no count of written rows (ClickHouse) always, as they may have — but for a
+  delete reading the keys of its rows first (one with an `on_delete` to carry out), which reports nothing
+  when it matched none.
 - `bulk_create()` and `bulk_update()`. When the call fails, only the rows that stayed in the database are
   reported:
   - the batches of a `bulk_create()` written before the error on a database without transactions

@@ -6,7 +6,6 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.log import logger
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
@@ -14,7 +13,6 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.transactions.atomic.atomic import Atomic
-from hare.transactions.constants import MAX_TRANSACTION_RETRIES
 from hare.transactions.distributed.distributed_coordinator import DistributedCoordinator
 from hare.transactions.distributed.distributed_transactions import DistributedTransactions
 from hare.transactions.enums import IsolationLevel
@@ -47,8 +45,8 @@ class Transactions:
 
         Args:
             retries: How many more times the transaction runs after a ``TransactionRetryError``
-                (a serialization failure, a deadlock) of its block or its commit - an int from 0 to
-                ``MAX_TRANSACTION_RETRIES``. The decorated function is called again; a block runs as
+                (a serialization failure, a deadlock) of its block or its commit. The decorated
+                function is called again; a block runs as
                 ``async for attempt in Transactions.atomic(retries=3): async with attempt: ...``. A
                 transaction nested in another never runs again - the outer one does.
             using: The connection alias, optional with a single connection.
@@ -68,7 +66,7 @@ class Transactions:
             The transaction, started when its block is entered or the decorated function is called.
 
         Raises:
-            QueryError: ``statement_timeout``/``isolation``/``retries`` has the wrong type or range;
+            QueryError: ``statement_timeout``/``isolation`` has the wrong type or range;
                 entering the block - a read-only transaction nested inside a read-write one, or a
                 nested transaction setting its own ``statement_timeout`` or another isolation level.
             UnSupportedError: Entering the block - the database has no transactions
@@ -81,11 +79,6 @@ class Transactions:
             isolation=isolation,  # type: ignore[arg-type]
             lock_timeout=lock_timeout,
         )
-        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= MAX_TRANSACTION_RETRIES:
-            raise QueryError(
-                f"atomic(retries=...) takes an int from 0 to {MAX_TRANSACTION_RETRIES}, got "
-                f"{ValueDescriptions.get_shown_value(retries)}"
-            )
         return Atomic(partial(Atomic.get_connection, using), options, retries)
 
     @staticmethod

@@ -20,7 +20,6 @@ from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
     CallableDefault,
     CompositePkThing,
-    DefaultModel,
     DirtyTrackedThing,
     Event,
     IntFields,
@@ -33,6 +32,7 @@ from tests.shared_models.testmodels import (
     Widget,
     WidgetTagMembership,
 )
+from tests.shared_models.testmodels_postgres import DefaultModel
 
 
 def assert_list_sort_equal(actual, expected, sorted_key="id"):
@@ -506,6 +506,7 @@ async def test_bulk_create_returning_ids_usable_for_downstream_fk_relations(db_t
         assert fetched.tournament_id == tournament.id
 
 
+@pytest.mark.postgresql_models
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_bulk_create_returning_populates_db_default_fields(db_truncate):
@@ -525,6 +526,7 @@ async def test_bulk_create_returning_populates_db_default_fields(db_truncate):
         assert obj.char_default == "hare"
 
 
+@pytest.mark.postgresql_models
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_bulk_create_returning_false_leaves_db_default_fields_untouched(db_truncate):
@@ -539,6 +541,7 @@ async def test_bulk_create_returning_false_leaves_db_default_fields_untouched(db
     assert all(isinstance(obj.int_default, DatabaseDefault) for obj in objects)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_bulk_update_rejects_unset_db_default_field(db_truncate):
     """execute_update() (Model.save()) silently omits a field from its SET clause when the
@@ -763,14 +766,14 @@ async def test_bulk_create_returning_and_use_copy_together_raises(db_truncate):
 async def test_bulk_create_use_copy_and_on_conflict_together_raises(db_truncate):
     """COPY performs a pure bulk insert with no ON CONFLICT support - any conflict-handling
     parameter combined with use_copy must fail eagerly rather than silently ignoring it."""
-    with pytest.raises(UnSupportedError, match="ON CONFLICT"):
+    with pytest.raises(UnSupportedError, match="takes no conflict handling"):
         UniqueName.objects.bulk_create(
             [UniqueName(name="x")],
             use_copy=True,
             update_fields=["optional"],
             on_conflict=["name"],
         )
-    with pytest.raises(UnSupportedError, match="ON CONFLICT"):
+    with pytest.raises(UnSupportedError, match="takes no conflict handling"):
         UniqueName.objects.bulk_create([UniqueName(name="x")], use_copy=True, ignore_conflicts=True)
 
 

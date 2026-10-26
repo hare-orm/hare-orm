@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 class RemoveCollation(CreateCollation):
-    """Drops a Postgres collation - given the arguments it was created with, to create it again going
+    """Drops a collation - given the arguments it was created with, to create it again going
     back."""
 
     def describe(self) -> str:

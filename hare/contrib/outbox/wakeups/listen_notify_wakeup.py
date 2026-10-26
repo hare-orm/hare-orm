@@ -4,7 +4,6 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.notify import NotificationListener
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.wakeups.constants import (
     DEFAULT_WAKEUP_CHANNEL,
     WAKEUP_MAX_RECONNECT_ATTEMPTS,
@@ -24,14 +23,10 @@ class ListenNotifyWakeup(OutboxWakeup):
 
     Args:
         channel: The channel.
-
-    Raises:
-        ConfigurationError: ``channel`` isn't a non-empty string.
     """
 
     def __init__(self, channel: str = DEFAULT_WAKEUP_CHANNEL) -> None:
         super().__init__()
-        BrokerArguments.require_text("channel", channel)
         self.channel = channel
         #: The listener of the relays' subscription.
         self.listener: NotificationListener | None = None

@@ -110,7 +110,8 @@ class MypyTypes:
         origin = typing.get_origin(value_type)
         if origin is not None:
             return self.get_parametrized_type(origin, typing.get_args(value_type))
-        if not isinstance(value_type, type) or value_type is object:
+        # typing.Any is a class since Python 3.11 - typeshed's ``class Any`` is no Any.
+        if not isinstance(value_type, type) or value_type is object or value_type is typing.Any:
             return self.any()
         return self.get_class_type(BoundModels.get_fullname(value_type)) or self.any()
 
@@ -137,7 +138,8 @@ class MypyTypes:
         type_info = self.get_type_info(fullname)
         if type_info is None or len(type_info.defn.type_vars) != len(argument_types):
             return self.get_class_type(fullname) or self.any()
-        return self.api.named_generic_type(fullname, argument_types)
+        # The class found above - a module the checked code doesn't import has no name the checker looks up.
+        return Instance(type_info, argument_types)
 
     def get_model_type(self, model: type[Model]) -> Type | None:
         """The type of an instance of a model.
@@ -246,6 +248,10 @@ class MypyTypes:
             )
         else:
             mypy_type = item_type
+        if value_type.alternatives:
+            mypy_type = make_simplified_union(
+                [mypy_type, *(self.get_python_type(alternative) for alternative in value_type.alternatives)]
+            )
         if value_type.accepts_expressions:
             return make_simplified_union([mypy_type, *self.get_always_accepted_types()])
         return mypy_type

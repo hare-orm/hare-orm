@@ -197,13 +197,15 @@ await Book.objects.all().annotate(
 ```
 
 Типы результатов: `Count` — всегда `int` (и `Sum`/`Max`/`Min` над вычисляемым значением `Count()` тоже, а
-`Avg` над ним — `float`); `Avg` от целых — `float` на любой базе, в том числе внутри арифметики или
-`Concat`; `Avg` от `FloatField` — `float`, от `DecimalField` — `Decimal`, не округлённый до `decimal_places`
-поля (точность важнее одинаковости на разных базах: PostgreSQL возвращает среднее с собственным масштабом
-деления, `1.7125`, а не `1.71`, для `DecimalField(decimal_places=2)`; SQLite и ClickHouse — точную сумму,
-делённую с отсечением (не округлением) частного до 20 знаков после запятой), одинаково в `.aggregate()`,
+`Avg` над ним — `float`); `Avg` от целых — то, что считает база: точный `Decimal` на PostgreSQL, чьё
+среднее `numeric` обрезал бы `float`, и `float` на SQLite и ClickHouse, в том числе внутри арифметики или
+`Concat`; `Avg` от `FloatField` — `float`, от `DecimalField` — то, что считает база: на PostgreSQL
+`Decimal`, не округлённый до `decimal_places` поля (среднее с собственным масштабом деления, `1.7125`, а не
+`1.71`, для `DecimalField(decimal_places=2)`), на ClickHouse — `float`
+(`Features.computes_decimal_statistics_exactly`), одинаково в `.aggregate()`,
 `.annotate()` и в окне; по пустому набору строк `Min`/`Max`/`Avg`/`StdDev`/ `Variance` дают `None` на любой
-базе, а `Sum` — `None` в PostgreSQL и SQLite, но собственный `0` в ClickHouse (`0.00` для `Decimal`);
+базе, а `Sum` — `None` в PostgreSQL и SQLite, но собственный `0` в ClickHouse (`0.00` для `Decimal`,
+`None` для поля, допускающего NULL);
 `Sum`/`Max`/`Min`/`FirstValue`/`LastValue`/`Lag`/`Lead` сохраняют тип того, что агрегируют, в том числе
 выражения или вычисляемого значения-константы (`Sum(F("duration") * 2)` — `timedelta`, оконный `Sum` над
 `Value(Decimal("1.5"))` — `Decimal`). `default` у `Lag`/`Lead` кодируется через поле, как записываемое в

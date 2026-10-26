@@ -4,7 +4,7 @@ files and for migrations an application builds in memory or keeps in its databas
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -12,6 +12,7 @@ from hare.core.config.migrations_config import MigrationsConfig
 from hare.core.connections.connections import Connections
 from hare.migrations.exceptions import PartiallyAppliedMigrationError
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.operations import RunPython, SeparateDatabaseAndState
 from hare.transactions.transactions import Transactions
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
     from hare.migrations.migration import Migration
     from hare.migrations.reports.operation_effect import OperationEffect
+    from hare.migrations.state.declarations import OperationUndo
     from hare.migrations.state.state import State
 
 
@@ -112,19 +114,29 @@ class MigrationRunner:
         async with self.migration_schema_editor(migration) as schema_editor:
             return await self._run(migration, state, schema_editor, forwards=True, dry_run=dry_run)
 
-    async def unapply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State:
+    async def unapply(
+        self,
+        migration: Migration,
+        state: State,
+        *,
+        dry_run: bool = False,
+        undos: Sequence[OperationUndo] | None = None,
+    ) -> State:
         """Unapplies a migration and removes its record - see ``_run()``.
 
         Args:
             migration: The migration.
-            state: The state before the migration was applied.
+            state: The state before the migration was applied - or, with ``undos``, the state after it,
+                taken back in place.
             dry_run: Run the operations without touching the database or the journal.
+            undos: What takes the state back from each of the migration's operations
+                (``Migration.unapply_in_place()``).
 
         Returns:
-            ``state``, the state once it is unapplied.
+            The state once it is unapplied.
         """
         async with self.migration_schema_editor(migration) as schema_editor:
-            return await self._run(migration, state, schema_editor, forwards=False, dry_run=dry_run)
+            return await self._run(migration, state, schema_editor, forwards=False, dry_run=dry_run, undos=undos)
 
     async def _run(
         self,
@@ -134,6 +146,7 @@ class MigrationRunner:
         *,
         forwards: bool,
         dry_run: bool = False,
+        undos: Sequence[OperationUndo] | None = None,
     ) -> State:
         """Applies or unapplies a migration and records it.
 
@@ -143,6 +156,7 @@ class MigrationRunner:
             schema_editor: The schema editor it runs with.
             forwards: True to apply it, False to unapply it.
             dry_run: Run the operations without touching the database or the journal.
+            undos: What takes the state after it back from each operation, when unapplying in place.
 
         Returns:
             The state after it.
@@ -152,8 +166,8 @@ class MigrationRunner:
             PartiallyAppliedMigrationError: An operation of a non-atomic migration failed after
                 others had run; its record is left as it was.
         """
-        # Entered on schema_editor.client as it is before the transaction below opens it - SQLite
-        # no-ops a PRAGMA foreign_keys change made while a transaction is active.
+        # Entered on schema_editor.client as it is before the transaction below opens it - a database
+        # may ignore turning its foreign key checks off inside an open transaction.
         async with schema_editor.constraint_checking_disabled():
             if schema_editor.atomic_migration:
                 # Restored once the transaction commits, before constraint_checking_disabled()'s
@@ -164,7 +178,7 @@ class MigrationRunner:
                         self.connection.connection_alias, lock_timeout=self.lock_timeout
                     ) as transaction_client:
                         schema_editor.client = transaction_client
-                        state = await self._run_operations(migration, state, schema_editor, forwards, dry_run)
+                        state = await self._run_operations(migration, state, schema_editor, forwards, dry_run, undos)
                         if not dry_run:
                             await schema_editor.check_constraints()
                             # On the transaction the DDL ran on - a crash between the two can't
@@ -176,9 +190,15 @@ class MigrationRunner:
             if forwards and not dry_run:
                 # Refused before any operation runs - none of them is undone by a transaction.
                 migration.raise_if_unsupported(state.clone(), schema_editor)
+            run_statement_count = schema_editor.run_statement_count
             try:
-                state = await self._run_operations(migration, state, schema_editor, forwards, dry_run)
+                state = await self._run_operations(migration, state, schema_editor, forwards, dry_run, undos)
             except Exception as error:
+                if schema_editor.run_statement_count == run_statement_count and not MigrationRunner.runs_python(
+                    migration
+                ):
+                    # Refused before its first statement ran - nothing of it landed.
+                    raise
                 raise PartiallyAppliedMigrationError(
                     MigrationRunner.get_partial_failure_message(migration, forwards, error)
                 ) from error
@@ -188,7 +208,12 @@ class MigrationRunner:
 
     @staticmethod
     async def _run_operations(
-        migration: Migration, state: State, schema_editor: BaseSchemaEditor, forwards: bool, dry_run: bool
+        migration: Migration,
+        state: State,
+        schema_editor: BaseSchemaEditor,
+        forwards: bool,
+        dry_run: bool,
+        undos: Sequence[OperationUndo] | None = None,
     ) -> State:
         """Runs a migration's operations one way.
 
@@ -198,14 +223,37 @@ class MigrationRunner:
             schema_editor: The schema editor it runs with.
             forwards: True to apply it, False to unapply it.
             dry_run: Run the operations without touching the database.
+            undos: What takes the state after it back from each operation, when unapplying in place.
 
         Returns:
             The state after it - ``state`` itself when unapplying.
         """
         if forwards:
             return await migration.apply(state, dry_run=dry_run, schema_editor=schema_editor)
+        if undos is not None:
+            return await migration.unapply_in_place(state, undos, dry_run=dry_run, schema_editor=schema_editor)
         await migration.unapply(state, dry_run=dry_run, schema_editor=schema_editor)
         return state
+
+    @staticmethod
+    def runs_python(migration: Migration) -> bool:
+        """Whether a migration runs Python code - which may write without a statement of the schema editor.
+
+        Args:
+            migration: The migration.
+
+        Returns:
+            True when an operation, or a database operation of a ``SeparateDatabaseAndState`` at any depth,
+            is ``RunPython``.
+        """
+        operations = list(migration.operations)
+        while operations:
+            operation = operations.pop()
+            if isinstance(operation, RunPython):
+                return True
+            if isinstance(operation, SeparateDatabaseAndState):
+                operations.extend(operation.database_operations)
+        return False
 
     @staticmethod
     def get_partial_failure_message(migration: Migration, forwards: bool, error: Exception) -> str:

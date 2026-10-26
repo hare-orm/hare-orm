@@ -560,7 +560,8 @@ async def test_preview_lists_a_protect_from_a_soft_deleted_row_of_the_same_casca
 
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
-async def test_preview_lists_a_protect_from_a_soft_deleted_row_below_a_hard_root(db):
+async def test_a_protecting_soft_row_deleted_with_a_hard_root_blocks_nothing(db):
+    """The guard goes for real with the crate it cascades from - its PROTECT keeps nothing."""
     crate = await DeletePreviewHardCrate.objects.create(name="crate")
     box = await DeletePreviewCrateSoftBox.objects.create(crate=crate)
     item = await DeletePreviewCrateBoxItem.objects.create(box=box)
@@ -574,7 +575,14 @@ async def test_preview_lists_a_protect_from_a_soft_deleted_row_below_a_hard_root
 
     preview = await preview_and_delete(crate, models)
 
-    assert preview.protected_by == [guard]
+    assert preview.protected_by == []
+    assert preview.deleted == {
+        DeletePreviewHardCrate: 1,
+        DeletePreviewCrateSoftBox: 1,
+        DeletePreviewCrateBoxItem: 1,
+        DeletePreviewCrateSoftGuard: 1,
+    }
+    assert guard.pk not in await DeletePreviewCrateSoftGuard.objects.include_deleted().values_list("pk", flat=True)
 
 
 @pytest.mark.asyncio
@@ -591,8 +599,12 @@ async def test_preview_of_a_hard_root_with_a_soft_child_below_an_unconstrained_e
 
     preview = await preview_and_delete(crate, models)
 
-    assert preview.soft_deleted == {DeletePreviewCrateSoftBox: 1}
-    assert preview.deleted == {DeletePreviewHardCrate: 1, DeletePreviewCrateBoxItem: 1}
+    assert preview.soft_deleted == {}
+    assert preview.deleted == {
+        DeletePreviewHardCrate: 1,
+        DeletePreviewCrateSoftBox: 1,
+        DeletePreviewCrateBoxItem: 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -615,7 +627,7 @@ async def test_soft_delete_cascade_deletes_hard_children_of_another_tenant(db):
 
 
 @pytest.mark.asyncio
-async def test_hard_delete_cascade_soft_deletes_an_unconstrained_child_of_another_tenant(db):
+async def test_hard_delete_cascade_deletes_an_unconstrained_soft_child_of_another_tenant(db):
     with Tenancy.scope(1):
         project = await DeletePreviewTenantHardProject.objects.create(company_id=1)
     # No tenant active: a cross-tenant link is written as trusted seed data.
@@ -624,12 +636,12 @@ async def test_hard_delete_cascade_soft_deletes_an_unconstrained_child_of_anothe
     with Tenancy.scope(1):
         preview = await preview_and_delete(project, (DeletePreviewTenantHardProject, DeletePreviewTenantLooseSoftTask))
 
-    assert preview.deleted == {DeletePreviewTenantHardProject: 1}
-    assert preview.soft_deleted == {DeletePreviewTenantLooseSoftTask: 1}
+    assert preview.deleted == {DeletePreviewTenantHardProject: 1, DeletePreviewTenantLooseSoftTask: 1}
+    assert preview.soft_deleted == {}
     with Tenancy.scope(2):
-        assert await DeletePreviewTenantLooseSoftTask.objects.all().only_deleted().values_list("pk", flat=True) == [
-            task.pk
-        ]
+        assert task.pk not in await DeletePreviewTenantLooseSoftTask.objects.all().include_deleted().values_list(
+            "pk", flat=True
+        )
 
 
 @pytest.mark.asyncio

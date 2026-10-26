@@ -215,12 +215,12 @@ class CorrelatedSubqueries:
                 and cls.split_conditions(nested_query, cls.get_declared_table_names(nested_query))[2]
             ):
                 # An EXISTS no membership test says runs as the database's own.
-                raise cls.get_mutation_error(sql_context)
+                raise cls.get_row_write_error(sql_context)
             if not rewrites and cls.query_reads_other_tables(nested_query, set()):
                 if not runs_correlation:
                     raise cls.get_error(sql_context)
                 if writes_rows and not features.orders_by_correlated_subqueries:
-                    raise cls.get_mutation_error(sql_context)
+                    raise cls.get_row_write_error(sql_context)
                 if nested_query._orderbys or nested_query._limit is not None or nested_query._offset is not None:
                     raise UnSupportedError(
                         f"The {sql_context.dialect.name} database runs no correlated subquery ordering or "
@@ -359,7 +359,8 @@ class CorrelatedSubqueries:
         inner_sql = inner_query.get_sql(statement_context.copy(subquery=True))
         quoted_conditions = [statement_context.quote_alias(name) for name in condition_names]
         quoted_sort_keys = [statement_context.quote_alias(name) for name in sort_key_names]
-        sql = f"SELECT * EXCEPT ({','.join([*quoted_conditions, *quoted_sort_keys])}) FROM {inner_sql}"  # nosec B608
+        select_sql = sql_context.dialect.clauses.get_select_all_except_sql([*quoted_conditions, *quoted_sort_keys])
+        sql = f"{select_sql} FROM {inner_sql}"
         if quoted_conditions:
             sql += f" WHERE {' AND '.join(quoted_conditions)}"
         if quoted_sort_keys:
@@ -377,7 +378,7 @@ class CorrelatedSubqueries:
         return sql
 
     @staticmethod
-    def get_mutation_error(sql_context: SqlContext) -> UnSupportedError:
+    def get_row_write_error(sql_context: SqlContext) -> UnSupportedError:
         """The refusal of a correlated subquery in an ``UPDATE`` or a ``DELETE``.
 
         Args:
@@ -568,8 +569,8 @@ class CorrelatedSubqueries:
         membership_query._wheres = where
         outer_context = sql_context.copy(with_alias=False)
         if not sql_context.with_namespace:
-            # The query around reads one table and names its columns alone - an UPDATE or DELETE
-            # mutation knows its table by no name.
+            # The query around reads one table and names its columns alone - an UPDATE or a DELETE of
+            # the database knows its table by no name there.
             outer_columns = [
                 Field(column.column) if isinstance(column, QualifiedOuterField) else column for column in outer_columns
             ]

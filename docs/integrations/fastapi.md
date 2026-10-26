@@ -70,6 +70,7 @@ what `FastAPI()` takes.
   | `ValidationError` (a value a field refuses: out of its range, too long, a null byte PostgreSQL refuses) | `422 Unprocessable Content`, the field's message in `detail` |
   | `InvalidRequestQuery` | `422 Unprocessable Content` as FastAPI answers invalid parameters itself: `{"detail": [{"type", "loc": ["query", name], "msg", "input"}]}`; an error of the whole query (a model validator's) has `"loc": ["query"]` and the query's parameters as `input` |
   | `RequestQueryForbidden` (a parameter asks for what the request may not see: deleted rows without `may_see_deleted()`) | `403 Forbidden`, the reason in `detail` |
+  | `ApiGetterError` (a value of another service a request query's `Meta.api_getter` requires couldn't be loaded) | `502 Bad Gateway`, without the error's message, which names the service and the values asked |
 
   An application mounted on it (`app.mount("/v1", sub_app)`) answers its own errors: give it the same
   answers with `FastAPI(exception_handlers=HareExceptionHandlers.get_handlers())`.

@@ -1,5 +1,5 @@
 """The native GREATEST/LEAST pick the argument the Python ones pick - the first of equals, NULLs
-skipped, numbers and decimal text compared as numbers - and raise what they raise."""
+skipped, numbers and numbers as text compared as numbers - and raise what they raise."""
 
 import itertools
 

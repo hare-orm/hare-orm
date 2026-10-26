@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import uuid
 
-#: Database URL of a fresh in-memory SQLite database.
-MEMORY_SQLITE = "sqlite+aiosqlite://:memory:"
+#: Database URL of a fresh in-memory database, with no server.
+MEMORY_DATABASE = "sqlite+aiosqlite://:memory:"
 
-#: Environment variable switching hare_test_context()'s reusable Postgres test databases on
+#: Environment variable switching hare_test_context()'s reusable test databases of a server on
 #: ("1"/"true") or off ("0"/"false") when its reuse_databases argument is left as None.
 REUSE_DATABASES_ENVIRONMENT_VARIABLE = "HARE_TEST_REUSE_DATABASES"
 

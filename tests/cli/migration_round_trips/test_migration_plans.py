@@ -151,11 +151,11 @@ async def test_an_app_unapplied_after_the_app_depending_on_it_runs_its_code_with
 
 
         async def add_authors(apps, schema_editor):
-            await apps.get_model("a", "Author").objects.create(id=1)
+            await apps.get_model("a.Author").objects.create(id=1)
 
 
         async def remove_authors(apps, schema_editor):
-            await apps.get_model("a", "Author").objects.all().delete()
+            await apps.get_model("a.Author").objects.all().delete()
 
 
         class Migration(migrations.Migration):

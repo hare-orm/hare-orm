@@ -992,22 +992,17 @@ async def test_distributed_rust_pg_participant_connection_is_released_after_comm
             "already releases the pool unconditionally regardless of _finalized"
         )
 
-    async def other_connection_count() -> int:
-        _, rows = await participant_client.execute(
-            "SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND pid != pg_backend_pid()"
-        )
-        return int(rows[0]["n"])
-
-    before = await other_connection_count()
     for i in range(3):
         async with Transactions.distributed(coordinator=COORDINATOR, participants=[PARTICIPANT_A]) as txns:
             await DistributedWidget.objects.using(txns.coordinator).create(name=f"c{i}")
             await DistributedWidget.objects.using(txns[PARTICIPANT_A]).create(name=f"p{i}")
-    after = await other_connection_count()
 
-    assert after <= before, (
-        f"participant_a's pool leaked a connection per distributed() call: {before} -> {after} "
-        "other connections after 3 calls"
+    # A leaked connection stays handed out; the pool may keep any number of idle ones.
+    pool_status = participant_client.get_pool_status()
+    assert pool_status is not None
+    assert pool_status.in_use == 0, (
+        f"participant_a's pool leaked a connection per distributed() call: {pool_status.in_use} "
+        "still handed out after 3 calls"
     )
 
 

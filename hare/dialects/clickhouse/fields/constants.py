@@ -25,6 +25,15 @@ CLICKHOUSE_DATETIME_RANGE = (
     datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC),
     datetime.datetime(2106, 2, 7, 6, 28, 15, tzinfo=datetime.UTC),
 )
+#: The first and the last moment a ``DateTime64`` column holds.
+CLICKHOUSE_DATETIME64_RANGE = (
+    datetime.datetime(1900, 1, 1, tzinfo=datetime.UTC),
+    datetime.datetime(2299, 12, 31, 23, 59, 59, 999999, tzinfo=datetime.UTC),
+)
+#: The first and the last day a ``Date32`` column holds.
+CLICKHOUSE_DATE32_RANGE = (datetime.date(1900, 1, 1), datetime.date(2299, 12, 31))
+#: The last moment a ``DateTime64(9)`` holds - its ticks are a 64-bit count of nanoseconds from 1970.
+CLICKHOUSE_DATETIME64_NANOSECONDS_LAST_MOMENT = datetime.datetime(2262, 4, 11, 23, 47, 16, 854775, tzinfo=datetime.UTC)
 #: The most digits after the second a ``DateTime64`` keeps.
 CLICKHOUSE_DATETIME64_MAX_PRECISION = 9
 #: The digits after the second a Python datetime keeps.

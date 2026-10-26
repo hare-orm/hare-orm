@@ -2,7 +2,7 @@
 
 The `hare` commands that make and apply migrations, called from Python; the lock timeout a migration runs
 under; squashing many migrations into one; the `Migration` class a migration file declares; and how a
-migration writes enums built at run time and swappable models.
+migration writes the enums of enum fields and swappable models.
 
 ## <a id="migrations-api"></a>The commands as functions (`hare.migrations.api`)
 
@@ -123,7 +123,8 @@ context initialized — call `await Hare.close_connections()` when done.
 
 The models alone don't tell a renamed field from a removed one and a new one — `makemigrations` asks.
 A question is put only for the one removed and one added field of a model declared exactly
-alike (type and options, names aside); with several declared alike, nothing is asked. The same for a
+alike (type and options, names aside); with several declared alike, nothing is asked — which is which
+isn't guessed, and only a `--rename` answer given beforehand pairs them. The same for a
 model: the one removed and one added model of an app declared exactly alike (fields and options) — a
 model renamed and changed in the same run is two runs: rename it first, then change it. And for a model
 of another app taking over a removed model's table, unchanged: is it moved there?
@@ -271,11 +272,14 @@ its `RunSQL` again after the change. When the change alters a field's type, each
 by SQLite: a datetime to its date (of the UTC instant for an aware one), a date's or a datetime's text to
 its date, a date to its midnight (as UTC under `use_timezone=True`), a number and a boolean into each other
 (a non-zero number is true), a text to a boolean when it reads `true`, `false`, `1` or `0` (any case,
-trimmed), a boolean to SQLite's own text (`1` or `0`), a whole float or decimal to the integer, an integer
-or float to decimal text with the field's decimal places. A fractional one turned into an integer raises
+trimmed), a boolean to SQLite's own text (`1` or `0`), a whole float to the integer. A fractional one
+turned into an integer raises
 `FieldNarrowingDataLossError` (see [`AlterField`](operations.md#alter-field)) rather than being cut. Only a
 stored value the new type can't read is refused, with `OperationalError`, before the table changes (`the
-column holds "abc", which is no integer`); no pair of types is refused for lacking a cast. A change that
+column holds "abc", which is no integer`); no pair of types is refused for lacking a cast. A geometry or a
+vector field changed to another type, SRID, dimensions or length — its column keeps any geometry or vector
+- has each stored value written by the new field first, and one it refuses raises `OperationalError` the
+same way. A change that
 leaves the column declared as it was — only a field's own index, or its Python side (`sensitive`, a
 relation's `related_name`) — keeps the table: the index is dropped or created by a statement of its own, for
 a relation too when its key columns and what their `REFERENCES` names stay.
@@ -298,20 +302,22 @@ behind; targets that would both apply and unapply the same migration raise `Quer
 Migration files are re-read on every load: a file edited after it was first imported is picked up by the
 next `migrate`/`plan` in the same process.
 
-## <a id="runtime-enums"></a>Enums built while the application runs
+## <a id="runtime-enums"></a>Enums of enum fields
 
-A `CharEnumField`/`IntEnumField` may take an enum built while the application runs — from choices set in
-an admin panel:
+A migration keeps the members of a `CharEnumField`/`IntEnumField` enum as they are when it is written: the
+column's enum type (`Enum8`/`Enum16` on ClickHouse) or its `CHECK` holds them, so a member added to the
+class later is a change the next `makemigrations` sees and the migration after it applies. The enum may
+also be one built while the application runs — from choices set in an admin panel:
 
 ```python
 Status = StrEnum("Status", {"NEW": "new", "DONE": "done"})
 status = fields.CharEnumField(Status, default=Status.NEW)
 ```
 
-Such an enum has no module attribute to import it from, so a migration declares it at its top in the same
-functional form, on the same base (`StrEnum`, `IntEnum`, `IntFlag`, `Enum`, a data type mixed in with
-`type=`), its members in their order — once, however many fields, defaults and constraint conditions use
-it:
+A migration doesn't import the enum of such a field — one built while the application runs has no module
+attribute to import it from either: it declares it at its top in the functional form, on the same base
+(`StrEnum`, `IntEnum`, `IntFlag`, `Enum`, a data type mixed in with `type=`), its members in their order —
+once, however many fields, defaults and constraint conditions use it:
 
 ```python
 from enum import StrEnum
@@ -325,8 +331,10 @@ class Migration(migrations.Migration):
     ]
 ```
 
-An enum is imported instead when its `__module__` and `__qualname__` lead to the class itself, or it
-declares `migration_import_path`. Two different enums of one name are declared as `Status` and `Status2`.
+An enum only a default or a condition names, with no enum field of it in the migration, is imported when
+its `__module__` and `__qualname__` lead to the class itself, or it declares `migration_import_path`.
+An enum the functional form can't write — several enum bases or several data types — is refused with
+`ConfigurationError`. Two different enums of one name are declared as `Status` and `Status2`.
 The autodetector compares an enum by what it holds — its bases, name and members in order — not by the
 class: the same enum built again after a restart changes nothing, a member added, removed, renamed,
 revalued or moved is an `AlterField`.
@@ -379,7 +387,8 @@ class Migration(migrations.Migration):
   when it's installed, so a written migration passes `ruff check`/`ruff format --check`.
 
 Choose the setting before the package's tables are created. `migrate` refuses to run while a table an
-applied migration created has a `swappable()` foreign key referencing another table than the model its
-setting points at now, and `hare drift` reports the column with the setting's name. To move an existing
+applied migration created has a `swappable()` foreign key — a relation's own, or one of the automatic
+through table of a many-to-many relation — referencing another table than the model its setting points
+at now, and `hare drift` reports the column with the setting's name. To move an existing
 project to another model, write a migration of your own: create the new model's table, copy the rows,
 repoint the foreign keys of the package's tables (`RunSQL`), and only then change the setting.

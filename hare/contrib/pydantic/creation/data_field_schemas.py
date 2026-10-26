@@ -19,6 +19,7 @@ from hare.fields.data.choices.char_enum_field_instance import CharEnumFieldInsta
 from hare.fields.data.choices.int_enum_field_instance import IntEnumFieldInstance
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.generated_field import GeneratedField
+from hare.gis.fields.geometry_field import GeometryField
 
 if TYPE_CHECKING:
     from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
@@ -172,6 +173,10 @@ class DataFieldSchemas:
                 generated_validators[f"_hare_orm_validate_{field_name}"] = field_validator(field_name)(
                     DataFieldSchemas.make_orm_field_validator(field, accepts_none=field_name in creator._optional)
                 )
+            if isinstance(field, GeometryField):
+                generated_validators[f"_hare_orm_check_geometry_{field_name}"] = field_validator(field_name)(
+                    DataFieldSchemas.make_geometry_validator(field)
+                )
             if isinstance(DataFieldSchemas.unwrap_generated_field(field), ContainerField):
                 generated_validators[f"_hare_orm_check_held_values_{field_name}"] = field_validator(field_name)(
                     DataFieldSchemas.make_held_values_validator(
@@ -179,6 +184,25 @@ class DataFieldSchemas:
                     )
                 )
         return generated_validators
+
+    @staticmethod
+    def make_geometry_validator(field: GeometryField) -> Callable[[type[PydanticModel], Any], Any]:
+        """Builds the pydantic validator checking a geometry as a write checks it - of the field's type,
+        dimensions and SRID; one without an SRID takes the field's, which its GeoJSON then holds.
+
+        Args:
+            field: The geometry field.
+        """
+
+        def validate(cls: type[PydanticModel], value: Any) -> Any:
+            if value is None:
+                return value
+            try:
+                return field.get_checked_geometry(field.get_parsed_geometry(value))
+            except HareValidationError as error:
+                raise ValueError(str(error)) from error
+
+        return validate
 
     @staticmethod
     def make_held_values_validator(field: ContainerField) -> Callable[[type[PydanticModel], Any], Any]:

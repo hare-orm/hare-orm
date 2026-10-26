@@ -5,9 +5,7 @@ from typing import Any
 
 from hare.dialects.enums import ParameterPosition
 from hare.fields.field import Field
-from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression, Function
-from hare.query.expressions.compatibility.constants import COALESCE_NUMERIC_FIELD_CLASSES
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.expression_context import ExpressionContext
@@ -24,26 +22,9 @@ class Coalesce(Function):
 
     database_function = functions.Coalesce
     default_value_counts = (1, None)
+    returns_an_argument = True
     # The result is decoded by the first argument's field.
     populate_field_object = True
-
-    def _get_collation_argument(self, argument: ExpressionResult) -> ExpressionResult:
-        """Casts a DecimalField column's collated text to NUMERIC, like every other number the
-        COALESCE can return - a database may order any text above every number.
-
-        Args:
-            argument: The resolved argument.
-
-        Returns:
-            `argument`, or a copy whose term is the numeric cast.
-        """
-        if not functions.Collate.is_decimal_text(argument.term):
-            return argument
-        return ExpressionResult(
-            term=functions.NumericCast(functions.Collate.strip(argument.term)),
-            joins=argument.joins,
-            output_field=argument.output_field,
-        )
 
     @staticmethod
     def _default_is_compatible(output_field: Field[Any], default_value: Any, default_result: ExpressionResult) -> bool:
@@ -95,7 +76,6 @@ class Coalesce(Function):
             renderers = expression_context.dialect.renderers
             output_field: Field[Any] | None = result.output_field
             result.term.args = [renderers.get_result_branch_term(arg, output_field) for arg in result.term.args]
-            result.term = renderers.get_result_term(result.term, output_field)
         return result
 
     def _get_default_terms(
@@ -114,6 +94,14 @@ class Coalesce(Function):
         for default_value, default_result in zip(self.default_values, default_results, strict=True):
             term = default_result.term
             literal_value = default_value.value if isinstance(default_value, Value) else default_value
+            if (
+                literal_value is not None
+                and not isinstance(literal_value, (Expression, Term))
+                and self.is_json_field(output_field)
+            ):
+                # Bound as the JSON column binds a value - its JSON text, which takes the column's type.
+                terms.append(term)
+                continue
             if types_nothing and isinstance(term, ValueWrapper):
                 term = Value.get_typed_term(
                     term, term.value, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
@@ -132,9 +120,5 @@ class Coalesce(Function):
                 term = Value.get_typed_term(
                     term, literal_value, ParameterPosition.FUNCTION_ARGUMENT, expression_context.dialect
                 )
-            elif output_field is None or isinstance(
-                GeneratedField.get_effective_field(output_field), COALESCE_NUMERIC_FIELD_CLASSES
-            ):
-                term = expression_context.dialect.renderers.get_decimal_value_term(term)
             terms.append(term)
         return terms

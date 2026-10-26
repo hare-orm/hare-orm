@@ -1,6 +1,6 @@
 [project]
 name = "hare-orm"
-version = "0.9.0"
+version = "0.10.0"
 description = "An async Python ORM for PostgreSQL, SQLite and ClickHouse, built with relations in mind"
 readme = "README.md"
 authors = [
@@ -290,6 +290,8 @@ markers = [
     "database_independent: The test reads no test database - a suite of its own (make test_database_independent), left out of the suite of every database",
     "sqlite_only: The test opens only SQLite databases of its own, whatever HARE_TEST_DB is - left out of the suite of every other database",
     "timing: The test's outcome depends on time (a timeout, a lease, a delay running out) - left out unless --run-timing",
+    "postgresql_models: The test reads a model of tests.shared_models.testmodels_postgres - left out of the suite of every other database",
+    "decimal_fields: The test reads or writes exact decimals (a DecimalField, a Decimal value) - left out of the suite of a database storing none (SQLite)",
     "plan_verification_after_test: --verify-plans compares the runs on a plan after the test's body - for tests counting the builds or calls a run on a plan makes",
 ]
 

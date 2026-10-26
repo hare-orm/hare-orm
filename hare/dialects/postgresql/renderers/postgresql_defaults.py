@@ -39,20 +39,21 @@ class PostgresqlDefaults:
         renderers.register(UuidV7, cls.render_uuid_v7)
 
     @staticmethod
-    def get_zone_sql(default: Now) -> str:
+    def get_zone_sql(default: Now, sql_context: SqlContext) -> str:
         """The zone a date/wall clock default is taken in, as an ``AT TIME ZONE`` operand.
 
         Args:
             default: The default.
+            sql_context: The rendering context.
 
         Returns:
             The configured zone's name under ``use_timezone=True``; the system's local zone otherwise
             (its name when ``tzlocal`` is installed, its current UTC offset without it).
         """
         if Timezone.get_use_timezone():
-            return default.get_quoted_text(Timezone.name())
+            return sql_context.dialect.literals.get_string_literal_sql(Timezone.name())
         try:
-            return default.get_quoted_text(Timezone.get_local_zone_name())
+            return sql_context.dialect.literals.get_string_literal_sql(Timezone.get_local_zone_name())
         except ConfigurationError:
             local_offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
             return POSTGRESQL_NOW_OFFSET_ZONE_TEMPLATE.format(offset=default.get_offset_text(local_offset))
@@ -71,7 +72,7 @@ class PostgresqlDefaults:
         """
         if default.value_type == NowValueType.DATETIME:
             return POSTGRESQL_NOW_SQL
-        zone_sql = cls.get_zone_sql(default)
+        zone_sql = cls.get_zone_sql(default, sql_context)
         if default.value_type == NowValueType.DATE:
             return POSTGRESQL_NOW_DATE_SQL_TEMPLATE.format(zone=zone_sql)
         offset_text = (

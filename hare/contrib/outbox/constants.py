@@ -24,8 +24,3 @@ RELAY_MANAGED_FIELD_NAMES = frozenset(
         "leased_by",
     }
 )
-
-
-#: Largest accepted ``poll_interval_seconds``, ``retry_base_seconds``, ``retry_max_seconds``,
-#: ``lease_seconds`` and ``delivery_timeout_seconds`` - one day.
-MAX_INTERVAL_SECONDS = 86400.0

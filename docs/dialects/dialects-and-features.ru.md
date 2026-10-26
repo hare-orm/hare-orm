@@ -100,9 +100,6 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `max_bulk_update_rows` | Наибольшее число строк одной команды `bulk_update()` (`None` — сколько позволяют параметры) | `None` | `None` | `None` | 1000 |
 | `cascade_depth_limit` | Глубина рекурсии, на которой останавливается собственный `ON DELETE CASCADE` базы; тогда клиент даёт `CascadeDepthLimitError`, а глубокий каскад доводит до конца hare — меньшим числом уровней за раз | `SQLITE_LIMIT_TRIGGER_DEPTH` сборки (1000; 100 у официальной библиотеки 3.37.2) | нет | нет | нет |
 | `supports_nulls_distinct` | Ограничение уникальности принимает `NULLS [NOT] DISTINCT` | нет | с 15 | с 15 | нет |
-| `supports_partitioned_exclusion_constraints` | Партиционированная таблица принимает ограничение-исключение | нет | с 17 | с 17 | нет |
-| `supports_unhex` | Функция SQL `unhex()` — длинный `__in` по байтам передаётся одним массивом JSON | с 3.41.0 | нет | нет | нет |
-| `supports_drop_column` | `ALTER TABLE ... DROP COLUMN` — `RemoveField` простой колонки удаляет её на месте, без пересборки таблицы | да | да | да | да |
 | `explain_options` | Параметры, которые принимает `explain(**options)` | нет | параметры версии сервера (`GENERIC_PLAN` с 16, `MEMORY` и `SERIALIZE` с 17) | так же | нет |
 | `supports_pool_status` | Клиент сообщает состояние и метрики своего пула — `get_pool_status()`, [метрики пула](../observability/pool-health.ru.md) | да | да | да | clickhouse-driver — да, clickhouse-connect — нет |
 
@@ -139,6 +136,9 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `sorts_nulls_first` | При сортировке по возрастанию `NULL` по умолчанию идёт раньше всех значений | да | нет | нет |
 | `guarantees_returning_order` | `INSERT ... RETURNING` на много строк возвращает строки в порядке вставки — `bulk_create(returning=True)` | нет | да | нет |
 | `divides_integers_exactly` | `/` двух целых даёт точное частное, в том числе дробь, — поле вывода выражения тогда `FloatField` | нет | нет | да |
+| `computes_integer_statistics_exactly` | `Avg()`, `StdDev()` и `Variance()` от целых — точные десятичные числа, которые считает база, читаются как `Decimal`; без этого база считает их как числа с плавающей точкой | нет | да | нет |
+| `computes_decimal_statistics_exactly` | `Avg()`, `StdDev()` и `Variance()` от десятичных — точные десятичные числа, которые считает база, читаются как `Decimal`; без этого база считает их как числа с плавающей точкой | да | да | нет |
+| `keeps_enum_columns` | Колонка `IntEnumField` и `CharEnumField` — перечислимого типа, который хранит только элементы; без этого `CHECK` (`EnumMembersCondition`) ограничивает колонку значениями элементов | нет | нет | да |
 | `orders_json_values_in_aggregates` | `Max()`/`Min()` значения JSON сравнивают его так, как его упорядочивает база; без этого они отклоняются | да | да | нет |
 | `supports_uuid_v7` | `db_default`, порождающий упорядоченный по времени UUID версии 7 (`UuidV7()`) | нет | с 18 | нет |
 | `supports_conflict_constraint_names` | `bulk_create(on_conflict_constraint=...)` | нет | да | нет |
@@ -149,14 +149,12 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `supports_without_overlaps` | `UniqueConstraint(without_overlaps=True)` и `CompositePrimaryKey(without_overlaps=True)` — `WITHOUT OVERLAPS` у последнего поля, диапазона | нет | да (18+) | нет |
 | `supports_returning_old_new` | `returning(old=...)` у `update()` и `merge()` — `RETURNING old.column` | нет | да (18+) | нет |
 | `supports_json_table` | `JSON_TABLE` — `JsonTable(...)` | нет | да (17+) | нет |
-| `supports_strict_tables` | `SqliteTableOptions(strict=True)` — таблицы `STRICT` | да (3.37+) | нет | нет |
 | `supports_text_search_configurations` | [Полнотекстовый поиск](search-and-geodata/full-text-search.ru.md) с конфигурациями, `SearchVector` как значением, лексемами, весами меток, нормализацией ранга и параметрами фрагментов разметки | нет | да | нет |
 | `supports_full_text_index` | `FullTextIndex` — таблица FTS5, которую держат в согласии триггеры и из которой читает [полнотекстовый поиск](search-and-geodata/full-text-search.ru.md), и веса полей у `SearchRank` | да (SQLite, собранная с FTS5) | нет (поиск по tsvector) | нет |
 | `supports_vector_search` | Расстояния и `__nearby` из [`hare.vectors`](search-and-geodata/vector-search.ru.md) — pgvector в PostgreSQL, sqlite-vec в SQLite | с `load_sqlite_vec=true` | да (pgvector) | нет |
 | `supports_tenant_schemas` | [Схема на арендатора](../soft-delete-versions-tenants/schema-per-tenant.ru.md) — `tenant_schema_template`, `Meta.tenant_schema`, `TenantSchemas` | нет | да | нет |
 | `supports_spatial` | Пространственные операторы, пути, функции и агрегаты [`hare.gis`](search-and-geodata/gis.ru.md) | с `load_spatialite=true` | да (PostGIS) | да (гео-типы — см. [Типы](clickhouse/types.ru.md#geo)) |
 | `supports_geography` | `GeometryField(geography=True)`, измеряемое на эллипсоиде | с пространственными метаданными SpatiaLite (`spatialite_metadata` не `none`) | да | да (измеряется на сфере) |
-| `supports_spatial_index` | [`SpatialiteIndex`](search-and-geodata/gis.ru.md#spatial-index) — R*Tree SpatiaLite и пространственные операторы, сужаемые через него | с пространственными метаданными SpatiaLite | нет (`GistIndex`) | нет |
 | `spatial_reference_ids` | SRID пространственных метаданных, которые принимают geography и пространственный индекс, — `None` для любых | из метаданных, читаются при открытии соединения | `None` | `None` |
 | `supports_ordered_aggregates` | `ORDER BY` внутри агрегата — `MakeLine(order_by=...)` | да (3.44+) | да | нет |
 | `isolation_levels` | Уровни изоляции, на которых выполняется транзакция, — см. [Уровень изоляции](../connections/transactions.ru.md#isolation-level) | `SERIALIZABLE` | все четыре | `REPEATABLE READ` — снимок на начало транзакции |
@@ -189,7 +187,6 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 | `supports_row_updates` | `UPDATE` хранимых строк | да | да | да |
 | `supports_row_deletes` | `DELETE` хранимых строк | да | да | да |
 | `supports_recursive_queries` | Рекурсивный запрос `WITH` — `with_recursive()`; без этого он даёт `UnSupportedError` | да | да | да |
-| `supports_json_type` | Значение JSON хранится собственным типом с типизированными путями — `JSONField` становится колонкой `JSON` | нет | нет | да (`String` через clickhouse-driver) |
 | `reads_trailing_comment_of_insert` | Комментарий в конце `INSERT ... VALUES` остаётся комментарием; без этого теги запроса ставятся перед такой командой — ClickHouse читает всё после `VALUES` как данные | да | да | нет |
 | `supports_correlated_subqueries` | Связанный подзапрос; без этого `EXISTS`, связанный равенством колонок, пишется как проверка `IN`, а любой другой отклоняется | да | да | да |
 | `rewrites_correlated_exists` | `EXISTS`, связанный равенством колонок (и строки колонок составного ключа), пишется как проверка `IN` и там, где связанные подзапросы выполняются, — собственный `EXISTS` сервер не выполняет в `ON` соединения и над `UNION DISTINCT`; связанный не только равенствами там — собственный `EXISTS` сервера, а в остальных случаях даёт `UnSupportedError` | нет | нет | да |
@@ -202,6 +199,20 @@ connection.features.supports_nulls_distinct    # True у PostgreSQL 15 и нов
 хранения и [партиционирование](postgresql/indexes-and-tables.ru.md#partitioning) (хеш-, списочные и
 диапазонные партиции, которые добавляют и удаляют миграции) в PostgreSQL, — задаётся для каждой модели
 через [`Meta.table_options`](../models/meta-options.ru.md#table_options).
+
+### <a id="features-of-one-database"></a>Возможности одной базы
+
+Возможность, которая есть только у одной базы и которую читает только её диалект, — поле подкласса
+`Features` этого диалекта: `connection.features` соединения с ней — его экземпляр, а у диалекта другой
+базы такого поля нет.
+
+| Класс | Поле | Смысл | Значение |
+|---|---|---|---|
+| `SqliteFeatures` | `supports_unhex` | Функция SQL `unhex()` — длинный `__in` по байтам передаётся одним массивом JSON | с 3.41.0 |
+| `SqliteFeatures` | `supports_strict_tables` | `SqliteTableOptions(strict=True)` — таблицы `STRICT` | с 3.37 |
+| `SqliteFeatures` | `supports_spatial_index` | [`SpatialiteIndex`](search-and-geodata/gis.ru.md#spatial-index) — R*Tree SpatiaLite и пространственные операторы, сужаемые через него | с пространственными метаданными SpatiaLite |
+| `PostgresqlFeatures` | `supports_partitioned_exclusion_constraints` | Партиционированная таблица принимает ограничение-исключение | с 17 |
+| `ClickhouseFeatures` | `supports_json_type` | Значение JSON хранится собственным типом с типизированными путями — `JSONField` становится колонкой `JSON` | да (`String` через clickhouse-driver) |
 
 ## <a id="dialectregistry"></a>`DialectRegistry`
 

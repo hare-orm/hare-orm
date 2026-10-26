@@ -21,7 +21,9 @@ from hare.query.functions.window import (
     StdDev as WindowStdDev,
     Variance as WindowVariance,
 )
-from tests.shared_models.testmodels import ExpressionTypeRow, IntFields
+from tests.shared_models.testmodels import IntFields
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
+from tests.utils.integer_statistic import IntegerStatistic
 
 ROWS = (
     ("a", 3, 0.5, "1.25"),
@@ -66,6 +68,7 @@ def assert_close(got: Any, expected: float | None) -> None:
         assert math.isclose(float(got), expected, rel_tol=1e-9, abs_tol=1e-12), (got, expected)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @pytest.mark.parametrize("function, deviation", [(StdDev, True), (Variance, False)])
 @pytest.mark.parametrize("sample", [False, True])
@@ -76,17 +79,19 @@ async def test_statistic_aggregate_matches_python(db, function, deviation, sampl
     assert_close(result["value"], expected_statistic([row[position] for row in ROWS], sample, deviation))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_aggregate_result_types(db):
     await create_rows()
     result = await ExpressionTypeRow.objects.all().aggregate(
         of_int=StdDev("num"), of_float=Variance("fl"), of_decimal=Variance("dec", sample=True)
     )
-    assert type(result["of_int"]) is float
+    assert type(result["of_int"]) is IntegerStatistic.get_type(ExpressionTypeRow)
     assert type(result["of_float"]) is float
     assert type(result["of_decimal"]) is Decimal
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_aggregate_distinct_and_filter(db):
     await create_rows()
@@ -98,6 +103,7 @@ async def test_statistic_aggregate_distinct_and_filter(db):
     assert_close(result["filtered"], statistics.stdev([3, 5, 5]))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_aggregate_skips_nulls_and_needs_enough_values(db):
     await create_rows()
@@ -113,6 +119,7 @@ async def test_statistic_aggregate_skips_nulls_and_needs_enough_values(db):
     assert_close(result["one_row_population"], 0.0)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_aggregate_grouped(db):
     await create_rows()
@@ -125,6 +132,7 @@ async def test_statistic_aggregate_grouped(db):
         assert_close(grouped[group], expected_statistic([row[2] for row in ROWS if row[0] == group], True, True))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @pytest.mark.parametrize("function, deviation", [(WindowStdDev, True), (WindowVariance, False)])
 async def test_statistic_window_over_partition(db, function, deviation):
@@ -141,6 +149,7 @@ async def test_statistic_window_over_partition(db, function, deviation):
             assert_close(values[row.id], expected_statistic(group_values, sample, deviation))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_aggregate_computed_over_window(db):
     rows = await create_rows()
@@ -154,6 +163,7 @@ async def test_statistic_aggregate_computed_over_window(db):
     assert values[rows[5].id] is None
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_statistic_window_running(db):
     rows = await create_rows()
@@ -166,6 +176,7 @@ async def test_statistic_window_running(db):
         assert_close(values[row.id], statistics.pstdev([source[2] for source in ROWS[: position + 1]]))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_cume_dist_and_percent_rank(db):
     rows = await create_rows()
@@ -181,6 +192,7 @@ async def test_cume_dist_and_percent_rank(db):
         assert math.isclose(values[row.id][1], percent)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_percent_rank_of_one_row_partition_is_zero(db):
     rows = await create_rows()
@@ -192,6 +204,7 @@ async def test_percent_rank_of_one_row_partition_is_zero(db):
     assert values[rows[5].id] == 0.0
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_nth_value_over_whole_partition(db):
     rows = await create_rows()

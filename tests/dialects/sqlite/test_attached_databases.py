@@ -62,7 +62,7 @@ async def test_the_ddl_names_indexes_in_the_attached_database_and_references_its
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models", "SchemaCategory")._meta.connection
+        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
         schema_sql = connection.get_schema_sql(safe=False)
         assert 'CREATE TABLE "custom"."product"' in schema_sql
         assert 'CREATE INDEX "custom"."idx_product_categor_2b519b10056a" ON "product" ("category_id")' in schema_sql
@@ -80,7 +80,7 @@ async def test_the_migration_safety_check_counts_the_rows_of_the_attached_databa
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models", "SchemaCategory")._meta.connection
+        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
         await connection.execute_script("INSERT INTO \"custom\".\"category\" (id, name) VALUES (1, 'a'), (2, 'b')")
         await connection.execute_script('CREATE TABLE "main"."category" (id INTEGER PRIMARY KEY)')
         rules = connection.dialect.migration_safety_rules
@@ -94,9 +94,9 @@ async def test_a_constrained_relation_to_a_model_of_another_schema_is_refused(mo
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        product_model = ctx.apps.get_model("models", "SchemaProduct")
-        category_model = ctx.apps.get_model("models", "SchemaCategory")
-        tag_model = ctx.apps.get_model("models", "SchemaTag")
+        product_model = ctx.apps.get_model("models.SchemaProduct")
+        category_model = ctx.apps.get_model("models.SchemaCategory")
+        tag_model = ctx.apps.get_model("models.SchemaTag")
         monkeypatch.setattr(category_model._meta, "schema", "archive")
         monkeypatch.setattr(tag_model._meta, "schema", "archive")
         with pytest.raises(
@@ -168,7 +168,7 @@ async def test_inspectdb_reads_the_tables_of_an_attached_database_as_models_of_i
     async with hare_test_context(
         SCHEMA_MODULES, db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"])
     ) as ctx:
-        connection = ctx.apps.get_model("models", "SchemaCategory")._meta.connection
+        connection = ctx.apps.get_model("models.SchemaCategory")._meta.connection
         await connection.execute_script('CREATE TABLE "main"."category" (id INTEGER PRIMARY KEY)')
 
         source = await SchemaInspector.inspect(connection, schema="custom")

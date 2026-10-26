@@ -264,10 +264,10 @@ async for attempt in Transactions.atomic(isolation="serializable", retries=3):
   error to the outer transaction, which has to run again as a whole — its own `retries` does that.
 - Code in the block runs once per attempt: keep effects outside the database (a sent email, a call to a
   service) out of it, or in `on_commit()`.
-- `retries` is an int from `0` (the default — one run) to `100`; another value raises `QueryError`. A
-  plain `async with Transactions.atomic(retries=3):` raises `QueryError` when entered — a `with` block
-  can't run twice; use the `async for` form. A run of the `async for` form that isn't entered with
-  `async with attempt:` raises `QueryError` at the next one — nothing would ever end the loop.
+- `retries` is `0` by default — one run. A plain `async with Transactions.atomic(retries=3):` raises
+  `QueryError` when entered — a `with` block can't run twice; use the `async for` form. A run of the `async
+  for` form that isn't entered with `async with attempt:` raises `QueryError` at the next one — nothing would
+  ever end the loop.
 
 ## <a id="autonomous"></a>An independent connection: `autonomous()`
 

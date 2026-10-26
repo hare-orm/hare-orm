@@ -148,7 +148,7 @@ The report's `status` is its worst connection's.
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `timeout_seconds` | 2.0 | How long a ping waits — above 0, at most 60. |
+| `timeout_seconds` | 2.0 | How long a ping waits. |
 | `degraded_when` | `[WaitingRequests(at_least=1), PoolSaturation(ratio=0.9)]` | The criteria making a connection degraded — `[]` for never. |
 | `unhealthy_when` | `[PingFailed()]` | The criteria making a connection unhealthy. |
 | `criteria_by_connection` | none | Other criteria for some connections (`ConnectionCriteria`); a list it leaves None is the check's own. |
@@ -162,16 +162,14 @@ The report's `status` is its worst connection's.
   hold then.
 - Keep one `HealthCheck` object: the criteria counting "since the last check" compare with its previous
   run.
-- A number is checked for its range when the object is made — `ValueError` for one out of range; the
-  types of the arguments aren't checked.
 
 ### <a id="criteria"></a>Criteria
 
 | Criterion (`hare.health.criteria`) | Holds when |
 |---|---|
 | `PingFailed()` | the ping failed or didn't answer in time — or, with `check_direct`, the ping of the server past the pooler |
-| `PingLatency(max_ms)` | the ping took longer than `max_ms` (above 0, at most 60000) |
-| `PoolSaturation(ratio)` | a pool has at least `ratio` of its `max_size` in use (above 0, at most 1) |
+| `PingLatency(max_ms)` | the ping took longer than `max_ms` |
+| `PoolSaturation(ratio)` | a pool has at least `ratio` of its `max_size` in use |
 | `WaitingRequests(at_least)` | at least `at_least` tasks wait for a connection of a pool |
 | `AcquireWaitTime(max_seconds)` | a wait for a connection since the last check took longer than `max_seconds` — needs `PoolMetrics` enabled when the check is made, else `ConfigurationError` |
 | `AcquireTimeouts(at_least)` | at least `at_least` waits ran out since the last check |

@@ -119,7 +119,13 @@ class DbUrlConfigGenerator:
         Raises:
             ConfigurationError: If the URL is malformed or names an unknown scheme or parameter.
         """
-        driver = DialectRegistry.get_driver_for_url_scheme(db_url.partition("://")[0])
+        scheme, separator, _location = db_url.partition("://")
+        if not separator:
+            # Not shown: without its scheme the URL may begin with a user and a password.
+            raise ConfigurationError(
+                f"A DB_URL begins with its scheme - one of {DialectRegistry.get_url_schemes()} - got none"
+            )
+        driver = DialectRegistry.get_driver_for_url_scheme(scheme)
         if driver.url_has_userinfo:
             db_url = DbUrlConfigGenerator._quote_url_userinfo(db_url)
         try:

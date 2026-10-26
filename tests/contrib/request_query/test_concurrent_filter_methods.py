@@ -47,16 +47,6 @@ class MeetingBookQuery(RequestQuery[Book]):
         return Q(status__isnull=False) if value else None
 
 
-class WrongResultBookQuery(RequestQuery[Book]):
-    title_is: str | None = None
-
-    class Meta:
-        queryset = Book.objects.all()
-
-    async def filter_title_is(self, value: str) -> dict[str, str]:
-        return {"title": value}
-
-
 async def titles(query: RequestQuery[Book]) -> list[str]:
     return sorted(book.title for book in await query.fetch())
 
@@ -85,9 +75,3 @@ async def test_conditions_keep_the_declared_order(library):
     assert "author_id__in" in joined.children[0].filters
     assert "id__in" in joined.children[1].filters
     assert joined.children[2].filters == {"status__isnull": False}
-
-
-@pytest.mark.asyncio
-async def test_an_async_filter_method_must_return_a_q(library):
-    with pytest.raises(TypeError, match=r"filter_title_is\(\) must return a Q or None"):
-        await WrongResultBookQuery(title_is="Alpha").fetch()

@@ -274,7 +274,7 @@ The spatial metadata hare creates in a database without any, when a connection l
 (the default) — the WGS84 reference systems, longitude/latitude 4326 and its UTM zones, created in
 milliseconds; `full` — every EPSG reference system SpatiaLite knows, slower to create; `none` — no
 metadata. A database that already has metadata keeps its own. A geography (`Features.supports_geography`)
-and a spatial index (`Features.supports_spatial_index`) need it.
+and a spatial index (`SqliteFeatures.supports_spatial_index`) need it.
 
 `spatialite_path`, `spatialite_proj_database` and `spatialite_metadata` without `load_spatialite=true`
 raise `ConfigurationError`, as do a library that doesn't load and a `spatialite_metadata` other than the
@@ -288,7 +288,13 @@ spatial index of a Web Mercator (3857) column: create the database with `spatial
 the reference system to it (SpatiaLite's `InsertEpsgSrid()`), and connect again.
 
 - **Columns** are typed by the geometry type — `POINT`, `POLYGON`, `GEOMETRY`, with a `Z` for x/y/z
-  (`POINTZ`). SpatiaLite has no empty geometry: writing one raises `ValidationError`.
+  (`POINTZ`). SpatiaLite has no empty geometry: writing one raises `ValidationError`, and a function whose
+  result is empty (`Intersection()` of geometries apart, `Difference()` of one by a geometry covering it,
+  `Boundary()` of a point) reads as `None`.
+- **`Distance()`** of SpatiaLite 5.1 — and `__dwithin` and the distance lookups built on it — may give a
+  geometry lying inside a polygon the distance to the polygon's boundary instead of 0, once a polygon
+  with a hole was measured on the connection; hare doesn't work around it. Test such a geometry with
+  `__intersects` instead.
 - **A geography** is a longitude/latitude geometry measured on the ellipsoid: `Area`, `Length`,
   `Perimeter`, `Distance`, `__dwithin` and the distance lookups in square meters and meters, read through
   SpatiaLite's spatial metadata — with `spatialite_metadata=none` they raise `UnSupportedError`. The
@@ -359,7 +365,9 @@ class Store(Model):
 
 In a pydantic model generated from a model, a geometry field is a GeoJSON geometry: it accepts a GeoJSON
 mapping, WKT/EWKT, (E)WKB or a `Geometry`, serializes as the GeoJSON object, and its JSON schema
-describes a GeoJSON geometry. `inspectdb` reads a PostGIS column with a type and an SRID as the matching
+describes a GeoJSON geometry. It takes what a write takes: a geometry of another type, other dimensions
+or another SRID is refused (the GeoJSON it serializes to holds no SRID), and one without an SRID takes
+the field's. `inspectdb` reads a PostGIS column with a type and an SRID as the matching
 field (`geometry(PolygonZ,3857)` -> `PolygonField(srid=3857, dimensions=3)`); a `geography(Point,4326)`
 column stays the [`PostGISField`](../postgresql/fields.md#postgisfield) of a `(latitude, longitude)`
 tuple, and a column without a type and an SRID, or with measured coordinates, is an ambiguous

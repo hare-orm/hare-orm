@@ -98,8 +98,9 @@ class ChangeEvents:
     async def report_deletion(
         cls, client: DatabaseClient, model: type[Model], *, pks: Iterable[Any] | None = None, soft: bool = False
     ) -> None:
-        """Reports deleted rows and what their ``on_delete`` reaches: ``CASCADE`` rows deleted too
-        (soft deleted, for a soft delete of a model with ``Meta.soft_delete_field``),
+        """Reports deleted rows and what their ``on_delete`` reaches: ``CASCADE`` rows deleted too (a soft
+        delete soft-deletes those of a model with ``Meta.soft_delete_field`` and keeps the others, unless
+        ``Meta.soft_delete_hard_cascade`` deletes them),
         ``SET_NULL``/``SET_DEFAULT`` rows and the related rows of many-to-many links updated.
 
         Args:
@@ -116,17 +117,18 @@ class ChangeEvents:
         deletion = RowOperation.UPDATE if soft else RowOperation.DELETE
         soft_delete_fields = (model._meta.soft_delete_field,) if soft and model._meta.soft_delete_field else None
         events = [cls.build_event(client, model, deletion, pks, soft_delete_fields)]
-        reached_models = DeletionGraph.get_cascade_models(model)
-        for cascade_model in reached_models[1:]:
-            cascade_soft_delete_field = cascade_model._meta.soft_delete_field if soft else None
-            if cascade_soft_delete_field:
-                events.append(
-                    cls.build_event(client, cascade_model, RowOperation.UPDATE, None, (cascade_soft_delete_field,))
-                )
+        reached = (
+            DeletionGraph.get_soft_delete_cascade_models(model)
+            if soft_delete_fields
+            else [(cascade_model, False) for cascade_model in DeletionGraph.get_cascade_models(model)]
+        )
+        for cascade_model, is_soft in reached[1:]:
+            if is_soft:
+                soft_delete_field = cast("str", cascade_model._meta.soft_delete_field)
+                events.append(cls.build_event(client, cascade_model, RowOperation.UPDATE, None, (soft_delete_field,)))
             else:
-                # A soft delete really deletes the rows of a model without soft delete.
                 events.append(cls.build_event(client, cascade_model, RowOperation.DELETE, None, None))
-        for reached_model in reached_models:
+        for reached_model in dict.fromkeys(cascade_model for cascade_model, _is_soft in reached):
             for backward_field, foreign_key in DeletionGraph.get_backward_relations(reached_model):
                 if foreign_key.on_delete in {OnDelete.SET_NULL, OnDelete.SET_DEFAULT}:
                     events.append(

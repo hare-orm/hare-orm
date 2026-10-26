@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.node import Node, TNode
 

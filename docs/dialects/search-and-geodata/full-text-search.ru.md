@@ -135,7 +135,7 @@ SearchRank(vector, query, weights=None, normalization=None, cover_density=False)
 | `vector` | Ранжируемое поле, кортеж полей, `SearchVector` или (PostgreSQL) выражение tsvector — `TSVectorField` ранжируется как есть |
 | `query` | Текст поиска (`PLAIN`) или `SearchQuery` |
 | `weights` | Словарь весов полей — совпадение в более тяжёлом поле выше, у поля, которого нет в словаре, вес 1, каждый вес — конечное число от 0 до 1000000 (SQLite); или веса меток D, C, B, A PostgreSQL последовательностью из четырёх чисел или выражением — другая последовательность даёт `ConfigurationError` |
-| `normalization` | Битовая маска нормализации по длине текста — PostgreSQL; целое число или выражение, другое значение вызывает `ConfigurationError` |
+| `normalization` | Битовая маска нормализации по длине текста — PostgreSQL; 32-битное целое число или выражение, другое значение вызывает `ConfigurationError` |
 | `cover_density` | `TS_RANK_CD()` вместо `TS_RANK()` — PostgreSQL |
 
 В SQLite поля должны входить в один `FullTextIndex` модели, вес должен называть одно из его полей (иначе

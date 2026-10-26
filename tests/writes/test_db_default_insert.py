@@ -25,7 +25,8 @@ from hare.exceptions import (
 )
 from hare.fields.database_default import DatabaseDefault
 from hare.time import UTC
-from tests.shared_models.testmodels import DefaultModel, NoFetchDefaultModel, SqlDefaultModel
+from tests.shared_models.testmodels import NoFetchDefaultModel, SqlDefaultModel
+from tests.shared_models.testmodels_postgres import DefaultModel
 from tests.utils.timezone_context import override_timezone
 
 
@@ -70,6 +71,7 @@ class TestGetDbDefaultValue:
 
 
 class TestModelInitDbDefault:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_init_sets_database_default(self, db):
 
@@ -79,6 +81,7 @@ class TestModelInitDbDefault:
         assert isinstance(instance.bool_default, DatabaseDefault)
         assert isinstance(instance.float_default, DatabaseDefault)
 
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_init_with_explicit_value(self, db):
 
@@ -88,6 +91,7 @@ class TestModelInitDbDefault:
 
 
 class TestConstructWithDbDefault:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_construct_sets_database_default(self, db):
 
@@ -97,6 +101,7 @@ class TestConstructWithDbDefault:
 
 
 class TestCreateWithDbDefault:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_create_no_args_applies_db_defaults_and_persists(self, db):
 
@@ -113,6 +118,7 @@ class TestCreateWithDbDefault:
         assert refreshed.bool_default is True
         assert refreshed.float_default == 1.5
 
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_create_with_partial_override(self, db):
 
@@ -125,6 +131,7 @@ class TestCreateWithDbDefault:
         assert instance2.int_default == 42
         assert instance2.char_default == "hare"
 
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_create_all_explicit_values(self, db):
         """When all values are provided, cached query path is used (no DEFAULT keyword)."""
@@ -144,6 +151,7 @@ class TestCreateWithDbDefault:
 
 
 class TestBulkCreateWithDbDefault:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_bulk_create_all_defaults(self, db):
 
@@ -155,6 +163,7 @@ class TestBulkCreateWithDbDefault:
             assert inst.int_default == 1
             assert inst.char_default == "hare"
 
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_bulk_create_all_explicit_values(self, db):
         """When all instances provide explicit values for a db_default field, column is included."""
@@ -166,6 +175,7 @@ class TestBulkCreateWithDbDefault:
         assert all_inst[0].int_default == 99
         assert all_inst[1].int_default == 77
 
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_bulk_create_mixed_raises(self, db):
         """Mixed usage (some default, some explicit) for same field raises OperationalError."""
@@ -198,6 +208,7 @@ class TestBulkCreateWithDbDefault:
 
 
 class TestSaveUpdateWithDbDefault:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_update_skips_database_default_fields(self, db):
 
@@ -325,6 +336,7 @@ class TestNowDbDefaultTimezone:
 
 
 class TestMetaInfo:
+    @pytest.mark.postgresql_models
     @pytest.mark.asyncio
     async def test_db_default_meta_attributes(self, db):
         meta = DefaultModel._meta
@@ -353,6 +365,7 @@ class TestPydanticDbDefault:
         assert pydantic_instance.int_val == 1
         assert pydantic_instance.char_val == "test"
 
+    @pytest.mark.postgresql_models
     @pytest.mark.database_independent
     def test_db_default_only_field_not_required_in_schema(self):
         """A field with only a db_default (no plain ``default``, not null, not generated) is

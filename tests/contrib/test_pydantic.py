@@ -43,10 +43,10 @@ from tests.shared_models.testmodels import (
     Tournament,
     User,
     UUIDFields,
-    ValidatorModel,
     VersionedDocument,
     json_pydantic_default,
 )
+from tests.shared_models.testmodels_postgres import ValidatorModel
 
 
 # Fixtures for TestPydantic
@@ -1620,7 +1620,8 @@ def test_geometry_field_is_a_geo_json_geometry():
     ModelPydantic = pydantic_model_creator(GeometryFieldPydanticModel, name="GeometryFieldPydanticModel")
 
     model = ModelPydantic.model_validate({"id": 1, "location": {"type": "Point", "coordinates": [1, 2]}})
-    assert model.location == Point(1, 2)
+    # A GeoJSON geometry has no SRID - it takes the field's, as the field reads it.
+    assert model.location == Point(1, 2, srid=4326)
     assert ModelPydantic.model_validate({"id": 1, "location": "SRID=4326;POINT(1 2)"}).location == Point(
         1, 2, srid=4326
     )
@@ -1629,6 +1630,11 @@ def test_geometry_field_is_a_geo_json_geometry():
     with pytest.raises(ValidationError):
         ModelPydantic.model_validate({"id": 1, "location": "POINT(1)"})
     assert isinstance(Polygon.get_validated_geometry("POLYGON((0 0,1 0,1 1,0 0))"), Polygon)
+    # The schema takes what a write takes: another SRID was taken and dumped without it - written as the
+    # column's own, its coordinates read in another reference system; another type and other dimensions too.
+    for refused in ("SRID=3857;POINT(1 2)", "POLYGON((0 0,1 0,1 1,0 0))", "POINT Z (1 2 3)"):
+        with pytest.raises(ValidationError):
+            ModelPydantic.model_validate({"id": 1, "location": refused})
 
 
 # Fixtures for TestPydanticCycle
@@ -2922,6 +2928,7 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
         assert "double_name" in schema.model_computed_fields
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_orm_field_validators_enforced_in_generated_schema():
     """Field(validators=[...]) is an ORM-level rule Model.save() enforces via Field.validate() -
@@ -2943,6 +2950,7 @@ def test_orm_field_validators_enforced_in_generated_schema():
     assert ValidatorModel_Create.model_validate({"max_length": "abc"}).max_length == "abc"
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_orm_field_validators_combine_with_caller_supplied_validators():
     """The auto-generated Field.validate()-backed validator and a caller-supplied validators=

@@ -14,6 +14,7 @@ from hare.time.constants import DEFAULT_TIMEZONE
 
 if TYPE_CHECKING:
     from hare.core.apps import Apps
+    from hare.core.apps.declarations import ModelReference
     from hare.models import Model
 
 
@@ -148,7 +149,7 @@ class Hare(metaclass=HareMeta):
         cls.get_context().register_live_models(models, app_label, connection_alias, managed=managed)
 
     @classmethod
-    def unregister_live_models(cls, models: Iterable[type[Model]]) -> None:
+    def unregister_live_models(cls, models: Iterable[ModelReference]) -> None:
         """See ``HareContext.unregister_live_models()``.
 
         Raises:

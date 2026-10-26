@@ -6,6 +6,7 @@ from hare.classes.class_path import ClassPath
 from hare.fields.field import Field
 from hare.query.plans.description.plannable import Plannable
 from hare.query.query_connection import QueryConnection
+from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.query.statements.awaitable_query import AwaitableQuery
@@ -108,6 +109,30 @@ class Expression(Plannable, abstract=True):
         if self.value_field is not None:
             return self.value_field
         return result.output_field
+
+    def get_result_literals(self) -> list[Any]:
+        """The literals the expression's value may be - none by default: the database computes it.
+
+        Returns:
+            The literals.
+        """
+        return []
+
+    @staticmethod
+    def get_literals_of(value: Any) -> list[Any]:
+        """The literals a value given to an expression may be - a bare value itself, an expression's
+        ``get_result_literals()``.
+
+        Args:
+            value: An argument, a branch.
+
+        Returns:
+            The literals.
+        """
+        if isinstance(value, Expression):
+            return value.get_result_literals()
+        # A SQL term is the database's to compute.
+        return [] if isinstance(value, Term) else [value]
 
     @staticmethod
     def _get_wrapped_query(wrapped_query: AwaitableQuery[Any], expression_context: ExpressionContext) -> Any:

@@ -45,7 +45,6 @@ from tests.shared_models.testmodels import (
     Currency,
     DateFields,
     DatetimeFields,
-    DecimalFields,
     EnumFields,
     FloatFields,
     IntFields,
@@ -55,6 +54,7 @@ from tests.shared_models.testmodels import (
     TimeDeltaFields,
     UUIDFields,
 )
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 _hydrate_candidate = pytest.importorskip("rust.native.rows")
 # rust/ has no __init__.py anywhere (a deliberate PEP 420 namespace package, see
@@ -215,6 +215,7 @@ def test_int_field_type_conversion_failure_error_parity():
         _restore_field(IntFields, "intnum", original_field)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_decimal_field_type_conversion_failure_error_parity():
     # DecimalField overrides to_db_value (to quantize a value before validating - see its own
@@ -262,6 +263,7 @@ def test_none_on_nullable_field_returns_none_both_paths():
     assert rust_rows == [[1, None]]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_decimal_field_max_digits_validator_is_bucket_2_and_matches():
     # DecimalField overrides to_db_value (to quantize a value before validating), which
@@ -286,6 +288,7 @@ def test_decimal_field_max_digits_validator_is_bucket_2_and_matches():
     assert str(rust_exc.value) == str(python_exc.value)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_decimal_bounded_validator_excluded_from_bucket_0():
     # A Decimal-valued Min/MaxValueValidator must never be inlined (f64 precision risk on

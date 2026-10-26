@@ -124,7 +124,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
         if duplicate_names:
             raise QueryError(
                 f"raw() query returns the column(s) {duplicate_names} more than once - alias the "
-                "extra ones (e.g. SELECT b.*, a.id AS author_pk ...), each column name must be unique."
+                "extra ones (a.id AS author_pk), each column name must be unique."
             )
         meta = self.model._meta
         layout = meta.get_hydration_layout(self._connection)

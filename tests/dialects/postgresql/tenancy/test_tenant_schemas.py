@@ -236,7 +236,7 @@ from hare.migrations import operations as ops
 
 
 async def seed_notes(apps, schema_editor):
-    note_model = apps.get_model("models", "TenantNote")
+    note_model = apps.get_model("models.TenantNote")
     await note_model.objects.create(id=1, text="seeded")
 
 
@@ -353,7 +353,7 @@ FAILING_SCHEMAS = {"tenant_beta"}
 
 
 async def seed_or_fail(apps, schema_editor):
-    note_model = apps.get_model("models", "TenantNote")
+    note_model = apps.get_model("models.TenantNote")
     if schema_editor.client.tenant_schema in FAILING_SCHEMAS:
         raise ValueError("this tenant's data can't be seeded")
     await note_model.objects.create(id=2, text="second")

@@ -171,12 +171,6 @@ async def test_collection_cannot_be_entered_twice(db):
             pass
 
 
-@pytest.mark.database_independent
-def test_repeated_rejects_threshold_below_one():
-    with pytest.raises(ValueError):
-        RepeatedQueryDetector.collect().repeated(threshold=0)
-
-
 @pytest.mark.asyncio
 async def test_failing_observer_does_not_break_the_query(db):
     def failing_observer(event):

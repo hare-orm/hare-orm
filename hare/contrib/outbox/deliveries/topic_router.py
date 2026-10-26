@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.exceptions import DeliveryError
-from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -24,9 +23,6 @@ class TopicRouter(OutboxDelivery):
         routes: The delivery of each topic or pattern - an ``OutboxDelivery`` or an async function of
             the event.
         default: The delivery of a topic no route names.
-
-    Raises:
-        ConfigurationError: An empty or non-text route, or a delivery that is neither.
     """
 
     def __init__(
@@ -35,13 +31,9 @@ class TopicRouter(OutboxDelivery):
         *,
         default: OutboxDelivery | Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
-        if not isinstance(routes, Mapping):
-            raise ConfigurationError(f"routes must map topics to deliveries, got {routes!r}")
-        self.routes: dict[str, OutboxDelivery] = {}
-        for pattern, delivery in routes.items():
-            if not isinstance(pattern, str) or not pattern:
-                raise ConfigurationError(f"a route must be a non-empty topic or pattern, got {pattern!r}")
-            self.routes[pattern] = CallableDelivery.of(delivery)
+        self.routes: dict[str, OutboxDelivery] = {
+            pattern: CallableDelivery.of(delivery) for pattern, delivery in routes.items()
+        }
         self.default = CallableDelivery.of(default) if default is not None else None
 
     def get_delivery(self, topic: str) -> OutboxDelivery:

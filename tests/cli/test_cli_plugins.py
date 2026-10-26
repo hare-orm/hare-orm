@@ -61,10 +61,6 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
 
         async def run(self, ctx, args):
             print("never")
-
-
-    class NotACommand:
-        name = "plain"
     """
 )
 
@@ -186,7 +182,6 @@ async def test_name_conflicts_are_warned_about_and_the_later_command_skipped(tmp
     ("entry_point_value", "expected_warning"),
     [
         ("cli_plugin_missing_module:Anything", "ModuleNotFoundError"),
-        ("cli_plugin_commands:NotACommand", "is not a CLICommand subclass"),
         ("cli_plugin_commands:NoSuchClass", "AttributeError"),
     ],
 )

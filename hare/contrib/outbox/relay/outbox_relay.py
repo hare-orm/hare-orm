@@ -11,7 +11,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.contrib.outbox.constants import MAX_INTERVAL_SECONDS, OUTBOX_KEY_MAX_LENGTH
+from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
 from hare.contrib.outbox.exceptions import DeliveryError
 from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -28,18 +28,16 @@ from hare.contrib.outbox.relay.constants import (
     LAST_ERROR_MAX_LENGTH,
     LEASE_RENEWALS_PER_LEASE,
     MAX_BATCH_SIZE,
-    MAX_CONCURRENCY,
-    MAX_DELIVERY_ATTEMPTS_LIMIT,
     MAX_RETRY_DELAY_EXPONENT,
     RETRY_JITTER_RATIO,
 )
 from hare.contrib.outbox.relay.declarations import OutboxDeadLettered, OutboxDelivered, OutboxDeliveryFailed
 from hare.contrib.outbox.relay.outbox_backlog import OutboxBacklog
 from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.core.log import logger
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.instrumentation.observers.observers import Observers
-from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.expressions import Exists, OuterReference, Q
 from hare.time import Timezone
 
@@ -49,6 +47,7 @@ if TYPE_CHECKING:
 
     from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
     from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+    from hare.fields.relations.swappable_model_reference import SwappableModelReference
     from hare.query.queryset import QuerySet
 
 TOutboxEvent = TypeVar("TOutboxEvent", bound=OutboxEvent)
@@ -75,24 +74,26 @@ class OutboxRelay(Generic[TOutboxEvent]):
     ``stop()`` or use ``async with``.
 
     Args:
-        model: The ``OutboxEvent`` subclass.
+        model: The ``OutboxEvent`` subclass - its class, its ``"app.Model"`` label or a ``swappable()``
+            setting; a label is looked up in the current context when the relay first needs the model.
         delivery: An ``OutboxDelivery``, or an async function of the event - raising fails it.
-        poll_interval_seconds: The delay between polls without a signal, in ``(0, 86400]``.
+        poll_interval_seconds: The delay between polls without a signal.
         batch_size: The most events claimed per poll, in ``1..10000``.
-        max_delivery_attempts: The attempts before an event is dead-lettered, in ``1..10000``.
-        retry_base_seconds: The pause after the first failure, in ``[0, 86400]``.
-        retry_max_seconds: The longest pause, in ``[retry_base_seconds, 86400]``.
-        lease_seconds: How long a claimed batch belongs to this relay, in ``(0, 86400]`` - longer
-            than ``delivery_timeout_seconds``.
+        max_delivery_attempts: The attempts before an event is dead-lettered.
+        retry_base_seconds: The pause after the first failure.
+        retry_max_seconds: The longest pause.
+        lease_seconds: How long a claimed batch belongs to this relay - longer than
+            ``delivery_timeout_seconds``, else a lease running out mid-delivery lets another relay
+            deliver the event too.
         delivery_timeout_seconds: The longest the delivery of an event (of a batch, for a delivery
-            sending batches) may take, in ``(0, 86400]``.
-        concurrency: The most events delivered at a time, in ``1..1000``.
+            sending batches) may take.
+        concurrency: The most events delivered at a time.
         topics: The topics of the events the relay delivers and cleans up - every event when None.
         wakeup: The wakeup the relay subscribes to - the model's ``Meta.outbox_wakeup`` when None.
         name: The relay's name in ``leased_by`` - host, process and a random part by default.
 
     Raises:
-        ConfigurationError: An option has the wrong type or is out of range.
+        ConfigurationError: ``batch_size`` is out of range.
     """
 
     #: The random spread of the retry pauses.
@@ -100,7 +101,7 @@ class OutboxRelay(Generic[TOutboxEvent]):
 
     def __init__(
         self,
-        model: type[TOutboxEvent],
+        model: type[TOutboxEvent] | str | SwappableModelReference,
         delivery: OutboxDelivery | Callable[[TOutboxEvent], Awaitable[None]],
         *,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
@@ -115,34 +116,10 @@ class OutboxRelay(Generic[TOutboxEvent]):
         wakeup: OutboxWakeup | None = None,
         name: str | None = None,
     ) -> None:
-        self.check_seconds("poll_interval_seconds", poll_interval_seconds, allow_zero=False)
         self.check_count("batch_size", batch_size, MAX_BATCH_SIZE)
-        self.check_count("max_delivery_attempts", max_delivery_attempts, MAX_DELIVERY_ATTEMPTS_LIMIT)
-        self.check_seconds("retry_base_seconds", retry_base_seconds, allow_zero=True)
-        self.check_seconds("retry_max_seconds", retry_max_seconds, allow_zero=True)
-        if retry_max_seconds < retry_base_seconds:
-            raise ConfigurationError(
-                f"retry_max_seconds ({retry_max_seconds!r}) must be at least retry_base_seconds "
-                f"({retry_base_seconds!r})"
-            )
-        self.check_seconds("lease_seconds", lease_seconds, allow_zero=False)
-        self.check_seconds("delivery_timeout_seconds", delivery_timeout_seconds, allow_zero=False)
-        if delivery_timeout_seconds >= lease_seconds:
-            raise ConfigurationError(
-                f"delivery_timeout_seconds ({delivery_timeout_seconds!r}) must be shorter than lease_seconds "
-                f"({lease_seconds!r}) - a lease running out mid-delivery lets another relay deliver the event too"
-            )
-        self.check_count("concurrency", concurrency, MAX_CONCURRENCY)
-        if topics is not None and (
-            isinstance(topics, str)
-            or not isinstance(topics, Sequence)
-            or not topics
-            or not all(isinstance(topic, str) and topic for topic in topics)
-        ):
-            raise ConfigurationError(f"topics must be None or a non-empty sequence of topic names, got {topics!r}")
-        if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= OUTBOX_KEY_MAX_LENGTH):
-            raise ConfigurationError(f"name must be None or a string of 1..{OUTBOX_KEY_MAX_LENGTH} characters")
-        self.model = model
+        #: The model as it was given - a label is looked up on first use.
+        self.model_reference = model
+        self._model: type[TOutboxEvent] | None = model if isinstance(model, type) else None
         self.delivery = CallableDelivery.of(delivery)
         self.poll_interval_seconds = poll_interval_seconds
         self.batch_size = batch_size
@@ -153,30 +130,28 @@ class OutboxRelay(Generic[TOutboxEvent]):
         self.delivery_timeout_seconds = delivery_timeout_seconds
         self.concurrency = concurrency
         self.topics = tuple(topics) if topics is not None else None
-        self.wakeup = wakeup if wakeup is not None else model.get_wakeup()
+        self._wakeup = wakeup
         self.name = name or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"[:OUTBOX_KEY_MAX_LENGTH]
         self.task: asyncio.Task[None] | None = None
         self.stopping = False
         #: Set by a wakeup signal - the loop polls at once instead of waiting out the interval.
         self.woken = asyncio.Event()
 
-    @staticmethod
-    def check_seconds(option_name: str, value: Any, *, allow_zero: bool) -> None:
-        """Checks a duration option.
+    @property
+    def model(self) -> type[TOutboxEvent]:
+        """The ``OutboxEvent`` subclass - a label given looked up in the current context once.
 
         Raises:
-            ConfigurationError: It isn't a finite number in range.
+            ConfigurationError: The label names no model of the current context.
         """
-        if (
-            not FiniteNumbers.is_finite_number(value)
-            or not (value >= 0 if allow_zero else value > 0)
-            or (value > MAX_INTERVAL_SECONDS)
-        ):
-            bound = ">= 0" if allow_zero else "> 0"
-            raise ConfigurationError(
-                f"{option_name} must be a number {bound} and <= {MAX_INTERVAL_SECONDS}, got "
-                f"{ValueDescriptions.get_shown_value(value)}"
-            )
+        if self._model is None:
+            self._model = cast("type[TOutboxEvent]", HareContext.require_current().get_model(self.model_reference))
+        return self._model
+
+    @property
+    def wakeup(self) -> OutboxWakeup | None:
+        """The wakeup the relay subscribes to - the model's ``Meta.outbox_wakeup`` when none was given."""
+        return self._wakeup if self._wakeup is not None else self.model.get_wakeup()
 
     @staticmethod
     def check_count(option_name: str, value: Any, maximum: int) -> None:

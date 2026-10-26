@@ -41,7 +41,7 @@ class InstanceCapture:
 
     @staticmethod
     async def get_values(
-        obj: Model, connection: DatabaseClient, capture_needs: CaptureNeeds
+        obj: Model, connection: DatabaseClient, capture_needs: CaptureNeeds, *, wrote_every_field: bool = True
     ) -> tuple[dict[str, Any] | None, Any]:
         """The captured fields of an obj as its row holds them now, and its tenant.
 
@@ -49,13 +49,15 @@ class InstanceCapture:
             obj: The obj.
             connection: The connection - the write's transaction.
             capture_needs: The model's needs.
+            wrote_every_field: Whether the write wrote every captured field - else the obj may hold
+                others the row no longer does, and they are read from the row.
 
         Returns:
             The values - None when the payload holds none - and the tenant.
         """
         if not capture_needs.reads_values:
             return None, ChangeCapturing.get_tenant(obj, capture_needs)
-        values = ChangeCapturing.get_instance_values(obj, capture_needs)
+        values = ChangeCapturing.get_instance_values(obj, capture_needs) if wrote_every_field else None
         if values is not None:
             return values, ChangeCapturing.get_tenant(obj, capture_needs)
         values_by_pk = await ChangeCapturing.read_values(type(obj), connection, [obj.pk], capture_needs)
@@ -126,10 +128,14 @@ class InstanceCapture:
         else:
             changed = None
         captured = CapturedWrite(model, capture_needs, writer.connection, RowOperation.UPDATE, changed=changed)
+        # A write of some of the fields leaves the others as the row holds them, which a stale obj doesn't.
+        wrote_every_field = update_fields is None or set(capture_needs.field_names) - set(
+            model._meta.primary_key_attribute_names
+        ) <= set(update_fields)
         async with captured.transaction() as connection:
             before = None
             if capture_needs.reads_before:
-                before = InstanceCapture.get_snapshot_values(obj, capture_needs)
+                before = InstanceCapture.get_snapshot_values(obj, capture_needs) if wrote_every_field else None
                 if before is None:
                     before = (await captured.read_before([obj.pk])).get(obj.pk)
             rows = await InstanceCapture.get_capturing_writer(writer, connection).execute_update(
@@ -141,7 +147,9 @@ class InstanceCapture:
             )
             # A count the database doesn't report may be of the changed row.
             if rows or (rows is None and not connection.features.reports_written_row_count):
-                after, tenant = await InstanceCapture.get_values(obj, connection, capture_needs)
+                after, tenant = await InstanceCapture.get_values(
+                    obj, connection, capture_needs, wrote_every_field=wrote_every_field
+                )
                 await captured.capture_values([(obj.pk, before, after, tenant)])
         return rows
 

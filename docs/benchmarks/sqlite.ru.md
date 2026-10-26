@@ -64,14 +64,14 @@ hare-orm против SQLAlchemy, tortoise-orm, yara-orm и Django на SQLite: 
 
 | | |
 |---|---|
-| Дата | 2026-10-19 |
+| Дата | 2026-10-26 |
 | Машина | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| Коммит hare-orm | `07215c80` |
+| Релиз hare-orm | 0.10.0 |
 | Прогонов | 3, медиана |
 | SQLite | 3.50.4 |
 | aiosqlite | 0.22.1 |
-| hare-orm | 0.9.0 |
+| hare-orm | 0.10.0 |
 | SQLAlchemy | 2.1.1 |
 | tortoise-orm | 1.1.8 |
 | yara-orm | 1.17.0 |
@@ -111,6 +111,7 @@ hare-orm против SQLAlchemy, tortoise-orm, yara-orm и Django на SQLite: 
   новых версиях её асинхронный драйвер не запускается.
 - Каждый сценарий написан так, как его пишет документация этой ORM.
 
-Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) в
-репозитории; в его [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.ru.md)
-перечислены все сценарии и описано, как повторить замер на своей машине.
+Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py)
+в репозитории; в его
+[README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.ru.md) перечислены все
+сценарии и описано, как повторить замер на своей машине.

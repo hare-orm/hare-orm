@@ -6,6 +6,8 @@ import pytest
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.ddl.constraints import UniqueConstraint
+from hare.ddl.indexes.index import Index
+from hare.exceptions import HareError
 from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb import SchemaIntrospector
@@ -74,6 +76,85 @@ async def test_partitions_are_left_out_of_the_table_list(connection):
     # A partition named explicitly is still inspected.
     [partition_info] = await DatabaseCatalog.inspect_tables(connection, ["inspect_partitioned_2024"])
     assert [column.name for column in partition_info.columns] == ["id", "created"]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_partitioning_no_model_declares_is_flagged(connection):
+    """A key over an expression and a partition partitioned itself were left out silently - the model came back
+    unpartitioned without a word."""
+    await connection.execute_script(
+        "CREATE TABLE inspect_expression_parts (id int NOT NULL, ts timestamptz NOT NULL) "
+        "PARTITION BY RANGE (date_trunc('month', ts AT TIME ZONE 'UTC')); "
+        "CREATE TABLE inspect_expression_parts_default PARTITION OF inspect_expression_parts DEFAULT; "
+        "CREATE TABLE inspect_nested_parts (id int NOT NULL, region text NOT NULL, d date NOT NULL) "
+        "PARTITION BY LIST (region); "
+        "CREATE TABLE inspect_nested_parts_eu PARTITION OF inspect_nested_parts FOR VALUES IN ('eu') "
+        "PARTITION BY RANGE (d); "
+        "CREATE TABLE inspect_nested_parts_eu_2024 PARTITION OF inspect_nested_parts_eu "
+        "FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"
+    )
+
+    expression_source = await generated_source(connection, "inspect_expression_parts")
+    nested_source = await generated_source(connection, "inspect_nested_parts")
+
+    assert '# TODO: the table is partitioned as "PARTITION BY RANGE (date_trunc(' in expression_source
+    assert "partitioned partitions inspect_nested_parts_eu" in nested_source
+    [expression_table] = await DatabaseCatalog.inspect_tables(connection, ["inspect_expression_parts"])
+    assert expression_table.unparsed_partitioning is not None
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_partitioning_no_model_declares_is_drift(db_isolated_no_schema):
+    """A table partitioned by an expression matched an unpartitioned model - drift saw no difference."""
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    reading = build_model(
+        "Reading",
+        "inspect_expression_drift",
+        {"id": IntField(), "value": IntField()},
+        {"primary_key": None},
+    )
+    await round_trip.migrate_to(reading)
+    assert (await detect_drift(round_trip.connection, build_live_state(reading), [APP_LABEL])).operations == []
+    await round_trip.connection.execute_script(
+        "DROP TABLE inspect_expression_drift; "
+        "CREATE TABLE inspect_expression_drift (id int NOT NULL, value int NOT NULL) PARTITION BY RANGE ((id % 10)); "
+        "CREATE TABLE inspect_expression_drift_default PARTITION OF inspect_expression_drift DEFAULT"
+    )
+
+    operations = (await detect_drift(round_trip.connection, build_live_state(reading), [APP_LABEL])).operations
+
+    assert [type(operation).__name__ for operation in operations] == ["AlterModelOptions"]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_an_invalid_index_is_flagged_and_drift(db_isolated_no_schema):
+    """A unique index whose concurrent build failed is kept INVALID - it enforces nothing, yet drift matched it
+    with the declared index and inspectdb rendered it as a working one."""
+    round_trip = RoundTrip(db_isolated_no_schema.get_connection())
+    loan = build_model("Loan", "inspect_invalid_index", {"status": CharField(max_length=10)})
+    await round_trip.migrate_to(loan)
+    await round_trip.connection.execute_script(
+        "INSERT INTO inspect_invalid_index (id, status) VALUES (1, 'a'), (2, 'a')"
+    )
+    with pytest.raises(HareError):
+        await round_trip.connection.execute_script(
+            "CREATE UNIQUE INDEX CONCURRENTLY inspect_invalid_status ON inspect_invalid_index (status)"
+        )
+    indexed_loan = build_model(
+        "Loan",
+        "inspect_invalid_index",
+        {"status": CharField(max_length=10)},
+        {"indexes": [Index(fields=["status"], name="inspect_invalid_status", unique=True)]},
+    )
+
+    operations = (await detect_drift(round_trip.connection, build_live_state(indexed_loan), [APP_LABEL])).operations
+    source = await generated_source(round_trip.connection, "inspect_invalid_index")
+
+    assert [type(operation).__name__ for operation in operations] == ["RemoveIndex", "AddIndex"]
+    assert "# TODO: index 'inspect_invalid_status' is invalid in the database" in source
 
 
 @requires_features(dialect="postgresql")
@@ -206,6 +287,108 @@ async def test_a_column_of_a_type_no_field_writes_is_flagged(connection):
     assert f"# TODO: the column is {column_type!r}, the field writes {written_type!r}" in source
 
 
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_a_boolean_default_of_an_integer_is_a_bool(connection):
+    """A BOOLEAN DEFAULT 1 came back as db_default=1, which the field refuses - drift failed on it instead of
+    reporting the column's type."""
+    await connection.execute_script(
+        "CREATE TABLE inspect_flags (id INTEGER PRIMARY KEY, on_flag BOOLEAN DEFAULT 1, off_flag BOOLEAN DEFAULT 0)"
+    )
+
+    source = await generated_source(connection, "inspect_flags")
+
+    assert "on_flag = fields.BooleanField(null=True, db_default=True)" in source
+    assert "off_flag = fields.BooleanField(null=True, db_default=False)" in source
+
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_a_quoted_default_is_the_value_the_field_reads(connection):
+    """A quoted default came back as its text, which the field refuses - drift failed on it."""
+    await connection.execute_script(
+        "CREATE TABLE inspect_quoted (id INTEGER PRIMARY KEY, flag BOOLEAN DEFAULT 't', count INT DEFAULT '7')"
+    )
+
+    source = await generated_source(connection, "inspect_quoted")
+
+    assert "flag = fields.BooleanField(null=True, db_default=True)" in source
+    assert "count = fields.IntField(null=True, db_default=7)" in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_default_no_value_of_the_field_holds_is_its_sql(connection):
+    """'NaN' of a float, 'infinity' of a date and '1 day' of an interval came back as text the field refuses -
+    drift failed on them instead of comparing the columns."""
+    await connection.execute_script(
+        "CREATE TABLE inspect_special_defaults (id serial PRIMARY KEY, ratio double precision DEFAULT 'NaN', "
+        "until date DEFAULT 'infinity', wait interval DEFAULT '1 day', nothing jsonb DEFAULT 'null')"
+    )
+
+    source = await generated_source(connection, "inspect_special_defaults")
+
+    # A JSON null as a value would be None - no default at all.
+    for expected in (
+        "SqlDefault(\"'NaN'\")",
+        "SqlDefault(\"'infinity'\")",
+        "SqlDefault(\"'1 day'\")",
+        "SqlDefault(\"'null'\")",
+    ):
+        assert expected in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_default_holding_a_backslash_is_its_sql_as_the_database_reads_it(connection):
+    """The text of a default the field takes no value of was quoted by hand - a backslash in it was written
+    into a plain literal, which a server without standard_conforming_strings reads as an escape."""
+    await connection.execute_script(
+        "CREATE TABLE inspect_escaped_defaults (id serial PRIMARY KEY, wait interval DEFAULT '1 day', "
+        "data bytea DEFAULT '\\x0102')"
+    )
+
+    source = await generated_source(connection, "inspect_escaped_defaults")
+
+    assert "SqlDefault(\"'1 day'\")" in source
+    assert r"""data = fields.BinaryField(null=True, db_default=SqlDefault("E'\\\\x0102'"))""" in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_the_sequence_of_a_column_of_a_composite_key_is_kept(connection):
+    """A SERIAL column of a composite primary key lost its default and its sequence - taken for a generated
+    key, which takes its own: drift reported the column, a create() left it None."""
+    await connection.execute_script("CREATE TABLE inspect_serial_composite (id serial, at int, PRIMARY KEY (id, at))")
+
+    source = await generated_source(connection, "inspect_serial_composite")
+
+    assert "db_default=SqlDefault(\"nextval('inspect_serial_composite_id_seq'::regclass)\")" in source
+    assert "DatabaseSequence(name='inspect_serial_composite_id_seq'" in source
+    assert "owned_by='id'" in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_sequence_no_column_owns_is_kept_by_the_table_taking_a_default_from_it(connection):
+    """A sequence no column owns, which a column's default reads, was named in the note of sequences no column
+    reads - the model's migration failed on the missing sequence."""
+    await connection.execute_script(
+        "CREATE SEQUENCE inspect_standalone_seq START 10; "
+        "CREATE TABLE inspect_standalone_user (id int PRIMARY KEY, "
+        "n bigint DEFAULT nextval('inspect_standalone_seq'))"
+    )
+
+    source = await generated_source(connection, "inspect_standalone_user")
+
+    assert "db_default=SqlDefault(\"nextval('inspect_standalone_seq'::regclass)\")" in source
+    assert "DatabaseSequence(name='inspect_standalone_seq', start=10)" in source
+    unattached_sequences, _functions, _grants = await DatabaseCatalog.get_unattached_schema_objects(
+        connection, DatabaseUnderTest.get_public_schema()
+    )
+    assert "inspect_standalone_seq" not in [sequence.name for sequence in unattached_sequences]
+
+
 @pytest.mark.asyncio
 async def test_set_null_on_a_not_null_column_is_rendered_as_no_action(connection):
     """inspectdb wrote ForeignKeyField(on_delete=SET_NULL) of a NOT NULL column - the model refused
@@ -252,3 +435,25 @@ async def test_an_array_default_is_a_list(connection):
 
     for expected in ("db_default=[]", "db_default=[1, 2]", "db_default=['a b', None]", "db_default=[[1, 2], [3, 4]]"):
         assert expected in source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_sequence_no_column_owns_read_by_two_tables_is_declared_once(connection):
+    """A sequence no column owns, whose values columns of two tables take by default, was declared in the
+    Meta.sequences of both models - their migrations created it twice."""
+    await connection.execute_script(
+        "CREATE SEQUENCE inspect_shared_seq; "
+        "CREATE TABLE inspect_shared_seq_a (id int PRIMARY KEY, n bigint DEFAULT nextval('inspect_shared_seq')); "
+        "CREATE TABLE inspect_shared_seq_b (id int PRIMARY KEY, n bigint DEFAULT nextval('inspect_shared_seq'))"
+    )
+
+    first_source = await generated_source(connection, "inspect_shared_seq_a")
+    second_source = await generated_source(connection, "inspect_shared_seq_b")
+
+    assert "sequences = [DatabaseSequence(name='inspect_shared_seq')]" in first_source
+    assert "DatabaseSequence" not in second_source
+    assert (
+        "# TODO: sequence 'inspect_shared_seq' a default reads is declared by the model of table "
+        "'inspect_shared_seq_a'"
+    ) in second_source

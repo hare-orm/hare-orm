@@ -55,14 +55,6 @@ SQLITE_TEXT_TO_BOOLEAN_SQL = (
 #: A fractional number loses its fraction, as SQLite's ``CAST`` cuts it off.
 SQLITE_NUMBER_TO_INTEGER_SQL = "CASE WHEN {column} IS NULL THEN NULL ELSE CAST({column} AS INTEGER) END"
 
-#: An integer as fixed-point decimal text with the field's number of decimal places.
-SQLITE_INTEGER_TO_DECIMAL_SQL = (
-    "CASE WHEN {column} IS NULL THEN NULL ELSE CAST(CAST({column} AS INTEGER) AS TEXT){fraction} END"
-)
-
-#: A floating-point number as fixed-point decimal text, rounded to the field's decimal places.
-SQLITE_FLOAT_TO_DECIMAL_SQL = "CASE WHEN {column} IS NULL THEN NULL ELSE printf('%.{decimal_places}f', {column}) END"
-
 #: The date of a stored datetime - of its UTC instant for an aware one.
 SQLITE_DATETIME_TO_DATE_SQL = "COALESCE(date({column}), {column})"
 
@@ -75,6 +67,8 @@ SQLITE_DATE_TO_NAIVE_DATETIME_SQL = "COALESCE(datetime({column}), {column})"
 SQLITE_COMMENT_ESCAPES = str.maketrans(
     {"\x00": "\\0", "\\": "\\\\", "\n": "\\n", "\r": "\\r", "\x1a": "\\Z", "/": "\\/"}
 )
+#: The character each escape of a comment stands for - by the character after its backslash.
+SQLITE_COMMENT_UNESCAPES = {"0": "\x00", "\\": "\\", "n": "\n", "r": "\r", "Z": "\x1a", "/": "/"}
 
 #: The implicit column naming a row of a table - what a backfill of a table without a primary key
 #: picks its batches by.
@@ -103,6 +97,8 @@ SQLITE_BOOLEAN_TEXT_SPELLINGS = frozenset({"true", "1", "false", "0"})
 
 #: A stored value a type change can't read.
 SQLITE_INVALID_INPUT_MESSAGE = 'the column holds "{value}", which is no {new_type}'
+#: A stored value the changed field reads but refuses - a geometry of another type or SRID, a vector of another length.
+SQLITE_UNFIT_VALUE_MESSAGE = "the column holds a value the changed field refuses - {refusal}"
 
 #: The SQL functions reading text as a date, a datetime and a time - NULL for text they can't read.
 SQLITE_TEMPORAL_READER_FUNCTIONS = {"date": "date", "timestamp": "datetime", "time": "time"}

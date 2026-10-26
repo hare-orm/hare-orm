@@ -12,8 +12,8 @@ from hare.exceptions import FieldError, OperationalError, QueryError
 from hare.query.expressions import Case, F, Value, When
 from hare.query.functions import Cast, Coalesce, Collate, Concat, Greatest, Least, NullIf
 from hare.transactions.transactions import Transactions
-from tests.shared_models.testmodels import CharFields, ExpressionTypeRow, JSONFields
-from tests.utils.database_under_test import DatabaseUnderTest
+from tests.shared_models.testmodels import CharFields, JSONFields
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
 
 
 async def create_row(num: int, fl: float, dec: str, num_null: int | None = None) -> ExpressionTypeRow:
@@ -35,22 +35,20 @@ async def get_value(model: Any, row: Any, expression: Any) -> Any:
     return (await model.objects.filter(id=row.id).annotate(value=expression).values_list("value", flat=True))[0]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_cast_converts_as_its_database(db):
-    """PostgreSQL rounds a numeric to an integer, SQLite cuts the fraction off; a boolean's text is
-    PostgreSQL's true, SQLite's 1."""
+    """PostgreSQL rounds a numeric to an integer and writes a boolean as true."""
     row = await create_row(7, 2.5, "2.50")
     other = await create_row(-3, -2.5, "-2.50")
-    is_sqlite = ExpressionTypeRow._meta.connection.dialect.name == "sqlite"
-
     assert await get_value(ExpressionTypeRow, row, Cast("fl", fields.IntField())) == 2
     assert await get_value(ExpressionTypeRow, other, Cast("fl", fields.IntField())) == -2
-    assert await get_value(ExpressionTypeRow, row, Cast("dec", fields.IntField())) == (2 if is_sqlite else 3)
-    assert await get_value(ExpressionTypeRow, other, Cast("dec", fields.IntField())) == (-2 if is_sqlite else -3)
+    assert await get_value(ExpressionTypeRow, row, Cast("dec", fields.IntField())) == 3
+    assert await get_value(ExpressionTypeRow, other, Cast("dec", fields.IntField())) == -3
     assert await get_value(ExpressionTypeRow, row, Cast("num", fields.CharField(max_length=10))) == "7"
     assert await get_value(ExpressionTypeRow, row, Cast("fl", fields.TextField())) == "2.5"
     assert await get_value(ExpressionTypeRow, row, Cast("dec", fields.TextField())) == "2.50"
-    assert await get_value(ExpressionTypeRow, row, Cast("flag", fields.TextField())) == ("1" if is_sqlite else "true")
+    assert await get_value(ExpressionTypeRow, row, Cast("flag", fields.TextField())) == "true"
     assert await get_value(
         ExpressionTypeRow, row, Cast("num", fields.DecimalField(max_digits=5, decimal_places=1))
     ) == (Decimal("7.0"))
@@ -82,6 +80,7 @@ async def test_json_becomes_the_text_its_database_writes_of_it(db):
         assert texts == (text, f"{text}|", "[1, 2.5, null, true]", "2.5|")
 
 
+@pytest.mark.postgresql_models
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_cast_refuses_what_would_become_another_value(db):
@@ -100,6 +99,7 @@ async def test_cast_refuses_what_would_become_another_value(db):
         Cast("num", fields.UUIDField())
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_cast_reads_text(db):
     row = await create_row(1, 1.0, "1.00")
@@ -115,6 +115,7 @@ async def test_cast_reads_text(db):
     ) == datetime.datetime(2024, 3, 1, 1, 30, tzinfo=datetime.UTC)
 
 
+@pytest.mark.postgresql_models
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_cast_of_text_refuses_text_of_no_value(db):
@@ -132,6 +133,7 @@ async def test_cast_of_text_refuses_text_of_no_value(db):
                 await get_value(ExpressionTypeRow, row, expression)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_greatest_and_least(db):
     """A NULL among the values is the database's to skip (PostgreSQL) or give back (SQLite, ClickHouse)."""
@@ -150,6 +152,7 @@ async def test_greatest_and_least(db):
         Greatest("num")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_null_if_and_collate(db):
     row = await create_row(0, 1.0, "1.00")
@@ -158,9 +161,7 @@ async def test_null_if_and_collate(db):
 
     assert await get_value(ExpressionTypeRow, row, NullIf("num", 0)) is None
     assert await get_value(ExpressionTypeRow, row, NullIf("fl", 2.0)) == 1.0
-    collation = (
-        "NOCASE" if DatabaseUnderTest.get_engine_name(CharFields._meta.connection.dialect) == "sqlite" else "und-x-icu"
-    )
+    collation = "und-x-icu"
     ordered = (
         await CharFields.objects.annotate(sort_key=Collate("char", collation))
         .order_by("sort_key")
@@ -171,6 +172,7 @@ async def test_null_if_and_collate(db):
         Collate("char", 'C"; DROP')
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_null_if_compares_a_decimal_as_a_number(db):
     row = await create_row(7, 2.5, "0.00")
@@ -187,6 +189,7 @@ async def test_null_if_compares_a_decimal_as_a_number(db):
     assert await get_value(ExpressionTypeRow, row, NullIf("num", Value(Decimal("7.5")))) == 7
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_case_and_coalesce_of_decimals_of_different_scales(db):
     row = await create_row(7, 2.5, "1.25")
@@ -199,6 +202,7 @@ async def test_case_and_coalesce_of_decimals_of_different_scales(db):
     assert str(await get_value(ExpressionTypeRow, row, case)) == "0.25"
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.parametrize(
     ("expression", "message"),
     [
@@ -218,6 +222,7 @@ async def test_values_of_types_that_dont_combine_are_refused(db, expression, mes
         await ExpressionTypeRow.objects.annotate(value=expression).values_list("value", flat=True)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_values_of_one_type_combine(db):
     await ExpressionTypeRow.objects.create(
@@ -239,6 +244,7 @@ async def test_values_of_one_type_combine(db):
     assert rows == [(1.5, datetime.datetime(2020, 1, 2, 13, 45, tzinfo=datetime.UTC), "s")]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_date_beside_a_moment_is_its_midnight_in_utc(db):
     await ExpressionTypeRow.objects.create(
@@ -264,6 +270,7 @@ async def test_a_date_beside_a_moment_is_its_midnight_in_utc(db):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_branch_literal_keeps_its_value_and_its_type(db):
     """PostgreSQL took a time literal of a CASE branch as a time without its offset - 13:05:09+03:00 read

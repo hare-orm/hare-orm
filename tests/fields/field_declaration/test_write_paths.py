@@ -13,8 +13,11 @@ from hare.contrib.test import requires_features
 from hare.exceptions import DatabaseError, HareError, ValidationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.instrumentation.change_events import ChangeEvents
+from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.enums import RowOperation
-from hare.query.expressions import F, RawSQL, Value
+from hare.instrumentation.observers.observers import Observers
+from hare.query.expressions import Case, F, RawSQL, Value, When
+from hare.query.functions import Coalesce, NullIf
 from hare.time import Timezone
 from hare.transactions.transactions import Transactions
 from tests.fields.models_write_paths import (
@@ -26,6 +29,8 @@ from tests.fields.models_write_paths import (
     WritePathParent,
     WritePathRecord,
     WritePathSecretKey,
+    WritePathSecretTag,
+    WritePathTaggedNote,
     WritePathTimes,
 )
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -305,7 +310,8 @@ async def test_defaults_are_normalized_like_assigned_values(db_write_paths):
     assert created.color is PaintColor.RED
     assert created.priority is Priority.HIGH
     assert created.rank is Rank.SECOND
-    assert created.price == Decimal("1.50")
+    if DatabaseUnderTest.holds_decimal_fields():
+        assert created.price == Decimal("1.50")
     assert created.naive_moment.tzinfo is not None
     assert created.current_moment.tzinfo is not None
     assert created.text_moment == datetime.datetime(2020, 1, 1, 9, 0, tzinfo=datetime.UTC)
@@ -321,7 +327,8 @@ async def test_defaults_are_normalized_like_assigned_values(db_write_paths):
 async def test_defaults_are_normalized_by_construct(db_write_paths):
     constructed = WritePathDefaults.construct()
     assert constructed.color is PaintColor.RED
-    assert constructed.price == Decimal("1.50")
+    if DatabaseUnderTest.holds_decimal_fields():
+        assert constructed.price == Decimal("1.50")
     assert constructed.identifier == uuid.UUID(int=5)
     assert constructed.duration == datetime.timedelta(seconds=5)
 
@@ -403,6 +410,27 @@ async def test_a_rows_changed_event_hides_the_sensitive_part_of_a_key(db_write_p
 
 
 @pytest.mark.asyncio
+async def test_an_update_of_a_relation_to_a_sensitive_key_hides_the_key(db_write_paths):
+    """update(tag=...) wrote the sensitive key into the relation's column as a shown parameter - the
+    event and the log held it, though create() and save() hid it."""
+    tag = await WritePathSecretTag.objects.create(code="SECRET-7731")
+    note = await WritePathTaggedNote.objects.create(id=1)
+    shown_parameters: list[Any] = []
+
+    def hook(event: QueryExecuted) -> None:
+        shown_parameters.append(event.parameters)
+
+    Observers.observe(QueryExecuted, hook)
+    try:
+        await WritePathTaggedNote.objects.filter(id=note.id).update(tag=tag)
+        await Observers.wait_for_pending()
+    finally:
+        Observers.unobserve(QueryExecuted, hook)
+    assert shown_parameters
+    assert "SECRET-7731" not in repr(shown_parameters)
+
+
+@pytest.mark.asyncio
 async def test_a_value_no_driver_encodes_leaves_no_trace_of_itself_in_the_error(db_write_paths):
     """The ValidationError raised for a lone surrogate was raised while the driver's error was handled
     - its __context__ kept the driver's error and with it the sensitive value."""
@@ -412,6 +440,7 @@ async def test_a_value_no_driver_encodes_leaves_no_trace_of_itself_in_the_error(
     assert error_info.value.__cause__ is None
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [True, False], ids=["true", "false"])
 async def test_a_bool_is_no_decimal(db_write_paths, value):
@@ -452,9 +481,9 @@ async def test_a_timedelta_is_no_time_of_day(db_write_paths):
     [
         {"number__lt": float("nan")},
         {"id__gt": float("nan")},
-        {"amount__lt": float("nan")},
-        {"amount__lt": Decimal("NaN")},
-        {"amount__in": [float("inf")]},
+        pytest.param({"amount__lt": float("nan")}, marks=pytest.mark.decimal_fields),
+        pytest.param({"amount__lt": Decimal("NaN")}, marks=pytest.mark.decimal_fields),
+        pytest.param({"amount__in": [float("inf")]}, marks=pytest.mark.decimal_fields),
         {"data__a": float("nan")},
         {"data__a__gt": float("inf")},
     ],
@@ -465,3 +494,120 @@ async def test_a_number_no_write_stores_is_refused_in_a_filter(db_write_paths, f
     SQLite matched nothing or everything, PostgreSQL raised for some, ClickHouse failed (Code 69)."""
     with pytest.raises(ValidationError, match="NaN|not a finite"):
         await WritePathRecord.objects.filter(**filters).count()
+
+
+EXPRESSION_LITERAL_SHAPES: dict[str, Callable[[str, Any], Any]] = {
+    "case": lambda field_name, value: Case(When(id__gte=0, then=Value(value)), default=F(field_name)),
+    "coalesce": lambda field_name, value: Coalesce(Value(None), Value(value)),
+    "null_if": lambda field_name, value: NullIf(Value(value), Value(None)),
+}
+
+
+async def expression_update_with(field_name: str, value: Any) -> None:
+    record = await WritePathRecord.objects.create()
+    await WritePathRecord.objects.filter(id=record.id).update(**{field_name: value})
+
+
+async def expression_save_with(field_name: str, value: Any) -> None:
+    record = await WritePathRecord.objects.create()
+    setattr(record, field_name, value)
+    await record.save()
+
+
+async def expression_update_or_create_with(field_name: str, value: Any) -> None:
+    record = await WritePathRecord.objects.create()
+    await WritePathRecord.objects.update_or_create(id=record.id, defaults={field_name: value})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(EXPRESSION_LITERAL_SHAPES))
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [("name", "abcde", "Length of"), ("small_number", 2**15, "small_number"), ("rank", "3", "rank")],
+    ids=["max_length", "integer_range", "enum_member"],
+)
+@pytest.mark.parametrize(
+    "write_path",
+    [expression_update_with, expression_save_with, expression_update_or_create_with],
+    ids=["update", "save", "update_or_create"],
+)
+async def test_a_literal_an_expression_writes_is_refused_as_the_plain_value_is(
+    db_write_paths, shape, field_name, value, message, write_path
+):
+    """A literal inside Case()/Coalesce()/NullIf() wasn't converted by the field it was written into - a
+    text past max_length, a number of no member of an enum were stored, the row unreadable after."""
+    expression = EXPRESSION_LITERAL_SHAPES[shape](field_name, value)
+    # Twice - the second update runs on its plan, whose literals bind without their field.
+    for _ in range(2):
+        with pytest.raises(ValidationError, match=message):
+            await write_path(field_name, expression)
+    assert await WritePathRecord.objects.filter(**{f"{field_name}__isnull": False}).count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("small_number", 40000, "small_number"),
+        ("name", "abcdef", "name"),
+        ("identifier", "not-a-uuid", "identifier"),
+    ],
+    ids=["smallint_out_of_range", "char_too_long", "uuid_garbage"],
+)
+async def test_insert_from_refuses_a_literal_its_field_refuses(db_write_paths, field_name, value, message):
+    """A Value() the source of insert_from() selected reached the table unchecked - SQLite and ClickHouse kept
+    it as it was, PostgreSQL raised its own error - where update() refuses it."""
+    await WritePathRecord.objects.create(id=1)
+    with pytest.raises(ValidationError, match=message):
+        await WritePathRecord.objects.insert_from(
+            WritePathRecord.objects.annotate(new_id=Value(2), literal=Value(value)).values_list("new_id", "literal"),
+            fields=["id", field_name],
+        )
+    assert await WritePathRecord.objects.count() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value", ["text", 5, 1.5, [None], {"a": 1}, datetime.date(2024, 1, 2), uuid.UUID(int=3)], ids=repr
+)
+async def test_a_literal_beside_a_json_column_is_written_as_its_json(db_write_paths, value):
+    """A literal in Coalesce() beside a JSON column was bound as itself - SQLite and ClickHouse stored text
+    that is no JSON, the row then unreadable; PostgreSQL found no common type."""
+    # A JSON field writes a date as its ISO text and a UUID as its text.
+    expected = (
+        value.isoformat()
+        if isinstance(value, datetime.date)
+        else str(value)
+        if isinstance(value, uuid.UUID)
+        else value
+    )
+    record = await WritePathRecord.objects.create()
+    for expression in (Coalesce(Value(value), F("data")), Coalesce(F("data"), Value(value))):
+        await WritePathRecord.objects.filter(id=record.id).update(data=expression)
+        assert (await WritePathRecord.objects.get(id=record.id)).data == expected
+        annotated = (
+            await WritePathRecord.objects.filter(id=record.id)
+            .annotate(value=expression)
+            .values_list("value", flat=True)
+        )
+        assert list(annotated) == [expected]
+        await WritePathRecord.objects.filter(id=record.id).update(data=None)
+
+
+@pytest.mark.asyncio
+async def test_a_uuid_literal_first_in_coalesce_shares_the_uuid_column_s_type(db_write_paths):
+    """A UUID first in Coalesce() was bound as text - PostgreSQL found no common type with a uuid column."""
+    record = await WritePathRecord.objects.create()
+    await WritePathRecord.objects.filter(id=record.id).update(
+        identifier=Coalesce(Value(uuid.UUID(int=7)), F("identifier"))
+    )
+    assert (await WritePathRecord.objects.get(id=record.id)).identifier == uuid.UUID(int=7)
+
+
+@pytest.mark.asyncio
+async def test_an_int_enum_refusal_names_its_field_once(db_write_paths):
+    record = await WritePathDefaults.objects.create()
+    with pytest.raises(ValidationError) as error_info:
+        await WritePathDefaults.objects.filter(id=record.id).update(priority="2")
+    assert "priority: expected an int" in str(error_info.value)
+    assert "priority: priority:" not in str(error_info.value)

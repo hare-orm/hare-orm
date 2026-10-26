@@ -34,14 +34,15 @@ class StubCommands:
         if "\0" in output:
             raise CLIUsageError(f"--output must be a path, got {output!r}")
         writer = StubWriter(BoundModels(CommandContext.load_config(cli_context)), Path(output), relation_depth)
-        if check:
-            outdated = writer.get_outdated()
-            for path in outdated:
-                print(f"Outdated stub: {path.as_posix()}")
-            return 1 if outdated else None
         try:
+            if check:
+                outdated = writer.get_outdated()
+                for path in outdated:
+                    print(f"Outdated stub: {path.as_posix()}")
+                return 1 if outdated else None
             written_paths = writer.write()
-        except OSError as error:
+        # A ValueError is a path a stub's name can't go into - "//" is the root of no server on Windows.
+        except (OSError, ValueError) as error:
             raise CLIError(f"Can't write the stubs into {output!r}: {error}") from error
         for path in written_paths:
             print(f"Wrote {path.as_posix()}")

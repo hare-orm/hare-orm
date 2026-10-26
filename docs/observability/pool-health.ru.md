@@ -147,7 +147,7 @@ report.connections["default"].reasons            # ("3 tasks wait for a connecti
 
 | Аргумент | По умолчанию | Что задаёт |
 |---|---|---|
-| `timeout_seconds` | 2.0 | Сколько ждёт пинг — больше 0, не больше 60. |
+| `timeout_seconds` | 2.0 | Сколько ждёт пинг. |
 | `degraded_when` | `[WaitingRequests(at_least=1), PoolSaturation(ratio=0.9)]` | Критерии деградации — `[]`, чтобы её не было никогда. |
 | `unhealthy_when` | `[PingFailed()]` | Критерии неработоспособности. |
 | `criteria_by_connection` | нет | Другие критерии для некоторых подключений (`ConnectionCriteria`); список, оставленный None, берётся у проверки. |
@@ -160,16 +160,14 @@ report.connections["default"].reasons            # ("3 tasks wait for a connecti
 - `run(ping=False)` оценивает только состояние пулов и не открывает ни одного пула — `PingFailed` и
   `PingLatency` тогда не срабатывают.
 - Держите один объект `HealthCheck`: критерии «с прошлой проверки» сравнивают с его предыдущим запуском.
-- Число проверяется по диапазону при создании объекта: значение вне диапазона даёт `ValueError`; типы
-  аргументов не проверяются.
 
 ### <a id="criteria"></a>Критерии
 
 | Критерий (`hare.health.criteria`) | Срабатывает, когда |
 |---|---|
 | `PingFailed()` | пинг не удался или не ответил вовремя — или, с `check_direct`, пинг сервера за пулером |
-| `PingLatency(max_ms)` | пинг дольше `max_ms` (больше 0, не больше 60000) |
-| `PoolSaturation(ratio)` | у пула занято не меньше доли `ratio` от `max_size` (больше 0, не больше 1) |
+| `PingLatency(max_ms)` | пинг дольше `max_ms` |
+| `PoolSaturation(ratio)` | у пула занято не меньше доли `ratio` от `max_size` |
 | `WaitingRequests(at_least)` | соединения пула ждут не меньше `at_least` задач |
 | `AcquireWaitTime(max_seconds)` | ожидание соединения с прошлой проверки длилось дольше `max_seconds` — нужен включённый при создании проверки `PoolMetrics`, иначе `ConfigurationError` |
 | `AcquireTimeouts(at_least)` | с прошлой проверки исчерпано не меньше `at_least` ожиданий |

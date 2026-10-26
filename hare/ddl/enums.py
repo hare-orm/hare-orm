@@ -55,7 +55,7 @@ class TriggerForEach(StrEnum):
     """Whether a trigger fires once per row or once per statement."""
 
     ROW = "ROW"
-    #: Refused where a trigger fires for every row - SQLite.
+    #: Refused where every trigger fires for each row.
     STATEMENT = "STATEMENT"
 
 

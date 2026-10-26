@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
+from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
@@ -20,7 +20,6 @@ from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
-from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -285,7 +284,7 @@ class RemoveField(FieldAddRemoveOperation):
         if isinstance(constraint, CheckConstraint):
             # A Q check reading only this field goes with it, like the single-field cases above.
             return self.condition_reads_field(constraint.check, self.name), (
-                isinstance(constraint.check, (Q, ExclusiveArcCondition))
+                isinstance(constraint.check, FieldCondition)
                 and constraint.check.get_referenced_field_names() == {self.name}
             )
         return False, False

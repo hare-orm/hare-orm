@@ -354,7 +354,9 @@ async def test_factory_and_generator_build_equivalent_models(db, connection):
     line_class, line_description = await assert_factory_matches_generator(connection, "live_eq_line", "LiveEqLine")
 
     assert parent_description["field_classes"]["payload"] is fields.JSONField
-    assert parent_description["field_classes"]["price"] is fields.DecimalField
+    # SQLite keeps no exact decimal: its NUMERIC column is a FloatField.
+    price_field_class = fields.FloatField if dialect == "sqlite" else fields.DecimalField
+    assert parent_description["field_classes"]["price"] is price_field_class
     assert line_description["primary_key_attribute"] == ("order_no", "line_no")
     assert line_description["field_classes"]["parent"] is ForeignKeyFieldInstance
     assert "fields.ForeignKeyField('live.LiveEqParent'" in line_description["fields"]["parent"]
@@ -371,7 +373,9 @@ async def test_factory_and_generator_build_equivalent_models(db, connection):
     Hare.register_live_models([line_class], app_label="live", connection_alias=alias, managed=False)
     try:
         extra: dict[str, Any] = {"tags": [1, 2], "labels": ["a"]} if dialect == "postgresql" else {}
-        parent = await parent_class.objects.create(id=1, name="p", payload={"k": [1]}, price="9.50", **extra)
+        parent = await parent_class.objects.create(
+            id=1, name="p", payload={"k": [1]}, price=9.5 if dialect == "sqlite" else "9.50", **extra
+        )
         await line_class.objects.create(order_no=1, line_no=2, parent=parent, note="n")
         line = await line_class.objects.get(order_no=1, line_no=2).select_related("parent")
         assert line.parent.payload == {"k": [1]}

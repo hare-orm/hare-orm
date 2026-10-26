@@ -12,7 +12,7 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
-from hare.dialects.base.client.constants import POOL_TIMEOUT_MESSAGE
+from hare.dialects.postgresql.client.constants import POOL_TIMEOUT_MESSAGE
 from hare.exceptions import DBConnectionError, PoolTimeoutError, UnSupportedError
 from hare.instrumentation import Observers
 from hare.instrumentation.declarations import ConnectionFailed, PoolAcquireTimedOut

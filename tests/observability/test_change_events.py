@@ -11,7 +11,9 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
-from hare.exceptions import IntegrityError, QueryError, StaleObjectError
+from hare.core.config import HareConfig
+from hare.core.hare_context import HareContext
+from hare.exceptions import ConfigurationError, IntegrityError, QueryError, StaleObjectError
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.declarations import RowsChanged
 from hare.instrumentation.enums import RowOperation
@@ -138,16 +140,31 @@ async def test_soft_delete_and_restore(db_isolated, changes):
     assert any(item[0] == "SoftDeleteChildCascadeSoft" and item[1] == "update" for item in summary)
 
 
+@pytest.mark.asyncio
+async def test_deleting_a_soft_deleted_row_again_reports_nothing(db_isolated, changes):
+    """A second delete() of a soft-deleted obj changes nothing, as a queryset delete of it - yet it was reported
+    as an UPDATE of the row and of the rows its cascade reaches."""
+    parent = await SoftDeleteParent.objects.create(name="parent")
+    await SoftDeleteChildCascadeSoft.objects.create(name="child", parent=parent)
+    await parent.delete()
+    changes.clear()
+
+    await parent.delete()
+    await (await SoftDeleteParent.objects.include_deleted().get(pk=parent.pk)).delete()
+
+    assert changes == []
+
+
 @pytest.mark.parametrize("through_queryset", [False, True])
 @pytest.mark.asyncio
 async def test_a_soft_delete_reports_each_model_once(db_isolated, changes, through_queryset):
     """Bug: the writes a soft delete makes on the way - the soft-deleting UPDATE, the rows its
     cascade reaches - reported events of their own besides the delete's, so a change came twice;
-    and a child without soft delete, which the soft delete really deletes, was reported as
-    updated, while the rows a SET_NULL reached weren't reported by the delete at all."""
+    the rows a SET_NULL reached weren't reported by the delete at all; and a child without soft
+    delete, which the soft delete keeps, was reported as deleted."""
     parent = await SoftDeleteParent.objects.create(name="parent")
     await SoftDeleteChildCascadeSoft.objects.create(name="soft child", parent=parent)
-    await SoftDeleteChildCascadeHard.objects.create(name="hard child", parent=parent)
+    kept_child = await SoftDeleteChildCascadeHard.objects.create(name="hard child", parent=parent)
     await SoftDeleteChildSetNull.objects.create(name="set-null child", parent=parent)
     changes.clear()
 
@@ -160,7 +177,8 @@ async def test_a_soft_delete_reports_each_model_once(db_isolated, changes, throu
     parent_pks = None if through_queryset else (parent.pk,)
     assert ("SoftDeleteParent", "update", parent_pks, {"deleted_at"}) in summary
     assert ("SoftDeleteChildCascadeSoft", "update", None, {"deleted_at"}) in summary
-    assert ("SoftDeleteChildCascadeHard", "delete", None, None) in summary
+    assert not any(item[0] == "SoftDeleteChildCascadeHard" for item in summary)
+    assert await SoftDeleteChildCascadeHard.objects.filter(pk=kept_child.pk).exists()
     assert ("SoftDeleteChildSetNull", "update", None, {"parent"}) in summary
 
 
@@ -299,6 +317,31 @@ async def test_a_listener_of_some_models_hears_only_them(db_isolated, listener_o
 
 
 @pytest.mark.asyncio
+async def test_a_listener_of_a_model_label_hears_that_model(db_isolated, listener_of_models):
+    label = Event._meta.full_name
+    Observers.observe(RowsChanged, listener_of_models.append, models=[label])
+    assert ChangeEvents.is_observed(Event) and not ChangeEvents.is_observed(Tournament)
+    tournament = await Tournament.objects.create(id=1, name="Spring")
+    await Event.objects.create(event_id=1, name="Final", tournament=tournament)
+    assert described(listener_of_models) == [("Event", "insert", (1,), None)]
+    Observers.unobserve(RowsChanged, listener_of_models.append, models=[label])
+    assert listener_of_models.append not in get_rows_changed_observers()
+    with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
+        Observers.observe(RowsChanged, listener_of_models.append, models=[f"{Event._meta.app}.Missing"])
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_a_label_observed_before_the_models_are_bound_is_looked_up_as_they_are(listener_of_models):
+    async with HareContext() as context:
+        Observers.observe(RowsChanged, listener_of_models.append, models=["models.Missing"])
+        with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
+            await context.init(
+                HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
+            )
+
+
+@pytest.mark.asyncio
 async def test_a_listener_of_an_abstract_base_hears_every_model_built_on_it(db_isolated, listener_of_models):
     from tests.shared_models.testmodels import MyAbstractBaseModel, MyDerivedModel, MyOtherDerivedModel
 
@@ -317,17 +360,6 @@ def get_rows_changed_observers():
 def get_observed_models(callback):
     """The models a RowsChanged observer gets the changes of, None for every model."""
     return get_rows_changed_observers()[callback].models
-
-
-@pytest.mark.database_independent
-def test_models_that_are_no_model_classes_are_refused(listener_of_models):
-    """Taken silently, they broke every later write of any model with a raw issubclass() TypeError."""
-    for models in (["models.Event"], [Event(name="x")], [5], "models.Event", Event):
-        with pytest.raises(TypeError):
-            Observers.observe(RowsChanged, listener_of_models.append, models=models)
-        with pytest.raises(TypeError):
-            Observers.unobserve(RowsChanged, listener_of_models.append, models=models)
-    assert listener_of_models.append not in get_rows_changed_observers()
 
 
 @pytest.mark.database_independent

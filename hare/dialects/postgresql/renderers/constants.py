@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hare.sql.constants import MICROSECONDS_PER_SECOND
 from hare.sql.enums import TruncType
 
 #: The units a moment is truncated to by taking its local remainder off the moment itself - the
@@ -41,3 +42,5 @@ POSTGRESQL_RANDOM_FLOAT_SQL = "random()"
 
 #: The text of an ``inet`` address without its mask - a cast to text writes ``1.2.3.4/32``.
 POSTGRESQL_ADDRESS_TEXT_SQL = "HOST({value})"
+#: The microseconds of an hour - a duration of microseconds is added as whole hours and a remainder.
+MICROSECONDS_PER_HOUR = 3_600 * MICROSECONDS_PER_SECOND

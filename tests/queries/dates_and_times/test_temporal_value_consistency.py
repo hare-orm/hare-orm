@@ -94,6 +94,15 @@ def test_server_settings_utc_time_zone_is_accepted(configured_zone):
     assert settings == {"TimeZone": "UTC", "application_name": "app"}
 
 
+@pytest.mark.database_independent
+def test_server_settings_of_a_db_url_are_refused():
+    """asyncpg passes a DB_URL's unknown parameters on - ?server_settings=x reached dict("x"), a raw ValueError."""
+    from hare.dialects.postgresql.client import PostgresqlClient
+
+    with pytest.raises(ConfigurationError, match="server_settings must be a mapping"):
+        PostgresqlClient._get_server_settings_with_utc_session("x")
+
+
 @pytest.mark.asyncio
 async def test_postgres_session_runs_in_utc_whatever_the_database_time_zone():
     async with temporal_context(timezone="Asia/Kolkata") as ctx:

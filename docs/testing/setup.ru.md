@@ -1,7 +1,7 @@
 # Настройка тестов
 
 Как набор тестов получает базу: плагин pytest из hare, фикстура `hare_test_context()` с повторно
-используемыми базами PostgreSQL, `init_memory_sqlite()` для быстрого скрипта, предупреждение о смене
+используемыми базами PostgreSQL, `init_memory_database()` для быстрого скрипта, предупреждение о смене
 цикла событий между тестами и пропуск теста, который база не может выполнить. Объекты для тестов создают
 [фабрики](factories.ru.md).
 
@@ -113,11 +113,11 @@ SQLite даёт `OperationalError` раньше, чем его что-либо �
 С `reuse_databases=True` тестовая база PostgreSQL берётся из пула, а не создаётся и удаляется — см.
 [PostgreSQL: тестирование](../dialects/postgresql/testing.ru.md#reuse-databases).
 
-## <a id="init-memory-sqlite"></a>Быстрые скрипты: `init_memory_sqlite()`
+## <a id="init-memory-database"></a>Быстрые скрипты: `init_memory_database()`
 
 ```python
 from hare import Hare, fields
-from hare.contrib.test import init_memory_sqlite
+from hare.contrib.test import init_memory_database
 from hare.models import Model
 
 
@@ -126,7 +126,7 @@ class Book(Model):
     title = fields.TextField()
 
 
-@init_memory_sqlite
+@init_memory_database
 async def run():
     obj = await Book.objects.create(title="Moby Dick")
     assert obj.id == 1
@@ -139,7 +139,7 @@ if __name__ == "__main__":
 Поднимает базу SQLite в памяти и создаёт таблицы перед вызовом обёрнутой функции — для разовых скриптов и
 примеров, а не для наборов тестов (для них используйте `hare_test_context()`). Принимает необязательный
 `models=[...]` (по умолчанию `["__main__"]`), если модели лежат не в вызывающем модуле. Его адрес
-подключения — `hare.contrib.test.MEMORY_SQLITE` (`sqlite+aiosqlite://:memory:`).
+подключения — `hare.contrib.test.MEMORY_DATABASE` (`sqlite+aiosqlite://:memory:`).
 
 ## <a id="hare-loop-switch-warning"></a>Смена цикла событий между тестами: `HareLoopSwitchWarning`
 

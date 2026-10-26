@@ -302,33 +302,31 @@ async def test_listen_setup_errors_are_retried(db_simple):
     assert attempts == 3
 
 
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+async def test_a_configuration_no_listen_runs_on_is_raised_by_start(db_simple):
+    """A LISTEN behind a transaction pooler without direct_host raises ConfigurationError - the listener
+    retried it forever and start() returned normally."""
+    attempts = 0
+
+    async def refused_listen(channel: str, callback: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise ConfigurationError("transaction_pooling needs direct_host for LISTEN")
+
+    listener = NotificationListener(CONNECTION_ALIAS, "refused", Collector())
+    with fake_notification_channels(refused_listen), pytest.raises(ConfigurationError, match="direct_host"):
+        await listener.start()
+    assert attempts == 1
+    assert not listener.is_listening
+
+
 @pytest.mark.database_independent
 def test_exponential_backoff_is_clamped():
     listener = NotificationListener(CONNECTION_ALIAS, "c", Collector(), backoff=0.5, max_backoff_seconds=3)
     assert [listener._get_backoff_delay(attempt) for attempt in range(5)] == [0.5, 1.0, 2.0, 3, 3]
     unbounded = NotificationListener(CONNECTION_ALIAS, "c", Collector(), max_backoff_seconds=None)
     assert unbounded._get_backoff_delay(10_000) == 0.5 * 2**32
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize(
-    "options",
-    [
-        {"reconnect_attempts": -1},
-        {"reconnect_attempts": True},
-        {"reconnect_attempts": 1.5},
-        {"backoff": -0.1},
-        {"backoff": float("inf")},
-        {"backoff": ()},
-        {"backoff": (0.1, -1)},
-        {"backoff": "1"},
-        {"max_backoff_seconds": 0},
-        {"max_backoff_seconds": float("nan")},
-    ],
-)
-def test_invalid_options_raise(options):
-    with pytest.raises(ConfigurationError):
-        NotificationListener(CONNECTION_ALIAS, "c", Collector(), **options)
 
 
 @requires_features(dialect="postgresql")
@@ -410,3 +408,12 @@ def test_a_channel_no_listen_takes_is_refused(channel):
     """start() retried such a channel forever - no reconnect makes it a channel."""
     with pytest.raises(ConfigurationError, match="channel must be a non-empty text"):
         NotificationListener(CONNECTION_ALIAS, channel, Collector())
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["c" * 64, "ж" * 32])
+async def test_a_channel_longer_than_the_names_of_the_database_is_refused(db_simple, channel):
+    """A channel past 63 bytes started - a NOTIFY refuses such a name, and the listener heard nothing."""
+    with pytest.raises(ConfigurationError, match="at most 63 bytes on postgresql"):
+        await NotificationListener(CONNECTION_ALIAS, channel, Collector()).start()

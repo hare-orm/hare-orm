@@ -15,7 +15,7 @@ from hare.contrib.pydantic import pydantic_model_creator
 from hare.contrib.test import requires_features, truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.hare_context import HareContext
-from hare.exceptions import DoesNotExist, QueryError
+from hare.exceptions import ConfigurationError, DoesNotExist, QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.functions import Count
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
@@ -104,7 +104,7 @@ def test_any_of_needs_values():
 def test_a_scope_by_model_names_tenant_models(tenant_scope_context):
     with pytest.raises(QueryError, match="is not a model with Meta.tenant_field"):
         Tenancy.set({ScopeShop: 1})
-    with pytest.raises(QueryError, match="is not a model with Meta.tenant_field"):
+    with pytest.raises(ConfigurationError, match="is not a model reference"):
         Tenancy.set({"ScopeOrder": "msk"})
     with pytest.raises(QueryError, match="ScopeOrder is given None"):
         Tenancy.set({ScopeOrder: None})
@@ -114,6 +114,15 @@ def test_a_scope_by_model_names_tenant_models(tenant_scope_context):
         with pytest.raises(QueryError, match=r"ScopeOrder is given .* Tenancy.any_of\(\*values\)"):
             Tenancy.set({ScopeOrder: several_values})
     assert Tenancy.current.get() is None
+
+
+@pytest.mark.database_independent
+def test_a_scope_by_model_takes_a_model_by_its_label(tenant_scope_context):
+    with Tenancy.scope({"models.ScopeOrder": "msk", ScopeFaq: Tenancy.ALL}):
+        assert Tenancy.get_scope(ScopeOrder) == "msk"
+        assert Tenancy.get_scope(ScopeFaq) is Tenancy.ALL
+    with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
+        Tenancy.set({"models.Missing": "msk"})
 
 
 @pytest.mark.database_independent

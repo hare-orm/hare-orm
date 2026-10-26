@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from hare.exceptions import QueryError
+from hare.exceptions import FieldError, QueryError
+from hare.fields.data.json.json_field import JSONField
 from hare.fields.field import Field
 from hare.query.expressions import Expression, Function, Value
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
@@ -13,6 +14,7 @@ from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.sql.functions.greatest_least import GreatestLeast as GreatestLeastTerm
+from hare.sql.terms.functions.function import Function as HareSqlFunction
 from hare.sql.terms.term import Term
 
 
@@ -23,6 +25,7 @@ class GreatestLeastFunction(Function):
     #: ``GREATEST`` or ``LEAST``.
     function_name: ClassVar[str]
     database_function = GreatestLeastTerm
+    returns_an_argument = True
 
     populate_field_object = True
 
@@ -60,7 +63,7 @@ class GreatestLeastFunction(Function):
         typed_terms = FunctionArguments.get_typed_literal_terms(terms, expression_context)
         # A wall clock literal beside a wall clock is typed by it - a cast would make it a moment.
         return [
-            term if self.is_wall_clock_literal(Value.get_bound_value(self.get_literal(value)), function_arg) else typed
+            term if self.binds_as_main_field(Value.get_bound_value(self.get_literal(value)), function_arg) else typed
             for value, term, typed in zip(self.default_values, terms, typed_terms, strict=True)
         ]
 
@@ -77,6 +80,23 @@ class GreatestLeastFunction(Function):
         if isinstance(value, Value):
             return value.value
         return None if isinstance(value, (Expression, Term)) else value
+
+    def _get_result_term(
+        self,
+        term: HareSqlFunction,
+        function_arg: ExpressionResult,
+        default_results: list[ExpressionResult],
+        expression_context: ExpressionContext,
+    ) -> Term:
+        if not expression_context.dialect.features.orders_json_values_in_aggregates and any(
+            isinstance(result.output_field, JSONField) for result in (function_arg, *default_results)
+        ):
+            # It would compare the JSON text, as MAX and MIN would (Features.orders_json_values_in_aggregates).
+            raise FieldError(
+                f"{type(self).__name__}() of a JSON value would compare its text on "
+                f"{expression_context.dialect.name} - convert it with Cast()"
+            )
+        return term
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         result = super().get_result(expression_context)

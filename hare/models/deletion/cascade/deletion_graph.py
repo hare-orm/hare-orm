@@ -126,6 +126,41 @@ class DeletionGraph:
         return cascade_models
 
     @staticmethod
+    def get_soft_delete_cascade_models(model: type[Model]) -> list[tuple[type[Model], bool]]:
+        """``model`` plus every model a soft delete of its rows reaches by ``on_delete=CASCADE``, each with
+        whether its rows are soft-deleted or deleted for real - as the delete itself walks them: from a
+        soft-deleted row a model with ``Meta.soft_delete_field`` is soft-deleted, one without it is kept
+        unless the parent's model has ``Meta.soft_delete_hard_cascade``; below a row deleted for real every
+        row is deleted for real.
+
+        Args:
+            model: The model rows are soft-deleted from.
+
+        Returns:
+            ``(model, soft)`` pairs, each listed once, ``(model, True)`` first.
+        """
+        reached = [(model, True)]
+        pending = [(model, True)]
+        while pending:
+            current_model, is_soft = pending.pop()
+            for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(current_model):
+                if foreign_key_field.on_delete != OnDelete.CASCADE:
+                    continue
+                related_model = backward_field.related_model
+                if not is_soft:
+                    is_related_soft = False
+                elif related_model._meta.soft_delete_field:
+                    is_related_soft = True
+                elif current_model._meta.soft_delete_hard_cascade:
+                    is_related_soft = False
+                else:
+                    continue
+                if (related_model, is_related_soft) not in reached:
+                    reached.append((related_model, is_related_soft))
+                    pending.append((related_model, is_related_soft))
+        return reached
+
+    @staticmethod
     def get_cascade_protect_foreign_keys(model: type[Model]) -> list[ForeignKeyFieldInstance[Any]]:
         """Every constrained ``on_delete=PROTECT`` FK/O2O field pointing at a model of
         ``get_cascade_models(model)`` - the database backstops a hard delete of ``model`` rows can

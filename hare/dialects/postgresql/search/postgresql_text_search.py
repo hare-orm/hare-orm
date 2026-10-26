@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.base.search.text_search import TextSearch
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.dialects.postgresql.search.constants import (
     POSTGRESQL_HEADLINE_OPTION_NAMES,
+    POSTGRESQL_INTEGER_RANGE,
+    POSTGRESQL_RANK_LABEL_WEIGHT_COUNT,
     POSTGRESQL_SEARCH_QUERY_OPERATORS,
     SEARCH_TYPE_FUNCTIONS,
 )
@@ -13,10 +17,11 @@ from hare.dialects.postgresql.search.criterion.declarations import TsInfixOperat
 from hare.dialects.postgresql.search.criterion.ts_query_function import TsQueryFunction
 from hare.dialects.postgresql.search.criterion.ts_query_invert import TsQueryInvert
 from hare.dialects.postgresql.search.enums import TsWeight
-from hare.exceptions import FieldError
+from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields import FloatField, TextField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.generated_field import GeneratedField
+from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, F
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.lookup_info.lookup_paths import LookupPaths
@@ -100,8 +105,10 @@ class PostgresqlTextSearch(TextSearch):
 
         if vector.weight is not None:
             if isinstance(vector.weight, str):
+                if vector.weight.upper() not in TsWeight:
+                    raise QueryError(f"SearchVector weight must be one of A, B, C, D, got {vector.weight!r}")
                 # setweight()'s weight is of type "char": a text parameter is rejected, a string
-                # literal isn't. Validated by TsWeight.
+                # literal isn't.
                 weight_term: Term = LiteralValue(f"'{TsWeight(vector.weight.upper()).value}'")
                 weight_joins: list[TableCriterionTuple] = []
             else:
@@ -151,6 +158,7 @@ class PostgresqlTextSearch(TextSearch):
         return isinstance(effective_field, TSVectorField)
 
     def get_rank_result(self, rank: SearchRank, expression_context: ExpressionContext) -> ExpressionResult:
+        self.raise_if_rank_arguments_refused(rank)
         vector_expression: VectorInput
         if isinstance(rank.vector, (Expression, Term)):
             vector_expression = rank.vector
@@ -190,6 +198,41 @@ class PostgresqlTextSearch(TextSearch):
         function = "TS_RANK_CD" if rank.cover_density else "TS_RANK"
         term = HareSqlFunction(function, *args)
         return ExpressionResult(term=term, joins=joins, output_field=FloatField())
+
+    @staticmethod
+    def raise_if_rank_arguments_refused(rank: SearchRank) -> None:
+        """Refuses label weights ``ts_rank()`` takes no array of, and a normalization it takes no bitmask of.
+
+        Args:
+            rank: The rank.
+
+        Raises:
+            ConfigurationError: Weights other than four finite numbers - of the labels D, C, B and A - or a
+                normalization that isn't an integer of 32 bits.
+        """
+        weights = rank.bound_weights
+        if weights is not None and not isinstance(weights, (str, Expression, Term)):
+            if (
+                not isinstance(weights, Sequence)
+                or len(weights) != POSTGRESQL_RANK_LABEL_WEIGHT_COUNT
+                or not all(FiniteNumbers.is_finite_number(weight) for weight in weights)
+            ):
+                raise ConfigurationError(
+                    f"SearchRank weights must be {POSTGRESQL_RANK_LABEL_WEIGHT_COUNT} numbers - the weights of the "
+                    f"D, C, B and A labels - or field weights by name, got {weights!r}"
+                )
+        normalization = rank.normalization
+        if normalization is None or isinstance(normalization, (Expression, Term)):
+            return
+        if (
+            isinstance(normalization, bool)
+            or not isinstance(normalization, int)
+            or not POSTGRESQL_INTEGER_RANGE[0] <= normalization <= POSTGRESQL_INTEGER_RANGE[1]
+        ):
+            raise ConfigurationError(
+                f"SearchRank normalization must be an integer bitmask of 32 bits, got "
+                f"{ValueDescriptions.get_shown_value(normalization)}"
+            )
 
     def get_headline_result(self, headline: SearchHeadline, expression_context: ExpressionContext) -> ExpressionResult:
         expression_result = SearchArguments.get_result(

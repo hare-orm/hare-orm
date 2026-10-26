@@ -20,6 +20,13 @@ def test_unknown_scheme():
         DbUrlConfigGenerator.expand("moo://baa")
 
 
+def test_a_url_without_a_scheme_is_not_shown():
+    """Its text was the unknown scheme of the error - with the password it begins with."""
+    with pytest.raises(ConfigurationError, match="begins with its scheme") as raised:
+        DbUrlConfigGenerator.expand("user:Secret1@127.0.0.1:5433/db")
+    assert "Secret1" not in str(raised.value)
+
+
 @pytest.mark.parametrize(
     ("db_url", "file_path"),
     [

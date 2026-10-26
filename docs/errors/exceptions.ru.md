@@ -147,9 +147,19 @@ PostgreSQL содержит `sqlstate`, `constraint_name`, `table_name` и др�
 
 | Модуль | Исключения |
 |---|---|
-| `hare.contrib.request_query.exceptions` | `InvalidRequestQuery` (`ValueError`, `.errors`): значения запроса не составляют корректный запрос — адаптер Litestar отвечает `400 Bad Request`, адаптеры FastAPI и Robyn — `422 Unprocessable Content`. `RequestQueryForbidden` (`PermissionError`, `.parameter`): запрос просит строки, которые ему видеть нельзя, — `403 Forbidden`. |
+| `hare.contrib.request_query.exceptions` | `InvalidRequestQuery`, `RequestQueryForbidden`, `ApiGetterError` и его подклассы — см. [Исключения запросов из HTTP-параметров](#request-query-exceptions). |
 | `hare.contrib.outbox.exceptions` | `DeliveryError`: событие outbox не доставлено. |
 | `hare.cli.exceptions` | `CLIError`: команда `hare` не выполнилась — код выхода 1. `CLIUsageError` (это `CLIError`): команду вызвали неверно — код выхода 2. См. [Команда `hare`](../migrations/cli.ru.md#adding-your-own-commands). |
+
+### <a id="request-query-exceptions"></a>Исключения запросов из HTTP-параметров
+
+`InvalidRequestQuery` (`ValueError`, `.errors`): значения запроса не составляют корректный запрос —
+адаптер Litestar отвечает `400 Bad Request`, адаптеры FastAPI и Robyn — `422 Unprocessable Content`.
+`RequestQueryForbidden` (`PermissionError`, `.parameter`): запрос просит строки, которые ему видеть
+нельзя, — `403 Forbidden`. `ApiGetterError` (`HareError`, `.source_name`): не загрузилось значение
+другого сервиса, которое требует `Meta.api_getter`, — `502 Bad Gateway`; подклассы
+`ApiDataNotFoundError`, `ApiRequestError`, `ApiValueMissingError` и `ApiValueConversionError` говорят
+почему — см. [`Meta.api_getter`](../integrations/request-queries.ru.md#api-getter).
 
 ## <a id="sqlerrormixin"></a>SQL ошибки базы данных
 

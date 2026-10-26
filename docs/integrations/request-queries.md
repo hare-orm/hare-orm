@@ -78,10 +78,8 @@ path through relations, an annotation of `Meta.queryset` — makes a parameter p
 `author__profile__isnull`. `Lookup.EXACT` (or `"exact"`) is the path itself, any other lookup adds
 `__<lookup>`; a lookup registered with `register_lookup()` goes by its name. `parameter=` names the
 parameters in place of the path, so the API doesn't show the model's structure: `city` and `city__in`
-filter by `author__profile__city`. `description=` replaces the field's description in the API schema. A
-`FilterField` is checked when it is declared: the path and `parameter` must be identifiers, the lookups a
-non-empty tuple, each once. The type of each parameter is the value its filter takes, as the ORM
-describes it:
+filter by `author__profile__city`. `description=` replaces the field's description in the API schema.
+The type of each parameter is the value its filter takes, as the ORM describes it:
 
 | The filter takes | The parameter |
 |---|---|
@@ -225,6 +223,7 @@ ordering, fields, include, deleted rows, pagination) — in the model's fields a
 | `include` | An `IncludeConfig`, None when a request can't ask for relations. |
 | `deleted` | A `DeletedConfig`, None when a request can't see soft-deleted rows. |
 | `versions` | `LatestVersions()` to keep only the latest version of each record of a `VersionedModel`, None for every version. |
+| `api_getter` | A tuple of `ApiSource` — HTTP APIs of other services the rows are filled from — and `ApiValueMapping` — values of the row copied to other attributes; see [`Meta.api_getter`](#api-getter). |
 
 A subclass inherits each option it doesn't set from the nearest base that does.
 
@@ -313,7 +312,8 @@ include = IncludeConfig(relations=("author", "author__profile", "tags"))
 
 `?fields=title,status` loads only the named fields (`QuerySet.only()`), the primary key and the fields
 the ordering reads; reading another field of such a row raises `AttributeError`. The names must be the
-model's own fields — relations are loaded with `include`. `?include=author,tags` loads the named
+model's own fields — relations are loaded with `include` — or targets of
+[`Meta.api_getter`](#api-getter). `?include=author,tags` loads the named
 relations with the rows: a relation to one row with a join (`select_related()`), a relation to many rows
 with a query of its own (`prefetch_related()`). A name the option doesn't list is an
 `InvalidRequestQuery`. Both apply to `fetch()`, `page()` and `get()`.
@@ -356,6 +356,113 @@ finds nothing. A model that isn't a `VersionedModel` is a `ConfigurationError`, 
 database running no correlated subqueries — raised by `check_declarations()`
 once the model has a connection.
 
+### <a id="api-getter"></a>Values from other services: `Meta.api_getter`
+
+```python
+from uuid import UUID
+
+from hare.contrib.request_query import ApiGetterRetry, ApiSource, ApiValueMapping
+
+
+async def get_service_headers() -> dict[str, str]:
+    return {"X-Service-Token": await service_tokens.get()}
+
+
+class DealQuery(RequestQuery[Deal]):
+    class Meta:
+        queryset = Deal.objects.all()
+        fields = FieldsConfig(fields=("title", "status", "partner_user", "label"))
+        api_getter = (
+            ApiSource(
+                url="http://users/service/users",
+                key="partner_user_id",
+                mappings=(ApiValueMapping(set_key="partner_user"),),
+                name="users",
+                query_parameter="ids",
+                match_key="id",
+                key_type=UUID,
+                headers=get_service_headers,
+                retry=ApiGetterRetry(attempts=3),
+            ),
+            ApiValueMapping(set_key="label", key="title"),
+        )
+```
+
+The rows are filled with what HTTP APIs of other services answer for the values they hold. An `ApiSource`
+is asked for every value of its `key` the rows hold — each value once, however many rows hold it — and
+each item of the answer goes to the rows holding the value it answers. Needs the `http` extra.
+
+- **The values asked.** `key` is a path of names joined by dots (`"partner_user_id"`,
+  `"partner.user_id"`); each part is an attribute or a dict key, and a list on the way is walked item by
+  item; a relation of a row is followed when the rows loaded it (`?include=`, `select_related()`,
+  `prefetch_related()`), and holds no value otherwise. `None` isn't asked for, nor a value no answer item
+  can be matched back to (a dict of a JSON field) — the targets of their rows stay empty.
+- **The requests.** `request_mode` says how a source is asked:
+  - `ApiRequestMode.QUERY_MANY` (the default) — one request per batch of up to `batch_size` (200) values,
+    each value a repetition of `query_parameter` (`?ids=1&ids=2`). Each answer item is matched to the
+    value it answers by its `match_key` (the key's last part when not given), read through `key_type`
+    (`UUID`, `int`, any function) — a value the type refuses matches nothing. The values are in the
+    URL: a large batch makes a long one, and a server refuses a URL longer than its own limit (often
+    `414 URI Too Long` beyond about 8 KB) — keep `batch_size` within what the service takes.
+  - `ApiRequestMode.QUERY_ONE` — one request per value, `?id=1`.
+  - `ApiRequestMode.PATH` — one request per value, the value in the URL, quoted:
+    `url="http://users/service/users/{partner_user_id}"` names the key's last part.
+
+  With these two modes, an item is matched by `match_key` too when it is given, otherwise the first item
+  of the answer answers. `items_path` (`"result"`) is where the items are in the answer — the answer
+  itself by default; a single item is taken as a list of one.
+- **Where the values go.** Each `ApiValueMapping` of `mappings` puts a value of the answer item — at its
+  `key`, the whole item without one — into `set_key` of the object holding the source's key: for
+  `key="partner.user_id"` and `set_key="partner.user"`, into the `user` of each `partner`. A row holding no
+  value, and a value without an answer, leave the target None, or its `default`. Several mappings of one
+  target settle it by their `mode`: `ApiValueMappingMode.LAST` (the default) keeps the last value,
+  `NOT_EMPTY` the first one that isn't empty. `field=DatetimeField()` reads the value through a field of
+  hare — an ISO text becomes a datetime — and `convert=` through a function of yours, after the field when
+  both are given. An `ApiValueMapping` given in `api_getter` itself, outside a source, copies a value of
+  the row itself (`key`) to another attribute (`set_key`).
+- **One run.** The sources of a run are asked at the same time, through one HTTP client, and their values
+  are applied in their order — a target two sources set keeps the later one's value. A source sends at
+  most `concurrency` (10) requests at a time, each taking at most `timeout_seconds` (10). `headers` is a
+  dict of ASCII texts on one line, or an `async` function giving it — called once a run; the headers
+  are left out of the source's `repr()`.
+- **Repeats.** `retry=ApiGetterRetry(attempts=3)` repeats a request whose connection broke, or that was
+  answered with one of `status_codes` (`429`, `502`, `503`, `504`), up to `attempts` times (0 by default):
+  after a random pause of up to `base_delay_seconds * 2 ** repeat` (0.5 s), at most `max_delay_seconds`
+  (10 s), or as long as the answer's `Retry-After` asks — in seconds or as an HTTP date — within the same
+  limit.
+- **Errors.** A source not `required` leaves the targets empty when it answers `404`, an error or no JSON, or
+  can't be reached. With `required=True` a source raises instead: `ApiDataNotFoundError` — `404`, or no item
+  for a value; `ApiRequestError` — the connection failed every time, an error answer, an answer that isn't
+  JSON or can't be read (a body that doesn't decode); `ApiValueMissingError` — the rows hold no value of its
+  key at all. A mapping with `required=True` raises `ApiValueMissingError` for a target left empty, and a
+  `field` or `convert` refusing a value raises `ApiValueConversionError`. Each is an `ApiGetterError`
+  (`.source_name`); a framework adapter answers it with `502 Bad Gateway`, without its message — it names the
+  service and the values asked.
+- **When.** `fetch()`, `page()` and `get()` fill their rows before `after_fetch()`; `get_for_update()`
+  doesn't — the row is loaded only to be changed. A source loads its values with the rows a request
+  reads; `triggers=ApiGetterTriggers(on_read=True, on_create=False, on_update=False)` chooses that, and a
+  handler fills the rows it created or updated itself — the sources whose `on_create`/`on_update` is set:
+
+  ```python
+  deal = await Deal.objects.create(**data)
+  (deal,) = await DealQuery(request=request).load_api_values([deal], ApiGetterTrigger.CREATE)
+  ```
+
+  `loads_api_values()` returns True; override it to leave the rows of some requests bare — a request of
+  another service asking for the rows themselves.
+- **`fields`.** A target — the first part of a `set_key` — may be listed in `FieldsConfig.fields` like a
+  field. A request whose `?fields=` names none of a source's targets (nor, through `?include=`, the
+  relation they are on) doesn't ask that source; one naming a target loads the field the source's key
+  starts with (`partner_user_id`) though it doesn't name it. Without `?fields=` every source is asked.
+- **What is reported.** Each attempt of a request is logged at `DEBUG` on the `hare` logger and given to the
+  observers of `ApiRequestExecuted` (`Observers.observe(ApiRequestExecuted, ...)`): `source_name`, `url`
+  (without the query, the fragment and the credentials), `status_code` (None when the connection failed),
+  `duration_seconds`, `attempt` (0 for the first) and `error` — the headers aren't part of it.
+
+Settings contradicting each other are refused when they are made — a `PATH` URL not naming the key, a
+query mode without `query_parameter`, a `required` mapping with a `default` — `ConfigurationError`.
+`ApiGetter.set(objs, sources, mappings)` fills any objects — dicts too — without a request query.
+
 ## <a id="running-a-query"></a>Running a query
 
 | Method | Returns |
@@ -378,7 +485,9 @@ the search, the handler's `where()`, `get_access_condition()`.
 nothing raises `InvalidRequestQuery` — answered as an invalid request by the framework integrations, like
 an invalid parameter — instead of changing every row the user may see. A filter counts by the condition
 it gives: a parameter whose `filter_<name>()` method returns `None` (or an empty `Q()`) filters by
-nothing.
+nothing, and so does an empty text of a lookup it matches every row with (`?title__icontains=`, of
+`contains`, `startswith`, `endswith`, their case-insensitive forms and the regex lookups) — as a blank
+search does.
 
 `get_for_update()` is for a handler that changes the row: call it inside a transaction; it locks the row
 with `SELECT ... FOR UPDATE`. A database that locks no row (`Features.supports_select_for_update` off:
@@ -429,8 +538,9 @@ class StaffBookQuery(BookQuery):
 ```
 
 `get_access_condition()` returns the rows the request may see at all — it joins every query, `delete()`
-included. `after_fetch()` runs on the rows of `fetch()`, `page()` and `get()`. `may_see_deleted()`
-decides whether the request may ask for deleted rows (see `DeletedConfig`).
+included. `after_fetch()` runs on the rows of `fetch()`, `page()` and `get()`, once
+[`Meta.api_getter`](#api-getter) filled them; `loads_api_values()` decides whether it fills them.
+`may_see_deleted()` decides whether the request may ask for deleted rows (see `DeletedConfig`).
 
 ## <a id="without-a-web-framework"></a>Without a web framework
 
@@ -501,7 +611,9 @@ ContentQuery = RequestQuery.for_model(
 page = await ContentQuery.from_query_string("status__in=draft&status__in=published").page()
 ```
 
-It takes each `Meta` option as a keyword argument — `queryset` (`model.objects` by default), `filters`,
+The model is given by its class or its `"app.Model"` label (`RequestQuery.for_model("content.Notice")`),
+looked up in the current context. It takes each `Meta` option as a keyword argument — `queryset`
+(`model.objects` by default), `filters`,
 `search`, `ordering`, `pagination` (an `OffsetPagination()` by default), `fields`, `include`, `deleted`,
 `versions`, `join_type` — and `name`, the class's name (`<Model>RequestQuery` by default). A wrong
 declaration raises `ConfigurationError` right there, as `check_declarations()` would find it. Called on a

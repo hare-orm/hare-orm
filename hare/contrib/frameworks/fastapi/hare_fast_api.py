@@ -37,7 +37,8 @@ class HareFastAPI(FastAPI):
       has the database - and closes it when it stops; the context is visible to every request;
     - checks every request query once the models are set up, so a wrong one fails at startup;
     - answers ``DoesNotExist`` with 404, ``IntegrityError`` with 409, ``InvalidRequestQuery`` with
-      422 and ``RequestQueryForbidden`` with 403 - in FastAPI's own error format - unless the
+      422, ``RequestQueryForbidden`` with 403 and ``ApiGetterError`` with 502 - in FastAPI's own error
+      format - unless the
       application answers them itself (``exception_handlers=``);
     - starts each request with an empty count of repeated queries (``RepeatedQueryDetector``);
     - with ``atomic_requests``, runs each HTTP request in a transaction (``TransactionMiddleware``)

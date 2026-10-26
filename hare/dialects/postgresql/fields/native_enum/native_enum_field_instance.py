@@ -36,7 +36,7 @@ class NativeEnumFieldInstance(CharEnumFieldInstance):
     """
 
     COLUMN_TYPE_FROM_DIALECT = True
-    snapshots_enum_in_migrations: ClassVar[bool] = True
+    has_native_enum_type: ClassVar[bool] = True
 
     def __init__(
         self, enum_type: type[Enum], *, type_name: str | None = None, type_schema: str | None = None, **kwargs: Any

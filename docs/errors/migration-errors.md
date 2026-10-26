@@ -27,7 +27,7 @@ HareError
 | `CircularDependencyError` | The dependencies of the migrations form a cycle. |
 | `IncompatibleStateError` | An operation can't run on the state the migrations before it leave. |
 | `IrreversibleMigrationError` | A migration is unapplied while one of its operations can't be reversed — raised before the first migration of the run is unapplied, so the later ones stay applied. |
-| `PartiallyAppliedMigrationError` | A non-atomic migration failed partway through — some of its operations already ran. |
+| `PartiallyAppliedMigrationError` | A non-atomic migration failed partway through — some of its operations already ran. One refused before its first statement ran (no `RunPython` in it) raises its own error instead: nothing of it landed. |
 | `TenantMigrationError` | With `tenant_schema_template`, the migrations failed in the schemas of some tenants. The other tenants' schemas are migrated; the error names each failed schema with its error, and the next `migrate` runs in each schema what its own journal lacks. |
 | `FieldNarrowingDataLossError` | An `AlterField` narrowing a column would cut stored values. |
 | `ForeignKeyTargetChangeError` | An `AlterField` points a relation at another target column (`to_field`) while rows store key values of the old one. |

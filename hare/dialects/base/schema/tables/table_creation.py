@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from collections.abc import Sequence
 from typing import cast
 
@@ -11,6 +12,8 @@ from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
+from hare.ddl.schema_objects.materialized_view import MaterializedView
+from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
 from hare.dialects.base.schema.data.model_sql_data import ModelSqlData
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import ConfigurationError, UnSupportedError
@@ -68,29 +71,43 @@ class TableCreation(SchemaEditorPart):
         many_to_many_tables_sql: list[str] = []
         deferred_foreign_key_sqls: list[str] = []
         created: set[tuple[str | None, str]] = set()
-        while pending_tables:
-            # A reference to a table hare doesn't create (a Meta.managed = False model's) never
-            # holds up the order.
-            next_table = next(
-                (
-                    sql_data
-                    for sql_data in pending_tables
-                    if (sql_data.references & created_table_keys) <= created | {sql_data.table_key}
-                ),
-                None,
-            )
-            if next_table is None:
+        # The first table, in the models' order, whose referenced tables exist - a reference to a table
+        # hare doesn't create (a Meta.managed = False model's) never holds up the order.
+        missing_counts: list[int] = []
+        waiting_positions: dict[tuple[str | None, str], list[int]] = {}
+        for position, sql_data in enumerate(pending_tables):
+            missing_table_keys = (sql_data.references & created_table_keys) - {sql_data.table_key}
+            missing_counts.append(len(missing_table_keys))
+            for table_key in missing_table_keys:
+                waiting_positions.setdefault(table_key, []).append(position)
+        ready_positions = [position for position, count in enumerate(missing_counts) if not count]
+        is_done = [False] * len(pending_tables)
+        first_left_position = 0
+        for _ in range(len(pending_tables)):
+            while ready_positions and is_done[ready_positions[0]]:
+                heapq.heappop(ready_positions)
+            if ready_positions:
+                position = heapq.heappop(ready_positions)
+                next_table = pending_tables[position]
+            else:
                 # A cycle: its first table, without the foreign keys to the tables not created yet.
-                next_table = pending_tables.pop(0)
+                while is_done[first_left_position]:
+                    first_left_position += 1
+                position = first_left_position
+                next_table = pending_tables[position]
                 if not self.editor.client.features.creates_tables_with_forward_references:
                     deferred_table_keys = frozenset(
                         (next_table.references & created_table_keys) - created - {next_table.table_key}
                     )
                     next_table = self.get_model_sql_data(next_table.model, safe, model_table_keys, deferred_table_keys)
                     deferred_foreign_key_sqls += next_table.deferred_foreign_key_sqls
-            else:
-                pending_tables.remove(next_table)
-            created.add(next_table.table_key)
+            is_done[position] = True
+            if next_table.table_key not in created:
+                created.add(next_table.table_key)
+                for waiting_position in waiting_positions.get(next_table.table_key, ()):
+                    missing_counts[waiting_position] -= 1
+                    if not missing_counts[waiting_position] and not is_done[waiting_position]:
+                        heapq.heappush(ready_positions, waiting_position)
             statements.append(next_table.get_table_creation_sql())
             many_to_many_tables_sql += next_table.many_to_many_tables_sql
         statements += deferred_foreign_key_sqls
@@ -678,7 +695,8 @@ class TableCreation(SchemaEditorPart):
     def get_schema_objects_after_table_sqls(self, model: type[Model], safe: bool = False) -> list[str]:
         """The statements creating what a model declares beside its table once the table exists:
         its sequences' owner columns, functions, dictionaries, views, materialized views, row level security,
-        policies and grants - in that order, each may use the ones before.
+        policies and grants - in that order, each may use the ones before; a view or a materialized view
+        whose ``read_columns`` name another one comes after it.
 
         Args:
             model: The model.
@@ -719,14 +737,11 @@ class TableCreation(SchemaEditorPart):
             for dictionary in meta.dictionaries
             for statement in self.editor.dictionaries.get_dictionary_create_sqls(model, dictionary, safe)
         ]
-        statements += [
-            statement for view in meta.views for statement in self.editor.views.get_view_create_sqls(model, view, safe)
-        ]
-        statements += [
-            statement
-            for view in meta.materialized_views
-            for statement in self.editor.materialized_views.get_materialized_view_create_sqls(model, view, safe)
-        ]
+        for view in ViewCreationOrder.get_ordered([*meta.views, *meta.materialized_views], lambda item: item):
+            if isinstance(view, MaterializedView):
+                statements += self.editor.materialized_views.get_materialized_view_create_sqls(model, view, safe)
+            else:
+                statements += self.editor.views.get_view_create_sqls(model, view, safe)
         if meta.row_level_security is not None:
             statements += self.editor.row_level_security_policies.get_row_level_security_sqls(
                 model, None, meta.row_level_security

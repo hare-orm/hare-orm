@@ -230,7 +230,8 @@ async def test_loose_hard_cascade_across_several_batches(small_bind_parameter_li
     assert await BatchLooseChild.objects.all().count() == 0
     assert await BatchLooseGrandchild.objects.all().count() == 0
     assert await BatchLooseSoftChild.objects.all().count() == 0
-    assert await BatchLooseSoftChild.objects.include_deleted().count() == 120
+    # A row deleted for real takes its soft-delete children with it, whatever db_constraint.
+    assert await BatchLooseSoftChild.objects.include_deleted().count() == 0
     assert await BatchLooseNullingRow.objects.filter(child_id__isnull=True).count() == 120
 
 

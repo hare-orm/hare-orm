@@ -28,18 +28,9 @@ UNSUPPORTED_META_OPTIONS = {
 #: The "#:" opening a field comment line, and the whitespace ending one.
 FIELD_COMMENT_MARKER_PATTERN = re.compile(r"(^\s*#:\s*|\s*$)", re.MULTILINE)
 
-#: Meta options taking a text - the name of a table, an app or a field, a description; ``schema`` takes
-#: one too, refused empty once the model's fields are known.
-TEXT_META_OPTIONS = frozenset(
-    {
-        ModelOption.APP,
-        ModelOption.OPTIMISTIC_LOCK_FIELD,
-        ModelOption.SOFT_DELETE_FIELD,
-        ModelOption.TABLE,
-        ModelOption.TABLE_DESCRIPTION,
-        ModelOption.TENANT_FIELD,
-    }
-)
+#: Meta options the DDL writes as a text - the table's name and description; ``schema`` takes one too,
+#: refused empty once the model's fields are known.
+TEXT_META_OPTIONS = frozenset({ModelOption.TABLE, ModelOption.TABLE_DESCRIPTION})
 #: Each Meta option of one type of value -> the types of its values, and how an error names them.
 META_OPTION_VALUE_TYPES: dict[str, tuple[tuple[type, ...], str]] = {
     **{option.value: ((str,), "a text") for option in TEXT_META_OPTIONS},
@@ -49,13 +40,5 @@ META_OPTION_VALUE_TYPES: dict[str, tuple[tuple[type, ...], str]] = {
 NONE_TAKING_META_OPTIONS = frozenset({*(option.value for option in TEXT_META_OPTIONS), ModelOption.SCHEMA.value})
 #: What joins a schema and a table in a qualified name - no table name holds it.
 TABLE_NAME_SEPARATOR = "."
-#: Meta options naming something - an empty text names nothing.
-NAMING_META_OPTIONS = frozenset(
-    {
-        ModelOption.APP.value,
-        ModelOption.OPTIMISTIC_LOCK_FIELD.value,
-        ModelOption.SOFT_DELETE_FIELD.value,
-        ModelOption.TABLE.value,
-        ModelOption.TENANT_FIELD.value,
-    }
-)
+#: Meta options naming something in the DDL - an empty text names nothing.
+NAMING_META_OPTIONS = frozenset({ModelOption.TABLE.value})

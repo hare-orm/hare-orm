@@ -21,7 +21,7 @@ class ExclusionConstraint:
     """``EXCLUDE USING <using> (...)`` - rejects a row whose values overlap an existing row's
     under the given operators: ``ExclusionConstraint(name=..., expressions=(("resource", "="),
     ("during", "&&")), using="gist")`` rejects two bookings of one resource with overlapping ranges.
-    PostgreSQL only - the other databases refuse it. Not tenant-aware: add the tenant column to
+    Where the dialect writes exclusion constraints - the others refuse it. Not tenant-aware: add the tenant column to
     ``expressions`` (with ``"="``) to check per tenant.
 
     Args:

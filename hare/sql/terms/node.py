@@ -22,6 +22,10 @@ class Node:
     reads_rows: bool = False
     #: The enclosing query's columns a subquery term reads through OuterReference().
     outer_reference_terms: tuple[Term, ...] = ()
+    #: Whether the node's value is a ``sensitive=True`` field's - its parameter is never shown
+    #: (``QueryParameters``); on a column or a subquery, the values a filter compares with it aren't
+    #: either. Declared here, not on a term: a table reads an unknown attribute as its column.
+    sensitive = False
 
     def nodes_(self) -> Iterator[TNode]:
         """The node and every node below it, depth first.

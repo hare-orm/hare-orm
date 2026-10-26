@@ -57,6 +57,19 @@ class RenameQuestions:
         """
         return self.get_answer(old_label, new_label, f"Was model {old_label} moved to {new_label}, keeping its table?")
 
+    def is_given(self, renamed: str, renamed_to: str) -> bool:
+        """Whether an answer given beforehand renames something to a name - nothing is asked: of several
+        removed and added ones declared alike, only such an answer tells which is which.
+
+        Args:
+            renamed: What may be renamed, as ``renames`` names it.
+            renamed_to: What it may be renamed to.
+        """
+        if self.renames.get(renamed) != renamed_to:
+            return False
+        self.applied_renames.add(renamed)
+        return True
+
     def get_answer(self, renamed: str, renamed_to: str, question: str) -> bool:
         """The answer given beforehand for what is renamed, else ``ask()``'s - asked once.
 

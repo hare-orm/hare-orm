@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Iterable
-from decimal import Decimal
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from hare.exceptions import QueryError, UnSupportedError
-from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
@@ -49,9 +47,6 @@ from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.time import Timezone
-
-if TYPE_CHECKING:
-    from hare.query.lookup_info.lookup_info import LookupInfo
 
 
 class FilterValues:
@@ -444,62 +439,6 @@ class FilterValues:
         return effective_field is not None and effective_field.holds_container_value
 
     @staticmethod
-    def holds_only_decimal_values(value: Any) -> bool:
-        """Whether a filter value is a Decimal, or a list/tuple/set of Decimals and Nones.
-
-        Args:
-            value: The raw or encoded filter value.
-
-        Returns:
-            True when every bound value is a Decimal.
-        """
-        if isinstance(value, Decimal):
-            return True
-        return isinstance(value, (list, tuple, set)) and all(
-            item is None or isinstance(item, Decimal) for item in value
-        )
-
-    @staticmethod
-    def get_decimal_column_comparand(
-        expression_context: ExpressionContext, lookup_info: LookupInfo, value: Any, value_field: Field[Any] | None
-    ) -> Any:
-        """An expression a Decimal column is compared with, read as the column's decimal - a number of
-        another type is compared by its value, never as text beside the column's decimal text.
-
-        Args:
-            expression_context: The context the filter is resolved in.
-            lookup_info: The lookup.
-            value: The expression's term.
-            value_field: The field the expression reads, None when unknown.
-
-        Returns:
-            The comparand - the term itself where the expression is a Decimal or the lookup no
-            comparison.
-        """
-        if lookup_info.lookup not in VALUE_COMPARISON_LOOKUPS or not isinstance(value, Term):
-            return value
-        compared_field = lookup_info.value_field
-        if compared_field is None or not isinstance(GeneratedField.get_effective_field(compared_field), DecimalField):
-            return value
-        if value_field is not None and isinstance(GeneratedField.get_effective_field(value_field), DecimalField):
-            return value
-        return expression_context.dialect.renderers.get_decimal_compared_term(value, only_decimals=True)
-
-    @staticmethod
-    def holds_decimal_value(value: Any) -> bool:
-        """Whether a filter value is a Decimal, or a list/tuple/set holding one.
-
-        Args:
-            value: The raw or encoded filter value.
-
-        Returns:
-            True when a Decimal is bound for the comparison.
-        """
-        if isinstance(value, Decimal):
-            return True
-        return isinstance(value, (list, tuple, set)) and any(isinstance(item, Decimal) for item in value)
-
-    @staticmethod
     def get_literal_value(value: Any) -> Any:
         """Unwraps a ``Value(...)`` filter value into its literal, so it is converted and validated
         by the filtered field like the same plain value.
@@ -530,7 +469,11 @@ class FilterValues:
         """
         value_type = type(value)
         if value_type is dict or (written and value_type is list):
-            return copy.deepcopy(value)
+            try:
+                return copy.deepcopy(value)
+            except RecursionError:
+                # Nested deeper than a copy reaches - deeper than JSON holds: the field refuses it as it is.
+                return value
         if value_type is list or value_type is set:
             return value_type(value)
         return value
