@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Install poetry
@@ -117,15 +117,15 @@ jobs:
       - uses: actions/checkout@v7
       # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
       # `python` of the steps below.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         id: python312
         with:
           python-version: '3.12'
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         id: python313
         with:
           python-version: '3.13'
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         id: python314
         with:
           python-version: '3.14'
@@ -229,7 +229,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Install poetry and wheel
