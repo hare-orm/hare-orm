@@ -43,6 +43,11 @@ sha2 = "0.11"
 # and the system allocator (HeapAlloc on Windows) costs several times more per allocation.
 mimalloc = { version = "0.1", default-features = false }
 
+# musl refuses to load a shared library with initial-exec TLS, mimalloc's default on Unix: the extension is
+# dlopen()ed, so on musl mimalloc takes the local-dynamic model.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
 [features]
 # Off for `cargo test`, which links libpython into the test binary.
 default = ["extension-module"]
