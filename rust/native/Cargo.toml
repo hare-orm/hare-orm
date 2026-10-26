@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time", "
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
 # array_to_sql/array_from_sql, which postgres-types uses internally but does not re-export.
 postgres-protocol = "0.6"
-fallible-iterator = "0.2"
+fallible-iterator = "0.3"
 deadpool-postgres = "0.14"
 # The pool deadpool-postgres builds on - its `Manager` trait, which `TimedManager` implements to
 # time every connect. The version deadpool-postgres uses.
