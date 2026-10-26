@@ -21,7 +21,7 @@ class ScrollPagination(BaseOffsetPagination):
         limit, offset = self.get_limit_and_offset(request_query)
         queryset = await request_query.get_filtered_queryset()
         rows = list(await request_query.get_ordered_queryset(queryset).offset(offset).limit(limit + 1))
-        items = await request_query.after_fetch(rows[:limit])
+        items = await request_query.finish_rows(rows[:limit])
         return ScrollPage(
             result=items,
             limit=limit,

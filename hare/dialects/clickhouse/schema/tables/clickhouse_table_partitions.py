@@ -14,6 +14,7 @@ from hare.dialects.clickhouse.schema.constants import (
 
 if TYPE_CHECKING:
     from hare.ddl.table_options import TableOptions
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.models import Model
 
 
@@ -23,6 +24,8 @@ class ClickhouseTablePartitions(TablePartitions):
     columns, its projections), by remaking the table for its engine and its keys."""
 
     __slots__ = ()
+
+    editor: ClickhouseSchemaEditor
 
     async def alter_table_options(
         self, model: type[Model], old_options: TableOptions | None, new_options: TableOptions | None
@@ -158,3 +161,69 @@ class ClickhouseTablePartitions(TablePartitions):
             if field_name not in new_values and field_name in fields_db_projection
         )
         return changes
+
+    def get_projection_names_reading_retyped_column(
+        self, old_model: type[Model], new_model: type[Model], field_name: str
+    ) -> list[str]:
+        """The projections of a table reading a column a field change gives another type - the server
+        changes no type of a column a projection reads.
+
+        Args:
+            old_model: The model the table matches.
+            new_model: The model it is changed to.
+            field_name: The changed field.
+
+        Returns:
+            The names of the projections, none when the column keeps its type.
+        """
+        column = old_model._meta.fields_db_projection.get(field_name)
+        options = old_model._meta.get_table_options(self.editor.client.dialect)
+        if (
+            column is None
+            or not isinstance(options, ClickhouseTableOptions)
+            or not options.projections
+            or not self.editor.column_definitions.changes_column_type(old_model, new_model, field_name)
+        ):
+            return []
+        return [projection.name for projection in options.projections if column in projection.get_read_columns()]
+
+    def get_projection_drop_sqls(self, model: type[Model], names: list[str]) -> list[str]:
+        """The statements dropping projections of a table.
+
+        Args:
+            model: The model of the table.
+            names: The projections' names.
+
+        Returns:
+            The statements.
+        """
+        meta = model._meta
+        table_sql = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        return [f"ALTER TABLE {table_sql} DROP PROJECTION {self.editor.quote(name)}" for name in names]
+
+    def get_projection_add_sqls(self, model: type[Model], names: list[str]) -> list[str]:
+        """The statements adding projections the model's table declares and building them for its rows.
+
+        Args:
+            model: The model of the table.
+            names: The projections' names.
+
+        Returns:
+            The statements.
+        """
+        meta = model._meta
+        table_sql = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        options = meta.get_table_options(self.editor.client.dialect)
+        projections = (
+            [projection for projection in options.projections if projection.name in names]
+            if isinstance(options, ClickhouseTableOptions)
+            else []
+        )
+        return [
+            statement
+            for projection in projections
+            for statement in (
+                f"ALTER TABLE {table_sql} ADD PROJECTION {projection.get_definition_sql(model, self.editor)}",
+                f"ALTER TABLE {table_sql} MATERIALIZE PROJECTION {self.editor.quote(projection.name)}",
+            )
+        ]

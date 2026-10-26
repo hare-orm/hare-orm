@@ -226,6 +226,17 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
         await run(RemoveView("Parcel", "views_all"), state, editor)
         await run(RemoveMaterializedView("Parcel", "views_per_city"), state, editor)
         assert "views_all" not in await get_engines(connection, "views_")
+        # Going back, a view writing to a table is created again over the rows its drop left there - filling
+        # it again wrote every row of the source a second time.
+        city_weights = [("a", 50), ("b", 62), ("c", 14)]
+        assert await get_rows(connection, totals_sql.format("views_city_weight")) == city_weights
+        state_before_removal = state.clone()
+        removal = RemoveMaterializedView("Parcel", "views_to_city")
+        await run(removal, state, editor)
+        await removal.database_backward("models", state, state_before_removal, state_editor=editor)
+        state = state_before_removal
+        assert await get_rows(connection, totals_sql.format("views_city_weight")) == city_weights
+        assert "views_to_city" in await get_engines(connection, "views_")
     finally:
         # The views a model declares go with its table.
         await run(DeleteModel(name="Parcel"), state, editor)

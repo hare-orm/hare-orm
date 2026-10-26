@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hare.dialects.enums import DialectName
+from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.gis import GeometryCollection, LineString, MultiPoint, Point, Polygon
 from hare.gis.aggregates import Collect, Extent, MakeLine, UnionAggregate
@@ -36,7 +36,7 @@ from hare.gis.functions import (
 )
 from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
 from hare.inspectdb.introspection.column_info import ColumnInfo
-from hare.query.expressions import F
+from hare.query.expressions import Case, F, Value, When
 from tests.dialects.postgresql.column_types.models_gis import GisCity, GisPlace, GisProjectedSite
 
 SQUARE = [(0, 0), (4, 0), (4, 4), (0, 4), (0, 0)]
@@ -136,6 +136,24 @@ async def test_the_same_query_with_another_geometry_is_not_stale(db_gis):
             await GisPlace.objects.order_by("id").annotate(d=Distance("location", point)).values_list("d", flat=True)
         )
         assert distances[expected_ids[0] - 1] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_geometry_in_an_expression_is_written_as_a_geometry(db_gis):
+    """Value(Point(...)) and a Case branch of a point went to the driver as the Point object - which no
+    driver binds - though update(location=Value(...)) wrote one."""
+    await create_places()
+    branch = Case(When(id=1, then=Point(7, 8)), default=F("location"))
+    assert await GisPlace.objects.filter(id=1).annotate(x=Value(Point(3, 4))).values_list("x", flat=True) == [
+        Point(3, 4, srid=4326)
+    ]
+    assert await GisPlace.objects.filter(id=1).annotate(x=branch).values_list("x", flat=True) == [
+        Point(7, 8, srid=4326)
+    ]
+    await GisPlace.objects.filter(id=1).update(
+        location=Case(When(id=1, then=Value(Point(5, 6))), default=F("location"))
+    )
+    assert (await GisPlace.objects.get(id=1)).location == Point(5, 6, srid=4326)
 
 
 @pytest.mark.asyncio
@@ -324,7 +342,7 @@ def test_inspectdb_maps_postgis_columns():
             udt_name=udt_name,
             full_type=full_type,
         )
-        return ColumnTypeMapper.map_column_type(DialectName.POSTGRESQL, column)
+        return ColumnTypeMapper.map_column_type(PostgresqlDialectName.POSTGRESQL, column)
 
     assert map_type("geometry(Point,4326)") == ("hare.gis.fields.PointField", {}, False)
     assert map_type("geometry(PolygonZ,3857)") == (

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.dialects.postgresql.renderers.constants import POSTGRESQL_REMAINDER_TRUNC_TYPES
+from hare.dialects.postgresql.renderers.constants import MICROSECONDS_PER_HOUR, POSTGRESQL_REMAINDER_TRUNC_TYPES
 from hare.sql import functions
-from hare.sql.constants import MICROSECONDS_PER_DAY, MICROSECONDS_PER_HOUR, MICROSECONDS_PER_SECOND
+from hare.sql.constants import MICROSECONDS_PER_DAY, MICROSECONDS_PER_SECOND
 from hare.sql.enums import DatePart, DateTruncSource, TruncType
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms import functions as term_functions
@@ -130,11 +130,15 @@ class PostgresqlTemporalRenderers:
         else:
             base_type = SqlTypes.TIMESTAMP if function.is_naive else SqlTypes.TIMESTAMPTZ
         operator = "-" if function.is_subtraction else "+"
-        microseconds_sql = f"CAST({function.get_arg_sql(microseconds_term, sql_context)} AS {SqlTypes.BIGINT})"
-        interval_sql = (
-            f"({microseconds_sql}/{MICROSECONDS_PER_HOUR}*INTERVAL '1 hour'"
-            f"+{microseconds_sql}%{MICROSECONDS_PER_HOUR}*INTERVAL '1 microsecond')"
-        )
+        if function.is_interval:
+            # An interval column - added as PostgreSQL adds it, its months calendar months.
+            interval_sql = f"({function.get_arg_sql(microseconds_term, sql_context)})"
+        else:
+            microseconds_sql = f"CAST({function.get_arg_sql(microseconds_term, sql_context)} AS {SqlTypes.BIGINT})"
+            interval_sql = (
+                f"({microseconds_sql}/{MICROSECONDS_PER_HOUR}*INTERVAL '1 hour'"
+                f"+{microseconds_sql}%{MICROSECONDS_PER_HOUR}*INTERVAL '1 microsecond')"
+            )
         shifted_sql = f"CAST({function.get_arg_sql(base_term, sql_context)} AS {base_type}){operator}{interval_sql}"
         if function.is_date:
             return f"CAST({shifted_sql} AS {SqlTypes.DATE})"

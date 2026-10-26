@@ -62,6 +62,7 @@ config = {"connections": {"analytics": "clickhouse+clickhouse-driver://default:s
 | `cast_string_to_dynamic_use_inference=0`, `cast_string_to_variant_use_inference=0` | Текст, приводимый к значению `Dynamic` или `Variant`, остаётся текстом — сервер прочитал бы `'5'` как число. |
 | `json_type_escape_dots_in_keys=1` | Точка в ключе значения JSON — часть ключа, а не вложенный путь. |
 | `allow_suspicious_types_in_order_by=1` | По значению `Dynamic` (пути JSON) можно сортировать. |
+| `allow_suspicious_types_in_group_by=1` | Группировка может взять такую сортировку — `values("data__n").annotate(...).order_by("data__n")`. |
 | `calculate_text_stack_trace=0` | Текст ошибки — сообщение сервера без его стека вызовов, который присылает собственный протокол. |
 
 Неверный пароль или пользователь и отсутствующая база подключения дают `ConfigurationError` на обоих
@@ -72,7 +73,9 @@ config = {"connections": {"analytics": "clickhouse+clickhouse-driver://default:s
 
 Дата и момент времени хранятся с 1900-01-01 по 2299-12-31 (`Date32`, `DateTime64`); любое другое значение
 сервер без ошибки заменяет ближайшим из них. hare вместо этого отклоняет такое значение — и при записи, и
-в фильтре — с `ValidationError`. Диапазон задан в UTC: момент в пределах суток от его краёв, прочитанный в
+в фильтре — с `ValidationError`. `ClickhouseDatetimeField(precision=9)` считает наносекунды в 64
+битах и хранит моменты до `2262-04-11 23:47:16.854775` UTC — более поздний отклоняется так же.
+Диапазон задан в UTC: момент в пределах суток от его краёв, прочитанный в
 поясе, где местное время выходит за диапазон (`1900-01-01 00:00` UTC в `America/New_York`), сервер
 переносит в `Extract()`, `Trunc()` и фильтре по части даты в этом поясе — держите такие моменты на сутки
 внутри диапазона.

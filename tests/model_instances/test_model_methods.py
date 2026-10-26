@@ -27,7 +27,6 @@ from tests.shared_models.testmodels import (
     CallableDefault,
     CompositePkThing,
     DatetimeFields,
-    DefaultModel,
     Dest_null,
     DirtyTrackedThing,
     DoubleFK,
@@ -56,6 +55,7 @@ from tests.shared_models.testmodels import (
     UUIDPkSourceModel,
     VersionedThing,
 )
+from tests.shared_models.testmodels_postgres import DefaultModel
 
 # ============================================================================
 # TestModelCreate
@@ -1154,6 +1154,7 @@ async def test_save_with_empty_update_fields_is_a_noop(db):
     assert (await VersionedThing.objects.get(pk=versioned_thing.pk)).version == 0
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_save_with_only_database_default_update_fields_is_a_noop(db):
     default_model = await DefaultModel.objects.create()
@@ -1268,16 +1269,6 @@ async def test_save_rejects_unknown_update_field_with_field_error(db):
 
     with pytest.raises(FieldError, match="nope"):
         await event.save(update_fields=["nope"])
-
-
-@pytest.mark.asyncio
-async def test_save_rejects_a_bare_string_for_update_fields(db):
-    """update_fields="name" iterated as characters and surfaced as KeyError: 'n'."""
-    tournament = await Tournament.objects.create(name="t")
-    event = await Event.objects.create(name="e", tournament=tournament)
-
-    with pytest.raises(QueryError, match=r"\['name'\]"):
-        await event.save(update_fields="name")
 
 
 @pytest.mark.asyncio

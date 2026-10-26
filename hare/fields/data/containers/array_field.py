@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.constants import ARRAY_VALUE_TYPE
 from hare.fields.data.containers.constants import (
     ARRAY_LENGTH_PATH_SEGMENT,
     ARRAY_LIST_LOOKUPS,
@@ -40,6 +41,8 @@ class ArrayField(ContainerField):
     Raises:
         ConfigurationError: ``base_field`` isn't a field instance.
     """
+
+    argument_value_type = ARRAY_VALUE_TYPE
 
     field_type = list
 

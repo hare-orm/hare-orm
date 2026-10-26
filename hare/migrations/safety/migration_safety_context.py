@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from hare.migrations.migration import Migration
     from hare.migrations.operations import Operation
     from hare.migrations.safety.enums import MigrationRiskCode
+    from hare.migrations.safety.operation_states import OperationStates
     from hare.migrations.state.state import State
     from hare.models import Model
 
@@ -24,8 +25,9 @@ class MigrationSafetyContext:
     Attributes:
         migration: The migration.
         operation: The operation checked.
-        state_before: The migration state before the operation.
-        state_after: The migration state after it.
+        operation_states: The states between the migration's operations - ``state_before`` and
+            ``state_after`` are made from them when read.
+        position: The operation's position among them.
         dialect: The dialect of the database the migration runs on.
         features: What that database supports - its server version's features when connected.
         large_table_rows: The rows from which a table counts as large.
@@ -40,14 +42,24 @@ class MigrationSafetyContext:
 
     migration: Migration
     operation: Operation
-    state_before: State
-    state_after: State
+    operation_states: OperationStates
+    position: int
     dialect: Dialect
     features: Features
     large_table_rows: int
     table_row_counts: Mapping[str, int | None] | None
     created_model_names: frozenset[str]
     in_separate_database_and_state: bool = False
+
+    @property
+    def state_before(self) -> State:
+        """The migration state before the operation."""
+        return self.operation_states.get(self.position)
+
+    @property
+    def state_after(self) -> State:
+        """The migration state after the operation."""
+        return self.operation_states.get(self.position + 1)
 
     def get_model_before(self, model_name: str) -> type[Model] | None:
         """The model as it is before the operation, None when the state has no such model.

@@ -9,12 +9,12 @@ import pytest
 import pytest_asyncio
 
 from hare import Connections
-from hare.exceptions import QueryError
+from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import Case, F, OuterReference, Subquery, Value, When, Window
 from hare.query.functions import Avg, Coalesce, Concat, Count, Length, Max, Round, Sum
 from hare.query.functions.window import Sum as WindowSum
-from tests.shared_models.testmodels import ExpressionTypeChild, ExpressionTypeParity, ExpressionTypeRow
-from tests.utils.sqlite_float_text import SqliteFloatText
+from tests.shared_models.testmodels_postgres import ExpressionTypeChild, ExpressionTypeParity, ExpressionTypeRow
+from tests.utils.integer_statistic import IntegerStatistic
 
 BIG_VALUE = 2**60 + 3
 AWARE_DATETIME = datetime(2020, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=3)))
@@ -36,10 +36,6 @@ async def parity_rows(db):
     )
 
 
-def is_sqlite() -> bool:
-    return ExpressionTypeParity._meta.connection.dialect.name == "sqlite"
-
-
 async def annotated_values(expression) -> list:
     return await ExpressionTypeParity.objects.all().annotate(c=expression).order_by("num").values_list("c", flat=True)
 
@@ -47,12 +43,14 @@ async def annotated_values(expression) -> list:
 # -- F4: integer % stays integer ---------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_integer_modulo_is_exact_integer(parity_rows):
     assert_same_values(await annotated_values(F("big") % 7), [BIG_VALUE % 7, 5])
     assert_same_values(await annotated_values(F("num") % 2), [1, 0])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_integer_modulo_filter_order_and_values(parity_rows):
     queryset = ExpressionTypeParity.objects.all().annotate(c=F("big") % 7)
@@ -64,6 +62,7 @@ async def test_integer_modulo_filter_order_and_values(parity_rows):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_integer_modulo_in_aggregate_and_update(parity_rows):
     assert await ExpressionTypeParity.objects.all().aggregate(total=Sum(F("big") % 7)) == {"total": BIG_VALUE % 7 + 5}
@@ -71,6 +70,7 @@ async def test_integer_modulo_in_aggregate_and_update(parity_rows):
     assert await ExpressionTypeParity.objects.get(num=1).values_list("big", flat=True) == BIG_VALUE % 7
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_modulo_is_exact_decimal(parity_rows):
     assert_same_values(await annotated_values(F("dec") % 1), [Decimal("0.10"), Decimal("0.40")])
@@ -80,12 +80,14 @@ async def test_decimal_modulo_is_exact_decimal(parity_rows):
 # -- F5: Decimal arithmetic with a literal ----------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_with_integer_literal(parity_rows):
     assert_same_values(await annotated_values(F("dec") + 1), [Decimal("2.10"), Decimal("1.40")])
     assert_same_values(await annotated_values(F("dec") * 3), [Decimal("3.30"), Decimal("1.20")])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_quotient_is_not_rounded(parity_rows):
     """Precision over dialect parity: a Decimal quotient isn't rounded to the operands' scale -
@@ -98,6 +100,7 @@ async def test_decimal_quotient_is_not_rounded(parity_rows):
         assert [str(quotient) for quotient in quotients] == ["0.36666666666666666667", "0.13333333333333333333"]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_literal_keeps_its_own_scale(parity_rows):
     assert_same_values(await annotated_values(F("dec") + Decimal("1.005")), [Decimal("2.105"), Decimal("1.405")])
@@ -105,12 +108,14 @@ async def test_decimal_literal_keeps_its_own_scale(parity_rows):
     assert_same_values(await annotated_values(F("dec") * F("dec")), [Decimal("1.2100"), Decimal("0.1600")])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_literal_scale_is_part_of_the_cached_shape(parity_rows):
     assert_same_values(await annotated_values(F("dec") + Decimal("1.005")), [Decimal("2.105"), Decimal("1.405")])
     assert_same_values(await annotated_values(F("dec") + Decimal("1.5")), [Decimal("2.60"), Decimal("1.90")])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_float_literal_still_gives_float(parity_rows):
     values = await annotated_values(F("dec") + 0.5)
@@ -118,6 +123,7 @@ async def test_float_literal_still_gives_float(parity_rows):
     assert all(type(value) is float for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_arithmetic_filter_values_order_aggregate_update(parity_rows):
     queryset = ExpressionTypeParity.objects.all().annotate(c=F("dec") + 1)
@@ -131,6 +137,7 @@ async def test_decimal_arithmetic_filter_values_order_aggregate_update(parity_ro
 # -- F6: Case with bool/Decimal/date literals --------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_case_literal_branches_decode_to_their_type(parity_rows):
     assert_same_values(await annotated_values(Case(When(num=1, then=True), default=False)), [True, False])
@@ -148,6 +155,7 @@ async def test_case_literal_branches_decode_to_their_type(parity_rows):
     assert datetime_values[1] is None
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_case_bool_literal_filter_and_values(parity_rows):
     queryset = ExpressionTypeParity.objects.all().annotate(c=Case(When(num=1, then=True), default=False))
@@ -158,6 +166,7 @@ async def test_case_bool_literal_filter_and_values(parity_rows):
 # -- F7: bare Value annotations ---------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_bare_value_annotation_types(parity_rows):
     assert_same_values(await annotated_values(Value(True)), [True, True])
@@ -168,6 +177,7 @@ async def test_bare_value_annotation_types(parity_rows):
     assert all(isinstance(value, datetime) and value.tzinfo is not None for value in datetime_values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_bare_value_annotation_with_values_and_model_instances(parity_rows):
     rows = (
@@ -181,15 +191,16 @@ async def test_bare_value_annotation_with_values_and_model_instances(parity_rows
 # -- F8: Concat with bool/datetime literals ----------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_concat_bool_literal_and_field(parity_rows):
-    # A literal is its Python text, a column its database's - SQLite's 1/0, PostgreSQL's true/false.
+    # A literal is its Python text, a column its database's - PostgreSQL's true/false.
     assert_same_values(await annotated_values(Concat("grp", True)), ["atrue", "btrue"])
-    true_text, false_text = ("1", "0") if is_sqlite() else ("true", "false")
-    assert_same_values(await annotated_values(Concat("grp", F("flag"))), [f"a{true_text}", f"b{false_text}"])
-    assert_same_values(await annotated_values(Concat("flag", "-", F("grp"))), [f"{true_text}-a", f"{false_text}-b"])
+    assert_same_values(await annotated_values(Concat("grp", F("flag"))), ["atrue", "bfalse"])
+    assert_same_values(await annotated_values(Concat("flag", "-", F("grp"))), ["true-a", "false-b"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_concat_temporal_literals(parity_rows):
     assert_same_values(
@@ -199,10 +210,11 @@ async def test_concat_temporal_literals(parity_rows):
     assert_same_values(await annotated_values(Concat("grp", date(2020, 1, 2))), ["a2020-01-02", "b2020-01-02"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_concat_bool_filter(parity_rows):
     queryset = ExpressionTypeParity.objects.all().annotate(c=Concat("grp", F("flag")))
-    assert await queryset.filter(c="b0" if is_sqlite() else "bfalse").values_list("num", flat=True) == [2]
+    assert await queryset.filter(c="bfalse").values_list("num", flat=True) == [2]
 
 
 # -- Mixed-type expressions over ExpressionTypeRow ---------------------------------
@@ -241,6 +253,7 @@ def assert_same_aggregate(actual: dict, expected: dict) -> None:
     assert {key: str(value) for key, value in actual.items()} == {key: str(value) for key, value in expected.items()}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_division_by_an_integer_is_not_integer_division(typed_rows):
     quotients = await typed_values(F("dec") / 3)
@@ -253,6 +266,7 @@ async def test_decimal_division_by_an_integer_is_not_integer_division(typed_rows
     assert all(type(value) is Decimal for value in halves)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_sum_divided_by_count_is_decimal(typed_rows):
     rows = (
@@ -269,6 +283,7 @@ async def test_decimal_sum_divided_by_count_is_decimal(typed_rows):
     assert abs(average["c"] - Decimal("3.50") / 9) < Decimal("1e-15")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_modulo_is_exact_on_every_backend(typed_rows):
     assert_same_values(await typed_values(F("dec") % Decimal("0.1")), [Decimal("0.00")] * 3)
@@ -280,6 +295,7 @@ async def test_decimal_modulo_is_exact_on_every_backend(typed_rows):
     assert await queryset.order_by("num").values_list("num", flat=True) == [3, 10]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_float_modulo_is_a_float_on_every_backend(typed_rows):
     assert_same_values(await typed_values(F("fl") % 2), [1.5, 0.25, -1.0])
@@ -296,12 +312,15 @@ async def test_float_modulo_is_a_float_on_every_backend(typed_rows):
     assert all(type(value) is float for value in remainders)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
-async def test_timedelta_modulo_is_an_integer_of_microseconds(typed_rows):
-    assert_same_values(await typed_values(F("td") % 2), [1, 0, 0])
-    assert_same_values(await typed_values(F("td") % 7), [3600000005 % 7, 86400000000 % 7, 30000000 % 7])
+async def test_a_timedelta_modulo_is_refused(typed_rows):
+    """A remainder of a duration was a number of its microseconds - a duration has no remainder."""
+    with pytest.raises(FieldError, match="with a duration here"):
+        await typed_values(F("td") % 2)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_count_combined_with_a_decimal_is_decimal(typed_rows):
     assert_same_values(
@@ -323,6 +342,7 @@ async def test_count_combined_with_a_decimal_is_decimal(typed_rows):
     assert abs(count_times_average["c"] - Decimal("3.50")) < Decimal("1e-15")
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_integer_and_decimal_branches_give_a_decimal(typed_rows):
     assert_same_values(
@@ -356,6 +376,7 @@ async def test_integer_and_decimal_branches_give_a_decimal(typed_rows):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_integer_and_float_branches_give_a_float(typed_rows):
     assert_same_values(await typed_values(Case(When(flag=True, then=F("num")), default=F("fl"))), [3.0, 2.25, 10.0])
@@ -369,6 +390,7 @@ async def test_integer_and_float_branches_give_a_float(typed_rows):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_date_and_datetime_literal_branches_give_a_datetime(typed_rows):
     midnight = datetime(2020, 1, 1, tzinfo=timezone.utc)
@@ -377,6 +399,7 @@ async def test_date_and_datetime_literal_branches_give_a_datetime(typed_rows):
     assert all(type(value) is datetime and value.utcoffset() == timedelta(0) for value in values)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_branches_keep_the_largest_scale(typed_rows):
     assert_same_values(
@@ -396,16 +419,22 @@ async def test_decimal_branches_keep_the_largest_scale(typed_rows):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_and_float_branches_give_a_float(typed_rows):
     assert_same_values(await typed_values(Case(When(flag=True, then=F("dec")), default=0.125)), [1.1, 0.125, 2.0])
     assert_same_values(await typed_values(Coalesce("dec_null", 0.125)), [0.125, 3.3, 1.0])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregates_of_untyped_integers(typed_rows):
     assert_same_aggregate(await ExpressionTypeRow.objects.all().aggregate(c=Sum(Value(1))), {"c": 3})
-    assert_same_aggregate(await ExpressionTypeRow.objects.all().aggregate(c=Avg(Value(2))), {"c": 2.0})
+    exact = IntegerStatistic.get_type(ExpressionTypeRow) is Decimal
+    assert_same_aggregate(
+        await ExpressionTypeRow.objects.all().aggregate(c=Avg(Value(2))),
+        {"c": Decimal("2.0000000000000000") if exact else 2.0},
+    )
     assert_same_aggregate(
         await ExpressionTypeRow.objects.all().aggregate(c=Sum(F("td") * 2)),
         {"c": timedelta(microseconds=180060000010)},
@@ -414,16 +443,20 @@ async def test_aggregates_of_untyped_integers(typed_rows):
         await ExpressionTypeRow.objects.all().aggregate(c=Sum("td") / Count("id")),
         {"c": timedelta(microseconds=30010000002)},
     )
-    assert_same_aggregate(await ExpressionTypeRow.objects.all().aggregate(c=Count("id") * Avg("num")), {"c": 17.0})
+    assert_same_aggregate(
+        await ExpressionTypeRow.objects.all().aggregate(c=Count("id") * Avg("num")),
+        {"c": Decimal("17.0000000000000001") if exact else 17.0},
+    )
     doubled_average = await ExpressionTypeRow.objects.all().aggregate(c=Avg("num") * Decimal("2"))
-    assert doubled_average["c"] == pytest.approx(34 / 3)
-    assert type(doubled_average["c"]) is float
+    assert float(doubled_average["c"]) == pytest.approx(34 / 3)
+    assert type(doubled_average["c"]) is IntegerStatistic.get_type(ExpressionTypeRow)
     assert_same_aggregate(
         await ExpressionTypeRow.objects.all().annotate(y=Value(Decimal("1.5"))).aggregate(c=Sum("y")),
         {"c": Decimal("4.5")},
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_a_duration_divided_by_an_integer_rounds_a_half_to_even(typed_rows):
     """The microseconds were divided as integers - cut towards zero, where Python and PostgreSQL
@@ -438,6 +471,7 @@ async def test_a_duration_divided_by_an_integer_rounds_a_half_to_even(typed_rows
     assert_same_values(await typed_values(-F("td") / 2), [-duration / 2 for duration in durations])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_window_sum_over_literal_and_timedelta_annotations(typed_rows):
     def windowed(annotation):
@@ -461,10 +495,11 @@ async def test_window_sum_over_literal_and_timedelta_annotations(typed_rows):
     assert_same_values(await windowed(Value(Decimal("1.5"))), [Decimal("1.5"), Decimal("3.0"), Decimal("4.5")])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_concat_of_arithmetic_and_numbers(typed_rows):
-    # A float's and a moment's text is its database's own - SQLite writes -3.0 and its stored moment.
-    float_three, average_three, offset = ("-3.0", "3.0", "+00:00") if is_sqlite() else ("-3", "3", "+00")
+    # A float's and a moment's text is its database's own.
+    float_three, offset = "-3", "+00"
     assert_same_values(await typed_values(Concat("s", F("dec") * 2)), ["abc2.20", "de0.80", "fghi4.00"])
     assert_same_values(await typed_values(Concat("s", F("num") / 2)), ["abc1", "de2", "fghi5"])
     assert_same_values(await typed_values(Concat("s", F("fl") * 1)), ["abc1.5", "de2.25", f"fghi{float_three}"])
@@ -479,10 +514,15 @@ async def test_concat_of_arithmetic_and_numbers(typed_rows):
             f"fghi2022-05-06 07:08:09{offset}",
         ],
     )
-    assert_same_values(await typed_values(Concat("s", Avg("children__num"))), ["abc1.5", f"de{average_three}", "fghi"])
+    # An average of integers is PostgreSQL's numeric, written with its own scale.
+    assert_same_values(
+        await typed_values(Concat("s", Avg("children__num"))),
+        ["abc1.5000000000000000", "de3.0000000000000000", "fghi"],
+    )
     assert_same_values(await typed_values(Concat("s", Sum("children__dec"))), ["abc3.75", "de0.10", "fghi"])
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_concat_float_literal_is_its_python_text(typed_rows):
     assert_same_values(
@@ -492,19 +532,8 @@ async def test_concat_float_literal_is_its_python_text(typed_rows):
             for prefix in ("abc", "de", "fghi")
         ],
     )
-    if is_sqlite():
-        # SQLite's own text of a double - 15 significant digits before 3.53, 17 from 3.53 on.
-        assert_same_values(await typed_values(Concat("s", F("fl") / 3)), ["abc0.5", "de0.75", "fghi-1.0"])
-        assert_same_values(
-            await typed_values(Concat("s", F("fl") * 1e15)),
-            [
-                f"{prefix}{SqliteFloatText.get(value)}"
-                for prefix, value in (("abc", 1.5e15), ("de", 2.25e15), ("fghi", -3e15))
-            ],
-        )
-    else:
-        assert_same_values(await typed_values(Concat("s", F("fl") / 3)), ["abc0.5", "de0.75", "fghi-1"])
-        assert_same_values(await typed_values(Concat("s", F("fl") * 1e15)), ["abc1.5e+15", "de2.25e+15", "fghi-3e+15"])
+    assert_same_values(await typed_values(Concat("s", F("fl") / 3)), ["abc0.5", "de0.75", "fghi-1"])
+    assert_same_values(await typed_values(Concat("s", F("fl") * 1e15)), ["abc1.5e+15", "de2.25e+15", "fghi-3e+15"])
 
 
 @pytest.mark.database_independent
@@ -515,6 +544,7 @@ def test_concat_rejects_a_bytes_literal():
         Concat("s", Value(b"x"))
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_timedelta_uuid_dict_and_bytes_literals(typed_rows):
     hour = timedelta(hours=1)
@@ -543,6 +573,7 @@ async def test_timedelta_uuid_dict_and_bytes_literals(typed_rows):
     assert await typed_values(Value({"a": 1})) == [{"a": 1}] * 3
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_encoded_literals_are_rebound_by_the_cached_query_shape(typed_rows):
     for hours in (1, 2):
@@ -561,6 +592,7 @@ async def test_encoded_literals_are_rebound_by_the_cached_query_shape(typed_rows
         )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_of_a_related_field_decodes_through_that_field(typed_rows):
     def first_child_value(path):

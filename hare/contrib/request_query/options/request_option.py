@@ -10,7 +10,6 @@ from hare.contrib.request_query.enums import ParameterType
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
 from hare.contrib.request_query.options.constants import NAME_SEPARATOR
 from hare.contrib.request_query.options.parameter_field import ParameterField
-from hare.exceptions import ConfigurationError
 
 
 class RequestOption(abc.ABC):
@@ -59,36 +58,6 @@ class RequestOption(abc.ABC):
         if not value:
             return ()
         return tuple(name.strip() for name in value.split(NAME_SEPARATOR) if name.strip())
-
-    @staticmethod
-    def check_parameter_name(option_name: str, parameter: str) -> None:
-        """Checks the name of an option's parameter.
-
-        Args:
-            option_name: The option's class name, for the error.
-            parameter: The name.
-
-        Raises:
-            ConfigurationError: The name isn't an identifier.
-        """
-        if not isinstance(parameter, str) or not parameter.isidentifier():
-            raise ConfigurationError(f"{option_name}.parameter must be an identifier, got {parameter!r}")
-
-    @staticmethod
-    def check_allowed_names(option_name: str, names: tuple[str, ...]) -> None:
-        """Checks the names an option lets a request choose from.
-
-        Args:
-            option_name: The option's class name, for the error.
-            names: The names.
-
-        Raises:
-            ConfigurationError: The names aren't a non-empty tuple of distinct names.
-        """
-        if not isinstance(names, tuple) or not names or not all(isinstance(name, str) and name for name in names):
-            raise ConfigurationError(f"{option_name} needs a non-empty tuple of names, got {names!r}")
-        if len(set(names)) != len(names):
-            raise ConfigurationError(f"{option_name} names each name once, got {names!r}")
 
     @staticmethod
     def get_name_list_parameter_fields(

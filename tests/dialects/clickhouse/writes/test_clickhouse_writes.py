@@ -4,6 +4,7 @@
 
 import datetime
 import decimal
+import ipaddress
 import os
 
 import pytest
@@ -28,6 +29,10 @@ from hare.query.expressions import F, OuterReference, Subquery, Value
 from hare.query.functions import Sum
 from tests.dialects.clickhouse.models import (
     Account,
+    Country,
+    Device,
+    DeviceLevel,
+    DeviceStatus,
     EventLog,
     NetworkHost,
     NetworkRoute,
@@ -38,6 +43,8 @@ from tests.dialects.clickhouse.models import (
     Revision,
     Team,
     TenantDocument,
+    TenantLabel,
+    TenantNote,
 )
 
 
@@ -277,16 +284,21 @@ async def test_an_integer_set_from_a_fraction_loses_the_fraction(clickhouse_db):
 
 
 @pytest.mark.asyncio
-async def test_a_date_shifted_beyond_the_stored_ones_is_refused(clickhouse_db):
-    """ClickHouse's own functions stop at the last date it stores."""
+async def test_a_moment_shifted_beyond_the_stored_ones_is_computed_by_clickhouse(clickhouse_db):
+    """ClickHouse's own addMicroseconds() - hare checks nothing; a moment read is computed past the
+    years a column stores."""
     await PageView.objects.create(site="a", viewed_at=datetime.datetime(2299, 12, 1, tzinfo=datetime.UTC))
 
-    with pytest.raises(OperationalError, match="timestamp out of range"):
-        await PageView.objects.annotate(later=F("viewed_at") + datetime.timedelta(days=60)).values_list("later")
-    with pytest.raises(OperationalError, match="timestamp out of range"):
-        await PageView.objects.annotate(earlier=F("viewed_at") - datetime.timedelta(days=200_000)).values_list(
-            "earlier"
+    shifted = await PageView.objects.annotate(
+        later=F("viewed_at") + datetime.timedelta(days=60),
+        earlier=F("viewed_at") - datetime.timedelta(days=200_000),
+    ).values_list("later", "earlier")
+    assert shifted == [
+        (
+            datetime.datetime(2300, 1, 30, tzinfo=datetime.UTC),
+            datetime.datetime(2299, 12, 1, tzinfo=datetime.UTC) - datetime.timedelta(days=200_000),
         )
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,3 +388,153 @@ async def test_a_null_byte_refusal_names_no_value(clickhouse_db):
         with pytest.raises(ValidationError, match="null byte") as error:
             await refused()
         assert "top-secret" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_integer_arithmetic_set_past_the_column_type_wraps_around_as_clickhouse_writes_it(
+    clickhouse_db,
+):
+    """A mutation is ClickHouse's own - an integer past its column's type wraps around."""
+    moment = datetime.datetime(2024, 1, 2, tzinfo=datetime.UTC)
+    await PageView.objects.create(site="a", viewed_at=moment, duration_ms=2**31 - 1)
+    await Country.objects.create(code="fr", name="France", population=2**63 - 1)
+
+    await PageView.objects.filter(site="a").update(duration_ms=F("duration_ms") + 1)
+    await Country.objects.filter(code="fr").update(population=F("population") + 1)
+    assert await PageView.objects.values_list("duration_ms", flat=True) == [-(2**31)]
+    assert await Country.objects.values_list("population", flat=True) == [-(2**63)]
+
+
+@pytest.mark.asyncio
+async def test_a_field_set_to_a_subquery_writes_its_value(clickhouse_db):
+    """A subquery is a query's expression and an SQL term at once - an update to a bare Subquery was
+    refused, the subquery bound as a parameter. A value past the column's type wraps around, as a
+    mutation of ClickHouse writes it."""
+    if (await PageView._meta.connection.get_server_version())[:2] >= (26, 7):
+        pytest.skip(
+            "ClickHouse 26.7 refuses a mutation setting a column without NULL to a Nullable subquery "
+            "(CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN) - the population column is Nullable"
+        )
+    moment = datetime.datetime(2024, 1, 2, tzinfo=datetime.UTC)
+    await PageView.objects.create(site="a", viewed_at=moment, duration_ms=1)
+    await Country.objects.create(code="fr", name="France", population=7)
+    await Country.objects.create(code="de", name="Germany", population=2**40)
+
+    def get_population(code: str) -> Subquery:
+        return Subquery(Country.objects.filter(code=code).values("population")[:1])
+
+    await PageView.objects.filter(site="a").update(duration_ms=get_population("fr"))
+    assert await PageView.objects.values_list("duration_ms", flat=True) == [7]
+    await PageView.objects.filter(site="a").update(duration_ms=get_population("de"))
+    assert await PageView.objects.values_list("duration_ms", flat=True) == [0]
+
+
+@pytest.mark.asyncio
+async def test_integer_arithmetic_set_into_an_enum_writes_a_member_and_refuses_a_non_member(clickhouse_db):
+    """Exact arithmetic is an Int256, which ClickHouse converts to no Enum16 - every arithmetic update of an
+    integer enum failed, a member's number too."""
+    await Device.objects.create(
+        id=1,
+        tiny=1,
+        big=1,
+        ratio=0.5,
+        code="ab",
+        country="fr",
+        status=DeviceStatus.ONLINE,
+        level=DeviceLevel.LOW,
+        address=ipaddress.IPv4Address("10.0.0.7"),
+        labels=[],
+    )
+
+    await Device.objects.filter(id=1).update(level=F("level") + 499)
+    assert await Device.objects.values_list("level", flat=True) == [DeviceLevel.HIGH]
+    with pytest.raises(OperationalError, match="no member of the enum"):
+        await Device.objects.filter(id=1).update(level=F("level") + 1)
+    assert await Device.objects.values_list("level", flat=True) == [DeviceLevel.HIGH]
+
+
+@pytest.mark.asyncio
+async def test_two_tenants_rows_of_one_key_are_told_apart_by_their_tenant(clickhouse_db):
+    """ClickHouse keeps no key unique - a relation's check read another tenant's row of the key and refused,
+    a delete's cascade reached another tenant's rows pointing at the key."""
+    for tenant in (1, 2):
+        with Tenancy.scope(tenant):
+            await TenantDocument.objects.create(id=1, title=f"of {tenant}")
+            await TenantLabel.objects.create(code="a", region="eu")
+    with Tenancy.scope(2):
+        await TenantNote.objects.create(id=2, document_id=1)
+        document = await TenantDocument.objects.get(id=1)
+        await document.labels.add(await TenantLabel.objects.get(code="a", region="eu"))
+    with Tenancy.scope(1):
+        await TenantNote.objects.create(id=1, document_id=1)
+        await (await TenantDocument.objects.get(id=1)).delete()
+
+    with Tenancy.scope(Tenancy.ALL):
+        assert await TenantDocument.objects.values_list("title", flat=True) == ["of 2"]
+        assert await TenantNote.objects.values_list("id", flat=True) == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_json_document_written_by_a_mutation_equals_the_inserted_one(clickhouse_db):
+    """A JSON column held an integer as an UInt64 written by an INSERT and as an Int64 by a mutation - the
+    document an update wrote wasn't found by an exact filter."""
+    document = {"a": 1, "b": [1, 2], "c": 2**40}
+    await Player.objects.create(id=1, name="inserted", data=document)
+    await Player.objects.create(id=2, name="updated")
+    await Player.objects.filter(id=2).update(data=document)
+
+    assert await Player.objects.filter(data=document).order_by("id").values_list("id", flat=True) == [1, 2]
+    assert await Player.objects.filter(data__not=document).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_json_boolean_beside_a_text_in_a_filter_stays_a_boolean(clickhouse_db):
+    """The document a filter compared with held true beside a text as the text 'true' - a row holding the
+    text was found."""
+    await Player.objects.create(id=1, name="texts", data={"a": ["", "true"]})
+
+    assert await Player.objects.filter(data={"a": ["", True]}).count() == 0
+    assert await Player.objects.filter(data={"a": ["", "true"]}).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_an_insert_from_refuses_a_literal_its_field_refuses(clickhouse_db):
+    """A Value() the source selected was written unchecked - a text past max_length kept whole, an
+    integer past its column's range wrapped around."""
+    await Account.objects.create(id=1, owner="a")
+    for literal, field_name in (("o" * 21, "owner"), (2**40, "balance")):
+        source = Account.objects.annotate(new_id=Value(2), literal=Value(literal), kept=F("owner")).values_list(
+            "new_id", "literal", "kept"
+        )
+        fields = ["id", field_name, "balance" if field_name == "owner" else "owner"]
+        with pytest.raises(ValidationError, match=field_name):
+            await Account.objects.insert_from(source, fields=fields)
+    assert await Account.objects.count() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_literal_beside_a_json_column_is_written_as_its_json(clickhouse_db):
+    """A literal in Coalesce() beside a JSON column was bound as itself - a text that is no JSON was
+    stored, and the row couldn't be read any more."""
+    from hare.query.functions import Coalesce
+
+    await Player.objects.create(id=1, name="p")
+    for value, expected in (
+        ({"a": 1}, {"a": 1}),
+        ("text", "text"),
+        ([None], [None]),
+        (datetime.date(2024, 1, 2), "2024-01-02"),
+    ):
+        try:
+            await Player.objects.filter(id=1).update(data=value)
+        except ValidationError as error:
+            # A JSON column of the server's JSON type holds an object alone - refused as a plain write is.
+            for expression in (Coalesce(Value(value), F("data")), Coalesce(F("data"), Value(value))):
+                with pytest.raises(ValidationError, match=str(error).split(":")[0]):
+                    await Player.objects.filter(id=1).update(data=expression)
+            continue
+        await Player.objects.filter(id=1).update(data=None)
+        for expression in (Coalesce(Value(value), F("data")), Coalesce(F("data"), Value(value))):
+            await Player.objects.filter(id=1).update(data=expression)
+            assert (await Player.objects.get(id=1)).data == expected
+            await Player.objects.filter(id=1).update(data=None)

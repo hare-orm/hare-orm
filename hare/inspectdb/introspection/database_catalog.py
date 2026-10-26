@@ -200,8 +200,8 @@ class DatabaseCatalog:
         Args:
             connection: The connection.
             table: The table.
-            schema: The schema ``table`` lives in (an attached database on SQLite, a database of the
-                server where databases are the schemas), the connection's default one when None.
+            schema: The schema ``table`` lives in (a schema, an attached database or a database of
+                the server - the namespace of tables the database has), the connection's default one when None.
             verify_exists: See inspect_tables().
 
         Returns:
@@ -225,8 +225,8 @@ class DatabaseCatalog:
         Args:
             connection: The connection.
             tables: The tables to inspect.
-            schema: The schema the tables live in (an attached database on SQLite, a database of the
-                server where databases are the schemas), the connection's default one when None.
+            schema: The schema the tables live in (a schema, an attached database or a database of
+                the server - the namespace of tables the database has), the connection's default one when None.
             verify_exists: Set to ``False`` only when the caller already matched ``tables``
                 against a table list it just fetched itself - skips this method's own
                 get_table_names() round trip. A dialect whose catalog statements take no bind

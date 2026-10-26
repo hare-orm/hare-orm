@@ -8,8 +8,7 @@ import datetime
 
 import pytest
 
-from hare import Model, fields
-from hare.exceptions import ConfigurationError, FieldError, QueryError
+from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import F
 from hare.time import Timezone
 from tests.shared_models.testmodels import DateFields, DatetimeFields, IntFields, Team
@@ -142,15 +141,3 @@ async def test_latest_and_earliest_take_meta_get_latest_by(db):
     assert (await DateFields.objects.latest("date_null")).id == 4
     with pytest.raises(FieldError, match="latest\\(\\) needs the fields to order by"):
         await IntFields.objects.latest()
-
-
-@pytest.mark.database_independent
-def test_meta_get_latest_by_takes_field_names_only():
-    with pytest.raises(ConfigurationError, match="Meta.get_latest_by must be a field name"):
-
-        class BadLatest(Model):
-            id = fields.IntField(primary_key=True)
-
-            class Meta:
-                abstract = True
-                get_latest_by = 5

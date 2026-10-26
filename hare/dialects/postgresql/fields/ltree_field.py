@@ -4,6 +4,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.dialects.postgresql.enums import PostgresqlLookup
 from hare.dialects.postgresql.fields.constants import (
     LTREE_LABEL_PATTERN,
     LTREE_LABEL_SEPARATOR,
@@ -13,6 +14,7 @@ from hare.dialects.postgresql.fields.constants import (
 from hare.exceptions import ValidationError
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.field import Field
+from hare.query.enums import LookupValueShape
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -87,6 +89,12 @@ class LtreeField(Field[str]):
         from hare.dialects.postgresql.lookups.ltree.postgresql_ltree_field_lookups import PostgresqlLtreeFieldLookups
 
         return PostgresqlLtreeFieldLookups.get_lookups(self)
+
+    def get_lookup_value_description(self, lookup: str) -> tuple[LookupValueShape, Any] | None:
+        """``matches_any`` takes a list of ``lquery`` patterns."""
+        if lookup == PostgresqlLookup.MATCHES_ANY:
+            return LookupValueShape.LIST, str
+        return None
 
     def get_path_transform(self, segment: str) -> tuple[Callable[[Term], Term], Field[Any]] | None:
         """The number of labels of the path (``path__depth``)."""

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.constants import TUPLE_VALUE_TYPE
 from hare.fields.data.containers.constants import CONTAINER_INDEX_PATH_PATTERN
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.containers.declarations import TupleValue
@@ -36,6 +37,8 @@ class TupleField(ContainerField):
         ConfigurationError: ``element_fields`` is empty, or holds a value that isn't a field
             instance or a name that isn't an identifier.
     """
+
+    argument_value_type = TUPLE_VALUE_TYPE
 
     field_type = tuple
 

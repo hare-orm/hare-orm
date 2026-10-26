@@ -4,9 +4,8 @@ import hashlib
 import inspect
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.outbox.capture.change_extension import ChangeExtension
 from hare.contrib.outbox.capture.constants import (
     CHANGE_ENVELOPE_KEYS,
@@ -31,7 +30,9 @@ from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import ChangePayload, RowOperation
 
 if TYPE_CHECKING:
+    from hare.core.apps.apps import Apps
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.fields.relations.swappable_model_reference import SwappableModelReference
     from hare.instrumentation.capture.captured_change import CapturedChange
     from hare.models import Model
 
@@ -53,7 +54,8 @@ class ChangeCapture(ChangeSink):
 
     Args:
         outbox: The concrete ``OutboxEvent`` model the events go to - on the connection of the
-            captured model.
+            captured model: its class, its ``"app.Model"`` label or a ``swappable()`` setting, found as
+            the models are bound.
         operations: The operations captured - every one by default.
         payload: What an event holds of its row: ``KEYS`` - its key only; ``AFTER`` - the row as the
             write left it (as it was, for a delete); ``BEFORE_AND_AFTER`` - both, which needs
@@ -73,12 +75,12 @@ class ChangeCapture(ChangeSink):
             its event, or None; run at the write, in its transaction.
 
     Raises:
-        ConfigurationError: An argument of the wrong type.
+        ConfigurationError: An unknown operation or payload, both ``fields`` and ``exclude``.
     """
 
     def __init__(
         self,
-        outbox: type[OutboxEvent],
+        outbox: type[OutboxEvent] | str | SwappableModelReference,
         *,
         operations: Iterable[RowOperation | str] = tuple(RowOperation),
         payload: ChangePayload | str = ChangePayload.AFTER,
@@ -88,32 +90,39 @@ class ChangeCapture(ChangeSink):
         ordering_key: KeyDeclaration | None = DEFAULT_CHANGE_ORDERING_KEY_TEMPLATE,
         extend: Callable[[CapturedChange], ChangeExtension | None | Awaitable[ChangeExtension | None]] | None = None,
     ) -> None:
-        if not isinstance(outbox, type) or not issubclass(outbox, OutboxEvent):
-            raise ConfigurationError(f"ChangeCapture outbox must be an OutboxEvent model, got {outbox!r}")
         try:
             self.operations = frozenset(RowOperation(operation) for operation in operations)
             self.payload = ChangePayload(payload)
         except ValueError as error:
             raise ConfigurationError(f"ChangeCapture: {error}") from None
-        if not self.operations:
-            raise ConfigurationError("ChangeCapture operations must name at least one operation")
-        if isinstance(fields, str) or isinstance(exclude, str):
-            raise ConfigurationError("ChangeCapture fields and exclude take a list of field names, not a string")
         if fields is not None and exclude:
             raise ConfigurationError("ChangeCapture takes fields or exclude, not both")
-        for declaration_name, declaration in (("topic", topic), ("ordering_key", ordering_key)):
-            if declaration is not None and not isinstance(declaration, str) and not callable(declaration):
-                raise ConfigurationError(f"ChangeCapture {declaration_name} must be a template or a function")
-        if topic is None or (isinstance(topic, str) and not topic):
-            raise ConfigurationError("ChangeCapture topic must be a non-empty template or a function")
-        if extend is not None and not callable(extend):
-            raise ConfigurationError(f"ChangeCapture extend must be a function, got {extend!r}")
-        self.outbox = outbox
+        #: The outbox model as it was given - a label is found as the registry links the models.
+        self.outbox_reference = outbox
+        self._outbox: type[OutboxEvent] | None = outbox if isinstance(outbox, type) else None
         self.fields = tuple(fields) if fields is not None else None
         self.exclude = tuple(exclude)
         self.topic = topic
         self.ordering_key = ordering_key
         self.extend = extend
+
+    @property
+    def outbox(self) -> type[OutboxEvent]:
+        """The outbox model - a label given found in the registry, else in the current context.
+
+        Raises:
+            ConfigurationError: The label names no model.
+        """
+        if self._outbox is None:
+            # Local import: the context imports the models, which import this module.
+            from hare.core.hare_context import HareContext
+
+            self._outbox = cast("type[OutboxEvent]", HareContext.require_current().get_model(self.outbox_reference))
+        return self._outbox
+
+    def link_models(self, apps: Apps) -> None:
+        if not isinstance(self.outbox_reference, type):
+            self._outbox = cast("type[OutboxEvent]", apps.get_model(self.outbox_reference))
 
     def get_field_names(self, model: type[Model]) -> tuple[str, ...]:
         meta = model._meta
@@ -209,21 +218,12 @@ class ChangeCapture(ChangeSink):
 
         Returns:
             The key, None without one.
-
-        Raises:
-            ValidationError: A function's key isn't text of 1 to 255 characters.
         """
         if declaration is None:
             return None
         if isinstance(declaration, str):
             return self.get_shortened_key(declaration.format(**self.get_template_values(model, change)))
-        key = declaration(change)
-        if key is not None and (not isinstance(key, str) or not 1 <= len(key) <= OUTBOX_KEY_MAX_LENGTH):
-            raise ValidationError(
-                f"{model.__name__}: a captured change's topic or ordering key must be a string of "
-                f"1..{OUTBOX_KEY_MAX_LENGTH} characters, got {ValueDescriptions.get_shown_value(key)}"
-            )
-        return key
+        return declaration(change)
 
     @staticmethod
     def get_shortened_key(key: str) -> str:
@@ -296,7 +296,6 @@ class ChangeCapture(ChangeSink):
             The extension, None without one.
 
         Raises:
-            TypeError: ``extend`` gave something other than a ``ChangeExtension`` or None.
             ValidationError: It sets a key of the envelope, or a field the outbox sets itself.
         """
         if self.extend is None:
@@ -306,8 +305,6 @@ class ChangeCapture(ChangeSink):
             extension = await extension
         if extension is None:
             return None
-        if not isinstance(extension, ChangeExtension):
-            raise TypeError(f"{model.__name__}: ChangeCapture extend must give a ChangeExtension or None")
         colliding_keys = sorted(CHANGE_ENVELOPE_KEYS & set(extension.payload or ()))
         if colliding_keys:
             raise ValidationError(f"ChangeExtension.payload can't set the envelope's {', '.join(colliding_keys)}")
@@ -327,8 +324,7 @@ class ChangeCapture(ChangeSink):
             changes: The changes.
 
         Raises:
-            ValidationError: A topic or an ordering key isn't text of the length a key takes, or a topic
-                function gave None.
+            ValidationError: An extension sets a key of the envelope, or a field the outbox sets itself.
         """
         outbox = self.outbox
         tenant_field = outbox._meta.tenant_field
@@ -344,12 +340,9 @@ class ChangeCapture(ChangeSink):
                 field_values.update(extension.extra_field_values or {})
             if tenant_field and tenant_field not in field_values and change.tenant is not None:
                 field_values[tenant_field] = change.tenant
-            topic = self.get_key(self.topic, model, change)
-            if topic is None:
-                raise ValidationError(f"{model.__name__}: the topic function of a captured change gave None")
             events.append(
                 outbox(
-                    topic=topic,
+                    topic=self.get_key(self.topic, model, change),
                     payload=payload,
                     ordering_key=self.get_key(self.ordering_key, model, change),
                     headers=headers,

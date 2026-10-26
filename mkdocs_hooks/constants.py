@@ -99,3 +99,12 @@ RUSSIAN_REPLACED_WORDING = {
     re.compile(r"\b[Пп]равил\w* сортировки|\b[Кк]олляци|\b[Сс]опоставлени\w* строк"): 'глоссарий: "правило сравнения"',
     re.compile(r"\b[Сс]ыр\w* SQL"): 'глоссарий: "готовый SQL"',
 }
+#: The page GitHub Pages serves for every missing path, and the language it is written in - each
+#: language's build writes it to the site's root, so only this one's is kept.
+NOT_FOUND_TEMPLATE_NAME = "404.html"
+NOT_FOUND_PAGE_LANGUAGE = "en"
+#: The search index of a build, under the site's root - and under a translation's own folder.
+SEARCH_INDEX_PATH = "search/search_index.json"
+#: The base path in a page's theme configuration - the search index and the search results are read
+#: from it.
+PAGE_CONFIG_BASE = re.compile(r'("base": ")([^"]*)(")')

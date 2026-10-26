@@ -67,3 +67,9 @@ CLICKHOUSE_FLOAT_DEFAULT_PATTERN = re.compile(r"reinterpretAsFloat(32|64)\(unhex
 CLICKHOUSE_DECIMAL_DEFAULT_PATTERN = re.compile(r"toDecimal(?:32|64|128|256)\('(-?[0-9]+(?:\.[0-9]+)?)', *[0-9]+\)")
 CLICKHOUSE_TEXT_VALUE_DEFAULT_PATTERN = re.compile(r"to(UUID|IPv4|IPv6)\('([^'\\]*)'\)")
 CLICKHOUSE_CAST_DEFAULT_PATTERN = re.compile(r"CAST\((.+), *'[^']*'\)")
+#: The typed literals hare writes a wide integer, a date and a moment as.
+CLICKHOUSE_WIDE_INTEGER_DEFAULT_PATTERN = re.compile(r"toU?Int(?:128|256)\('(-?[0-9]+)'\)")
+CLICKHOUSE_DATE_DEFAULT_PATTERN = re.compile(r"toDate32\('([0-9]{4}-[0-9]{2}-[0-9]{2})'\)")
+CLICKHOUSE_MOMENT_DEFAULT_PATTERN = re.compile(
+    r"toDateTime64\('([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)', *[0-9]+, *'UTC'\)"
+)

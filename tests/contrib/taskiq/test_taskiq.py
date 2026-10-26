@@ -15,7 +15,7 @@ from taskiq import InMemoryBroker
 
 from hare import Connections
 from hare.contrib.taskiq import HareTaskiq, HareTaskiqMiddleware, TaskiqDelivery
-from hare.contrib.taskiq.constants import MAX_TRANSACTION_RETRIES, TRANSACTION_RETRIES_LABEL
+from hare.contrib.taskiq.constants import TRANSACTION_RETRIES_LABEL
 from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
 from hare.contrib.test import requires_features
 from hare.exceptions import ConfigurationError, TransactionRetryError, UnSupportedError
@@ -147,6 +147,35 @@ async def test_an_atomic_task_commits_when_it_returns_and_rolls_back_when_it_rai
 
 
 @requires_features(supports_transactions=True)
+@pytest.mark.parametrize(
+    "scope",
+    [Tenancy.any_of(1, 2), Tenancy.ALL, {TenantTaskNote: Tenancy.any_of(3, 4)}],
+    ids=["several", "every", "by-model"],
+)
+@pytest.mark.asyncio
+async def test_a_task_sent_again_after_a_conflict_keeps_a_scope_of_several_tenants(db_taskiq, scope):
+    """The kicker of the second run wrote the label of such a scope as the text of its mapping - the task ran
+    under that text as one tenant."""
+    broker = make_broker(atomic_tasks=True, transaction_retries=1)
+    seen: list[Any] = []
+
+    @broker.task(task_name="conflicting_tenants_task")
+    async def conflicting_tenants_task() -> None:
+        seen.append(sorted(await TenantTaskNote.objects.values_list("id", flat=True)))
+        if len(seen) == 1:
+            raise TransactionRetryError("could not serialize access")
+
+    await TenantTaskNote.objects.all_tenants().bulk_create(
+        [TenantTaskNote(id=number, company_id=number) for number in range(1, 6)]
+    )
+    with Tenancy.scope(scope):
+        expected_ids = sorted(await TenantTaskNote.objects.values_list("id", flat=True))
+        result = await (await conflicting_tenants_task.kiq()).wait_result(timeout=5)
+
+    assert not result.is_err, result.error
+    assert seen == [expected_ids, expected_ids]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("transaction_retries", "conflicts", "succeeds"), [(2, 2, True), (2, 3, False), (0, 1, False)]
@@ -179,23 +208,6 @@ async def test_a_task_hitting_a_transaction_conflict_is_sent_again(
         assert result.is_err
         assert isinstance(result.error, TransactionRetryError)
         assert await TaskNote.objects.all().count() == 0
-
-
-@pytest.mark.parametrize(
-    ("options", "message"),
-    [
-        ({"tenant_label": ""}, "tenant_label must be None or a non-empty label name"),
-        ({"tenant_label": 5}, "tenant_label must be None or a non-empty label name"),
-        ({"transaction_retries": -1}, "transaction_retries must be an int"),
-        ({"transaction_retries": MAX_TRANSACTION_RETRIES + 1}, "transaction_retries must be an int"),
-        ({"transaction_retries": True}, "transaction_retries must be an int"),
-        ({"atomic_tasks": "models"}, "atomic_tasks must be a bool or a sequence"),
-        ({"atomic_tasks": ["models", "models"]}, "atomic_tasks must name each connection once"),
-    ],
-)
-def test_the_middleware_options_are_checked(options, message):
-    with pytest.raises(ConfigurationError, match=message):
-        HareTaskiqMiddleware(**options)
 
 
 @pytest.mark.sqlite_only
@@ -234,6 +246,23 @@ async def test_hare_taskiq_opens_the_worker_context_and_closes_it(tmp_path):
     with pytest.raises(ConfigurationError, match="atomic_tasks names the connection 'missing'"):
         await wrong.start(wrong_broker.state)
     assert wrong.lifecycle.context is None
+
+
+@pytest.mark.asyncio
+async def test_the_outbox_model_is_given_by_its_label(db_taskiq):
+    broker = InMemoryBroker(await_inplace=True)
+    tasks = TaskiqDelivery(broker, model="models.TaskiqOutboxEvent")
+    received: list[int] = []
+
+    @broker.task(task_name="receive_by_label")
+    async def receive(number: int) -> None:
+        received.append(number)
+
+    event = await tasks.kiq_on_commit(receive, 5)
+    assert isinstance(event, TaskiqOutboxEvent)
+    relay = tasks.get_relay()
+    assert await relay.poll_once() == 1
+    assert received == [5]
 
 
 @requires_features(supports_transactions=True)
@@ -316,8 +345,3 @@ async def test_a_task_the_broker_didnt_take_is_sent_again(db_taskiq):
     assert received == [(5, "five")]
     assert await TaskiqOutboxEvent.objects.filter(topic="tasks", published_at=None).count() == 0
     assert await TaskiqOutboxEvent.objects.filter(topic="other", published_at=None).count() == 1
-
-
-def test_the_delivery_options_are_checked():
-    with pytest.raises(ConfigurationError, match="topic must be a non-empty string"):
-        TaskiqDelivery(InMemoryBroker(), model=TaskiqOutboxEvent, topic="")

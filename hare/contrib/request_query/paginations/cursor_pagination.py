@@ -94,7 +94,7 @@ class CursorPagination(Pagination):
             if has_previous and items
             else None
         )
-        items = await request_query.after_fetch(items)
+        items = await request_query.finish_rows(items)
         return CursorPage(
             result=items,
             limit=limit,

@@ -442,7 +442,8 @@ class StateFieldDiff:
 
     def _get_rename_candidates(self, added_fields: set[str], removed_fields: set[str]) -> list[tuple[str, str]]:
         """The (removed, added) field pairs that may be a rename moving the column - the one added and
-        the one removed field declared alike; with several declared alike, which is which isn't asked.
+        the one removed field declared alike; with several declared alike, which is which isn't asked - only
+        an answer given beforehand pairs them.
 
         Args:
             added_fields: The names of the added fields left.
@@ -468,6 +469,19 @@ class StateFieldDiff:
             ]
             if len(matching_removed) == 1 and len(matching_added) == 1:
                 candidates.append((matching_removed[0], name))
+                continue
+            # Several declared alike: nothing is asked, but an answer given beforehand tells which is which.
+            model_label = f"{self.new_state.app}.{self.new_state.name}"
+            given_name = next(
+                (
+                    removed_name
+                    for removed_name in matching_removed
+                    if self.rename_questions.is_given(f"{model_label}.{removed_name}", name)
+                ),
+                None,
+            )
+            if given_name is not None:
+                candidates.append((given_name, name))
         return candidates
 
     def _add_answered_renames(

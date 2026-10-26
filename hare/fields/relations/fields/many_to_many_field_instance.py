@@ -46,12 +46,8 @@ class ManyToManyFieldInstance(RelationalField[TModel]):
         self.validate_model_name(model_name)
         self.model_name = model_name
         self.related_name: str = related_name
-        if lazy is not None and lazy != RelationLoadStrategy.SELECT:
-            # "joined" makes no sense for a many-to-many - a JOIN through the through-table
-            # multiplies rows, which is exactly what select_related() (and thus lazy="joined")
-            # doesn't do; only prefetch_related()'s separate-query strategy applies here.
-            raise ConfigurationError("lazy on a ManyToManyField can only be 'select' or None")
-        self.lazy = lazy
+        # The strategy is looked up - an unknown one raises ValueError.
+        self.lazy = RelationLoadStrategy(lazy) if lazy is not None else None
         # The keys as declared - a column, or the prefix of the columns of a composite key - kept apart
         # from the columns Apps fills in once the related model is resolved: the columns are expanded
         # from them, and deconstruct() writes them.

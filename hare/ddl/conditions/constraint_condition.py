@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.ddl.conditions.dialect_condition import DialectCondition
+from hare.ddl.conditions.enum_members_condition import EnumMembersCondition
 from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
-from hare.ddl.conditions.tenant_condition import TenantCondition
 from hare.ddl.ddl_term_sql import DdlTermSql
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, FieldError, QueryError
@@ -20,11 +21,12 @@ if TYPE_CHECKING:
 class ConstraintCondition:
     """The SQL a constraint's or partial index's condition is written into DDL as - a
     ``RawSQLTerm`` as given, a ``Q`` against the model's own columns with its values inline, an
-    ``ExclusiveArcCondition`` as the dialect writes it."""
+    ``ExclusiveArcCondition`` as the dialect writes it, an ``EnumMembersCondition`` as the members' values."""
 
     @staticmethod
     def raise_if_not_condition(condition: Any, owner: str) -> None:
-        """Rejects a condition that is neither a ``Q``, a ``RawSQLTerm`` nor an ``ExclusiveArcCondition``.
+        """Rejects a condition that is neither a ``Q``, a ``RawSQLTerm``, an ``ExclusiveArcCondition`` nor an
+        ``EnumMembersCondition``.
 
         Args:
             condition: The declared condition.
@@ -37,7 +39,7 @@ class ConstraintCondition:
         # Local import: the query package imports the ddl package.
         from hare.query.expressions import Q
 
-        if not isinstance(condition, (Q, RawSQLTerm, ExclusiveArcCondition)):
+        if not isinstance(condition, (Q, RawSQLTerm, ExclusiveArcCondition, EnumMembersCondition)):
             raise ConfigurationError(
                 f"{owner} takes a Q over the model's fields or RawSQLTerm(...) of raw SQL, got "
                 f"{ValueDescriptions.get_shown_value(condition)}"
@@ -45,7 +47,7 @@ class ConstraintCondition:
 
     @staticmethod
     def get_sql(
-        condition: Q | RawSQLTerm | ExclusiveArcCondition | TenantCondition,
+        condition: Q | RawSQLTerm | DialectCondition,
         model: type[Model],
         client: DatabaseClient,
         *,
@@ -54,8 +56,8 @@ class ConstraintCondition:
         """Renders a condition for a table of ``model``.
 
         Args:
-            condition: Raw SQL, a ``Q`` over the model's own fields, an exclusive arc, or a policy's tenant
-                condition.
+            condition: Raw SQL, a ``Q`` over the model's own fields, or a condition the dialect writes -
+                an exclusive arc, an enum's members, a policy's tenant condition.
             model: The model whose table the constraint or index belongs to.
             client: The client of the database the DDL runs on.
             table: The table a ``Q`` reads the columns of - the model's own table, unqualified, when None.
@@ -70,7 +72,7 @@ class ConstraintCondition:
         """
         if isinstance(condition, RawSQLTerm):
             return condition.sql
-        if isinstance(condition, (ExclusiveArcCondition, TenantCondition)):
+        if isinstance(condition, DialectCondition):
             return condition.get_condition_sql(model, client)
         # Local imports: hare.ddl is imported by the field and model modules the query package
         # itself depends on.

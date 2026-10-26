@@ -6,12 +6,12 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
-from hare.dialects.base.client.pool.pool_timeouts import PoolTimeouts
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
+from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 from hare.dialects.postgresql.client.postgresql_transaction_client import PostgresqlTransactionClient
 from hare.dialects.postgresql.drivers.constants import POSTGRES_TRANSACTION_ALIVE_CHECK_SQL

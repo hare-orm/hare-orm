@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hare.classes.class_path import ClassPath
+from hare.ddl.conditions.enum_members_condition import EnumMembersCondition
 from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
@@ -316,7 +317,7 @@ class MigrationWriter:
         if isinstance(value, OrderedIndexKey):
             imports.add_from("hare.ddl.indexes", "OrderedIndexKey")
             imports.add_from("hare.ddl", "RawSQLTerm")
-            imports.add_from("hare.sql.enums", "Order")
+            imports.add_from("hare.sql", "Order")
             return (
                 f"OrderedIndexKey(RawSQLTerm({value.term.get_sql(NEUTRAL_SQL_CONTEXT)!r}), Order.{value.order.name})"
             )
@@ -338,7 +339,16 @@ class MigrationWriter:
             The code, None when the value is none of them.
         """
         if isinstance(
-            value, (Index, UniqueConstraint, CheckConstraint, ExclusionConstraint, ExclusiveArcCondition, Trigger)
+            value,
+            (
+                Index,
+                UniqueConstraint,
+                CheckConstraint,
+                ExclusionConstraint,
+                ExclusiveArcCondition,
+                EnumMembersCondition,
+                Trigger,
+            ),
         ):
             # A schema object renders its own SQL for a model - written as the call building it.
             object_path, object_args, object_kwargs = value.deconstruct()

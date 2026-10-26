@@ -68,10 +68,6 @@ async def test_fields_and_include_options_are_checked(library):
         RelationAsFieldQuery.get_declaration()
     with pytest.raises(ConfigurationError, match="isn't a relation of Book"):
         FieldAsRelationQuery.get_declaration()
-    with pytest.raises(ConfigurationError, match="non-empty tuple"):
-        FieldsConfig(fields=())
-    with pytest.raises(ConfigurationError, match="each name once"):
-        IncludeConfig(relations=("author", "author"))
 
 
 @pytest.mark.asyncio

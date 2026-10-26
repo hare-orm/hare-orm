@@ -1174,14 +1174,9 @@ class DatabaseClient(abc.ABC):
         without closing the socket never makes a driver raise.
 
         Args:
-            timeout: Seconds to wait before reporting unhealthy - above 0, at most
-                ``MAX_PING_TIMEOUT_SECONDS``.
+            timeout: Seconds to wait before reporting unhealthy.
 
         Returns:
             True if the query succeeded.
-
-        Raises:
-            TypeError: ``timeout`` isn't a number.
-            ValueError: ``timeout`` is out of range.
         """
         return (await ConnectionPing.run(self, timeout)).succeeded

@@ -8,6 +8,7 @@ from hare.exceptions import QueryError
 from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.field import Field
 from hare.query.expressions import Aggregate
+from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 
@@ -40,5 +41,5 @@ class TopK(ParametricAggregate):
     def get_parameters(self) -> tuple[Any, ...]:
         return (self.k,)
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         return ArrayField(base_field=field_object)

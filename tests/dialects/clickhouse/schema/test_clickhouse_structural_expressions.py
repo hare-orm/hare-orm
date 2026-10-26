@@ -153,6 +153,118 @@ async def test_a_projection_keeps_every_row(project_factory):  # noqa: F811
 
 
 @pytest.mark.asyncio
+async def test_a_column_a_projection_reads_changes_its_type(project_factory):  # noqa: F811
+    """A column a projection reads changed its type with a raw ALTER_OF_COLUMN_IS_FORBIDDEN - the
+    projection is dropped before and added after."""
+    skip_without_clickhouse()
+    project = await project_factory()
+    query = 'ModelQuery().values("site").annotate(total=Sum("duration"))'
+    models = textwrap.dedent(PROJECTION_MODELS_TEMPLATE.format(duration="duration", query=query))
+    project.write_models(models)
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.query("INSERT INTO hit VALUES (1, 'a', 5), (2, 'a', 7)")
+    for field_sql in ("fields.BigIntField()", "fields.BigIntField(null=True)"):
+        project.write_models(models.replace("fields.IntField()", field_sql))
+        await project.cli_ok("makemigrations")
+        await project.cli_ok("migrate")
+        await project.assert_in_sync()
+    (row,) = await project.query(
+        "SELECT create_table_query FROM system.tables WHERE database = currentDatabase() AND name = 'hit'"
+    )
+    assert "PROJECTION by_site" in row["create_table_query"]
+    assert await project.query("SELECT site, sum(duration) AS total FROM hit GROUP BY site") == [
+        {"site": "a", "total": 12}
+    ]
+    await project.cli_ok("migrate", "app", "zero")
+
+
+TWO_PROJECTIONS_MODELS_TEMPLATE = """
+from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
+from hare.query.functions import Count
+from hare.query.queryset import ModelQuery
+
+class Hit(Model):
+    id = fields.BigIntField(primary_key=True, generated=False)
+    site = fields.CharField(max_length=20)
+    note = fields.CharField(max_length=20)
+    class Meta:
+        table_options = [
+            ClickhouseTableOptions(
+                projections=(
+                    ClickhouseProjection("by_order", ModelQuery().order_by({ordering})),
+                    ClickhouseProjection("by_site", ModelQuery().values("site").annotate(hits=Count("id"))),
+                )
+            )
+        ]
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_changed_projection_leaves_no_drift(project_factory):  # noqa: F811
+    """drift reported the options of a table changed after a migration changed its first projection - the
+    server keeps them in the order they were added, the changed one last."""
+    skip_without_clickhouse()
+    project = await project_factory()
+    for ordering in ('"site", "id"', '"note", "site"'):
+        project.write_models(textwrap.dedent(TWO_PROJECTIONS_MODELS_TEMPLATE.format(ordering=ordering)))
+        await project.cli_ok("makemigrations")
+        await project.cli_ok("migrate")
+        await project.assert_in_sync()
+    await project.cli_ok("migrate", "app", "zero")
+
+
+NULLABLE_MODELS_TEMPLATE = """
+class Visit(Model):
+    id = fields.BigIntField(primary_key=True, generated=False)
+    site = fields.CharField(max_length=20, null={null})
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_change_refused_before_any_statement_is_no_partial_migration(project_factory):  # noqa: F811
+    """A NOT NULL change refused over a NULL row, before any statement ran, was reported as a migration
+    failed partway - some of its operations perhaps landed, to be fixed by hand."""
+    skip_without_clickhouse()
+    project = await project_factory()
+    project.write_models(textwrap.dedent(NULLABLE_MODELS_TEMPLATE.format(null=True)))
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.query("INSERT INTO visit VALUES (1, NULL)")
+    project.write_models(textwrap.dedent(NULLABLE_MODELS_TEMPLATE.format(null=False)))
+    await project.cli_ok("makemigrations")
+    refused = await project.cli("migrate")
+    assert refused.exit_code not in (0, None)
+    assert "holds NULL" in refused.output
+    assert "partway" not in refused.output
+    await project.cli_ok("migrate", "app", "zero")
+
+
+@pytest.mark.asyncio
+async def test_a_projection_sorts_its_rows_ascending(project_factory):  # noqa: F811
+    """A projection of a queryset ordered by columns failed in migrate with a raw syntax error - its
+    ORDER BY is a sorting key, which takes no direction."""
+    skip_without_clickhouse()
+    project = await project_factory()
+    query = 'ModelQuery().order_by("site", "duration")'
+    project.write_models(textwrap.dedent(PROJECTION_MODELS_TEMPLATE.format(duration="duration", query=query)))
+    await project.cli_ok("makemigrations")
+    assert "ASC" not in project.read_latest_migration()
+    await project.cli_ok("migrate")
+    await project.assert_in_sync()
+    await project.cli_ok("migrate", "app", "zero")
+    project.write_models(
+        textwrap.dedent(
+            PROJECTION_MODELS_TEMPLATE.format(duration="duration", query='ModelQuery().order_by("-duration")')
+        )
+    )
+    refused = await project.cli("makemigrations")
+    assert refused.exit_code not in (0, None)
+    assert "ascending only" in refused.output
+
+
+@pytest.mark.asyncio
 async def test_a_materialized_view_sorted_by_an_expression_of_hare(round_trip):
     connection = round_trip.connection
     page = build_model(

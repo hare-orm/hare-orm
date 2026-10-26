@@ -39,7 +39,9 @@ It checks every app on connection `connection_alias`: an app from `apps_config` 
 `default_connection` is `connection_alias`, plus an app registered only at runtime (e.g. via
 `Hare.register_live_models()`) whose models are bound to `connection_alias`. `app_labels` narrows the
 check to those apps. A `Meta.managed = False` model (including a live-registered one) is never diffed,
-but its table counts as known, so it is not reported as untracked. A model without `Meta.schema` is
+but its table counts as known, so it is not reported as untracked; the shadow holds its table alone, for
+the relations pointing at it — not its triggers, views or other objects (an `INSTEAD OF` trigger of a
+model over a view would fail on a table). A model without `Meta.schema` is
 always looked up in the connection's default schema (PostgreSQL `current_schema()`, i.e. the first
 existing schema on the `search_path`) — where `migrate` creates its table; a model with `Meta.schema` is
 looked up there — in its attached database on SQLite, its database of the server on ClickHouse.
@@ -106,12 +108,15 @@ would make the database the models' — built from what the models declare:
 | `ENUM` type | `CreateEnumType` | — | `AlterEnumType` |
 | schema, extension | `CreateSchema`, `CreateExtension` | — | — |
 
-A column's comment is part of the column — another one is an `AlterField`; SQLite keeps no column
-comments. A table's storage is the connection's dialect entry of
+A column's comment is part of the column — another one is an `AlterField`; SQLite keeps the table's
+and the columns' comments inside `CREATE TABLE`, where drift and `inspectdb` read them. A table's storage
+is the connection's dialect entry of
 [`Meta.table_options`](../models/meta-options.md#table_options); a [partitioned
 table](../dialects/postgresql/indexes-and-tables.md#partitioning) whose partitions alone differ gets its
 partitions added and dropped, one of another strategy or key an `AlterModelOptions`. The partitions are
-never listed as tables of their own, by `drift` or by `inspectdb`.
+never listed as tables of their own, by `drift` or by `inspectdb`. A table partitioned in a way no
+partitioning of hare declares (a key over an expression, a partition partitioned itself) differs from
+every model: its `AlterModelOptions`.
 
 A `ManyToManyField`'s hare-managed through table that is missing, lacks one of its key columns or its
 `UNIQUE` key is the field's `AddField`; one differing otherwise — a key index, a `FOREIGN KEY` — its

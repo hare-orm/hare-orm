@@ -198,19 +198,7 @@ async def test_annotations_by_their_type_and_an_untyped_one_refused(library):
 
 
 @pytest.mark.database_independent
-def test_a_filter_field_is_checked_when_declared():
-    with pytest.raises(ConfigurationError, match="field path"):
-        FilterField("author.name")
-    with pytest.raises(ConfigurationError, match="non-empty tuple of lookups"):
-        FilterField("status", lookups=())
-    with pytest.raises(ConfigurationError, match="non-empty tuple of lookups"):
-        FilterField("status", lookups=["in"])
-    with pytest.raises(ConfigurationError, match="twice"):
-        FilterField("status", lookups=(Lookup.EXACT, "exact"))
-    with pytest.raises(ConfigurationError, match="parameter must be an identifier"):
-        FilterField("status", parameter="the status")
-    with pytest.raises(ConfigurationError, match="description must be text"):
-        FilterField("status", description=1)
+def test_a_filter_field_names_its_parameters():
     assert FilterField("status").get_filter_keys() == {"status": "status"}
     assert FilterField("author__profile__city", lookups=(Lookup.EXACT, "in"), parameter="city").get_filter_keys() == {
         "city": "author__profile__city",

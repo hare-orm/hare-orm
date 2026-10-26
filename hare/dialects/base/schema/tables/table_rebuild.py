@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
+from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
@@ -12,7 +12,6 @@ from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models import Model
-from hare.query.expressions import Q
 
 
 class TableRebuild(SchemaEditorPart):
@@ -76,7 +75,7 @@ class TableRebuild(SchemaEditorPart):
         the condition reads, a relation by one of its key columns' fields too. A CheckConstraint of
         raw SQL (``RawSQLTerm``) can't be read for field names."""
         field_names = {field.model_field_name, *getattr(field, "source_fields", ())}
-        if isinstance(constraint, CheckConstraint) and isinstance(constraint.check, (Q, ExclusiveArcCondition)):
+        if isinstance(constraint, CheckConstraint) and isinstance(constraint.check, FieldCondition):
             return not field_names.isdisjoint(constraint.check.get_referenced_field_names())
         return isinstance(constraint, UniqueConstraint) and not field_names.isdisjoint(constraint.fields)
 

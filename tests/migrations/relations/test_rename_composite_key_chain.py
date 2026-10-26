@@ -76,7 +76,7 @@ async def test_a_rename_reaches_the_relations_reading_the_renamed_key(renamed, n
         state = await Migration("0002", "models", operations=[RenameField(*renamed)]).apply(
             state, schema_editor=editor
         )
-        note = state.apps.get_model("models", "Note")
+        note = state.apps.get_model("models.Note")
         assert sorted(column for name, column in note._meta.fields_db_projection.items() if name != "position") == (
             note_key_columns
         )

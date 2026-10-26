@@ -11,7 +11,6 @@ from hare.query.expressions import Expression, Function
 from hare.query.expressions.compatibility.constants import NON_NUMBER_VALUE_TYPES
 from hare.query.expressions.constants import DECIMAL_OUTPUT_FIELD_MAX_DIGITS
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -22,9 +21,7 @@ from hare.sql.terms.term import Term
 class Round(Function):
     """Rounds a number to ``precision`` decimal places in the database, e.g.
     ``Round(F("price") / 3, 2)``, a tie by the database's own rule. A Decimal result keeps exactly
-    ``precision`` decimal places; an integer stays an integer and a float a float. Where the
-    database's ``ROUND()`` works on a double, a Decimal is rounded from its stored text, every digit
-    kept."""
+    ``precision`` decimal places; an integer stays an integer and a float a float."""
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
@@ -61,15 +58,7 @@ class Round(Function):
     def _get_function_field(self, term: Term | str, *default_values: Any) -> functions.Round:
         return functions.Round(term, self.precision)
 
-    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        result = super().get_result(expression_context)
-        output_field: Field[Any] | None = result.output_field
-        if isinstance(result.term, functions.Round) and output_field is not None:
-            effective_field = GeneratedField.get_effective_field(output_field)
-            result.term.rounds_decimal = isinstance(effective_field, DecimalField)
-        return result
-
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         """A Decimal result is decoded with exactly ``precision`` places; other types keep theirs.
 
         Args:

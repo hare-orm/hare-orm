@@ -137,7 +137,8 @@ class JsonPathFilters:
         if "" in path_segments:
             raise FieldError(
                 f"{key!r}: a path into a JSON value can't name an empty key - match it with "
-                f"{field_name}__contains={{'': value}} (PostgreSQL) or {field_name}__has_key=''"
+                f"{field_name}__has_key='', or {field_name}__contains={{'': value}} where the database "
+                "compares JSON by containment"
             )
         if path in FieldLookups.get(json_field):
             # A lookup of the whole value.

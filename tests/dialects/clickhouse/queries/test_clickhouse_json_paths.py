@@ -173,12 +173,17 @@ def test_the_json_text_of_a_dotted_key_follows_the_server():
         {"big": 10**30},
         {"l": [-(2**63) - 1]},
         {"mix": [[2**60 + 1], [0.5]]},
+        {"mix": [True, 1]},
+        {"mix": ["", False]},
+        {"o": {"mix": [[True], ["x"]]}},
+        {"mix": [0.5, True]},
     ],
 )
 @pytest.mark.asyncio
 async def test_a_value_a_json_column_would_read_back_otherwise_is_refused(clickhouse_db, data):
-    """A JSON column dropped a key holding null or an empty object and read an integer past 64 bits as a
-    float - the text stored on the native protocol keeps them all."""
+    """A JSON column dropped a key holding null or an empty object, read an integer past 64 bits as a
+    float and a boolean beside a number or a text as that number or text - the text stored on the native
+    protocol keeps them all."""
     if not Player._meta.connection.features.supports_json_type:
         await Player.objects.create(id=1, name="kept", data=data)
         assert await Player.objects.values_list("data", flat=True) == [data]
@@ -189,6 +194,57 @@ async def test_a_value_a_json_column_would_read_back_otherwise_is_refused(clickh
     with pytest.raises(ValidationError, match="a JSON column of ClickHouse (keeps|reads)"):
         await Player.objects.filter(id=1).update(data=data)
     assert await Player.objects.values_list("data", flat=True) == [{"b": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_literal_beside_a_json_value_is_any_json_value(clickhouse_db):
+    """Value(-100) beside F("data__count") was written as the JSON column's value, which holds an object - refused
+    over clickhouse-connect, though the path's value is any JSON value."""
+    from hare.query.expressions import Value
+    from hare.query.functions import Coalesce
+
+    await create_counts()
+    coalesced = await (
+        Player.objects.annotate(count=Coalesce(F("data__count"), Value(-100)))
+        .order_by("id")
+        .values_list("count", flat=True)
+    )
+
+    assert coalesced == [10, 9, 2.5, -100]
+
+
+@pytest.mark.asyncio
+async def test_rows_grouped_by_a_json_value_are_ordered_by_it(clickhouse_db):
+    """The ordering by the path joins the grouping as a Dynamic value - refused by the server, as no key of
+    a grouping by default."""
+    from hare.query.functions import Count
+
+    await create_counts()
+    await Player.objects.create(id=5, name="5", data={"count": 10})
+
+    counts = await Player.objects.values("data__count").annotate(rows=Count("id")).order_by("data__count")
+
+    assert [(row["data__count"], row["rows"]) for row in counts] == [(2.5, 1), (9, 1), (10, 2), (None, 1)]
+
+
+@pytest.mark.asyncio
+async def test_greatest_and_least_of_a_json_value_are_refused_and_take_a_cast_one(clickhouse_db):
+    """They compared the JSON text - Greatest of 10 and 3 gave 3, as Max and Min would."""
+    from hare.query.expressions import Value
+    from hare.query.functions import Greatest, Least
+
+    await create_counts()
+    for function in (Greatest, Least):
+        with pytest.raises(FieldError, match=r"of a JSON value would compare its text .* Cast\(\)"):
+            await Player.objects.annotate(count=function(F("data__count"), Value(3))).values_list("count", flat=True)
+    greatest = await (
+        Player.objects.filter(id__lte=2)
+        .annotate(count=Greatest(Cast(F("data__count"), fields.IntField()), Value(3)))
+        .order_by("id")
+        .values_list("count", flat=True)
+    )
+
+    assert greatest == [10, 9]
 
 
 @pytest.mark.asyncio

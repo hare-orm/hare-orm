@@ -14,6 +14,9 @@ from hare.dialects.sqlite.functions.sqlite_connection_function import SqliteConn
 from hare.dialects.sqlite.lookups.constants import SQLITE_JSON_KEY_PATH_FORMAT, SQLITE_JSON_TYPE_NAMES
 from hare.dialects.sqlite.lookups.in_list.sqlite_large_in_list import SqliteLargeInList
 from hare.dialects.sqlite.lookups.json.sqlite_json_type_criterion import SqliteJsonTypeCriterion
+from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
+from hare.exceptions import UnSupportedError
+from hare.query.expressions.constants import DECIMAL_WITHOUT_TYPE_MESSAGE
 from hare.query.filters import JsonLookups
 from hare.query.filters.lookups.date_part_lookups import DatePartLookups
 from hare.query.filters.lookups.json.json_filter_guards import JsonFilterGuards
@@ -74,8 +77,8 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
             return [cls.prepare_value(item, sql_type) for item in value]
         if isinstance(value, datetime.date) and sql_type in {"timestamp", "timestamptz"}:
             return SqliteJsonDatetime.normalize_value(value, "instant" if sql_type == "timestamptz" else "wall")
-        if isinstance(value, Decimal) and value.is_finite():
-            value = int(value) if value == value.to_integral_value() else float(value)
+        if isinstance(value, Decimal):
+            raise UnSupportedError(DECIMAL_WITHOUT_TYPE_MESSAGE.format(value=value, dialect=SqliteDialect.name))
         if isinstance(value, int) and not isinstance(value, bool):
             return SqliteJsonPath.get_sqlite_number(value)
         return value

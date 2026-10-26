@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from hare.exceptions import UnSupportedError
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
+from hare.sql.terms.node import TNode
 from hare.sql.terms.term import Term
 from hare.sql.terms.term_identity_text import TermIdentityText
 
@@ -39,6 +41,10 @@ class JSONAttributeCriterion(Criterion):
         self.json_column = json_column
         self.path = path
         self.as_text = as_text
+
+    def nodes_(self) -> Iterator[TNode]:
+        yield self  # type:ignore[misc]
+        yield from self.json_column.nodes_()
 
     def get_text_term(self) -> JSONAttributeCriterion:
         """The same path, extracting its value as the text a text lookup matches."""

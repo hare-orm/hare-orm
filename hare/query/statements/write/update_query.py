@@ -113,6 +113,19 @@ class UpdateQuery(MatchingRowsQuery):
         # An update orders its rows for its LIMIT alone.
         return self._limit is not None
 
+    def _prepare_build(self) -> None:
+        super()._prepare_build()
+        # A literal an expression may write is checked by its field as a plain value is - on a plan
+        # hit too, whose literals bind without their field.
+        fields_map = self.model._meta.fields_map
+        for key, value in self.update_kwargs.items():
+            field_object = fields_map.get(key)
+            if field_object is None or isinstance(field_object, (ForeignKeyFieldInstance, OneToOneFieldInstance)):
+                continue
+            value = ExpressionAssignment.get_assigned_value(value)
+            if isinstance(value, Expression):
+                ExpressionAssignment.raise_if_literal_refused(key, field_object, value, self.dialect)
+
     def _get_update_plan_description(self) -> PlanDescription | None:
         """Describes the assigned values - their structures, and the values bound.
 
@@ -303,6 +316,11 @@ class UpdateQuery(MatchingRowsQuery):
             update_query._orderbys = self.query._orderbys
             self.query = update_query
 
+    def hide_last_update_values(self) -> None:
+        """Marks the values of the last assignment of the SET clause never shown (``QueryParameters``)."""
+        for value_wrapper in self.query._updates[-1][1].find_(ValueWrapper):
+            value_wrapper.sensitive = True
+
     def _set_composite_relation_keys(
         self,
         key: str,
@@ -333,6 +351,8 @@ class UpdateQuery(MatchingRowsQuery):
                 value_wrapper_references,
                 PlanOrigins.get_value_origin(self.update_kwargs, key, index),
             )
+            if source_field_object.sensitive:
+                self.hide_last_update_values()
 
     def _get_relation_key_value(
         self, key: str, value: Any, field_object: ForeignKeyFieldInstance[Any] | OneToOneFieldInstance[Any]
@@ -470,10 +490,10 @@ class UpdateQuery(MatchingRowsQuery):
                     value_wrapper_references,
                     PlanOrigins.get_value_origin(self.update_kwargs, key),
                 )
-            if field_object.sensitive:
-                # The value written into a sensitive field is never shown (QueryParameters).
-                for value_wrapper in self.query._updates[-1][1].find_(ValueWrapper):
-                    value_wrapper.sensitive = True
+            # The value written into a sensitive field is never shown (QueryParameters) - nor a relation's
+            # key column, sensitive as the key it points at is.
+            if field_object.sensitive or (value_field_object is not None and value_field_object.sensitive):
+                self.hide_last_update_values()
 
         self._set_automatic_values(table, value_wrapper_references)
 

@@ -203,6 +203,21 @@ async def test_unknown_path_raises(crates, lookup):
 
 
 @pytest.mark.asyncio
+async def test_a_part_of_a_bound_date_in_values_and_order_by(crates):
+    """A date part of a range's bound was refused in values() - a filter took it."""
+    assert await Crate.objects.filter(id=1).values_list(
+        "moments__startswith__hour", "days__endswith__month", "moments__startswith__date"
+    ) == [(10, 2, datetime.date(2024, 1, 1))]
+    assert await Crate.objects.filter(days__isnull=False).order_by("-days__endswith__month").values_list(
+        "id", flat=True
+    ) == [2, 1]
+    # In F() too - it read no date part after a path.
+    assert await Crate.objects.filter(id=1).annotate(
+        hour=F("moments__startswith__hour") + 1, month=F("days__endswith__month")
+    ).values_list("hour", "month") == [(11, 2)]
+
+
+@pytest.mark.asyncio
 async def test_unknown_values_path_raises(crates):
     with pytest.raises(FieldError):
         await Crate.objects.all().values_list("numbers__0__1", flat=True)

@@ -244,8 +244,10 @@ POSTGRESQL_EXACT_TYPE_FIELD_PATHS = {
     "macaddr": "hare.dialects.postgresql.fields.network.MacAddressField",
 }
 
+#: The field an array column is inspected as - an array of arrays per further dimension.
+POSTGRESQL_ARRAY_FIELD_PATH = "hare.fields.data.containers.array_field.ArrayField"
 #: By the element type's pg_catalog name (udt_name without its "_" prefix) - "int4", not "integer".
-#: A multidimensional array reports the same name, so dimensions aren't rebuilt.
+#: A multidimensional array reports the same name - its dimensions are the column's attndims.
 POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "int2": ("hare.fields.data.numeric.SmallIntField", {}),
     "int4": ("hare.fields.data.numeric.IntField", {}),
@@ -255,10 +257,17 @@ POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "bool": ("hare.fields.data.boolean_field.BooleanField", {}),
     "text": ("hare.fields.data.text.TextField", {}),
     "varchar": ("hare.fields.data.text.CharField", {"max_length": 255}),
-    "bpchar": ("hare.fields.data.text.CharField", {"max_length": 255}),
+    # A bare character[] is of character(1).
+    "bpchar": (POSTGRESQL_FIXED_CHAR_FIELD_PATH, {"max_length": 1}),
     "uuid": ("hare.fields.data.uuid_field.UUIDField", {}),
     "date": ("hare.fields.data.temporal.DateField", {}),
     "timestamptz": ("hare.fields.data.temporal.DatetimeField", {}),
+    "timestamp": ("hare.dialects.postgresql.fields.NaiveDatetimeField", {}),
+    "time": ("hare.dialects.postgresql.fields.NaiveTimeField", {}),
+    "interval": ("hare.dialects.postgresql.fields.IntervalField", {}),
+    "inet": ("hare.dialects.postgresql.fields.network.InetField", {}),
+    "cidr": ("hare.dialects.postgresql.fields.network.CidrField", {}),
+    "macaddr": ("hare.dialects.postgresql.fields.network.MacAddressField", {}),
     "jsonb": ("hare.fields.data.json.JSONField", {}),
     "json": ("hare.fields.data.json.JSONField", {}),
     "numeric": ("hare.fields.data.numeric.DecimalField", {"max_digits": 20, "decimal_places": 6}),
@@ -345,7 +354,7 @@ SELECT tc.relname AS table_name, ic.relname AS index_name, array_agg(a.attname O
            JOIN pg_attribute ia ON ia.attrelid = idx.indrelid AND ia.attnum = include_key.attnum
            WHERE include_key.n > idx.indnkeyatts
        ) AS include_columns,
-       idx.indisunique AS is_unique, idx.indisprimary AS is_primary,
+       idx.indisunique AS is_unique, idx.indisprimary AS is_primary, idx.indisvalid AS is_valid,
        bool_or(COALESCE((to_jsonb(idx) ->> 'indnullsnotdistinct')::boolean, false)) AS nulls_not_distinct,
        am.amname AS index_type,
        pg_get_expr(idx.indpred, idx.indrelid) AS condition_sql,
@@ -376,8 +385,9 @@ WHERE ns.nspname = $1 AND tc.relname = ANY($2::text[]) AND ord.n <= idx.indnkeya
     AND idx.indexrelid NOT IN (
         SELECT conindid FROM pg_constraint WHERE conrelid = tc.oid AND contype = 'x'
     )
-GROUP BY tc.relname, ic.relname, idx.indisunique, idx.indisprimary, am.amname, idx.indpred, idx.indrelid,
-         idx.indexrelid, idx.indkey, idx.indnkeyatts, ic.reloptions, con.condeferrable, con.condeferred
+GROUP BY tc.relname, ic.relname, idx.indisunique, idx.indisprimary, idx.indisvalid, am.amname, idx.indpred,
+         idx.indrelid, idx.indexrelid, idx.indkey, idx.indnkeyatts, ic.reloptions, con.condeferrable,
+         con.condeferred
 ORDER BY tc.relname, ic.relname
 """
 
@@ -398,16 +408,17 @@ POSTGRESQL_DOMAIN_COLUMN_TODO = (
     "domain's type; drift reports the difference until the column is altered to the field's type"
 )
 
-#: Columns in their declared order - information_schema's own type reporting, plus
-#: format_type()'s full type text (vector dimensions, array element sizes), whether a generated column is
-#: stored (``attgenerated``), the domain of a column of one, column comments and the
-#: labels of an ENUM type, an array's element type's too, with its schema when it isn't the default one.
+#: Columns in their declared order - information_schema's own type reporting, plus format_type()'s
+#: full type text (vector dimensions, array element sizes), an array's declared dimensions
+#: (``attndims``), whether a generated column is stored (``attgenerated``), the domain of a column of
+#: one, column comments and the labels of an ENUM type, an array's element type's too, with its schema
+#: when it isn't the default one.
 POSTGRESQL_COLUMNS_SQL = """
 SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, c.character_maximum_length,
        c.numeric_precision, c.numeric_scale, c.column_default,
        c.is_generated, c.generation_expression, c.is_identity, c.identity_generation, c.domain_name,
        col_description(tc.oid, c.ordinal_position) AS description,
-       format_type(a.atttypid, a.atttypmod) AS full_type, a.attgenerated::text AS attgenerated,
+       format_type(a.atttypid, a.atttypmod) AS full_type, a.attgenerated::text AS attgenerated, a.attndims,
        (
            SELECT array_agg(e.enumlabel ORDER BY e.enumsortorder)
            FROM pg_type t
@@ -539,7 +550,8 @@ SELECT tc.relname AS table_name, pt.partstrat::text AS strategy, pt.partnatts::i
              JOIN pg_attribute att ON att.attrelid = tc.oid AND att.attnum = key_column.attnum
              ORDER BY key_column.position) AS key_types,
        child.relname AS partition_table, pg_get_expr(child.relpartbound, child.oid) AS bound,
-       child.reloptions AS storage_parameters, cts.spcname AS tablespace
+       child.reloptions AS storage_parameters, cts.spcname AS tablespace,
+       pg_get_partkeydef(tc.oid) AS key_definition, child.relkind = 'p' AS partition_partitioned
 FROM pg_partitioned_table pt
 JOIN pg_class tc ON tc.oid = pt.partrelid
 JOIN pg_namespace ns ON ns.oid = tc.relnamespace
@@ -774,12 +786,15 @@ WHERE n.nspname = $1 AND c.relname = ANY($2::text[]) AND a.attnum > 0 AND NOT a.
 ORDER BY c.relname, role, acl.privilege_type, a.attnum
 """
 
-#: The sequences owned by a column of the named tables of a schema (OWNED BY) - not the one a primary
-#: key column takes its default from (SERIAL), nor an identity column's - what inspectdb writes in
-#: Meta.sequences.
+#: The sequences of the named tables of a schema - owned by a column of one (OWNED BY), or owned by none
+#: and taken a column's default from - not the one the column of a single-column primary key takes its
+#: default from (SERIAL), nor an identity column's: what inspectdb writes in Meta.sequences. One such sequence is
+#: declared by one model - of the table owning it, else of the first by name among the tables reading it
+#: (declaring_table).
 POSTGRESQL_INSPECTED_SEQUENCES_SQL = """
 SELECT owner_table.relname AS table_name, s.sequencename AS name, s.start_value, s.increment_by, s.min_value,
-       s.max_value, s.cycle, s.cache_size, owner_column.attname AS owner_column
+       s.max_value, s.cycle, s.cache_size, owner_column.attname AS owner_column,
+       owner_table.relname AS declaring_table
 FROM pg_sequences s
 JOIN pg_namespace n ON n.nspname = s.schemaname
 JOIN pg_class sequence_class ON sequence_class.relname = s.sequencename AND sequence_class.relnamespace = n.oid
@@ -793,14 +808,40 @@ WHERE s.schemaname = $1 AND owner_table.relname = ANY($2::text[])
         JOIN pg_depend default_dependency ON default_dependency.objid = column_default.oid
             AND default_dependency.classid = 'pg_attrdef'::regclass
         JOIN pg_index primary_key ON primary_key.indrelid = column_default.adrelid AND primary_key.indisprimary
-            AND column_default.adnum = ANY(primary_key.indkey)
+            AND primary_key.indnkeyatts = 1 AND column_default.adnum = ANY(primary_key.indkey)
         WHERE default_dependency.refobjid = sequence_class.oid
     )
-ORDER BY s.sequencename
+UNION
+SELECT default_table.relname AS table_name, s.sequencename AS name, s.start_value, s.increment_by, s.min_value,
+       s.max_value, s.cycle, s.cache_size, NULL AS owner_column,
+       (
+           SELECT min(reading_table.relname) FROM pg_depend reading_dependency
+           JOIN pg_attrdef reading_default ON reading_default.oid = reading_dependency.objid
+           JOIN pg_class reading_table ON reading_table.oid = reading_default.adrelid
+           WHERE reading_dependency.refobjid = sequence_class.oid
+               AND reading_dependency.classid = 'pg_attrdef'::regclass
+       ) AS declaring_table
+FROM pg_sequences s
+JOIN pg_namespace n ON n.nspname = s.schemaname
+JOIN pg_class sequence_class ON sequence_class.relname = s.sequencename AND sequence_class.relnamespace = n.oid
+JOIN pg_depend default_dependency ON default_dependency.refobjid = sequence_class.oid
+    AND default_dependency.classid = 'pg_attrdef'::regclass
+JOIN pg_attrdef column_default ON column_default.oid = default_dependency.objid
+JOIN pg_class default_table ON default_table.oid = column_default.adrelid AND default_table.relnamespace = n.oid
+WHERE s.schemaname = $1 AND default_table.relname = ANY($2::text[])
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        WHERE d.objid = sequence_class.oid AND d.classid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_index primary_key
+        WHERE primary_key.indrelid = column_default.adrelid AND primary_key.indisprimary
+            AND primary_key.indnkeyatts = 1 AND column_default.adnum = ANY(primary_key.indkey)
+    )
+ORDER BY name
 """
 
-#: The sequences of a schema no column owns nor a primary key column takes its default from - inspectdb
-#: names them in a note.
+#: The sequences of a schema no column owns nor takes its default from - inspectdb names them in a note.
 POSTGRESQL_UNATTACHED_SEQUENCES_SQL = """
 SELECT s.sequencename AS name, s.start_value, s.increment_by, s.min_value, s.max_value, s.cycle, s.cache_size
 FROM pg_sequences s
@@ -812,12 +853,9 @@ WHERE s.schemaname = $1
         WHERE d.objid = sequence_class.oid AND d.classid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
     )
     AND NOT EXISTS (
-        SELECT 1 FROM pg_attrdef column_default
-        JOIN pg_depend default_dependency ON default_dependency.objid = column_default.oid
-            AND default_dependency.classid = 'pg_attrdef'::regclass
-        JOIN pg_index primary_key ON primary_key.indrelid = column_default.adrelid AND primary_key.indisprimary
-            AND column_default.adnum = ANY(primary_key.indkey)
+        SELECT 1 FROM pg_depend default_dependency
         WHERE default_dependency.refobjid = sequence_class.oid
+            AND default_dependency.classid = 'pg_attrdef'::regclass
     )
 ORDER BY s.sequencename
 """

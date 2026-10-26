@@ -21,7 +21,7 @@ from hare.exceptions import ConfigurationError
 from hare.models import Model
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
 
 
 class ClickhouseDictionaries(Dictionaries):
@@ -149,6 +149,27 @@ class ClickhouseDictionaries(Dictionaries):
         """Replaces the dictionary at once - a query reads the old one until the new one stands."""
         await self.editor.run_sql(self.get_dictionary_sql(model, new_dictionary, or_replace="OR REPLACE "))
 
+    async def replace_dictionaries_reading_field(
+        self, old_model: type[Model], new_model: type[Model], field_name: str
+    ) -> None:
+        """Replaces the dictionaries of a model reading a field a change declares with another column type - a
+        dictionary keeps each attribute's type as it was declared.
+
+        Args:
+            old_model: The model the table matched.
+            new_model: The model it is changed to.
+            field_name: The changed field.
+        """
+        if field_name not in old_model._meta.fields_db_projection or not any(
+            field_name in dictionary.get_field_names() for dictionary in new_model._meta.dictionaries
+        ):
+            return
+        if not self.editor.column_definitions.changes_column_type(old_model, new_model, field_name):
+            return
+        for dictionary in new_model._meta.dictionaries:
+            if field_name in dictionary.get_field_names():
+                await self.editor.run_sql(self.get_dictionary_sql(new_model, dictionary, or_replace="OR REPLACE "))
+
     async def rename_dictionary(
         self, model: type[Model], old_dictionary: Dictionary, new_dictionary: Dictionary
     ) -> None:
@@ -162,8 +183,11 @@ class ClickhouseDictionaries(Dictionaries):
         )
 
     async def reload_dictionary(self, model: type[Model], dictionary: Dictionary) -> None:
+        # Named in its database: every server of a cluster runs the reload, a bare name in its default one.
         await self.editor.run_sql(
             CLICKHOUSE_DICTIONARY_RELOAD_TEMPLATE.format(
-                dictionary=self.editor.qualify_object_name(model, dictionary.name)
+                dictionary=self.editor.qualify_table_name(
+                    dictionary.name, model._meta.schema or self.editor.client.database
+                )
             )
         )

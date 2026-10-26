@@ -5,7 +5,7 @@ from copy import copy, deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
-from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
+from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
@@ -32,7 +32,6 @@ from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.models.enums import ModelOption
-from hare.query.expressions import Q
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
@@ -126,7 +125,7 @@ class RenameField(ModelBoundOperation):
             The (app_label, model_name) keys of the models whose relations or options changed.
         """
         try:
-            rendered_model = state.apps.get_model(app_label, self.model_name)
+            rendered_model = state.apps.get_model(f"{app_label}.{self.model_name}")
         except KeyError:
             return set()
         relation = rendered_model._meta.fields_map.get(self.old_name)
@@ -160,13 +159,13 @@ class RenameField(ModelBoundOperation):
         if not self._may_be_related_to(app_label, state):
             return set()
         try:
-            target_model = state.apps.get_model(app_label, self.model_name)
+            target_model = state.apps.get_model(f"{app_label}.{self.model_name}")
         except KeyError:
             return set()
         changed_model_keys: set[tuple[str, str]] = set()
         for model_key, model_state in state.models.items():
             try:
-                rendered_model = state.apps.get_model(*model_key)
+                rendered_model = state.apps.get_model(".".join(model_key))
             except KeyError:
                 continue
             for relation in rendered_model._meta.fields_map.values():
@@ -416,10 +415,7 @@ class RenameField(ModelBoundOperation):
         Returns:
             The renamed condition, or None when it names no renamed field.
         """
-        if (
-            isinstance(condition, (Q, ExclusiveArcCondition))
-            and self.old_name in condition.get_referenced_field_names()
-        ):
+        if isinstance(condition, FieldCondition) and self.old_name in condition.get_referenced_field_names():
             return condition.with_renamed_field(self.old_name, self.new_name)
         return None
 

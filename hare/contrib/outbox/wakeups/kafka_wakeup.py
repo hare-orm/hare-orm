@@ -3,14 +3,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.wakeups.constants import (
     DEFAULT_WAKEUP_CHANNEL,
     KAFKA_WAKEUP_RETENTION_MILLISECONDS,
     WAKEUP_TOPIC_SEPARATOR,
 )
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
-from hare.exceptions import ConfigurationError
+from hare.contrib.package_checks import PackageChecks
 
 try:
     import aiokafka
@@ -33,8 +32,7 @@ class KafkaWakeup(OutboxWakeup):
         replication_factor: The replication of a created topic.
 
     Raises:
-        ConfigurationError: An empty ``bootstrap_servers`` or ``topic``, or the ``aiokafka`` package
-            isn't installed.
+        ConfigurationError: The ``aiokafka`` package isn't installed.
     """
 
     #: The ``aiokafka`` package, None without the ``kafka`` extra.
@@ -49,10 +47,7 @@ class KafkaWakeup(OutboxWakeup):
         replication_factor: int = 1,
     ) -> None:
         super().__init__()
-        BrokerArguments.require_package(self.aiokafka, "KafkaWakeup", "aiokafka", "kafka")
-        if not bootstrap_servers:
-            raise ConfigurationError("bootstrap_servers must name a Kafka server")
-        BrokerArguments.require_text("topic", topic)
+        PackageChecks.require_package(self.aiokafka, "KafkaWakeup", "aiokafka", "kafka")
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
         self.create_topic = create_topic
@@ -69,7 +64,12 @@ class KafkaWakeup(OutboxWakeup):
         async with self.producer_lock:
             if self.producer is None:
                 producer = self.aiokafka.AIOKafkaProducer(bootstrap_servers=self.bootstrap_servers)
-                await producer.start()
+                try:
+                    await producer.start()
+                except BaseException:
+                    # A producer that didn't start still holds its client - stopped, the next use starts anew.
+                    await producer.stop()
+                    raise
                 self.producer = producer
             return self.producer
 
@@ -80,8 +80,8 @@ class KafkaWakeup(OutboxWakeup):
     async def ensure_topic(self) -> None:
         """Creates the topic of the signals unless it exists."""
         admin = self.aiokafka.admin.AIOKafkaAdminClient(bootstrap_servers=self.bootstrap_servers)
-        await admin.start()
         try:
+            await admin.start()
             await admin.create_topics(
                 [
                     self.aiokafka.admin.NewTopic(
@@ -107,8 +107,8 @@ class KafkaWakeup(OutboxWakeup):
             auto_offset_reset="latest",
             enable_auto_commit=False,
         )
-        await consumer.start()
         try:
+            await consumer.start()
             async for message in consumer:
                 text = (message.value or b"").decode()
                 self.dispatch(frozenset(topic for topic in text.split(WAKEUP_TOPIC_SEPARATOR) if topic))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from hare.query.enums import Lookup
+
 #: The inner class a request query declares its options in.
 META_CLASS_NAME = "Meta"
 
@@ -22,6 +24,22 @@ DESCENDING_PREFIX = "-"
 
 #: What joins a field path and its lookup in a filter key (``published_at__gte``).
 LOOKUP_SEPARATOR = "__"
+
+
+#: The lookups an empty text matches every value of - a filter given one filters nothing, as a blank
+#: search does.
+EMPTY_TEXT_MATCHING_LOOKUPS = frozenset(
+    {
+        Lookup.CONTAINS,
+        Lookup.ICONTAINS,
+        Lookup.STARTSWITH,
+        Lookup.ISTARTSWITH,
+        Lookup.ENDSWITH,
+        Lookup.IENDSWITH,
+        Lookup.POSIX_REGEX,
+        Lookup.IPOSIX_REGEX,
+    }
+)
 
 
 #: The ``Meta`` options that add parameters to a request query, in the order their parameters

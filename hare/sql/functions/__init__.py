@@ -34,7 +34,6 @@ from hare.sql.functions.statistic import Statistic
 from hare.sql.functions.std_dev import StdDev
 from hare.sql.functions.text.collate import Collate
 from hare.sql.functions.text.concat import Concat
-from hare.sql.functions.text.decimal_text_collate import DecimalTextCollate
 from hare.sql.functions.text.lower import Lower
 from hare.sql.functions.text.replace import Replace
 from hare.sql.functions.text.upper import Upper
@@ -50,7 +49,6 @@ __all__ = [
     "Concat",
     "Date",
     "Now",
-    "DecimalTextCollate",
     "DatetimeAsText",
     "GroupingFunction",
     "NumericCast",

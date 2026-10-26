@@ -7,8 +7,10 @@ from hare.exceptions import UnSupportedError
 from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.enums import NarrowedValueSource
 from hare.fields.field import Field
-from hare.fields.narrowing.decimal_digits_limit import DecimalDigitsLimit
+from hare.fields.narrowing.constants import FLOAT32_MANTISSA_BITS
+from hare.fields.narrowing.day_limit import DayLimit
 from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
+from hare.fields.narrowing.float_precision_limit import FloatPrecisionLimit
 from hare.fields.narrowing.integer_range_limit import IntegerRangeLimit
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
 from hare.fields.narrowing.text_length_limit import TextLengthLimit
@@ -40,9 +42,7 @@ class ColumnNarrowingCheck(SchemaEditorPart):
             FieldNarrowingDataLossError: At least one existing row would overflow the new type.
         """
         limit = new_field.get_narrowing_limit(old_field)
-        overflow_predicates = (
-            [] if limit is None else [self.get_narrowing_overflow_predicate_sql(limit, quoted_column)]
-        )
+        overflow_predicates = [] if limit is None else [limit.get_overflow_predicate_sql(self, quoted_column)]
         if isinstance(new_field, ContainerField):
             overflow_predicates.extend(
                 self.get_held_value_overflow_predicate_sql(held_path, held_limit, quoted_column)
@@ -71,24 +71,6 @@ class ColumnNarrowingCheck(SchemaEditorPart):
             qualified_table: The already schema-qualified, quoted table name.
             quoted_column: The already-quoted column name.
         """
-
-    def get_narrowing_overflow_predicate_sql(self, limit: NarrowingLimit, quoted_column: str) -> str:
-        """A WHERE predicate matching the rows whose value is beyond a narrowing limit.
-
-        Args:
-            limit: The limit.
-            quoted_column: The quoted column.
-
-        Returns:
-            The predicate.
-        """
-        if isinstance(limit, TextLengthLimit):
-            return self.get_text_overflow_predicate_sql(limit, quoted_column)
-        if isinstance(limit, DecimalDigitsLimit):
-            return self.get_decimal_overflow_predicate_sql(quoted_column, limit.max_digits, limit.decimal_places)
-        if isinstance(limit, EnumValuesLimit):
-            return self.get_enum_overflow_predicate_sql(limit, quoted_column)
-        return self.get_integer_overflow_predicate_sql(limit, quoted_column)
 
     def get_text_overflow_predicate_sql(self, limit: TextLengthLimit, quoted_column: str) -> str:
         """A WHERE predicate matching the rows whose value is longer as text than a limit.
@@ -127,6 +109,52 @@ class ColumnNarrowingCheck(SchemaEditorPart):
             f"{self.get_decimal_overflow_predicate_sql(quoted_column, whole_digits, 0)} "
             f"OR {number_sql} < {limit.lowest} OR {number_sql} > {limit.highest}"
         )
+
+    def get_float_overflow_predicate_sql(self, limit: FloatPrecisionLimit, quoted_column: str) -> str:
+        """A WHERE predicate matching the rows whose number a float of the limit's mantissa rounds.
+
+        Args:
+            limit: The limit.
+            quoted_column: The quoted column.
+
+        Returns:
+            The predicate.
+        """
+        float_type = "DOUBLE PRECISION" if limit.mantissa_bits > FLOAT32_MANTISSA_BITS else "REAL"
+        number_sql = f"CAST({quoted_column} AS NUMERIC)"
+        return f"CAST(CAST({quoted_column} AS {float_type}) AS NUMERIC) <> {number_sql}"
+
+    def get_day_overflow_predicate_sql(self, limit: DayLimit, quoted_column: str) -> str:
+        """A WHERE predicate matching the rows whose value is outside the limit's days or, where it
+        checks one, has a time of day.
+
+        Args:
+            limit: The limit.
+            quoted_column: The quoted column.
+
+        Returns:
+            The predicate.
+        """
+        literals = self.editor.client.dialect.literals
+        predicates = []
+        if limit.checks_time_of_day:
+            predicates.append(self.get_time_of_day_predicate_sql(quoted_column))
+        if limit.first_day is not None:
+            predicates.append(f"{quoted_column} < {literals.get_literal_sql(limit.first_day)}")
+        if limit.last_day is not None:
+            predicates.append(f"{quoted_column} > {literals.get_literal_sql(limit.last_day)}")
+        return " OR ".join(predicates)
+
+    def get_time_of_day_predicate_sql(self, quoted_column: str) -> str:
+        """A WHERE predicate matching the rows whose moment isn't at midnight.
+
+        Args:
+            quoted_column: The quoted column of moments.
+
+        Returns:
+            The predicate.
+        """
+        return f"CAST({quoted_column} AS DATE) <> {quoted_column}"
 
     def get_enum_overflow_predicate_sql(self, limit: EnumValuesLimit, quoted_column: str) -> str:
         """A WHERE predicate matching the rows holding a value an enum no longer has.

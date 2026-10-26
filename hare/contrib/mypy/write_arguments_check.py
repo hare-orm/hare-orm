@@ -149,11 +149,14 @@ class WriteArgumentsCheck:
         if name in meta.foreign_key_fields or name in meta.one_to_one_fields:
             related_type = mypy_types.get_model_type(getattr(field, "related_model", model))
             return make_simplified_union([related_type or mypy_types.any(), *none_types])
+        accepted_types = [mypy_types.get_python_type(accepted) for accepted in field.get_accepted_value_types()]
         declared_type = mypy_types.get_declared_field_type(model, name)
         if declared_type is not None:
-            value_type = mypy_types.with_raw_enum_values(declared_type, field)
+            value_type = make_simplified_union(
+                [mypy_types.with_raw_enum_values(declared_type, field), *accepted_types]
+            )
             # A factory declaring the value itself (``CharEnumField``) leaves None out.
             if none_types and not is_overlapping_none(value_type):
                 return make_simplified_union([value_type, *none_types])
             return value_type
-        return make_simplified_union([mypy_types.get_python_type(field.field_type), *none_types])
+        return make_simplified_union([mypy_types.get_python_type(field.field_type), *accepted_types, *none_types])

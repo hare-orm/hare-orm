@@ -377,9 +377,8 @@ class InstanceSaving:
             of the whole obj.
 
         Raises:
-            QueryError: The arguments contradict each other, ``update_fields`` is a single string or
-                names ``Meta.soft_delete_field``, or an UPDATE is asked of a model without a
-                primary key.
+            QueryError: The arguments contradict each other, ``update_fields`` names
+                ``Meta.soft_delete_field``, or an UPDATE is asked of a model without a primary key.
             FieldError: ``update_fields`` names an unknown field or a relation without a column.
         """
         if force_create and force_update:
@@ -395,11 +394,6 @@ class InstanceSaving:
             meta.raise_if_no_primary_key(f"{obj.__class__.__name__}.save() of a saved row (an UPDATE)")
         if update_fields is None:
             return None
-        if isinstance(update_fields, (str, bytes)):
-            raise QueryError(
-                f"'update_fields' must be a collection of field names, not a single string - "
-                f"pass [{update_fields!r}] instead of {update_fields!r}"
-            )
         names = CollectionArguments.get_list(update_fields, "'update_fields'")
         # The version is the one the row is matched by - bumped as on every save().
         version_field = meta.optimistic_lock_field
@@ -473,15 +467,9 @@ class InstanceSaving:
             primary key attribute(s) and a forward relation to its key column(s).
 
         Raises:
-            QueryError: If ``field_names`` is a single string instead of a collection of names.
             FieldError: If a name is not a column-backed field or a forward relation of this model.
         """
         meta = model._meta
-        if isinstance(field_names, (str, bytes)):
-            raise QueryError(
-                f"{argument_name!r} must be a collection of field names, not a single string - "
-                f"pass [{field_names!r}] instead of {field_names!r}"
-            )
         field_names = CollectionArguments.get_list(field_names, f"'{argument_name}'")
         validated_names: dict[str, None] = {}
         for field_name in field_names:

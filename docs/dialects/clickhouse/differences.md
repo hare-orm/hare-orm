@@ -19,14 +19,21 @@ the call is refused before any SQL is sent.
 | `ON CONFLICT` | `bulk_create()` with `ignore_conflicts`, `update_fields`, `on_conflict` or `on_conflict_constraint` raises `UnSupportedError` (`Features.supports_insert_conflicts`); the transactional outbox, which writes its events so, is refused when its model is bound — see [Outbox](../../integrations/outbox.md). |
 | Batches of an UPDATE | `BackfillColumn` fills every row with one mutation — `batch_size` isn't used: a mutation locks no row a batch would spare, and each one rewrites the parts it changes. |
 | Row locks | `select_for_update()` and `atomic(lock_timeout=...)` raise `UnSupportedError` — see [Transactions and locks](transactions-and-locks.md). |
-| `NULL` from an aggregate over no rows | An aggregate whose result over no rows would be a value no row holds is written by its `-OrNull` form (`maxOrNull(...)`) and gives `None`; `Sum` gives ClickHouse's own `0` — see [`NULL` from an aggregate over no rows](#null-from-an-aggregate) for the list |
+| `NULL` from an aggregate over no rows | An aggregate whose result over no rows would be a value no row holds is written by its `-OrNull` form (`maxOrNull(...)`) and gives `None`; `Sum` gives ClickHouse's own `0` (`None` for a nullable field) — see [`NULL` from an aggregate over no rows](#null-from-an-aggregate) for the list |
 | `LIKE ... ESCAPE` | A pattern escapes with a backslash, ClickHouse's own escape character. An empty text is contained in every text, as on PostgreSQL (`contains=""`, `contains=F("name")` of an empty name): ClickHouse matches no empty string by `'%%'`, so hare writes that pattern as `'%'`. |
 | A plain `UPDATE`, and a refused `NULL`, in raw SQL | SQL you write (`RunSQL`, `raw()`, `execute()`) runs as ClickHouse takes it: an `UPDATE` statement needs the table's `enable_block_number_column` setting (`ALTER TABLE ... UPDATE` doesn't), and a `NULL` inserted into a column that isn't `Nullable` is written as the type's empty value (`0`, `''`). hare's own writes refuse such a `None`. |
 | A backslash as a plain character of a quoted name | A name holding a backslash — a table, a column, an alias — is written with it doubled: ClickHouse reads a single one as an escape. |
 | A recursive query adding rows by `UNION DISTINCT` | `with_recursive()` needs `max_depth`, which ends a cycle in the rows — see [Recursive queries and CTEs](../../querying/queryset-methods.md#recursive). Without it the walk raises `UnSupportedError`. |
 | `NULL` first in a descending ordering | ClickHouse puts `NULL` last in both directions — see [`NULL` first in a descending ordering](#null-first-in-a) |
 | A cursor of a transaction | `stream()` reads rows outside a transaction too: the server sends them as it computes them. Leaving the `async for` early closes the stream and gives the connection back. |
-| A zone's UTC offset with seconds | ClickHouse keeps a zone's offset in whole minutes: a local mean time before a zone's standard time (Moscow before 1919, `+02:30:17`) is read without its seconds — `Extract("second")`, `Trunc()` and `__time` of such a moment in that zone (or with `use_timezone=False` in it) differ from PostgreSQL's by those seconds. |
+| A zone's UTC offset with seconds | Read without its seconds — see [A zone's UTC offset with seconds](#zone-offset-seconds). |
+
+## <a id="zone-offset-seconds"></a>A zone's UTC offset with seconds
+
+ClickHouse keeps a zone's offset in whole minutes: a local mean time before a zone's standard time
+(Moscow before 1919, `+02:30:17`) is read without its seconds — `Extract("second")`, `Trunc()` to a day
+or longer and `__time` of such a moment in that zone (or with `use_timezone=False` in it) differ from
+PostgreSQL's by those seconds; `Trunc()` to an hour, a minute or a second takes the offset whole.
 
 ## <a id="an-update-of-rows"></a>An `UPDATE` of rows in place
 
@@ -38,12 +45,19 @@ a `union()`/`intersection()`/`difference()` — the server's lightweight `DELETE
 that fails is stopped (`KILL MUTATION`) before the error is raised: the server would retry it, fail every
 later mutation of the table behind it, and could still apply it after the call raised. A mutation runs no
 correlated subquery: an `update()` setting a field to a `Subquery` of `OuterReference`, or filtered or
-deleted by one, raises `UnSupportedError`. A `bulk_update()` mutation writes at most 1000 rows
+deleted by one, raises `UnSupportedError`. From ClickHouse 26.7 the server refuses a mutation setting a
+field without `NULL` to an expression that may be `NULL` — a `Subquery` of a nullable field
+(`CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`) — even when its value isn't; wrap such an expression in
+`Coalesce()` with a value. A `bulk_update()` mutation writes at most 1000 rows
 (`Features.max_bulk_update_rows`): it finds each row's values by scanning the list of rows, so a longer
 one costs more per row and outgrows the server's AST limit. Its rows' keys are read by a subquery of the
 list itself, the same on every replica: it runs with `allow_nondeterministic_mutations = 1`, which a
 `ReplicatedMergeTree` table needs for a mutation reading a subquery — an `update()` filtered by a
 subquery of another table is refused there by the server, as replicas might read different rows.
+
+Mutations of one table running at once are the server's own: each reads the rows as they were when it
+started, so two concurrent `update(n=F("n") + 1)` of one row may both write `n + 1` — one increment
+lost, where PostgreSQL's row lock would serialize them. Run such updates of a row one after another.
 
 ## <a id="written-row-count"></a>A count of written rows
 
@@ -72,39 +86,61 @@ generates is taken before the insert (see [Models](models.md#keys)); a model who
 `Max`, `Min`, `Avg`, `StdDev`, `Variance` and ClickHouse's own `ArgMax`, `ArgMin`, `AnyValue`,
 `AnyLast`, `Quantile` and `Median` (`exact=True` too) are written by their `-OrNull` form
 (`maxOrNull(...)`), so over no rows they give `None` rather than the column type's default; `Count` gives
-`0` and `Sum` gives ClickHouse's own `0` (`0.00` for a decimal). In a query with `GROUP BY` a group holds
+`0` and `Sum` gives ClickHouse's own `0` (`0.00` for a decimal; `None` for a nullable field, and over
+only `NULL` values too). In a query with `GROUP BY` a group holds
 at least one row, so an aggregate without `_filter` keeps its plain, cheaper form (`max(...)`). A sample
 deviation over one value is `None`, as in SQL — ClickHouse gives NaN.
 
 ## <a id="results"></a>Results that are ClickHouse's own
 
-hare doesn't make ClickHouse give PostgreSQL's result. It refuses a value ClickHouse would silently turn
-into another value or leave unreadable, writes the forms it stores itself (an enum by its label, an
-address as an `IPv6`, a JSON path) and supplies its functions by ClickHouse's own means; everything else is
+hare doesn't make ClickHouse give PostgreSQL's result. It checks what it guarantees itself — a value it
+writes, an enum's member — writes the forms it stores itself (an enum by its label, an address as an
+`IPv6`, a JSON path) and supplies its functions by ClickHouse's own means; everything else is
 ClickHouse's own, and differs from PostgreSQL's:
 
 - **Division and remainder by zero** give `inf` or `nan` for floats and ClickHouse's own error for
   integers; **a math function outside its domain** (`Sqrt(-1)`, `Ln(0)`) gives `nan` or `inf`. hare checks
   none of them. `MOD` and a negative zero are ClickHouse's own.
-- **Decimal quotients.** A division, `Avg()`, `StdDev()` and `Variance()` of decimals are computed exactly
-  and cut, not rounded, to 20 digits after the point, where PostgreSQL's numeric has scale rules of its
-  own. `Round()` is ClickHouse's `round()`.
+- **Decimal arithmetic** is ClickHouse's own. A quotient has the dividend's places, cut, not rounded
+  (`F("price") / 8` of `12.34` is `1.54`). A sum or a product past its type's digits wraps around
+  (a `Decimal128` past 38 digits), a decimal beside an integer keeps the decimal's own type (`Decimal(9, 4)`
+  plus a large `Int64` wraps the integer's digits), and a product past the result type's digits raises
+  ClickHouse's `Decimal math overflow`. `Avg()`, `StdDev()` and `Variance()` of decimals are floats
+  (`Features.computes_decimal_statistics_exactly`); `Sum()` of decimals is a `Decimal(38, places)`, a
+  quantile keeps the decimal. `Round()` is ClickHouse's `round()`. A value the server computed wider than
+  38 digits (a `Sum()` of a `Decimal128` past them) is read with every digit by clickhouse-driver;
+  clickhouse-connect rounds it to 38 digits as it reads it — the library's own.
 - **Counts, lengths, row numbers and ranks** (`Count()`, `Length()`, `StrIndex()`, and the window
   functions `RowNumber()`, `Rank()`, `DenseRank()`, `NTile()`) are signed `Int64` values: ClickHouse's
   own `UInt64` finds no common type with a signed integer in `Coalesce()`, `Case()` or `Greatest()`.
-- **Integer arithmetic** a query reads past its type's range is refused (`integer out of range`); a
-  value `update(n=F("n") + 1)` writes is converted by ClickHouse into the column's type, wrapping
-  around past its range (`2147483647 + 1` stored as `-2147483648` in an `Int32`). `/` of two integers
+- **Integer arithmetic** is ClickHouse's own: a result past its type's range wraps around
+  (`9223372036854775807 + 1` is `-9223372036854775808`), a value `update(n=F("n") + 1)` writes too
+  (`2147483647 + 1` stored as `-2147483648` in an `Int32`), and so do `Sum()` and `Avg()` of integers,
+  summed in the column's type (`Avg()` of two `UInt64` values `2**64 - 1` is `2**63`);
+  `Abs()` of a type's minimum is the minimum. `/` of two integers
   gives the exact quotient, a fraction too (`Features.divides_integers_exactly`) — the expression's output
   field is a `FloatField`. A decimal an expression computes with more places than the field keeps is cut
   by ClickHouse, not rounded: `update(price=F("price") + Decimal("0.005"))` leaves `12.34` where
   PostgreSQL and SQLite write `12.35`.
-- **`Cast()`** to an integer cuts the fraction off, where PostgreSQL rounds; an integer past the target
-  field's range raises. A decimal target rounds half away from zero to its places, and a float becomes a
-  decimal by its shortest digits. A cast to a boolean is ClickHouse's `toBool()`, which accepts `yes`,
-  `no`, `on` and `off` too. A cast to text is `toString()`: `1e308`, `-inf`, a decimal without trailing
-  zeros, a moment as `2024-01-02 03:04:05.678900`. A number padded with spaces (`' 42 '`) isn't read, and
-  text that isn't a value of the type raises. A `CharField`'s `max_length` cuts nothing.
+- **`Cast()`** is ClickHouse's own conversion. To an integer it cuts the fraction off, where PostgreSQL
+  rounds, and wraps a number past the target's range around (`Cast(Value(3e9), IntField())` is
+  `-2147483648`); to a decimal it cuts the places past the target's, a float converted as the double it
+  is (`2.675` becomes `2.67`). Text is read by ClickHouse's parsers: text that isn't a number is `NULL`,
+  a number padded with spaces (`' 42 '`) too; a date or a moment is read by
+  `parseDateTime64BestEffort()` — a date missing a part is completed (`"2024-01"` is the first of
+  January), a clock past its day rolls over (`"25:00"` is one o'clock of the next day), a year outside
+  1900 to 2299 is the nearest day ClickHouse holds — from ClickHouse 26.7, whose `DateTime64` holds the
+  years 1 to 9999, such a year is read as written, and a date of it past 2299 is a `Date32` day
+  clickhouse-driver can't read (its own `KeyError`) — a day no calendar has (`"2023-02-29"`) raises. A
+  cast to a boolean is ClickHouse's `toBool()`, which accepts `yes`, `no`, `on` and `off` too and raises
+  on any other text. A cast to text is `toString()`: `1e308`, `-inf`, a decimal without trailing zeros,
+  a moment as `2024-01-02 03:04:05.678900`. A `CharField`'s `max_length` cuts nothing.
+- **A moment shifted** by a duration is ClickHouse's own `addMicroseconds()`: a moment past the years a
+  column stores is the nearest one it holds — `DateTime` 1900-01-01 to 2299-12-31 23:00 (`DateTime64` from
+  ClickHouse 26.7: the years 1 to 9999), `Date32` up to 2299-12-31.
+- **`union()`, `intersection()` and `difference()`** of ordered branches keep no duplicate: the
+  connection runs with ClickHouse's `optimize_distinct_in_order` off, which kept duplicates of such
+  branches — also inside a subquery, whose own `SETTINGS` a set operation doesn't read.
 - **`Concat()`** joins the text ClickHouse gives a column's value (`toString()`); a naive datetime
   (`use_timezone=False`) is written at the machine's local zone. A Python value given as a literal is its
   Python text: a boolean `true` or `false`, a float by `repr()` (`1000000000000000.0`), a date or datetime
@@ -121,10 +157,9 @@ ClickHouse's own, and differs from PostgreSQL's:
   first — a `uuid7` key doesn't sort by time, so order by a date column) and of an `IPv6` address. An enum
   orders by its label, which hare stores that way. A time of day orders and compares as its stored text:
   `10:00:00+03:00` sorts after `08:00:00+00:00`, though it is the earlier moment.
-- **A NaN in a `FloatField`** is stored. **A null byte** in a text or a JSON value is stored as ClickHouse
-  stores it.
-- **Errors.** A decimal past its digits raises `the value has more digits than the decimal holds`; making
-  a column `NOT NULL` while it holds `NULL` raises `column X of table Y holds NULL`.
+- **A NaN in a `FloatField`** is stored. **A null byte** in a text raises `ValidationError` — the value is
+  written into SQL text, which can't hold one; inside a JSON object it is stored as ClickHouse stores it.
+- **Errors.** Making a column `NOT NULL` while it holds `NULL` raises `column X of table Y holds NULL`.
 
 ## <a id="null-first-in-a"></a>`NULL` first in a descending ordering
 
@@ -191,11 +226,15 @@ hare doesn't work around a fault of a ClickHouse version; the server's own error
   the parts stored before the change lack as every value NULL — `filter(title__isnull=True)` matches every
   such row. On these versions rewrite the column after the migration yourself:
   `ALTER TABLE "article" UPDATE "title" = "title" WHERE 1` (in a `RunSQL` after the `AlterField`).
+  Until then the checks of a later migration of the column read the same: rolling the change back to NOT
+  NULL is refused with `IntegrityError` (*holds NULL*), and a value a type change can't convert in such
+  a part isn't found before the change.
+- **An ordering by a JSON path** (`order_by("data__n")`): ClickHouse 25.8 with `allow_simdjson=0`, which
+  hare sets to read an integer past 64 bits, may order some rows of a `JSON` column out of place,
+  depending on the data. Order by a cast of the path (`Cast("data__n", IntField())`) there.
 - **An `update()` setting a constant value under a negation that folds into a constant**
   (`exclude(owner__isnull=True).update(balance=0)` of a non-nullable `owner`): ClickHouse before 26.3
   refuses it with *Cannot convert column ... because it is non constant in source stream*.
-- **`Count()` of a nullable column in a window** (`Window(Count("rating"))`): every version up to 26.9
-  refuses it with *Not found column ... in block* (`NOT_FOUND_COLUMN_IN_BLOCK`).
 - ClickHouse 25.12 refuses a query that joins a many-to-many relation for an aggregate next to a
   `select_related()` object (`Player.objects.annotate(Count("skills")).select_related("team")`) with
   *Cannot fold actions for projection* (`LOGICAL_ERROR`) — its join reordering; 25.10 and 26.x run it.
@@ -216,7 +255,9 @@ A `JSONField` is a `JSON` column, its paths stored as typed subcolumns (the outb
 reads no `JSON` column, it is a `String` column of JSON text, read by the `JSON*` functions. Which one a
 connection has follows from its driver, before it opens — `hare drift`, `hare sqlmigrate` and the migrations
 compare, print and create the column of that connection. A table made over one driver is read, written and
-filtered over the other as well;
+filtered over the other as well, but for a key holding a dot: write it and filter by it over the
+driver that made the table — over the other, clickhouse-connect writes it into a `String` column with the dot
+escaped (`%2E`), and clickhouse-driver matches no such key of a `JSON` column; reading it is right over both;
 `hare drift` over the other reports the column's `AlterField` — the two
 keep a `null` differently, below. The `JSON` type stores less than JSON text does, and a value it would
 read back otherwise raises `ValidationError` before anything is sent — a `String` column, over
@@ -231,18 +272,25 @@ clickhouse-driver, keeps them all:
   the path (`field__path__lt=10`) doesn't match it.
 - An integer outside the range of an `Int64` and a `UInt64` (`-2**63` to `2**64 - 1`) is refused — the type
   holds it as a float.
+- clickhouse-connect types a path of the rows one `bulk_create()` sends by the first value it meets: an
+  integer after a float at the same path of the batch is stored and read back as a float, and a filter
+  on its exact value finds nothing. Keep a path's numbers of one type in a batch, or write such rows
+  one by one; clickhouse-driver keeps the JSON text as it is.
 - The order of keys isn't kept.
 - A dot in a key stays part of the key: each connection sets `json_type_escape_dots_in_keys`, and hare writes
   the dot as the server escapes it, `%2E` — an `update()`'s mutation, which reads the JSON with the server's
   own settings, too. A key holding the text `%2E` itself raises `ValidationError`: the server would read it
   back as a dot.
 - An array of integers and floats holds them all as floats: `[1, 2.5]` reads back as `[1.0, 2.5]`; one whose
-  integers (its nested arrays' included) go past `2**53`, which a float doesn't hold exactly, is refused. A
+  integers (its nested arrays' included) go past `2**53`, which a float doesn't hold exactly, is refused,
+  and so is one holding a boolean beside a number or a string — a mutation would read `[true, 1]` as
+  `[1, 1]` and `["", true]` as `["", "true"]`. A
   boolean stays one, and a string stays a string even when it looks like a date or a moment
   (`"2024-01-02"`): each connection sets `input_format_try_infer_dates` and
-  `input_format_try_infer_datetimes` off. But `update()` writes by a mutation, which reads the JSON with
-  the server's own settings: an array of numbers and booleans it writes holds `true` as `1`, and a
-  date-like string is read back as a `date` or a `datetime` unless the server's default profile sets
+  `input_format_try_infer_datetimes` off. But `update()`, `save()` and `bulk_update()` write by a mutation,
+  which ClickHouse runs with the server's own settings, whatever the connection sets: a date-like string
+  is stored as a `Date` or a `DateTime`
+  path and read back as a `date` or a `datetime` unless the server's default profile sets
   those two settings to `0`.
 
 Key paths, `__has_key`, `__has_keys` and `__has_any_keys` work on both; `__filter`, `__contains` and

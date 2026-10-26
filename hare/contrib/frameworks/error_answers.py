@@ -22,7 +22,10 @@ class ErrorAnswers:
     - ``ValidationError`` (a value a field refuses - out of its range, too long) -
       ``422 Unprocessable Content`` with the field's message;
     - ``RequestQueryForbidden`` (a parameter asks for what the request may not see) -
-      ``403 Forbidden`` with the reason.
+      ``403 Forbidden`` with the reason;
+    - ``ApiGetterError`` (a value of another service's API a request query's ``Meta.api_getter``
+      requires couldn't be loaded) - ``502 Bad Gateway``, without the error's message, which names the
+      service and the values asked.
     """
 
     @staticmethod

@@ -28,7 +28,7 @@ from hare.query.functions import (
     Substr,
     Sum,
 )
-from tests.dialects.clickhouse.models import PageView, Player, Revision
+from tests.dialects.clickhouse.models import Player, Revision
 
 
 async def get_values(expression, **filters):
@@ -69,11 +69,11 @@ async def test_a_null_dividend_or_divisor_divides_into_null(clickhouse_db):
 
 
 @pytest.mark.asyncio
-async def test_a_decimal_quotient_keeps_its_digits(clickhouse_db):
+async def test_a_decimal_quotient_has_the_dividends_scale_as_clickhouse_divides(clickhouse_db):
     await create_players()
 
-    assert await get_values(F("score") / 8, id=1) == [decimal.Decimal("1.5425")]
-    assert await get_values(F("score") / decimal.Decimal("0.3"), id=1) == [decimal.Decimal("41.13333333333333333333")]
+    assert await get_values(F("score") / 8, id=1) == [decimal.Decimal("1.54")]
+    assert await get_values(F("score") / decimal.Decimal("0.3"), id=1) == [decimal.Decimal("41.13")]
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_power_and_exp_take_a_decimal(clickhouse_db):
     await create_players()
 
     assert await get_values(Power("score", 2), id=1) == [pytest.approx(decimal.Decimal("152.2756"))]
-    assert await get_values(Exp(F("score") / 100), id=1) == [pytest.approx(decimal.Decimal(math.exp(0.1234)))]
+    assert await get_values(Exp(F("score") / 100), id=1) == [pytest.approx(decimal.Decimal(math.exp(0.12)))]
 
 
 @pytest.mark.asyncio
@@ -187,15 +187,15 @@ async def test_a_division_over_a_composite_key_model(clickhouse_db):
 
 
 @pytest.mark.asyncio
-async def test_an_integer_result_out_of_its_type_range_is_refused(clickhouse_db):
+async def test_an_integer_result_past_its_type_wraps_around_as_clickhouse_computes_it(clickhouse_db):
+    """ClickHouse's own integer arithmetic - a result past the type wraps around, hare checks nothing."""
     await Player.objects.create(id=9_223_372_036_854_775_806, name="edge")
-    with pytest.raises(OperationalError, match="integer out of range"):
-        await get_values(F("id") + 2, name="edge")
+    assert await get_values(F("id") + 2, name="edge") == [-9_223_372_036_854_775_808]
     assert await get_values(F("id") + 1, name="edge") == [9_223_372_036_854_775_807]
 
 
 @pytest.mark.asyncio
-async def test_nested_integer_arithmetic_is_checked_at_each_level_and_written_once(clickhouse_db):
+async def test_nested_integer_arithmetic_is_written_once(clickhouse_db):
     await Player.objects.create(id=9_223_372_036_854_775_800, name="edge")
     deep = F("id")
     for _ in range(8):
@@ -203,16 +203,12 @@ async def test_nested_integer_arithmetic_is_checked_at_each_level_and_written_on
     # Each level wrote the level below three times - 8 levels were megabytes of SQL.
     assert len(Player.objects.annotate(value=deep).sql()) < 10_000
     assert await get_values(deep, name="edge") == [9_223_372_036_854_775_792]
-    # Past the type's range on an inner level, back within it on the outer one - refused as the
-    # level that leaves it.
-    with pytest.raises(OperationalError, match="integer out of range"):
-        await get_values(F("id") + 10 - 20, name="edge")
+    # Past the type's range on an inner level, back within it on the outer one - wrapped around twice.
+    assert await get_values(F("id") + 10 - 20, name="edge") == [9_223_372_036_854_775_790]
 
 
 @pytest.mark.asyncio
-async def test_a_checked_integer_result_combines_with_a_float(clickhouse_db):
-    """The checked result is an Int256, and ClickHouse has no arithmetic of an Int256 and a Float64 -
-    code 43 "Illegal types Int256 and Float64"."""
+async def test_integer_arithmetic_combines_with_a_float(clickhouse_db):
     await Player.objects.create(id=3, name="mixed", rating=0.5)
     assert await get_values(F("id") * F("id") + F("rating"), name="mixed") == [9.5]
     assert await get_values(F("id") * 2 * F("rating"), name="mixed") == [3.0]
@@ -236,18 +232,3 @@ async def test_a_count_or_a_length_combines_with_a_signed_integer(clickhouse_db)
     assert await revisions.values("document_id").annotate(
         value=Greatest(F("document_id"), Count("title"))
     ).values_list("value", flat=True) == [1]
-
-
-@pytest.mark.asyncio
-async def test_a_written_integer_past_its_type_is_clickhouses_own(clickhouse_db):
-    """An update's value is the database's: ClickHouse converts it into the column's type, wrapping it
-    around - written as it is, the operands not widened for a check of a read result."""
-    import datetime
-
-    view = await PageView.objects.create(
-        site="a", viewed_at=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC), duration_ms=2**31 - 1
-    )
-    update = PageView.objects.filter(id=view.id).update(duration_ms=F("duration_ms") + 1)
-    assert "accurateCast" not in update.sql()
-    await update
-    assert await PageView.objects.filter(id=view.id).values_list("duration_ms", flat=True) == [-(2**31)]

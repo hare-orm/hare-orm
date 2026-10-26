@@ -8,7 +8,6 @@ from hare.contrib.request_query.enums import ParameterType
 from hare.contrib.request_query.options.constants import DEFAULT_SEARCH_PARAMETER
 from hare.contrib.request_query.options.parameter_field import ParameterField
 from hare.contrib.request_query.options.request_option import RequestOption
-from hare.exceptions import ConfigurationError
 from hare.query.enums import Connector, Lookup
 from hare.query.expressions import Q
 
@@ -34,16 +33,6 @@ class SearchConfig(RequestOption):
     parameter: str = DEFAULT_SEARCH_PARAMETER
     join_type: Connector = Connector.OR
     split_words: bool = False
-
-    def __post_init__(self) -> None:
-        self.check_allowed_names(type(self).__name__, self.fields)
-        if not isinstance(self.lookup, str):
-            raise ConfigurationError(f"SearchConfig.lookup must be a lookup name, got {self.lookup!r}")
-        self.check_parameter_name(type(self).__name__, self.parameter)
-        if self.join_type not in {Connector.AND, Connector.OR}:
-            raise ConfigurationError(
-                f"SearchConfig.join_type must be Connector.AND or Connector.OR, got {self.join_type!r}"
-            )
 
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         return (ParameterField(self.parameter, str | None, None, ParameterType.SEARCH),)

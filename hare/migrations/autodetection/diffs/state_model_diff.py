@@ -72,6 +72,28 @@ class StateModelDiff:
             rename.rename_in_model_state(renamed_state)
         return renamed_state
 
+    def get_options_before_field_renames(
+        self, options: dict[str, Any], field_operations: list[HareOperation]
+    ) -> dict[str, Any]:
+        """Options naming the fields by their names after the field renames, named by those before them - the
+        options of the model ahead of the renames, which rename them as they run.
+
+        Args:
+            options: The options.
+            field_operations: The model's field operations.
+
+        Returns:
+            The options; ``options`` itself when no field is renamed.
+        """
+        renames = [operation for operation in field_operations if isinstance(operation, RenameField)]
+        if not renames:
+            return options
+        model_state = self.old_state_after_renames.clone()
+        model_state.options = dict(options)
+        for rename in reversed(renames):
+            RenameField(rename.model_name, rename.new_name, rename.old_name).rename_in_model_state(model_state)
+        return model_state.options
+
     @staticmethod
     def get_changed_columns(model_state: ModelState, field_operations: list[HareOperation]) -> set[tuple[str, str]]:
         """The columns of a model's table its field operations change, ``(table, column)`` each.
@@ -204,7 +226,10 @@ class StateModelDiff:
             *IndexDiff(self.old_state_after_renames, self.new_state).get_operations(),
             *ConstraintDiff(self.old_state_after_renames, self.new_state).get_operations(),
             *TriggerDiff(
-                self.old_state_after_renames, self.new_state, alters_in_place=not field_operations
+                self.old_state_after_renames,
+                self.new_state,
+                alters_in_place=not field_operations,
+                changed_columns=frozenset(StateModelDiff.get_changed_columns(self.old_state, field_operations)),
             ).get_operations(),
         ]
         # Objects are renamed and removed before the fields change, added and changed after them.
@@ -242,9 +267,19 @@ class StateModelDiff:
                     options_during_field_changes.pop(option, None)
             removed_fields = [operation for operation in field_operations if isinstance(operation, RemoveField)]
             field_operations = [operation for operation in field_operations if not isinstance(operation, RemoveField)]
+        elif field_operations and not ComparableValues.are_equal(new_options, options_during_field_changes):
+            # The options held while the fields change may still read a removed field - it is removed once
+            # the new options are set.
+            removed_fields = [operation for operation in field_operations if isinstance(operation, RemoveField)]
+            field_operations = [operation for operation in field_operations if not isinstance(operation, RemoveField)]
         # Compared by their declarations - hare's expressions compare by identity.
         if not ComparableValues.are_equal(options_during_field_changes, old_options):
-            operations.append(AlterModelOptions(name=self.new_state.name, options=options_during_field_changes))
+            operations.append(
+                AlterModelOptions(
+                    name=self.new_state.name,
+                    options=self.get_options_before_field_renames(options_during_field_changes, field_operations),
+                )
+            )
 
         operations.extend(partition_diff.get_operations())
         self.data_loss_warnings.extend(partition_diff.data_loss_warnings)

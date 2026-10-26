@@ -21,6 +21,7 @@ class SchemaPartType(StrEnum):
     SEQUENCE = "sequence"
     DICTIONARY = "dictionary"
     TABLE_OPTIONS = "table_options"
+    UNPARSED_PARTITIONING = "unparsed_partitioning"
     ROW_LEVEL_SECURITY = "row_level_security"
     ENUM_TYPE = "enum_type"
     COMMENT = "comment"

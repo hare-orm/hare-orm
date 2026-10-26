@@ -134,7 +134,7 @@ How well each row matches, higher for a better match — for an annotation to fi
 | `vector` | The ranked field, a tuple of fields, a `SearchVector`, or (PostgreSQL) a tsvector expression — a `TSVectorField` is ranked as it is |
 | `query` | The search text (`PLAIN`) or a `SearchQuery` |
 | `weights` | A dict of weights by field — a match in a heavier field ranks higher, 1 for a field left out, each a finite number from 0 to 1000000 (SQLite); or PostgreSQL's weights of the labels D, C, B, A as a sequence of four numbers or an expression — another sequence raises `ConfigurationError` |
-| `normalization` | PostgreSQL's length normalization bitmask — an integer or an expression; another value raises `ConfigurationError` |
+| `normalization` | PostgreSQL's length normalization bitmask — an integer of 32 bits or an expression; another value raises `ConfigurationError` |
 | `cover_density` | `TS_RANK_CD()` instead of `TS_RANK()` — PostgreSQL |
 
 On SQLite the fields have to be covered by one `FullTextIndex` of the model, a weight has to name one of

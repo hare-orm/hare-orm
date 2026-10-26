@@ -83,7 +83,8 @@ class QueryConnection:
             execution_query = specification._get_execution_query()
             execution_query._plan_origin = specification
             return execution_query
-        pinned_connection = specification._connection
+        # None until .using(), the router or the default connection sets it.
+        pinned_connection: DatabaseClient | None = specification._connection
         if pinned_connection is not None and pinned_connection.connection_alias != outer_connection.connection_alias:
             raise QueryError(
                 f"{specification.model.__name__} query used as {embedded_as} is pinned to a different database "
@@ -93,10 +94,45 @@ class QueryConnection:
                 "connection. Remove the inner queryset's .using() override, or query each connection "
                 "separately instead."
             )
+        if pinned_connection is None:
+            QueryConnection.raise_if_model_on_another_connection(
+                specification.model, outer_connection, outer_model, embedded_as
+            )
         bound_query = copy(specification)
         bound_query._plan_origin = specification
         bound_query._apply_connection(outer_connection)
         return bound_query
+
+    @staticmethod
+    def raise_if_model_on_another_connection(
+        model: type[Model], outer_connection: DatabaseClient, outer_model: type[Model], embedded_as: str
+    ) -> None:
+        """Refuses a query of a model living on another connection than the outer query, which runs on its
+        own model's connection - bound to the outer one, it would read that connection's table of its name.
+        An outer query sent to a connection of the caller's choice (a shard) takes the inner query along.
+
+        Args:
+            model: The inner query's model.
+            outer_connection: The outer query's connection.
+            outer_model: The outer query's model.
+            embedded_as: What the inner query is in the outer one, for the message.
+
+        Raises:
+            QueryError: The inner model lives on another connection.
+        """
+        outer_alias = outer_connection.connection_alias
+        routed_aliases_of = {
+            routed_model: {
+                routed_model.get_routed_connection(for_write=for_write).connection_alias for for_write in (False, True)
+            }
+            for routed_model in (model, outer_model)
+        }
+        if outer_alias in routed_aliases_of[outer_model] and outer_alias not in routed_aliases_of[model]:
+            raise QueryError(
+                f"{model.__name__} query used as {embedded_as} runs on a different database connection "
+                f"({sorted(routed_aliases_of[model])[0]!r}) than the outer {outer_model.__name__} query runs on "
+                f"({outer_alias!r}) - both compile to one SQL text. Query each connection separately instead."
+            )
 
     @staticmethod
     def get_analysis_dialect(specification: QuerySpecification[Any]) -> Dialect:

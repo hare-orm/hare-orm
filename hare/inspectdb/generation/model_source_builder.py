@@ -89,7 +89,7 @@ class ModelSourceBuilder:
             The lines.
         """
         lines = ["from hare.models import Model", *imports.render()]
-        # An enum class no module defines (the labels of a PostgreSQL ENUM type) is declared after
+        # An enum class no module defines (the labels of a database ENUM type) is declared after
         # the imports.
         if imports.enum_declarations:
             lines.extend(["", *imports.enum_declarations])

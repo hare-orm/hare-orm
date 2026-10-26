@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
+from hare.classes.comparable_values import ComparableValues
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
@@ -165,6 +166,21 @@ class StateSignatures:
     @staticmethod
     def _get_base_signature(bases: Iterable[type]) -> list[str]:
         return [ClassPath.get(base) for base in bases]
+
+    @staticmethod
+    def get_model_signature_key(model_state: ModelState) -> str:
+        """A model's signature as a text compared and hashed at once - hare's expressions in its options by
+        their declarations, not by identity.
+
+        Args:
+            model_state: The model's state.
+
+        Returns:
+            The text.
+        """
+        return json.dumps(
+            ComparableValues.get(StateSignatures.get_model_signature(model_state)), sort_keys=True, default=repr
+        )
 
     @staticmethod
     def get_model_signature(model_state: ModelState) -> dict[str, object]:

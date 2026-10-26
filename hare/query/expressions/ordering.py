@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.exceptions import QueryError
-from hare.sql.enums import Order
+from hare.sql.order import Order
 
 if TYPE_CHECKING:
     from hare.query.expressions.expression import Expression

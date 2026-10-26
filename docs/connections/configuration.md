@@ -41,11 +41,10 @@ await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models
 
 `HareConfig.from_db_url(db_url, modules)` builds the configuration of one connection (`"default"`) from a
 URL and `{app_label: [module paths]}`. A source that can't be read — a missing file, a module or variable
-that doesn't exist, a variable holding something else — raises `ConfigurationError`.
+that doesn't exist — raises `ConfigurationError`.
 
-`slow_query_threshold_ms` is checked too: a finite number from `0` to `86400000`. The process-wide
-settings (`slow_query_threshold_ms`, the class-level `table_name_generator`) change only once `init()`
-succeeds — a failed `init()` leaves them as they were.
+The process-wide settings (`slow_query_threshold_ms`, the class-level `table_name_generator`) change only
+once `init()` succeeds — a failed `init()` leaves them as they were.
 
 | Argument | Meaning |
 |---|---|
@@ -229,7 +228,8 @@ async with HareContext() as context:
 `HareContext` (a new one when the task has none) and every other `Hare` method acts on the current one.
 Everything is defined once, on `HareContext`: `.init(config, ...)`, `.generate_schemas(safe=True)`,
 `.close_connections()`, `.connections` (a `ConnectionHandler`), `.apps`, `.router`, `.routers`,
-`.inited`, `.default_connection`, `.use_timezone`, `.timezone`, `.get_model(app_label, model_name)`,
+`.inited`, `.default_connection`, `.use_timezone`, `.timezone`, `.get_model("app.Model")` (a label, a
+model class or a `swappable()` setting),
 `.get_connection(connection_alias=None)`, `.bind_models(config, ...)`, `.swappable_label(setting)`,
 `.get_swappable_model(setting)`, `.register_live_models(...)`, `.unregister_live_models(...)` and
 `.observe(event_type, callback)`/`.unobserve(...)` (see [Observing the
@@ -283,12 +283,13 @@ context it does nothing. How long it waits for the queries still running depends
 |---|---|
 | PostgreSQL | Each pool (`asyncpg` and `rust_pg` alike) waits up to 10 seconds for the connections its queries and transactions hold or are opening, then drops them: the server rolls back the transactions still open and ends their sessions |
 | SQLite | The connection waits up to 10 seconds for the transaction or query using it, then closes anyway |
-| ClickHouse | `clickhouse_driver` waits up to 10 seconds for the statements handed over already; one still running ends on its own. `clickhouse_connect` closes its HTTP client once the requests already sent are answered - they end with their results |
+| ClickHouse | `clickhouse_driver` waits up to 10 seconds for the statements handed over already; one still running ends on its own. `clickhouse_connect` closes its HTTP client once the requests already sent are answered — they end with their results |
 
-A task still holding one of the dropped connection objects gets `DBConnectionError` on its next query
-instead of opening a new pool. The context forgets its connections even when a close fails, and the first
-failure is raised afterwards; observers still flushing a metric or a trace get up to 10 seconds to
-finish. `close_all()` of a `ConnectionHandler` is the same close for one context — see
+A task still holding one of the dropped connection objects gets `DBConnectionError` on its next query instead
+of opening a new pool; a query through a model looks its connection up again — inside a transaction too — and
+gets `ConfigurationError`, as before `Hare.init()`. The context forgets its connections even when a close
+fails, and the first failure is raised afterwards; observers still flushing a metric or a trace get up to 10
+seconds to finish. `close_all()` of a `ConnectionHandler` is the same close for one context — see
 [Connections](connections.md#connections).
 
 ```python

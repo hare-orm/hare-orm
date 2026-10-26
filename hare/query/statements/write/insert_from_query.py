@@ -18,7 +18,9 @@ from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
+from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.write_steps import WriteSteps
+from hare.query.expressions.expression import Expression
 from hare.query.expressions.value import Value
 from hare.query.query_connection import QueryConnection
 from hare.query.statements.constants import INSERT_FROM_CONSTANT_PREFIX
@@ -27,6 +29,7 @@ from hare.time import Timezone
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.query.queryset.queryset import QuerySet
@@ -219,6 +222,35 @@ class InsertFromQuery:
             return parameters
         return QueryParameters(parameters, range(len(parameters)))
 
+    def raise_if_literals_refused(self, source: QuerySet[Any, Any], dialect: Dialect) -> None:
+        """Refuses a literal the source selects which the field it is written into refuses - as
+        ``update()`` refuses it: a ``Value(...)`` as the value itself, a literal an expression may be
+        (``Coalesce(Value(...), ...)``) too. The rows the source reads are the database's own.
+
+        Args:
+            source: The source queryset - each branch of a ``union()`` (or of another set operation) checked.
+            dialect: The dialect the rows are written on.
+
+        Raises:
+            ValidationError: A field refuses a literal.
+            FieldError: A moment is written into a wall clock in no zone.
+        """
+        if source._combination is not None:
+            for branch in source._combination.branches:
+                self.raise_if_literals_refused(branch, dialect)
+            return
+        if source._selection is None:
+            return
+        selected_names = source._selection.get_selected_names()
+        for name, field_name, field in zip(selected_names, self.field_names, self.written_fields, strict=False):
+            expression = source._annotations.get(name)
+            if type(expression) is Value:
+                literal = ExpressionAssignment.get_assigned_value(expression)
+                if literal is not None:
+                    dialect.types.get_db_value(field, literal, None)
+            elif isinstance(expression, Expression):
+                ExpressionAssignment.raise_if_literal_refused(field_name, field, expression, dialect)
+
     @staticmethod
     def get_selects_in_selected_order(selects: list[Any], selected_names: list[str]) -> list[Any]:
         """The columns of a ``values()``/``values_list()`` source in the order of its names - its
@@ -284,6 +316,7 @@ class InsertFromQuery:
         execution_query = self.target._get_execution_query(for_write=True)
         WrittenTargetChecks.raise_if_refused_calls(execution_query)
         connection = execution_query._connection
+        self.raise_if_literals_refused(self.source, connection.dialect)
         constant_columns = self.get_constant_columns()
         source = self.source
         if constant_columns:

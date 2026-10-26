@@ -5,7 +5,7 @@ import pytest
 from hare.contrib.request_query import InvalidRequestQuery, OrderingConfig, RequestQuery, SearchConfig
 from hare.query.enums import Connector
 from hare.query.expressions.ordering import Ordering
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from tests.contrib.request_query.models import Book, OrderLine
 from tests.contrib.request_query.queries import AuthorQuery, BookQuery, OrderLineQuery, TitledBookQuery
 

@@ -57,9 +57,10 @@ fighting whatever owns its table. `managed` is written to [`Meta.managed`](meta-
 ```python
 class Hare:
     @classmethod
-    def unregister_live_models(cls, models: Iterable[type[Model]]) -> None: ...
+    def unregister_live_models(cls, models: Iterable[type[Model] | str]) -> None: ...
 ```
 
+A model is given by its class or its `"app.Model"` label (`Hare.unregister_live_models(["content.Notice"])`).
 Reverses a registration: the model leaves the registry, the backward relations (reverse FK/O2O accessors,
 generated M2M fields) it added to the models its own relation fields point at are removed, and every
 cache built for it or for those targets is dropped. Its FK shadow columns are reset too, so a new class

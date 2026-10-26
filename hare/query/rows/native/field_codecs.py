@@ -411,8 +411,6 @@ class FieldCodecs:
                 **common,
                 "quant": field.quant,
                 "context": field.quantize_context,
-                "decimal_places": field.decimal_places,
-                "text": DecimalField.field_type in types.bound_as_text,
                 **FieldCodecs.get_validation_options(field),
             }
         if (

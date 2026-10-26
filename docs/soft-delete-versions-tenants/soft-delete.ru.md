@@ -56,7 +56,9 @@ class Book(Model):
 ## <a id="hard-delete"></a>Настоящее удаление: `hard_delete()`
 
 **`hard_delete()`** удаляет строку по-настоящему, живую или уже помеченную (очистка корзины); связанные
-строки поступают по своему `on_delete`, как при настоящем `DELETE`. `QuerySet.hard_delete()` делает то же
+строки поступают по своему `on_delete`, как при настоящем `DELETE`, — строка по `on_delete=CASCADE` тоже
+удаляется по-настоящему, в том числе модели с `soft_delete_field` и через связь `db_constraint=False`.
+Удаление модели без `soft_delete_field` распространяется так же. `QuerySet.hard_delete()` делает то же
 для всех строк запроса:
 
 ```python

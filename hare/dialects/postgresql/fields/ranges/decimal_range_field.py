@@ -3,10 +3,10 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
 from hare.fields import Field
-from hare.query.rows.enums import RangeBoundType
 
 
 class DecimalRangeField(RangeField):

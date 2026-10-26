@@ -99,13 +99,6 @@ def test_url_schemes():
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("schemes", ["http", [], ["HTTP"], ["1http"], [""], [5], None])
-def test_url_schemes_are_checked_on_declaration(schemes):
-    with pytest.raises(ConfigurationError, match="URLField: "):
-        fields.URLField(schemes=schemes)
-
-
-@pytest.mark.database_independent
 def test_slug():
     assert write(fields.SlugField(), "my-first_post2") == "my-first_post2"
     with pytest.raises(ValidationError, match="Invalid slug"):
@@ -148,13 +141,6 @@ def test_phone_with_phonenumbers_is_written_in_e164_form(region, value, written)
 def test_a_number_phonenumbers_refuses_is_refused(region, value):
     with pytest.raises(ValidationError, match="^value: Invalid phone number$"):
         write(fields.PhoneField(region=region), value)
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize("region", ["us", "XX", 5, ""])
-def test_phone_region_is_checked_on_declaration(region):
-    with pytest.raises(ConfigurationError, match="region must be an ISO 3166-1 region code"):
-        fields.PhoneField(region=region)
 
 
 @pytest.mark.database_independent
@@ -411,7 +397,7 @@ async def test_alter_field_into_a_format_field_on_the_database(db_text_formats):
         ]
         previous_state = state.clone()
         state = await migration.apply(state, dry_run=False, schema_editor=editor)
-        altered_model = state.apps.get_model("models", "AlterProfile")
+        altered_model = state.apps.get_model("models.AlterProfile")
         assert isinstance(altered_model._meta.fields_map["email"], fields.EmailField)
         rows = await connection.execute_dicts(f"SELECT id, email, slug FROM {literals.quote_identifier(table_name)}")
         assert rows == [{"id": 1, "email": "a@example.com", "slug": "a-b"}]

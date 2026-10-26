@@ -32,7 +32,9 @@ class UniqueConstraint:
 
 @dataclass(frozen=True)
 class CheckConstraint:
-    check: Q | RawSQLTerm   # Q по собственным полям модели или готовый SQL
+    # Q по собственным полям модели, готовый SQL или условие, которое добавляет сама hare:
+    # ExclusiveArcCondition у GenericForeignKeyField, EnumMembersCondition у поля-перечисления.
+    check: Q | RawSQLTerm | ExclusiveArcCondition | EnumMembersCondition
     name: str
 ```
 
@@ -219,7 +221,9 @@ class Category(Model):
 
 Триггер из `Meta.triggers` срабатывает на таблице модели, поэтому `INSTEAD_OF`, который база выполняет
 только на представлении, даёт `ConfigurationError` при определении модели; модель `Meta.managed = False`
-поверх представления может его объявить.
+поверх представления может его объявить. hare ничего не создаёт для неуправляемой модели — ни
+миграции, ни `generate_schemas()` не создают её триггеры, поэтому такой триггер создаётся вместе с самим
+представлением (`RunSQL`).
 
 ### <a id="trigger-body-and-when"></a>`body` и `when`
 

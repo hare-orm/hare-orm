@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import heapq
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.migrations.operations import AddField, AddIndex, CreateModel
+from hare.migrations.operations import AddField, AddIndex, CreateModel, DeleteModel, RemoveField
+from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.enums import DependencySubject, DependencyType
+from hare.migrations.state.state_apps import StateApps
 
 if TYPE_CHECKING:
-    from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+    from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+    from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
     from hare.migrations.operations.operation import Operation
     from hare.migrations.state.state import State
 
@@ -19,7 +22,7 @@ class OperationSorter:
     """Orders operations so that each runs after what it needs (``Operation.get_required_dependencies()``,
     met by the first operation providing it) - a stable order: an operation keeps its place among the
     others unless a dependency moves it after them. A cycle is broken by taking a relation out of a
-    ``CreateModel`` into an ``AddField`` of its own.
+    ``CreateModel`` into an ``AddField`` of its own, or out of a ``DeleteModel`` into a ``RemoveField`` before it.
 
     Args:
         state: The state before the operations.
@@ -51,16 +54,67 @@ class OperationSorter:
             entries = self.get_cycle_broken(entries, waiting)
 
     def get_required(self, app_label: str, operation: Operation) -> list[OperationDependency]:
-        """What an operation needs - its own requirements and those it was made with.
+        """What an operation needs - its own requirements and those it was made with; a model of the
+        running application no migration creates (``Meta.managed = False``) needs the models its relations
+        point at, so an operation needing it needs them too.
 
         Args:
             app_label: The operation's app.
             operation: The operation.
         """
-        return [
+        required = [
             *operation.get_required_dependencies(app_label, self.state),
             *operation.generation_dependencies,
         ]
+        return [*required, *self.get_unmanaged_targets_required(required)]
+
+    @staticmethod
+    def get_unmanaged_targets_required(required: list[OperationDependency]) -> list[OperationDependency]:
+        """The creations of the models the relations of the unmanaged models required point at - through
+        other unmanaged models too.
+
+        Args:
+            required: The requirements.
+
+        Returns:
+            The requirements of the targets' creation.
+        """
+        unmanaged_targets: list[OperationDependency] = []
+        waiting = [
+            (requirement.app_label, requirement.model_name)
+            for requirement in required
+            if requirement.subject is DependencySubject.MODEL
+            and requirement.dependency_type is DependencyType.CREATED
+            and requirement.model_name is not None
+        ]
+        seen: set[tuple[str, str]] = set()
+        while waiting:
+            model_key = waiting.pop()
+            if model_key in seen:
+                continue
+            seen.add(model_key)
+            live_model = StateApps.get_live_model_of_lower_name(*model_key)
+            if live_model is None or live_model._meta.managed is not False:
+                continue
+            meta = live_model._meta
+            references = [
+                cast(
+                    "ForeignKeyFieldInstance[Any] | ManyToManyFieldInstance[Any]", meta.fields_map[field_name]
+                ).model_name
+                for field_name in (*meta.foreign_key_fields, *meta.one_to_one_fields, *meta.many_to_many_fields)
+            ]
+            # A many-to-many relation's own through model too - its table is linked with the relation.
+            references += [
+                through_model
+                for field_name in meta.many_to_many_fields
+                if (through_model := cast("ManyToManyFieldInstance[Any]", meta.fields_map[field_name]).through_model)
+                is not None
+            ]
+            for reference in references:
+                target_app, target_name = StateApps.split_reference(reference)
+                unmanaged_targets.append(OperationDependency.of_model(target_app, target_name, DependencyType.CREATED))
+                waiting.append((target_app, target_name.lower()))
+        return unmanaged_targets
 
     @classmethod
     def get_provider_keys(cls, requirement: OperationDependency) -> list[tuple[Any, ...]]:
@@ -169,7 +223,9 @@ class OperationSorter:
     ) -> list[tuple[str, Operation]]:
         """The operations with one relation of a waiting ``CreateModel`` that needs another waiting
         operation taken out into an ``AddField`` (with the indexes over it) right after it - a many-to-many
-        relation rather than a foreign key.
+        relation rather than a foreign key; else one relation of a waiting ``DeleteModel`` another waiting
+        operation needs removed taken out into a ``RemoveField`` right before it (a model deleted with the
+        through model of its many-to-many relation).
 
         Args:
             entries: The operations, each with its app.
@@ -179,7 +235,7 @@ class OperationSorter:
             The operations with the relation taken out.
 
         Raises:
-            ConfigurationError: No waiting CreateModel has such a relation.
+            ConfigurationError: No waiting CreateModel or DeleteModel has such a relation.
         """
         waiting_entries = [entries[position] for position in waiting]
         waiting_provided = {
@@ -209,5 +265,54 @@ class OperationSorter:
                         *((app_label, AddIndex(model_name=operation.name, index=index)) for index in indexes),
                     ]
                     return [*entries[: position + 1], *taken_out, *entries[position + 1 :]]
+        if (removal := self.get_cycle_breaking_removal(entries, waiting)) is not None:
+            position, removal_entry = removal
+            return [*entries[:position], removal_entry, *entries[position:]]
         described = "; ".join(operation.describe() for _app_label, operation in waiting_entries)
         raise ConfigurationError(f"The migration's operations need each other in a cycle: {described}")
+
+    def get_cycle_breaking_removal(
+        self, entries: list[tuple[str, Operation]], waiting: list[int]
+    ) -> tuple[int, tuple[str, Operation]] | None:
+        """A relation of a waiting ``DeleteModel`` whose removal another waiting operation needs - its
+        ``RemoveField`` and the position it goes to, right before the ``DeleteModel``.
+
+        Args:
+            entries: The operations, each with its app.
+            waiting: The positions of the operations waiting in a cycle.
+
+        Returns:
+            The position and the removal - None for no such relation.
+        """
+        for relation_types in ((ManyToManyFieldInstance,), (ForeignKeyFieldInstance,)):
+            for position in waiting:
+                app_label, operation = entries[position]
+                if not isinstance(operation, DeleteModel):
+                    continue
+                model_state = next(
+                    (
+                        model_state
+                        for model_key, model_state in self.state.models.items()
+                        if model_key[0] == app_label and model_key[1].lower() == operation.name.lower()
+                    ),
+                    None,
+                )
+                if model_state is None:
+                    continue
+                needed_keys = {
+                    key
+                    for other_position in waiting
+                    if other_position != position
+                    for requirement in self.get_required(*entries[other_position])
+                    for key in self.get_provider_keys(requirement)
+                }
+                for field_name, field in model_state.fields.items():
+                    if not isinstance(field, relation_types):
+                        continue
+                    removal = RemoveField(model_name=operation.name, name=field_name)
+                    if any(
+                        self.get_provided_key(dependency) in needed_keys
+                        for dependency in removal.get_provided_dependencies(app_label)
+                    ):
+                        return position, (app_label, removal)
+        return None

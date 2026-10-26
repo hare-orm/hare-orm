@@ -17,10 +17,13 @@ from hare.exceptions import FieldError
 from hare.query.expressions import ArithmeticOperator, CombinedExpression, F, OuterReference, Subquery, Value
 from hare.query.functions import Avg, Count, Max, Min, Sum
 from hare.time import Timezone
-from tests.shared_models import testmodels
+from tests.shared_models import testmodels, testmodels_postgres
 from tests.utils.timezone_context import override_timezone
 
-TemporalRecord = testmodels.TemporalRecord
+# Every test reads a model of tests.shared_models.testmodels_postgres.
+pytestmark = pytest.mark.postgresql_models
+
+TemporalRecord = testmodels_postgres.TemporalRecord
 TemporalBatch = testmodels.TemporalBatch
 
 ZONES = [
@@ -56,7 +59,7 @@ def moment(*args, **kwargs) -> datetime.datetime:
     return datetime.datetime(*args, **kwargs)
 
 
-async def make_record(**overrides) -> testmodels.TemporalRecord:
+async def make_record(**overrides) -> testmodels_postgres.TemporalRecord:
     values = {"started_at": moment(2024, 1, 31, 12), "day": datetime.date(2024, 1, 31)}
     values.update(overrides)
     return await TemporalRecord.objects.create(**values)
@@ -124,6 +127,7 @@ async def test_datetime_shift_is_absolute_time_across_a_dst_transition(db):
         assert await evaluate(F("started_at") - timedelta(days=1)) == datetime.datetime(2024, 3, 29, 12, tzinfo=berlin)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_datetime_shift_result_survives_a_write_read_round_trip(zone):
     """The shifted value is stored in the same format a plain write produces, so ordering and
@@ -244,6 +248,7 @@ async def test_timedelta_multiplied_by_a_number_is_unchanged(zone):
     assert await evaluate(F("duration") * 2) == timedelta(seconds=10)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_timedelta_scaled_by_a_number_is_a_timedelta(zone):
     # Either side, a number column, a division - and written back by update().
@@ -276,6 +281,7 @@ async def test_null_operands_give_null_without_raising(zone):
 # -- update -------------------------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_datetime_from_a_shifted_expression(zone):
     record = await make_record(finished_at=moment(2024, 1, 31, 8))
@@ -288,6 +294,7 @@ async def test_update_datetime_from_a_shifted_expression(zone):
     assert record.finished_at == moment(2024, 1, 30, 8)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_date_and_timedelta_from_shifted_expressions(zone):
     record = await make_record(day=datetime.date(2024, 1, 31), duration=timedelta(seconds=5))
@@ -299,6 +306,7 @@ async def test_update_date_and_timedelta_from_shifted_expressions(zone):
     assert record.duration == timedelta(seconds=6)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_datetime_field_from_a_datetime_difference_is_a_timedelta_field_update(zone):
     record = await make_record(started_at=moment(2024, 1, 31, 12), finished_at=moment(2024, 1, 31, 14, 30))
@@ -307,6 +315,7 @@ async def test_update_datetime_field_from_a_datetime_difference_is_a_timedelta_f
     assert record.duration == timedelta(hours=2, minutes=30)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_with_a_null_operand_writes_null(zone):
     record = await make_record(duration=None, finished_at=None)
@@ -321,6 +330,7 @@ async def test_update_with_a_null_operand_writes_null(zone):
 # -- filter / order_by --------------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_by_a_shifted_expression(zone):
     early = await make_record(started_at=moment(2024, 1, 31, 12), finished_at=moment(2024, 1, 31, 11))
@@ -335,6 +345,7 @@ async def test_filter_by_a_shifted_expression(zone):
     assert result == [early.id]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_by_an_annotated_difference(zone):
     short = await make_record(started_at=moment(2024, 1, 31, 12), finished_at=moment(2024, 1, 31, 12, 30))
@@ -347,6 +358,7 @@ async def test_filter_by_an_annotated_difference(zone):
     assert result == [short.id]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_order_by_a_shifted_expression(zone):
     first = await make_record(started_at=moment(2024, 1, 31, 12), duration=timedelta(hours=5))
@@ -360,6 +372,7 @@ async def test_order_by_a_shifted_expression(zone):
 # -- aggregates ---------------------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregates_over_a_difference(zone):
     await make_record(started_at=moment(2024, 1, 31, 12), finished_at=moment(2024, 1, 31, 13))
@@ -377,6 +390,7 @@ async def test_aggregates_over_a_difference(zone):
     }
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_aggregate_of_a_date_difference(zone):
     await make_record(day=datetime.date(2024, 1, 1), other_day=datetime.date(2024, 1, 11))
@@ -385,6 +399,7 @@ async def test_aggregate_of_a_date_difference(zone):
     assert result == {"longest": timedelta(days=10)}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_sum_and_max_over_a_shifted_timedelta(zone):
     await make_record(duration=timedelta(seconds=5))
@@ -396,6 +411,7 @@ async def test_sum_and_max_over_a_shifted_timedelta(zone):
     assert result == {"total": timedelta(seconds=17), "longest": timedelta(hours=1, seconds=10)}
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_max_over_a_shifted_datetime_and_date(zone):
     await make_record(started_at=moment(2024, 1, 31, 12), day=datetime.date(2024, 1, 31))
@@ -420,6 +436,7 @@ async def test_nested_arithmetic(zone):
 # -- correlated subquery ------------------------------------------------------
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_over_a_shifted_datetime(zone):
     batch = await TemporalBatch.objects.create(name="only")
@@ -466,6 +483,7 @@ UNSUPPORTED = {
 }
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 @pytest.mark.parametrize("build", list(UNSUPPORTED.values()), ids=list(UNSUPPORTED))
 async def test_unsupported_combination_raises_field_error(zone, build):
@@ -474,6 +492,7 @@ async def test_unsupported_combination_raises_field_error(zone, build):
         await TemporalRecord.objects.annotate(result=build()).values_list("result", flat=True)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_unsupported_update_raises_and_writes_nothing(zone):
     record = await make_record(day=datetime.date(2024, 1, 31))
@@ -486,6 +505,7 @@ async def test_unsupported_update_raises_and_writes_nothing(zone):
     assert reread.started_at == moment(2024, 1, 31, 12)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_update_from_an_expression_of_another_date_time_type_raises_and_writes_nothing(zone):
     """A datetime shift can't be stored in a date column, nor a difference in a datetime one."""
@@ -499,6 +519,7 @@ async def test_update_from_an_expression_of_another_date_time_type_raises_and_wr
     assert reread.started_at == moment(2024, 1, 31, 12)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_unsupported_annotation_in_an_aggregate_raises(zone):
     await make_record()

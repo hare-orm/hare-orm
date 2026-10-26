@@ -1121,3 +1121,19 @@ async def test_prefetch_with_values_queryset_rejected(db):
         Prefetch("events", queryset=Event.objects.all().values("name"))
     with pytest.raises(QueryError, match=r"needs a model QuerySet, got a \.values_list\(\) query"):
         Prefetch("events", queryset=Event.objects.all().values_list("name"))
+
+
+@pytest.mark.asyncio
+async def test_a_prefetch_through_a_relation_select_related_loaded_reads_it_once(db):
+    """prefetch_related("tournament__events") next to select_related("tournament") read the tournaments again
+    and replaced the objects select_related had loaded - what they had loaded went with them."""
+    from hare.contrib.test import capture_queries
+
+    tournament = await Tournament.objects.create(name="t")
+    await Event.objects.create(name="a", tournament=tournament)
+    await Event.objects.create(name="b", tournament=tournament)
+
+    async with capture_queries() as queries:
+        events = await Event.objects.select_related("tournament").prefetch_related("tournament__events")
+    assert queries.count == 2
+    assert all(sorted(e.name for e in event.tournament.events) == ["a", "b"] for event in events)

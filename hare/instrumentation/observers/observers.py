@@ -19,6 +19,7 @@ from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 if TYPE_CHECKING:
+    from hare.core.apps.declarations import ModelReference
     from hare.instrumentation.declarations import QueryCall
     from hare.instrumentation.queries.query_wrapper import QueryWrapper
     from hare.models import Model
@@ -72,7 +73,7 @@ class Observers:
 
     @classmethod
     def observe(
-        cls, event_type: type, callback: TCallback, *, models: Iterable[type[Model]] | None = None
+        cls, event_type: type, callback: TCallback, *, models: Iterable[ModelReference] | None = None
     ) -> TCallback:
         """Adds an observer of ``event_type`` for the whole process. Observing again adds the
         models to the ones it observes; an observer of every event stays one, and observing
@@ -82,21 +83,23 @@ class Observers:
             event_type: The event type.
             callback: The observer.
             models: For ``RowsChanged``: the models whose changes it gets - their subclasses'
-                too; None for every model.
+                too; None for every model. A model is given by its class, its ``"app.Model"`` label or a
+                ``swappable()`` setting; a label is looked up in the current context when one is set up,
+                else when a context binds its models.
 
         Returns:
             The callback, to pass to ``unobserve()``.
 
         Raises:
             QueryError: ``models`` given for an event that isn't narrowed by model.
-            TypeError: A model isn't a model class.
+            ConfigurationError: A label names no model of the current context.
         """
         cls.process_observers.add(event_type, callback, models)
         return callback
 
     @classmethod
     def unobserve(
-        cls, event_type: type, callback: ObserverCallback, *, models: Iterable[type[Model]] | None = None
+        cls, event_type: type, callback: ObserverCallback, *, models: Iterable[ModelReference] | None = None
     ) -> None:
         """Stops an observer of the whole process observing ``models`` - removes it entirely
         without them, or once it observes no model; nothing when it isn't registered.
@@ -108,14 +111,13 @@ class Observers:
 
         Raises:
             QueryError: The observer observes every model - it can only be removed entirely.
-            TypeError: A model isn't a model class.
         """
         cls.process_observers.remove(event_type, callback, models)
 
     @classmethod
     @contextmanager
     def observing(
-        cls, event_type: type, callback: ObserverCallback, *, models: Iterable[type[Model]] | None = None
+        cls, event_type: type, callback: ObserverCallback, *, models: Iterable[ModelReference] | None = None
     ) -> Generator[None]:
         """Observes ``event_type`` in the current context for the block - the code it runs and the
         tasks it starts.
@@ -126,9 +128,10 @@ class Observers:
             models: For ``RowsChanged``: the models whose changes it gets.
 
         Raises:
-            QueryError, TypeError: See ``observe()``.
+            QueryError, ConfigurationError: See ``observe()``.
         """
-        observer = Observer(callback, ObserverSet.get_model_set(event_type, models))
+        observed = ObserverSet.get_observed_models(event_type, models)
+        observer = Observer(callback, None) if observed is None else Observer(callback, observed[0], observed[1])
         token = cls.context_observers.set((*cls.context_observers.get(), (event_type, observer)))
         try:
             yield

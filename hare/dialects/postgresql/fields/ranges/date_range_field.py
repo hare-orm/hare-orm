@@ -3,11 +3,11 @@ from __future__ import annotations
 import datetime
 from typing import Any, ClassVar
 
+from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.fields import Field
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.parse_datetime import parse_datetime
-from hare.query.rows.enums import RangeBoundType
 
 
 class DateRangeField(RangeField):

@@ -188,8 +188,9 @@ class Tenancy:
         for the block. A nested block replaces the outer scope until it exits.
 
         ``tenant`` is a tenant value (for every model alike), ``Tenancy.any_of(...)`` (several
-        values), ``Tenancy.ALL`` (every tenant), or a dict of those by model - a model takes the
-        entry of its own class, else of its nearest base class with the same ``Meta.tenant_field``.
+        values), ``Tenancy.ALL`` (every tenant), or a dict of those by model - its class or its
+        ``"app.Model"`` label; a model takes the entry of its own class, else of its nearest base class
+        with the same ``Meta.tenant_field``.
 
         A row written without a tenant gets the model's value when its scope is one value; otherwise
         the write has to name it. ``<Model>.objects.all_tenants()`` spans every tenant for one
@@ -337,7 +338,8 @@ class Tenancy:
         connection: DatabaseClient,
     ) -> None:
         """Reads the tenant of each related row a relation names and compares it with the related
-        model's scope."""
+        model's scope - a key of a row of the scope passes, also where a database keeping no key unique
+        holds another tenant's row of it too."""
         related_model = field.related_model
         related_meta = related_model._meta
         table = related_meta.basetable
@@ -348,14 +350,25 @@ class Tenancy:
             batch = ordered_keys[start : start + TENANT_RELATION_CHECK_BATCH_SIZE]
             query = (
                 connection.query_class.from_(table)
-                .select(table[tenant_column].as_("tenant"))
+                .select(
+                    table[tenant_column].as_("tenant"),
+                    *(table[column].as_(f"key_{position}") for position, column in enumerate(key_columns)),
+                )
                 .where(KeyColumns.row_is_in([table[column] for column in key_columns], batch))
             )
             _, related_rows = await connection.execute(*query.get_parameterized_sql())
             tenant_field = related_meta.fields_map[cast("str", related_meta.tenant_field)]
+            allowed_keys: set[tuple[Any, ...]] = set()
+            refused_tenants: dict[tuple[Any, ...], Any] = {}
             for related_row in related_rows:
+                row_key = tuple(related_row[f"key_{position}"] for position in range(len(key_columns)))
                 related_tenant = connection.dialect.types.get_python_value(tenant_field, related_row["tenant"])
-                if not cls.allows(related_model, related_scope, related_tenant):
+                if cls.allows(related_model, related_scope, related_tenant):
+                    allowed_keys.add(row_key)
+                else:
+                    refused_tenants.setdefault(row_key, related_tenant)
+            for row_key, related_tenant in refused_tenants.items():
+                if row_key not in allowed_keys:
                     raise QueryError(
                         f"{model.__name__}.{field_name}: the {related_model.__name__} row it points at "
                         f"belongs to tenant {related_tenant!r}, not the active {related_scope!r} - a "

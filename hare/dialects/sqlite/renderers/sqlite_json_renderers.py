@@ -27,10 +27,10 @@ class SqliteJsonRenderers(JsonRenderers):
 
     @staticmethod
     def render_json_value(function: functions.JsonValue, sql_context: SqlContext) -> str:
-        """A value as SQLite writes it into JSON - a Decimal, kept as text, as a number, a JSON value
-        nested, bytes, which JSON holds none of, as their hex."""
+        """A value as SQLite writes it into JSON - a JSON value nested, bytes, which JSON holds none
+        of, as their hex."""
         term_sql = function.get_arg_sql(function.args[0], sql_context)
-        if function.value_type in {JsonValueType.DECIMAL, JsonValueType.JSON}:
+        if function.value_type == JsonValueType.JSON:
             return f"json({term_sql})"
         if function.value_type == JsonValueType.BINARY:
             return SQLITE_JSON_BYTES_TEMPLATE.format(term_sql)
@@ -40,8 +40,6 @@ class SqliteJsonRenderers(JsonRenderers):
     def render_json_comparand(cls, function: functions.JsonComparand, sql_context: SqlContext) -> str:
         """A number as it is and any other value as JSON text - the form a path's value renders in."""
         term_sql = function.get_arg_sql(function.args[0], sql_context)
-        if function.value_type == JsonValueType.DECIMAL:
-            return f"CAST({term_sql} AS NUMERIC)"
         if function.value_type == JsonValueType.PLAIN:
             return (
                 f"CASE WHEN typeof({term_sql}) IN ('integer','real','null') THEN {term_sql} "
@@ -59,8 +57,6 @@ class SqliteJsonRenderers(JsonRenderers):
         if isinstance(argument, criteria.JSONAttributeCriterion):
             return function.get_arg_sql(argument if argument.as_text else argument.get_text_term(), sql_context)
         if isinstance(argument, functions.JsonComparand):
-            if argument.value_type == JsonValueType.DECIMAL:
-                return f"CAST({argument.get_arg_sql(argument.args[0], sql_context)} AS NUMERIC)"
             return cls.render_json_value(argument, sql_context)
         return f"json_extract({function.get_arg_sql(argument, sql_context)}, '$')"
 

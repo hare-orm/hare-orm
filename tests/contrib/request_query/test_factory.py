@@ -58,12 +58,16 @@ async def test_a_built_class_queries_like_a_declared_one(library):
 async def test_a_wrong_class_is_refused_when_it_is_built(db_request_query):
     with pytest.raises(ConfigurationError, match="has no field 'missing'"):
         RequestQuery.for_model(Book, filters=(FilterField("missing"),))
-    with pytest.raises(ConfigurationError, match="takes a model class"):
-        RequestQuery.for_model("Book")  # type: ignore[arg-type]
     with pytest.raises(ConfigurationError, match="takes a queryset of Book"):
         RequestQuery.for_model(Book, queryset=Author.objects.all())  # type: ignore[arg-type]
-    with pytest.raises(ConfigurationError, match="name must be an identifier"):
-        RequestQuery.for_model(Book, name="not a name")
+
+
+@pytest.mark.asyncio
+async def test_a_class_is_built_for_a_model_given_by_its_label(db_request_query):
+    book_query = RequestQuery.for_model("models.Book", filters=(FilterField("title"),))
+    assert book_query.get_declaration().queryset.model is Book
+    with pytest.raises(ConfigurationError, match="No model with name 'Missing'"):
+        RequestQuery.for_model("models.Missing")
 
 
 @pytest.mark.asyncio

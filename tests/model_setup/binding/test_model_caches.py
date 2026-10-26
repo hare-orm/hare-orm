@@ -257,3 +257,16 @@ def test_a_cache_size_within_the_bounds_is_taken(monkeypatch):
     monkeypatch.setenv(ENV_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL, "64")
 
     assert Cache.max_size_from_env() == 64
+
+
+@pytest.mark.database_independent
+def test_a_plain_bucket_is_emptied_once_full():
+    """A model's plain bucket grew with every key of a JSON value a filter named - keys from data."""
+    from hare.core.caching.constants import MAX_PLAIN_BUCKET_ENTRIES
+
+    bucket: dict[str, int] = {}
+    for number in range(MAX_PLAIN_BUCKET_ENTRIES):
+        assert Cache.set_bounded(bucket, f"data__k{number}", number) == number
+    assert len(bucket) == MAX_PLAIN_BUCKET_ENTRIES
+    Cache.set_bounded(bucket, "data__past", -1)
+    assert bucket == {"data__past": -1}

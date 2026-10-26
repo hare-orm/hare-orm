@@ -20,6 +20,7 @@ from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import Clickhou
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
 from hare.dialects.clickhouse.query.constants import CLICKHOUSE_ENGINE_PREFIXES, CLICKHOUSE_FINAL_ENGINES
 from hare.dialects.clickhouse.schema.constants import (
+    CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING,
     CLICKHOUSE_CODEC_PATTERN,
     CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTING_VALUE,
     CLICKHOUSE_LIGHTWEIGHT_UPDATE_SETTINGS,
@@ -195,9 +196,17 @@ class ClickhouseTableOptions(TableOptions):
             ConfigurationError: ``order_by``, ``sample_by``, ``partition_by``, ``ttl``, ``sharding_key`` or a
                 ``column_ttls`` time names an unknown field, ``order_by`` one computed on read or doesn't
                 begin with the key; ``sample_by`` names a field of no unsigned integer; ``column_codecs``
-                or ``column_ttls`` name an unknown field, or ``column_ttls`` a key.
+                or ``column_ttls`` name an unknown field, or ``column_ttls`` a key; ``distributed_over``
+                names the model's table itself; ``order_by`` or ``partition_by`` reads a nullable field without
+                the ``allow_nullable_key`` setting.
         """
         meta = model._meta
+        # The Distributed table and the local one would be one table - created as the local one alone.
+        if self.distributed_over == meta.db_table:
+            raise ConfigurationError(
+                f"{model.__name__}: ClickhouseTableOptions.distributed_over names the model's table "
+                f"{meta.db_table!r} - name the local table another way"
+            )
         # A text names a field in each of these - one of no field met the DDL as a KeyError.
         for option_name, keys in (
             ("order_by", self.order_by),
@@ -234,6 +243,7 @@ class ClickhouseTableOptions(TableOptions):
                     f"{'Nullable ' if sample_field.null else ''}{sample_column_type} - ClickHouse samples rows by an "
                     "unsigned integer that holds no NULL (a UInt field, or RawSQLTerm('intHash32(...)'))"
                 )
+        self.raise_if_nullable_key(model)
         column_option_names = [name for name, _ in (*self.column_codecs, *self.column_ttls)]
         unknown_columns = [name for name in column_option_names if name not in meta.fields_db_projection]
         if unknown_columns:
@@ -265,6 +275,58 @@ class ClickhouseTableOptions(TableOptions):
                     f"{model.__name__}: ClickhouseTableOptions.order_by must begin with the primary key {pk_names}"
                 )
 
+    def raise_if_nullable_key(self, model: type[Model]) -> None:
+        """Refuses a key reading a nullable field - ClickHouse refuses a sorting or a partition key over one
+        unless the table's settings allow it, and a sharding key over one always.
+
+        Args:
+            model: The model.
+
+        Raises:
+            ConfigurationError: ``order_by`` or ``partition_by`` reads a nullable field without the
+                ``allow_nullable_key`` setting, or ``sharding_key`` reads one.
+        """
+        nullable_sharding_names = self.get_nullable_field_names(model, (self.sharding_key,))
+        if nullable_sharding_names:
+            raise ConfigurationError(
+                f"{model.__name__}: ClickhouseTableOptions.sharding_key reads the nullable fields "
+                f"{nullable_sharding_names} - ClickHouse shards rows by an integer that holds no NULL"
+            )
+        if str(dict(self.settings).get(CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING, 0)) == "1":
+            return
+        nullable_key_names = self.get_nullable_field_names(model, (*self.order_by, self.partition_by))
+        if nullable_key_names:
+            raise ConfigurationError(
+                f"{model.__name__}: ClickhouseTableOptions.order_by/partition_by read the nullable fields "
+                f"{nullable_key_names} - ClickHouse keys hold no NULL unless the table allows it: declare the fields "
+                f"without null=True, or settings=(('{CLICKHOUSE_ALLOW_NULLABLE_KEY_SETTING}', 1),)"
+            )
+
+    @staticmethod
+    def get_nullable_field_names(model: type[Model], keys: Iterable[Any]) -> list[str]:
+        """The nullable fields keys read - a raw SQL key's columns aren't read out of it.
+
+        Args:
+            model: The model.
+            keys: Field names, expressions of hare and ``RawSQLTerm``s; None for no key.
+
+        Returns:
+            The fields' names.
+        """
+        # Local import: the dialect module imports this one.
+        from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
+
+        meta = model._meta
+        key_column_names: set[str] = set()
+        for key in keys:
+            if key is not None:
+                key_column_names |= DeclaredExpressions.get_column_names(key, model, CLICKHOUSE_DIALECT) or set()
+        return [
+            field_name
+            for field_name, column_name in meta.fields_db_projection.items()
+            if column_name in key_column_names and meta.fields_map[field_name].null
+        ]
+
     def with_field_names(self, column_to_field_name: Mapping[str, str]) -> Self:
         return dataclasses.replace(
             self,
@@ -274,6 +336,13 @@ class ClickhouseTableOptions(TableOptions):
             sample_by=column_to_field_name.get(self.sample_by, self.sample_by)
             if isinstance(self.sample_by, str)
             else self.sample_by,
+            partition_by=column_to_field_name.get(self.partition_by, self.partition_by)
+            if isinstance(self.partition_by, str)
+            else self.partition_by,
+            ttl=column_to_field_name.get(self.ttl, self.ttl) if isinstance(self.ttl, str) else self.ttl,
+            sharding_key=column_to_field_name.get(self.sharding_key, self.sharding_key)
+            if isinstance(self.sharding_key, str)
+            else self.sharding_key,
             column_codecs=tuple((column_to_field_name.get(name, name), codecs) for name, codecs in self.column_codecs),
             column_ttls=tuple((column_to_field_name.get(name, name), ttl) for name, ttl in self.column_ttls),
         )
@@ -606,14 +675,24 @@ class ClickhouseTableOptions(TableOptions):
     def get_options_during_field_changes(self, old_options: TableOptions | None) -> Self:
         # A time to live, a column's codec or a projection reads columns - one that changes is
         # removed before the fields change and set after: ClickHouse refuses a TTL over a Nullable
-        # column, so a column turned NOT NULL takes a new TTL only after its change.
+        # column, so a column turned NOT NULL takes a new TTL only after its change. The keys and the
+        # engine's arguments stay the old ones until the fields they name are added.
         old = old_options if isinstance(old_options, ClickhouseTableOptions) else ClickhouseTableOptions()
 
         def is_kept(value: Any, old_values: Sequence[Any]) -> bool:
             return any(ComparableValues.are_equal(value, old_value) for old_value in old_values)
 
+        def get_kept_key(option_name: str) -> Any:
+            value = getattr(self, option_name)
+            return value if ComparableValues.are_equal(value, getattr(old, option_name)) else getattr(old, option_name)
+
         return dataclasses.replace(
             self,
+            engine=get_kept_key("engine"),
+            order_by=get_kept_key("order_by"),
+            sample_by=get_kept_key("sample_by"),
+            partition_by=get_kept_key("partition_by"),
+            sharding_key=get_kept_key("sharding_key"),
             ttl=self.ttl if ComparableValues.are_equal(self.ttl, old.ttl) else None,
             column_ttls=tuple(item for item in self.column_ttls if is_kept(item, old.column_ttls)),
             column_codecs=tuple(item for item in self.column_codecs if item in old.column_codecs),

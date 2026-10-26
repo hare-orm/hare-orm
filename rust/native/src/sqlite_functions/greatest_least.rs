@@ -1,6 +1,5 @@
 //! `GREATEST`/`LEAST` on SQLite: SQLite's own multi-argument `max()`/`min()`, NULL when any argument
-//! is, numbers - a `DecimalField`'s text included - compared as numbers; arguments of mixed types go
-//! to the Python function.
+//! is, numbers compared as numbers; arguments of mixed types go to the Python function.
 
 use std::cmp::Ordering;
 
@@ -8,22 +7,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyFloat, PyInt, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
-use crate::sqlite_functions::decimal_number::DecimalNumber;
-
 /// What every argument is compared by - all of one type, or the Python function decides.
 enum SortKeys {
     Integers(Vec<i128>),
     Floats(Vec<f64>),
     Texts(Vec<String>),
-    /// Exact decimals - integers and decimal text.
-    Numbers(Vec<Vec<u8>>),
-}
-
-/// The byte key of an exact decimal.
-fn get_number_key(number: &DecimalNumber) -> Vec<u8> {
-    let mut key = Vec::new();
-    number.write_key(&mut key);
-    key
 }
 
 /// The sort keys of the arguments; None when they are of mixed types this doesn't compare exactly.
@@ -39,24 +27,8 @@ fn get_sort_keys(values: &[Bound<'_, PyAny>], compares_numbers: bool) -> PyResul
         return Ok(integers.map(SortKeys::Integers));
     }
     if compares_numbers {
-        let mut keys = Vec::with_capacity(values.len());
-        for value in values {
-            let number = if value.is_instance_of::<PyInt>() {
-                let Ok(integer) = value.extract::<i128>() else {
-                    return Ok(None);
-                };
-                DecimalNumber::from_digits(integer < 0, integer.unsigned_abs().to_string().into_bytes(), 0)
-            } else if let Ok(text) = value.cast::<PyString>() {
-                let Some(number) = DecimalNumber::parse(text.to_str()?) else {
-                    return Ok(None);
-                };
-                number
-            } else {
-                return Ok(None);
-            };
-            keys.push(get_number_key(&number));
-        }
-        return Ok(Some(SortKeys::Numbers(keys)));
+        // Numbers of mixed types, or text read as a number - the Python function compares them.
+        return Ok(None);
     }
     if values.iter().all(PyAnyMethods::is_instance_of::<PyString>) {
         let texts: PyResult<Vec<String>> =
@@ -107,7 +79,6 @@ impl GreatestLeast {
                 Some(SortKeys::Integers(keys)) => pick_index(&keys, |left, right| Some(left.cmp(right)), wanted),
                 Some(SortKeys::Floats(keys)) => pick_index(&keys, PartialOrd::partial_cmp, wanted),
                 Some(SortKeys::Texts(keys)) => pick_index(&keys, |left, right| Some(left.cmp(right)), wanted),
-                Some(SortKeys::Numbers(keys)) => pick_index(&keys, |left, right| Some(left.cmp(right)), wanted),
                 None => None,
             };
             if let Some(index) = index {

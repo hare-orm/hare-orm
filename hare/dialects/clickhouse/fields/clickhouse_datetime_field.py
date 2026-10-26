@@ -6,19 +6,22 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.clickhouse.fields.constants import (
+    CLICKHOUSE_DATE32_RANGE,
     CLICKHOUSE_DATETIME64_MAX_PRECISION,
+    CLICKHOUSE_DATETIME64_NANOSECONDS_LAST_MOMENT,
+    CLICKHOUSE_DATETIME64_RANGE,
     CLICKHOUSE_DATETIME_RANGE,
     PYTHON_DATETIME_PRECISION,
 )
+from hare.dialects.clickhouse.fields.narrowing.moment_limit import MomentLimit
 from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.datetime_field import DatetimeField
-from hare.query.enums import Lookup
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
+    from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
-    from hare.query.filters.lookups.field_lookup import FieldLookup
 
 TDatetime = TypeVar("TDatetime", datetime.datetime, datetime.datetime | None)
 
@@ -76,50 +79,37 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
             return f"DateTime({timezone_argument})" if timezone_argument else "DateTime"
         return f"DateTime64({self.precision}{', ' + timezone_argument if timezone_argument else ''})"
 
-    def get_lookups(self) -> dict[str, FieldLookup]:
-        lookups = super().get_lookups()
-        if self.precision is not None:
-            return lookups
-        # The list of IN is typed as the DateTime column - ClickHouse compares no DateTime64 there.
-        return {
-            **lookups,
-            Lookup.IN: lookups[Lookup.IN].with_changes(value_encoder=self.encode_whole_second_list),
-            Lookup.NOT_IN: lookups[Lookup.NOT_IN].with_changes(value_encoder=self.encode_whole_second_list),
-        }
-
-    def encode_whole_second_list(
-        self, values: Any, obj: Model | type[Model], field: Field[Any], dialect: Dialect
-    ) -> list[Any]:
-        """The values of ``__in``/``__not_in`` of a ``DateTime`` column, typed as the column.
-
-        Args:
-            values: The values.
-            obj: The model or object.
-            field: The field.
-            dialect: The dialect.
+    def get_moment_bounds(self) -> tuple[datetime.datetime, datetime.datetime, int]:
+        """The first and the last moment the column holds, and its digits after the second.
 
         Returns:
-            The encoded values.
-
-        Raises:
-            ValidationError: A moment has a fraction of a second - no value of the column.
+            The bounds and the digits.
         """
-        # Local imports: the dialect's types and the filters import the fields.
-        from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
-        from hare.query.filters.lookups.value_encoders import ValueEncoders
+        if self.precision is None:
+            return (*CLICKHOUSE_DATETIME_RANGE, 0)
+        first_moment, last_moment = CLICKHOUSE_DATETIME64_RANGE
+        if self.precision == CLICKHOUSE_DATETIME64_MAX_PRECISION:
+            last_moment = CLICKHOUSE_DATETIME64_NANOSECONDS_LAST_MOMENT
+        return first_moment, last_moment, self.precision
 
-        encoded_values = ValueEncoders.encode_list(values, obj, field, dialect)
-        typed_values = []
-        for value in encoded_values:
-            if isinstance(value, datetime.datetime):
-                if value.microsecond:
-                    raise ValidationError(
-                        f"{self.model_field_name}: {self.get_value_for_message(value)} has a fraction of a second - "
-                        "a DateTime column holds whole seconds; compare it with __gt/__lt or __range"
-                    )
-                value = ClickhouseTypedValue(value, self.SQL_TYPE)
-            typed_values.append(value)
-        return typed_values
+    def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
+        first_moment, last_moment, digits = self.get_moment_bounds()
+        if isinstance(old_field, ClickhouseDatetimeField):
+            old_first_moment, old_last_moment, old_digits = old_field.get_moment_bounds()
+        elif isinstance(old_field, DatetimeField):
+            old_first_moment, old_last_moment, old_digits = (*CLICKHOUSE_DATETIME64_RANGE, PYTHON_DATETIME_PRECISION)
+        elif isinstance(old_field, DateField):
+            first_day, last_day = CLICKHOUSE_DATE32_RANGE
+            old_first_moment = datetime.datetime.combine(first_day, datetime.time(), datetime.UTC)
+            old_last_moment = datetime.datetime.combine(last_day, datetime.time(), datetime.UTC)
+            old_digits = 0
+        else:
+            return None
+        if first_moment <= old_first_moment and old_last_moment <= last_moment and old_digits <= digits:
+            return None
+        # A moment outside the column's would be written as the nearest of them, the digits past its
+        # precision cut off.
+        return MomentLimit(first_moment, last_moment, digits)
 
     @staticmethod
     def to_db_rounded_value(field: Any, value: Any, instance: type[Model] | Model | None) -> Any:
@@ -145,18 +135,26 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
         if not isinstance(value, datetime.datetime):
             return value
         precision = 0 if field.precision is None else field.precision
+        first_moment, last_moment = CLICKHOUSE_DATETIME_RANGE
         if precision < PYTHON_DATETIME_PRECISION:
             quantum = 10 ** (PYTHON_DATETIME_PRECISION - precision)
             remainder = value.microsecond % quantum
+            # The column counts ticks from 1970 (``first_moment``) - a moment before it is a negative
+            # count, whose tie rounds away from zero to the earlier tick.
+            is_before_epoch = (
+                value if value.tzinfo is not None else value.replace(tzinfo=datetime.UTC)
+            ) < first_moment
             value -= datetime.timedelta(microseconds=remainder)
-            if remainder * 2 >= quantum:
+            if remainder * 2 > quantum or (remainder * 2 == quantum and not is_before_epoch):
                 value += datetime.timedelta(microseconds=quantum)
-        if field.precision is None:
+        column_first_moment, column_last_moment, _digits = field.get_moment_bounds()
+        # A DateTime and a DateTime64(9) hold fewer moments than the 1900 to 2299 every moment is checked against.
+        if (column_first_moment, column_last_moment) != CLICKHOUSE_DATETIME64_RANGE:
             moment = value if value.tzinfo is not None else value.replace(tzinfo=datetime.UTC)
-            first_moment, last_moment = CLICKHOUSE_DATETIME_RANGE
-            if not first_moment <= moment <= last_moment:
+            if not column_first_moment <= moment <= column_last_moment:
+                type_name = "DateTime" if field.precision is None else f"DateTime64({field.precision})"
                 raise ValidationError(
-                    f"{field.model_field_name}: {value} is outside the moments a DateTime column holds, "
-                    f"{first_moment} to {last_moment}"
+                    f"{field.model_field_name}: {value} is outside the moments a {type_name} column holds, "
+                    f"{column_first_moment} to {column_last_moment}"
                 )
         return ClickhouseTypedValue(value, field.SQL_TYPE)

@@ -18,12 +18,12 @@ from tests.shared_models.testmodels import (
     DeletePreviewSoftFolder,
     DeletePreviewSoftNote,
     Event,
-    ExpressionTypeParity,
     IntFields,
     SoftDeleteAutoNow,
     Tournament,
     UpsertTarget,
 )
+from tests.shared_models.testmodels_postgres import ExpressionTypeParity
 
 
 async def create_int_rows() -> None:
@@ -95,6 +95,7 @@ async def test_a_composite_primary_key(db):
     assert deleted == [{"thing_id": 1, "revision": 1}]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_an_expression_value_checked_after_the_write(db):
     row = await ExpressionTypeParity.objects.create(

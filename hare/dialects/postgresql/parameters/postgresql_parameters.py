@@ -13,6 +13,7 @@ from hare.dialects.postgresql.parameters.constants import (
     POSTGRESQL_PARAMETER_CASTS,
     POSTGRESQL_SELECTED_LITERAL_POSITIONS,
     POSTGRESQL_SELECTED_LITERAL_TYPES,
+    POSTGRESQL_TYPE_MODIFIER_PATTERN,
 )
 from hare.sql.enums import JsonValueType
 
@@ -78,8 +79,9 @@ class PostgresqlParameters(SqlParameters):
         return parameter_sql
 
     def get_copy_column_type(self, field: Field[Any]) -> str:
-        # Binary COPY is told each type by its name alone ("VARCHAR(255)" -> "VARCHAR").
-        return super().get_copy_column_type(field).split("(")[0].strip()
+        # Binary COPY is told each type by its name alone ("VARCHAR(255)" -> "VARCHAR") - an array's
+        # brackets kept ("VARCHAR(255)[]" -> "VARCHAR[]").
+        return POSTGRESQL_TYPE_MODIFIER_PATTERN.sub("", super().get_copy_column_type(field)).strip()
 
     def supports_copy_column_type(self, column_type: str) -> bool:
         # The types both drivers' binary COPY encodes - not an array, a range or an extension's type.

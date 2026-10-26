@@ -20,8 +20,17 @@ class KeptSharedTestDatabase:
     comment, unchanged since. Creating the database and its schema of the ~135 test models cost every
     worker of every run seconds before its first test."""
 
-    #: The models of the shared database.
-    MODULES = ["tests.shared_models.testmodels"]
+    @staticmethod
+    def get_modules() -> list[str]:
+        """The models of the shared database - on PostgreSQL its own models too, those of the fields
+        only it has (a DecimalField, which SQLite has none of)."""
+        # Local import: the database under test reads the configured URL.
+        from tests.utils.database_under_test import DatabaseUnderTest
+
+        modules = ["tests.shared_models.testmodels"]
+        if DatabaseUnderTest.get_dialect().name == "postgresql":
+            modules.append("tests.shared_models.testmodels_postgres")
+        return modules
 
     @staticmethod
     async def acquire_url(ownership_connection: Any, database_url_template: str) -> str:
@@ -56,7 +65,7 @@ class KeptSharedTestDatabase:
         """
         try:
             async with hare_test_context(
-                modules=cls.MODULES,
+                modules=cls.get_modules(),
                 db_url=database_url,
                 app_label="models",
                 connection_label="models",

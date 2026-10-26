@@ -11,7 +11,3 @@ SECRET_CONFIG_KEY_MARKERS = ("password", "passwd", "pwd", "secret", "token")
 
 #: The model label a ``swappable`` config setting points at - ``app_label.ModelName``.
 SWAPPABLE_MODEL_LABEL_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*")
-
-#: The longest window of ``read_your_writes_seconds`` - the reads after a write stay on the written
-#: connection at most this long.
-READ_YOUR_WRITES_MAXIMUM_SECONDS = 3600

@@ -14,9 +14,6 @@ mod decimal_write;
 pub use decimal_read::DecimalRead;
 pub use decimal_write::DecimalWrite;
 
-/// `SQLITE_DECIMAL_FIXED_POINT_MAX_EXPONENT` - past it SQLite gets scientific text.
-const FIXED_POINT_MAX_EXPONENT: i64 = 1000;
-
 /// The quantizing both directions share.
 struct Quantizer {
     /// `field.quant`.

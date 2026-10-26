@@ -9,9 +9,10 @@ from hare.contrib.test import requires_features
 from hare.exceptions import OperationalError
 from hare.query.expressions import F
 from hare.transactions.transactions import Transactions
-from tests.shared_models.testmodels import ExpressionTypeRow
+from tests.shared_models.testmodels_postgres import ExpressionTypeRow
 
 
+@pytest.mark.postgresql_models
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_a_shift_beyond_the_held_dates_is_refused(db):

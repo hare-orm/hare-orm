@@ -28,10 +28,6 @@ class IncludeConfig(RequestOption):
     relations: tuple[str, ...]
     parameter: str = DEFAULT_INCLUDE_PARAMETER
 
-    def __post_init__(self) -> None:
-        self.check_allowed_names(type(self).__name__, self.relations)
-        self.check_parameter_name(type(self).__name__, self.parameter)
-
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         return self.get_name_list_parameter_fields(
             self.parameter, self.relations, "Relations to load with the rows", ParameterType.INCLUDE

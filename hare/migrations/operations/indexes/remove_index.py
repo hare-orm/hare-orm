@@ -16,8 +16,8 @@ class RemoveIndex(RemoveSchemaObject):
         model_name: The model.
         name: The index's name.
         fields: The fields of an unnamed index.
-        concurrently: Drop it without blocking reads and writes (Postgres ``DROP INDEX
-            CONCURRENTLY``) - the migration needs ``atomic = False``.
+        concurrently: Drop it without blocking reads and writes
+            (``Features.supports_concurrent_indexes``) - the migration needs ``atomic = False``.
     """
 
     object_type: ClassVar[type[IndexObjectType]] = IndexObjectType

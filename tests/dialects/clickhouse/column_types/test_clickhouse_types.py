@@ -270,6 +270,24 @@ def test_a_comma_inside_an_enum_value_does_not_split_the_type():
 
 
 @pytest.mark.database_independent
+def test_the_typed_literals_hare_writes_a_default_as_are_read_back_as_values():
+    """A wide integer, a date and a moment came back as SqlDefault of their text - inspectdb of a database
+    hare had migrated wrote other models than the ones migrated."""
+    from hare.dialects.clickhouse.clickhouse_introspector import ClickhouseIntrospector
+
+    for raw_sql, expected in (
+        ("toInt128('18446744073709551616')", 18446744073709551616),
+        ("toUInt256('5')", 5),
+        ("CAST(toDate32('2020-01-01'), 'Date')", datetime.date(2020, 1, 1)),
+        (
+            "toDateTime64('2020-01-01 00:00:00.000001', 6, 'UTC')",
+            datetime.datetime(2020, 1, 1, 0, 0, 0, 1, datetime.UTC),
+        ),
+    ):
+        assert ClickhouseIntrospector.parse_db_default(raw_sql) == expected
+
+
+@pytest.mark.database_independent
 def test_a_json_column_is_a_json_field():
     specification = ClickhouseTypeParser.get_specification("Nullable(JSON)")
     assert specification.path == "hare.fields.data.json.JSONField"
@@ -285,23 +303,14 @@ async def test_an_expression_of_a_64_bit_column_is_written(devices):
 
 @pytest.mark.asyncio
 async def test_integer_arithmetic_of_a_null_column_reads_null(clickhouse_db):
-    """An operand was widened to a non-Nullable Int256, which the server refuses a NULL in - the read
-    failed instead of giving NULL."""
+    """An operand was widened to a non-Nullable integer type, which the server refuses a NULL in - the
+    read failed instead of giving NULL."""
     await Country.objects.create(code="fr", name="France", population=None)
     await Country.objects.create(code="de", name="Germany", population=83)
 
     assert await Country.objects.order_by("code").annotate(next=F("population") + 1).values_list(
         "next", flat=True
     ) == [84, None]
-
-
-@pytest.mark.asyncio
-async def test_integer_arithmetic_of_a_not_null_column_stays_non_nullable(clickhouse_db):
-    # A Nullable Int256 costs a sum its speed - only an operand that can be NULL takes it.
-    sql = Device.objects.annotate(next=F("big") + 1).sql()
-
-    assert "accurateCast(\"big\",'Int256')" in sql.replace(" ", "")
-    assert "Nullable(Int256)" not in sql
 
 
 @pytest.mark.asyncio
@@ -453,6 +462,11 @@ async def test_a_moment_is_kept_in_the_columns_own_type_and_precision(clickhouse
         moment.replace(microsecond=679000),
     )
     assert await MomentReading.objects.filter(milli=moment.replace(microsecond=679000), second__year=2020).count() == 1
+    # The moment written is compared rounded as it was written - a filter by it found no row, and
+    # get_or_create() wrote it again.
+    assert await MomentReading.objects.filter(second=moment, milli=moment, local__in=[moment]).count() == 1
+    _reading, created = await MomentReading.objects.get_or_create(second=moment, milli=moment, defaults={"id": 2})
+    assert not created
     columns = await MomentReading._meta.connection.execute_dicts(
         "SELECT name, type FROM system.columns WHERE table = 'momentreading' AND database = currentDatabase()"
     )
@@ -468,6 +482,31 @@ async def test_a_moment_is_kept_in_the_columns_own_type_and_precision(clickhouse
 
 
 @pytest.mark.asyncio
+async def test_a_tie_before_1970_rounds_away_from_the_epoch(clickhouse_db):
+    """A moment before 1970 is a negative count of ticks - its tie rounded up, to the epoch, though a
+    tie rounds away from zero; a DateTime column then took 1969 as 1970 instead of refusing it."""
+    moment = datetime.datetime(1969, 12, 31, 23, 59, 59, 999500, tzinfo=datetime.UTC)
+    await MomentReading.objects.create(id=1, milli=moment)
+
+    assert (await MomentReading.objects.get(id=1)).milli == moment.replace(microsecond=999000)
+    with pytest.raises(ValidationError, match="outside the moments a DateTime column holds"):
+        await MomentReading.objects.create(id=2, second=moment.replace(microsecond=500000))
+
+
+@pytest.mark.asyncio
+async def test_a_moment_past_a_nanosecond_column_is_refused(clickhouse_db):
+    """A DateTime64(9) counts nanoseconds in 64 bits - up to 2262-04-11; a later moment reached the server and
+    failed there instead of being refused, in a write and in a filter alike."""
+    field = ClickhouseDatetimeField(precision=9)
+    field.model_field_name = "nano"
+    last_moment = datetime.datetime(2262, 4, 11, 23, 47, 16, 854775, tzinfo=datetime.UTC)
+
+    assert ClickhouseDatetimeField.to_db_rounded_value(field, last_moment, None).value == last_moment
+    with pytest.raises(ValidationError, match=r"outside the moments a DateTime64\(9\) column holds"):
+        ClickhouseDatetimeField.to_db_rounded_value(field, last_moment + datetime.timedelta(microseconds=1), None)
+
+
+@pytest.mark.asyncio
 async def test_a_list_of_moments_is_compared_with_a_datetime_column(clickhouse_db):
     """IN of a DateTime column failed on every value - ClickHouse compares no DateTime64 in its list."""
     moment = datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)
@@ -478,8 +517,10 @@ async def test_a_list_of_moments_is_compared_with_a_datetime_column(clickhouse_d
     assert await MomentReading.objects.filter(second__in=[moment, later, None]).count() == 2
     assert await MomentReading.objects.filter(second__not_in=[moment]).values_list("id", flat=True) == [2]
     assert await MomentReading.objects.filter(second__global_in=[later]).values_list("id", flat=True) == [2]
-    with pytest.raises(ValidationError, match="fraction of a second"):
-        await MomentReading.objects.filter(second__in=[moment.replace(microsecond=5)]).count()
+    # A moment with a fraction of a second is rounded to the column's whole second, as it is written.
+    assert await MomentReading.objects.filter(second__in=[moment.replace(microsecond=5)]).count() == 1
+    rounded_down = moment.replace(microsecond=400000)
+    assert await MomentReading.objects.filter(second=rounded_down).values_list("id", flat=True) == [1]
 
 
 @pytest.mark.asyncio
@@ -549,3 +590,35 @@ async def test_an_integer_enum_member_is_written_as_text_by_its_number(clickhous
     assert await get_value(Cast("level", fields.TextField())) == "500"
     assert await get_value(Concat(Value("level "), F("level"))) == "level 500"
     assert await get_value(JSONObject(level="level")) == {"level": 500}
+
+
+@pytest.mark.asyncio
+async def test_a_scaled_duration_shares_a_type_with_a_duration_beside_it(clickhouse_db):
+    """A duration times a float, or divided, is a Float64 - beside a duration literal past 2 ** 32
+    microseconds or a duration column ClickHouse found no common type."""
+    from hare.query.functions import Coalesce, Greatest
+
+    long_duration = datetime.timedelta(days=1, seconds=3, microseconds=7)
+    await MomentReading.objects.bulk_create(
+        [MomentReading(id=1, lasts=datetime.timedelta(seconds=10, microseconds=3)), MomentReading(id=2)]
+    )
+    for expression, expected in (
+        (Coalesce(F("lasts") * 0.5, long_duration), [datetime.timedelta(seconds=5, microseconds=2), long_duration]),
+        (Coalesce(F("lasts") / 2, long_duration), [datetime.timedelta(seconds=5, microseconds=2), long_duration]),
+        # ClickHouse leaves a NULL argument of greatest() out.
+        (Greatest(F("lasts") * 0.5, long_duration), [long_duration, long_duration]),
+        (
+            Case(When(id=1, then=F("lasts") * 1.5), default=long_duration),
+            [
+                datetime.timedelta(seconds=15, microseconds=4),
+                long_duration,
+            ],
+        ),
+    ):
+        values = await MomentReading.objects.annotate(value=expression).order_by("id").values_list("value", flat=True)
+        assert list(values) == expected
+    await MomentReading.objects.update(lasts=Coalesce(F("lasts") * 0.5, long_duration))
+    assert list(await MomentReading.objects.order_by("id").values_list("lasts", flat=True)) == [
+        datetime.timedelta(seconds=5, microseconds=2),
+        long_duration,
+    ]

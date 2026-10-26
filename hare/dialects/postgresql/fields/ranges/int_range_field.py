@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
+from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
 from hare.fields import Field
 from hare.fields.data.constants import INT32_MAX, INT32_MIN
 from hare.fields.data.numeric.int_field import IntField
-from hare.query.rows.enums import RangeBoundType
 
 
 class IntRangeField(RangeField):
@@ -17,10 +17,12 @@ class IntRangeField(RangeField):
     SQL_TYPE = "int4range"
     ELEMENT_SQL_TYPE = "integer"
 
-    def get_bound_field(self) -> Field[Any]:
-        from hare.query.expressions.numeric.numeric_typing import NumericTyping
+    #: Shared field a bound is read through - of the element type, so a value past it is refused as the
+    #: field refuses it; the statement plans hold output fields weakly.
+    BOUND_FIELD: ClassVar[IntField[Any]] = IntField()
 
-        return NumericTyping.INTEGER_OUTPUT_FIELD
+    def get_bound_field(self) -> Field[Any]:
+        return self.BOUND_FIELD
 
     DISCRETE_STEP = 1
     NATIVE_BOUND_TYPE = RangeBoundType.INTEGER

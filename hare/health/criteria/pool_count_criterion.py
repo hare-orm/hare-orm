@@ -13,7 +13,7 @@ class PoolCountCriterion(HealthCriterion):
     a subclass names the count and the reason it gives.
 
     Args:
-        at_least: The count - at least 1.
+        at_least: The count.
     """
 
     #: The attribute of a pool's check holding the count.
@@ -22,7 +22,7 @@ class PoolCountCriterion(HealthCriterion):
     reason: ClassVar[str]
 
     def __init__(self, at_least: int) -> None:
-        self.at_least = HealthCriterion.get_checked_count("at_least", at_least)
+        self.at_least = at_least
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         for pool in connection_check.pools:

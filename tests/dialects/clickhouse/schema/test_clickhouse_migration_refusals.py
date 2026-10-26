@@ -194,3 +194,60 @@ async def test_a_migration_declaring_uniqueness_is_refused_before_it_changes_any
         "SELECT name FROM system.columns WHERE database = currentDatabase() AND table = 'board'"
     )
     assert {column["name"] for column in columns} == {"id", "rank"}
+
+
+@pytest.mark.asyncio
+async def test_a_migration_enabling_row_level_security_creates_no_table(project_factory):  # noqa: F811
+    """The row level security of a new model was refused when its own operation ran - after the model's
+    table was created, the migration left applied halfway."""
+    project = await project_factory()
+    project.write_models(
+        textwrap.dedent(
+            """
+            class Board(Model):
+                id = fields.IntField(primary_key=True, generated=False)
+
+                class Meta:
+                    row_level_security = "enabled"
+            """
+        )
+    )
+    await project.cli_ok("makemigrations")
+
+    result = await project.cli("migrate")
+
+    assert result.exit_code not in (0, None)
+    assert "Row level security policies are not supported on clickhouse" in result.output
+    assert "failed partway" not in result.output
+    tables = await project.query("SELECT name FROM system.tables WHERE database = currentDatabase()")
+    assert "board" not in {table["name"] for table in tables}
+
+
+@pytest.mark.asyncio
+async def test_a_migration_creating_a_model_with_a_trigger_creates_no_table(project_factory):  # noqa: F811
+    """A new model's trigger was refused once the model's table was created - the migration left applied
+    halfway."""
+    project = await project_factory()
+    project.write_models(
+        textwrap.dedent(
+            """
+            from hare.ddl import RawSQLTerm
+            from hare.ddl.schema_objects.trigger import Trigger
+
+            class Board(Model):
+                id = fields.IntField(primary_key=True, generated=False)
+
+                class Meta:
+                    triggers = [Trigger(name="board_insert", on="INSERT", body=RawSQLTerm("RETURN NEW;"))]
+            """
+        )
+    )
+    await project.cli_ok("makemigrations")
+
+    result = await project.cli("migrate")
+
+    assert result.exit_code not in (0, None)
+    assert "Triggers are not supported on clickhouse" in result.output
+    assert "failed partway" not in result.output
+    tables = await project.query("SELECT name FROM system.tables WHERE database = currentDatabase()")
+    assert "board" not in {table["name"] for table in tables}

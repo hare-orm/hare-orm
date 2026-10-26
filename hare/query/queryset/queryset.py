@@ -58,6 +58,7 @@ from hare.query.queryset.constants import (
     DATETIMES_TRUNC_TYPES,
     LATEST_WITHOUT_FIELDS_MESSAGE,
     LOCKED_SUMMARY_MESSAGE,
+    MAX_CALL_SIGNATURE_LENGTH,
     MAX_ROW_COUNT,
     RANDOM_ORDERING,
     RANDOM_ORDERING_ALIAS,
@@ -188,6 +189,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         call_signature = self._call_signature
         if call_signature is not None:
+            if len(call_signature) >= MAX_CALL_SIGNATURE_LENGTH:
+                # Built as it goes from here - its pending filters are taken on the next call.
+                queryset._call_signature = None
+                return queryset
             queryset._call_signature = call_signature if call is None else (*call_signature, call)
             queryset._call_values = (*self._call_values, *values) if values else self._call_values
         return queryset
@@ -1025,7 +1030,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         return queryset
 
     @CallsBeforeSetup.recorded
-    def with_cte(self, name: str, query: AwaitableQuery[Any] | Selectable) -> Self:
+    def with_cte(self, name: str, query: QuerySpecification[Any] | Selectable) -> Self:
         """Attaches a named ``WITH`` to the queryset's SQL - recursive when ``query`` references its
         own name. The queryset still selects from the model's table; its rows are read from the CTE
         by a filter (``id__in=CteRows(name, "id")``), a ``Subquery`` or hand-built SQL. A walk along a

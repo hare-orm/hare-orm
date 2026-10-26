@@ -92,6 +92,13 @@ The value a key takes:
 | a generic foreign key (`subject`) | an instance of one of its models, or a dict `{"type": ..., "id": ...}` |
 | `subject__type` | one of the branch names — `Literal["book", "author"]` |
 | a JSON path (`data__owner__name`) | anything |
+| an address field (`IPAddressField`, PostgreSQL's `InetField`, `CidrField`) | its text, or an `ipaddress` object |
+| a range field (`period`, `period__overlap`, `period__contained_by`) | a `Range` of the bound type, or its `(lower, upper)` bounds (None for an open side) |
+| `period__contains` | a value of the bound type, a `Range`, or its `(lower, upper)` bounds |
+| a range's path (`period__startswith`, `period__endswith`, `period__isempty`, `period__lower_inc`, ...) | the bound type; `bool` for a flag |
+| a geometry field's `dwithin` and distance lookups (`point__distance_lte`) | `(geometry, distance)` |
+| a geometry field's `relate` | `(geometry, pattern)` |
+| a geometry field's other spatial relations (`area__contains`) | a geometry |
 | a registered lookup | its `value_shape` and `value_type` (the field's type when None) |
 | a registered transform (`rating__as_text__startswith`) | the type of the field the transform reads |
 | an annotation | its type (see below) |
@@ -180,7 +187,7 @@ The names given as string literals to:
 | Method | A name is |
 |---|---|
 | `order_by()` | a field path or an annotation, with an optional `-`; `?` orders randomly |
-| `only()` | a field path or an annotation |
+| `only()` | a field path or an annotation — not one ending at a relation holding many rows |
 | `defer()` | a direct field of the model — not a relation |
 | `select_related()` | a path of forward relations and reverse one-to-one relations, or a generic foreign key |
 | `bulk_update(fields=...)` | a field of the model's rows — not a relation holding many rows |
@@ -298,7 +305,8 @@ titles = await Book.objects.values_list("title", flat=True)  # list[str]
 | Typed | Through |
 |---|---|
 | `filter()`, `exclude()`, `get()`, `get_or_create()`, `update_or_create()` | `<Model>Filters`: every key of the model's fields, the fields of the models its relations lead to (up to `--relation-depth`), with each lookup the connection's dialect runs, and the type of its value — the same as the mypy plugin's; a generic foreign key with `__type`, `__in`, `__isnull` and their negations. |
-| `create()`, `update()` | `<Model>Writes`: each field, a relation's object or key, a generic foreign key's object or its row as a dict, and `pk`. |
+| `create()` | `<Model>Writes`: each field, a relation's object or key, a generic foreign key's object or its row as a dict, and `pk`. |
+| `update()` | `<Model>Updates`: the values of `<Model>Writes`, or an expression (`F("price") * 2`, a function, a subquery). |
 | `values_list(name, flat=True)` | The type of the field selected. |
 | A model's fields | `Field[<value>]` — the field on the class, its value on an instance; the fields of an abstract base the same. |
 | `objects` and the model's other managers | `<Model>QuerySet`, built on the project's own queryset class of the default manager — its methods stay; a manager of another queryset class is that class. |

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, cast
 
 from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_ARRAY_AGGREGATE_NAME,
-    CLICKHOUSE_DECIMAL_AVERAGE_NAME,
     CLICKHOUSE_GROUP_ARRAY_FUNCTION_NAME,
     CLICKHOUSE_GROUP_DISTINCT_ARRAY_FUNCTION_NAME,
     CLICKHOUSE_GROUPED_AGGREGATE_NAMES,
@@ -14,8 +13,7 @@ from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_VALUE_COUNT_FUNCTION_NAME,
 )
 from hare.exceptions import UnSupportedError
-from hare.sql.constants import DECIMAL_QUOTIENT_SCALE
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.terms.functions.aggregate_function import AggregateFunction
 from hare.sql.terms.functions.function import Function
 
@@ -44,20 +42,6 @@ class ClickhouseAggregateRenderers:
         for function_name in CLICKHOUSE_NULL_FOR_NO_ROWS_AGGREGATE_NAMES:
             renderers.register_function(function_name, cls.render_null_for_no_rows_aggregate)
         renderers.register_function(CLICKHOUSE_ARRAY_AGGREGATE_NAME, cls.render_array_aggregate)
-        renderers.register_function(CLICKHOUSE_DECIMAL_AVERAGE_NAME, cls.render_decimal_average)
-
-    @classmethod
-    def render_decimal_average(cls, function: Function, sql_context: SqlContext) -> str:
-        """An average of Decimals as their exact sum divided by their count at the quotient scale -
-        ClickHouse's ``avg()`` of a Decimal is a Float64. Its ``DISTINCT``, ``FILTER`` and window are
-        those of both."""
-        total = copy(function)
-        total.name = "SUM"
-        count = copy(function)
-        count.name = CLICKHOUSE_VALUE_COUNT_FUNCTION_NAME
-        count_sql = count.get_function_sql(sql_context)
-        total_sql = total.get_function_sql(sql_context)
-        return f"if({count_sql} = 0, NULL, toDecimal256({total_sql}, {DECIMAL_QUOTIENT_SCALE}) / {count_sql})"
 
     @staticmethod
     def render_array_aggregate(function: Function, sql_context: SqlContext) -> str:

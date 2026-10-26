@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from hare.dialects.clickhouse.fields.constants import FLOAT32_MAX
 from hare.exceptions import ValidationError
 from hare.fields.data.numeric.float_field import FloatField
+from hare.fields.narrowing.constants import FLOAT32_MANTISSA_BITS
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -20,6 +21,8 @@ class Float32Field(FloatField[TFloat]):
     so close to zero it would be stored as 0, is refused - a float32 holds neither."""
 
     SQL_TYPE = "Float32"
+    MANTISSA_BITS = FLOAT32_MANTISSA_BITS
+    EXACT_DECIMAL_DIGITS = 6
     COLUMN_TYPE_FROM_DIALECT = True
     keeps_native_db_values = False
 

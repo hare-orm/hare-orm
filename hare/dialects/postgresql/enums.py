@@ -3,6 +3,12 @@ from __future__ import annotations
 from enum import StrEnum
 
 
+class PostgresqlDialectName(StrEnum):
+    """The name PostgreSQL's dialect is registered under."""
+
+    POSTGRESQL = "postgresql"
+
+
 class PostgresqlArrayOperators(StrEnum):
     CONTAINS = "@>"
     CONTAINED_BY = "<@"
@@ -97,3 +103,23 @@ class RangeBound(StrEnum):
 
     MINVALUE = "MINVALUE"
     MAXVALUE = "MAXVALUE"
+
+
+class PostgresqlJsonOperator(StrEnum):
+    """An operator of ``jsonb`` a JSON lookup is written with."""
+
+    HAS_KEY = "?"
+    CONTAINS = "@>"
+    CONTAINED_BY = "<@"
+    HAS_KEYS = "?&"
+    HAS_ANY_KEYS = "?|"
+
+
+class RangeBoundType(StrEnum):
+    """The bounds of a range ``rust.native.rows.FieldCodec`` reads itself."""
+
+    INTEGER = "integer"
+    DECIMAL = "decimal"
+    DATE = "date"
+    #: A timestamp, read into the configured zone.
+    DATETIME = "datetime"

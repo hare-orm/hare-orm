@@ -62,10 +62,10 @@ from tests.shared_models.testmodels import (
     SoftDeleteParent,
     Team,
     TemporalBatch,
-    TemporalRecord,
     Tournament,
     Tree,
 )
+from tests.shared_models.testmodels_postgres import TemporalRecord
 from tests.utils.model_rows_queries import get_model_rows_query
 
 # TODO: Test the many exceptions in QuerySet
@@ -3129,6 +3129,7 @@ def per_batch_aggregate(aggregate):
     )
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_of_a_max_date_is_a_date(temporal_batches):
     """On SQLite the raw driver value ("2021-03-01") was returned instead of a date."""
@@ -3142,6 +3143,7 @@ async def test_subquery_annotation_of_a_max_date_is_a_date(temporal_batches):
     assert all(type(value) is datetime.date for _, value in rows)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_of_a_sum_decimal_is_a_decimal(temporal_batches):
     """On SQLite the SUM came back as a float/int instead of a Decimal."""
@@ -3155,6 +3157,7 @@ async def test_subquery_annotation_of_a_sum_decimal_is_a_decimal(temporal_batche
     assert all(isinstance(value, Decimal) for _, value in rows)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_of_a_max_datetime_is_an_aware_datetime(temporal_batches):
     rows = (
@@ -3170,6 +3173,7 @@ async def test_subquery_annotation_of_a_max_datetime_is_an_aware_datetime(tempor
     assert all(isinstance(value, datetime.datetime) and value.tzinfo is not None for _, value in rows)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_of_a_max_timedelta_is_a_timedelta(temporal_batches):
     """A TimeDeltaField's stored microseconds came back as a bare int on every backend."""
@@ -3180,6 +3184,7 @@ async def test_subquery_annotation_of_a_max_timedelta_is_a_timedelta(temporal_ba
     assert dict_rows == [{"name": name, "x": value} for name, value in expected]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_is_decoded_on_full_instances(temporal_batches):
     batches = (
@@ -3188,6 +3193,7 @@ async def test_subquery_annotation_is_decoded_on_full_instances(temporal_batches
     assert [batch.x for batch in batches] == [datetime.timedelta(seconds=1200), datetime.timedelta(seconds=7)]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_filter_on_a_decoded_subquery_annotation(temporal_batches):
     result = (
@@ -3199,6 +3205,7 @@ async def test_filter_on_a_decoded_subquery_annotation(temporal_batches):
     assert result == [("A", datetime.date(2021, 3, 1))]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_subquery_annotation_decoding_survives_repeated_calls(temporal_batches):
     """The decoded output fields ride along in the cached query shape - a second, structurally

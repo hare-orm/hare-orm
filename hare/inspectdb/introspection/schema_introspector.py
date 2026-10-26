@@ -515,7 +515,7 @@ class SchemaIntrospector:
                 kwargs = dict(default_kwargs)
                 if path == "hare.fields.data.text.CharField" and column.max_length is not None:
                     if column.max_length < 1:
-                        # A length no CharField takes (SQLite's VARCHAR(0) holds any text).
+                        # A length no CharField takes (a VARCHAR(0) of a database not limiting text holds any).
                         return "hare.fields.data.text.TextField", {}, False
                     kwargs["max_length"] = column.max_length
                 elif path == "hare.fields.data.text.CharField" and cls.maps_unbounded_char_to_text():
@@ -529,8 +529,8 @@ class SchemaIntrospector:
                     and precision >= 1
                     and (scale is None or 0 <= scale <= precision)
                 ):
-                    # Sizes no DecimalField takes (SQLite's DECIMAL(5, 10), NUMERIC(0)) leave its
-                    # defaults - the column's type is reported as differing.
+                    # Sizes no DecimalField takes (a DECIMAL(5, 10), a NUMERIC(0) of a database not holding
+                    # exact decimals) leave its defaults - the column's type is reported as differing.
                     kwargs["max_digits"] = precision
                     kwargs["decimal_places"] = (
                         scale if scale is not None else min(kwargs.get("decimal_places", 0), precision)

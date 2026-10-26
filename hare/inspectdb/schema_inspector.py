@@ -9,8 +9,10 @@ from hare.inspectdb.generation.many_to_many_tables import ManyToManyTables
 from hare.inspectdb.generation.model_naming import ModelNaming
 from hare.inspectdb.generation.model_source_builder import ModelSourceBuilder
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 from hare.migrations.writer.import_manager import ImportManager
 from hare.migrations.writer.migration_writer import MigrationWriter
+from hare.transactions.constants import DISTRIBUTED_DECISIONS_TABLE_NAME
 
 if TYPE_CHECKING:
     from hare.ddl.schema_objects.database_function import DatabaseFunction
@@ -34,8 +36,8 @@ class SchemaInspector:
         Args:
             connection: The connection to the database to read.
             tables: The tables to generate models for; every table of ``schema`` when omitted.
-            schema: The schema to inspect (an attached database on SQLite, a database of the server
-                where databases are the schemas), the connection's default one when None.
+            schema: The schema to inspect (a schema, an attached database or a database of the
+                server - the namespace of tables the database has), the connection's default one when None.
 
         Returns:
             The module source.
@@ -46,7 +48,7 @@ class SchemaInspector:
             TableNotFoundError: A table in ``tables`` doesn't exist.
             DuplicateModelClassNameError: If two distinct tables in this run derive the same
                 Python class name (e.g. two tables differing only by case, legal as distinct
-                tables under Postgres's case-sensitive quoted-identifier rules) - generating both
+                tables where quoted names are case-sensitive) - generating both
                 would silently produce two "class Foo(Model):" definitions back to back, the
                 second shadowing the first with no error/warning and that table's model quietly
                 vanishing.
@@ -54,9 +56,17 @@ class SchemaInspector:
         dialect = connection.dialect.name
         if schema is None:
             schema = await DatabaseCatalog.get_default_schema(connection)
-        table_names = (
-            tables if tables is not None else await DatabaseCatalog.get_table_names(connection, schema=schema)
-        )
+        if tables is not None:
+            table_names = tables
+        else:
+            # hare's own bookkeeping - the migration journal, the decisions of distributed transactions - is
+            # no table of the application.
+            bookkeeping_tables = {NoopRecorder().table_name, DISTRIBUTED_DECISIONS_TABLE_NAME}
+            table_names = [
+                table_name
+                for table_name in await DatabaseCatalog.get_table_names(connection, schema=schema)
+                if table_name not in bookkeeping_tables
+            ]
         table_name_by_class_name: dict[str, str] = {}
         for table_name in table_names:
             class_name = ModelNaming.get_class_name(table_name)

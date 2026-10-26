@@ -6,7 +6,7 @@ from hare.dialects.base.schema.columns.column_definitions import ColumnDefinitio
 from hare.dialects.clickhouse.types.clickhouse_nullable_types import ClickhouseNullableTypes
 
 if TYPE_CHECKING:
-    from hare.dialects.clickhouse.schema.declarations import ClickhouseSchemaEditor
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.fields.field import Field
     from hare.models import Model
 
@@ -24,6 +24,23 @@ class ClickhouseColumnDefinitions(ColumnDefinitions):
 
     def get_altered_column_type(self, sql_type: str, nullable: bool) -> str:
         return ClickhouseNullableTypes.get_nullable_type(sql_type) if nullable else sql_type
+
+    def changes_column_type(self, old_model: type[Model], new_model: type[Model], field_name: str) -> bool:
+        """Whether a change of a field declares its column with another type - ``Nullable`` too.
+
+        Args:
+            old_model: The model the table matches.
+            new_model: The model it is changed to.
+            field_name: The changed field.
+
+        Returns:
+            True for another declared type.
+        """
+        old_field = old_model._meta.fields_map[field_name]
+        new_field = new_model._meta.fields_map[field_name]
+        old_type = self.get_altered_column_type(self.get_table_column_type(old_model, old_field), old_field.null)
+        new_type = self.get_altered_column_type(self.get_table_column_type(new_model, new_field), new_field.null)
+        return old_type != new_type
 
     def get_field_sql(
         self,

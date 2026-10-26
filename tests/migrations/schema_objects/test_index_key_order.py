@@ -15,7 +15,7 @@ from hare.migrations import operations as ops
 from hare.migrations.drift import detect_drift
 from hare.migrations.writer import MigrationWriter
 from hare.query.expressions import F
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.model_source_generator import ModelSourceGenerator
 

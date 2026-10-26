@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.dialects.postgresql.fields.constants import INTERVAL_VALUE_TYPE
 from hare.exceptions import ValidationError
 from hare.fields.field import Field
 
@@ -19,7 +20,10 @@ class IntervalField(Field[TTimedelta]):
     """
 
     SQL_TYPE = "INTERVAL"
+    # Not a TimeDeltaField's bigint of microseconds - neither column takes the other's values.
+    argument_value_type = INTERVAL_VALUE_TYPE
     COLUMN_TYPE_FROM_DIALECT = True
+    holds_intervals = True
     field_type = datetime.timedelta
 
     def to_python(self, value: Any) -> datetime.timedelta | None:

@@ -6,9 +6,6 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import FieldError
 from hare.query.expressions import Expression, F, RawSQL
 from hare.query.expressions.term_expression import TermExpression
-from hare.query.filters.constants import DATETIME_CAST_SEGMENTS
-from hare.query.functions.datetime.extract import Extract
-from hare.query.functions.datetime.trunc import Trunc
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.lookup_info.value_paths import ValuePaths
 from hare.query.query_connection import QueryConnection
@@ -116,8 +113,7 @@ class AnnotationArguments:
             if base_name in queryset._annotations or ValuePaths.get_value_path_split(queryset.model, name) is not None:
                 paths[name] = F(name)
             elif (date_part_split := ValuePaths.get_date_part_split(queryset.model, name)) is not None:
-                field_path, part = date_part_split
-                paths[name] = Trunc(field_path, part) if part in DATETIME_CAST_SEGMENTS else Extract(field_path, part)
+                paths[name] = F.get_date_part_expression(*date_part_split)
         return paths
 
     @staticmethod

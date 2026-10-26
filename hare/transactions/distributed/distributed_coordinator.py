@@ -670,8 +670,8 @@ class DistributedCoordinator:
 
         if pending_aliases:
             raise DistributedTransactionPartiallyCommittedError(
-                f"Transactions.distributed() (xid={transaction.xid}) committed, but COMMIT PREPARED failed "
-                f"for {pending_aliases} - run `hare distributed-recover` to finish delivering "
+                f"Transactions.distributed() (xid={transaction.xid}) committed, but the commit of the prepared "
+                f"transactions failed for {pending_aliases} - run `hare distributed-recover` to finish delivering "
                 "them",
                 transaction.xid,
                 transaction.coordinator,
@@ -734,7 +734,7 @@ class DistributedCoordinator:
                             reason=(
                                 f"coordinator {coordinator!r} already committed this decision, but "
                                 f"connection alias {participant_alias!r} is no longer configured - "
-                                "cannot connect to issue COMMIT PREPARED"
+                                "cannot connect to commit its prepared transaction"
                             ),
                         )
                     )
@@ -749,7 +749,7 @@ class DistributedCoordinator:
                             resolution=DistributedTransactionResolution.COMMIT,
                             reason=(
                                 f"coordinator {coordinator!r} already committed this decision - "
-                                "participant still needs COMMIT PREPARED"
+                                "the participant's prepared transaction still needs its commit"
                             ),
                         )
                     )

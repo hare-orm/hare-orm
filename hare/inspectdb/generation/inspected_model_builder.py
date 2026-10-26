@@ -16,7 +16,8 @@ from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.dialect_registry import DialectRegistry
-from hare.exceptions import ConfigurationError
+from hare.exceptions import ConfigurationError, ValidationError
+from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import OnDelete
 from hare.fields.field import Field
 from hare.inspectdb.constants import (
@@ -219,8 +220,7 @@ class InspectedModelBuilder:
             return {}
         return {"db_index": False}
 
-    @staticmethod
-    def get_field_db_default(field_path: str, db_default: Any) -> Any:
+    def get_field_db_default(self, field_path: str, db_default: Any) -> Any:
         """Adapts an introspected column default to the field class it is declared on.
 
         Args:
@@ -229,14 +229,51 @@ class InspectedModelBuilder:
 
         Returns:
             For a JSONField, a string default parsed as the JSON document it holds (kept as a
-            string it would be stored as a JSON string literal); otherwise db_default unchanged.
+            string it would be stored as a JSON string literal) - a JSON null as its text, as None is no
+            default; otherwise db_default unchanged.
         """
         if field_path != JSON_FIELD_PATH or not isinstance(db_default, str):
             return db_default
         try:
-            return json.loads(db_default)
+            document = json.loads(db_default)
         except ValueError:
             return db_default
+        if document is None:
+            return SqlDefault(self.connection_dialect.literals.get_string_literal_sql(db_default))
+        return document
+
+    def get_db_default_the_field_takes(self, field: Field[Any], db_default: Any) -> Any:
+        """A literal default as the field takes it - the value it stands for read the way the field reads
+        the database's values (``'7'`` an int, ``1`` and ``'t'`` a bool), or its text as a ``SqlDefault``
+        when the field takes no value of it (``'NaN'`` of a float, ``'infinity'`` of a date, ``'1 day'`` of a
+        duration): a default the field refuses broke ``hare drift`` instead of being compared.
+
+        Args:
+            field: The field, built with the default.
+            db_default: The default introspected.
+
+        Returns:
+            The default the field takes.
+        """
+        if type(db_default) not in (str, int, float, bool):
+            return db_default
+        types = self.connection_dialect.types
+        try:
+            types.get_db_value(field, db_default, None)
+        except ValidationError:
+            pass
+        else:
+            return db_default
+        try:
+            read_default = types.get_python_value(field, db_default)
+            types.get_db_value(field, read_default, None)
+        except (ValidationError, TypeError, ValueError):
+            pass
+        else:
+            return read_default
+        if isinstance(db_default, str):
+            return SqlDefault(self.connection_dialect.literals.get_string_literal_sql(db_default))
+        return SqlDefault(str(db_default))
 
     @staticmethod
     def construct(path: str, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> Any:
@@ -630,7 +667,13 @@ class InspectedModelBuilder:
             or dropped_index_reason
             or identity_reason
             or column.todo_reason
-            or (None if base_field is not None else self.get_column_type_reason(path, extra_kwargs, column))
+            or self.get_column_type_reason(
+                path,
+                extra_kwargs
+                if base_field is None
+                else {**extra_kwargs, "base_field": InspectedFieldSpecification(base_field[0], base_field[1])},
+                column,
+            )
         )
 
         generated_field = (
@@ -658,7 +701,12 @@ class InspectedModelBuilder:
             self._add_column_options(kwargs, column, attribute_name, is_indexable)
             if column.description:
                 kwargs["description"] = column.description
-            kwargs["output_field"] = self.construct(path, kwargs=extra_kwargs)
+            output_field_kwargs = dict(extra_kwargs)
+            if base_field is not None:
+                # A generated array column's element field.
+                base_field_path, base_field_kwargs = base_field
+                output_field_kwargs["base_field"] = self.construct(base_field_path, kwargs=base_field_kwargs)
+            kwargs["output_field"] = self.construct(path, kwargs=output_field_kwargs)
             self.add_field(
                 attribute_name,
                 self.construct("hare.fields.generated_field.GeneratedField", kwargs=kwargs),
@@ -676,13 +724,19 @@ class InspectedModelBuilder:
         # A primary key column can carry its own DB-level DEFAULT (e.g. a UUID PK with DEFAULT
         # gen_random_uuid()) - applied regardless of is_pk.
         if column.db_default is not None:
-            kwargs["db_default"] = InspectedModelBuilder.get_field_db_default(path, column.db_default)
+            kwargs["db_default"] = self.get_field_db_default(path, column.db_default)
         if column.description:
             kwargs["description"] = column.description
         if base_field is not None:
             base_field_path, base_field_kwargs = base_field
             kwargs["base_field"] = self.construct(base_field_path, kwargs=base_field_kwargs)
-        self.add_field(attribute_name, self.construct(path, kwargs=kwargs), todo_reason)
+        field = self.construct(path, kwargs=kwargs)
+        if "db_default" in kwargs:
+            db_default = self.get_db_default_the_field_takes(field, kwargs["db_default"])
+            if db_default is not kwargs["db_default"]:
+                kwargs["db_default"] = db_default
+                field = self.construct(path, kwargs=kwargs)
+        self.add_field(attribute_name, field, todo_reason)
 
     def _build_composite_foreign_key_fields(self) -> None:
         columns_by_name = {column.name: column for column in self.table.columns}
@@ -950,13 +1004,18 @@ class InspectedModelBuilder:
             self.add_meta_option(
                 ModelOption.TABLE_OPTIONS, [table.table_options.with_field_names(self.field_attribute_names)]
             )
+        if table.unparsed_partitioning is not None:
+            self.meta_layout.append(
+                f"# TODO: the table is partitioned as {table.unparsed_partitioning!r}, which no partitioning of "
+                "hare declares - a migration of the model creates it unpartitioned; partition it by hand."
+            )
         if table.row_level_security is not None:
             self.add_meta_option(ModelOption.ROW_LEVEL_SECURITY, table.row_level_security)
         self._add_security_meta_options()
 
     def _add_security_meta_options(self) -> None:
-        """Adds the sequences a column of the table owns, its policies and its grants - each column
-        named by its field."""
+        """Adds the sequences the table declares (a note of those another table declares), its policies and its
+        grants - each column named by its field."""
         table = self.table
         if table.sequences:
             self.add_meta_option(
@@ -968,6 +1027,10 @@ class InspectedModelBuilder:
                     for sequence in table.sequences
                 ],
             )
+        self.meta_layout.extend(
+            f"# TODO: sequence {sequence_name!r} a default reads is declared by the model of table {declaring_table!r}"
+            for sequence_name, declaring_table in table.sequences_of_other_tables
+        )
         if table.policies:
             self.add_meta_option(ModelOption.POLICIES, list(table.policies))
         if table.grants:
@@ -1103,6 +1166,12 @@ class InspectedModelBuilder:
             "with a RunSQL migration if it matters."
             for index in (*table.column_indexes, *table.indexes)
             if index.unrepresentable_properties
+        )
+        self.meta_layout.extend(
+            f"# TODO: index {index.name!r} is invalid in the database - its build didn't finish, so the database "
+            "keeps it but doesn't use it (nor enforces its uniqueness). Drop it and create it again."
+            for index in table.indexes
+            if not index.is_valid
         )
         self.meta_layout.extend(
             f"# TODO: index {name!r} wasn't reconstructed ({raw_def!r}) - an expression term carries "

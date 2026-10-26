@@ -1,8 +1,7 @@
 """The native variance and standard deviation aggregates give what the Python ones give - as plain
-aggregates and as window functions, over ints, floats, decimal text and NULLs."""
+aggregates and as window functions, over ints, floats, numbers as text and NULLs."""
 
 import random
-from decimal import Decimal
 from functools import partial
 
 import pytest
@@ -54,7 +53,6 @@ def test_statistics(statistic_class) -> None:
         statistic_class.sample,
         statistic_class.is_deviation,
         SqliteStatistic.get_statistic,
-        Decimal,
     )
     for values in get_series():
         for window in (None, 2, 3):

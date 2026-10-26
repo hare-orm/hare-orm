@@ -7,6 +7,7 @@ import pytest
 from hare import fields
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
+from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields import (
     BackwardForeignKeyRelation,
     BackwardOneToOneRelation,
@@ -259,7 +260,7 @@ def test_simple_delete_model(state_with_model: State):
     operation.state_forward("models", state_with_model)
 
     assert ("models", "TestModel") not in state_with_model.models
-    with pytest.raises(KeyError):
+    with pytest.raises(ConfigurationError, match="No (app|model) with name"):
         state_with_model.apps.get_model("models.TestModel")
 
 
@@ -309,7 +310,7 @@ def test_delete_model_with_a_relation(state_with_model: State, make_reference):
     DeleteModel("TestModel2").state_forward("models", state)
 
     assert ("models", "TestModel2") not in state.models
-    with pytest.raises(KeyError):
+    with pytest.raises(ConfigurationError, match="No model with name"):
         state.apps.get_model("models.TestModel2")
     # Target model still intact
     state.apps.get_model("models.TestModel")
@@ -332,7 +333,7 @@ def test_delete_model_with_self_reference(state_with_model: State):
     DeleteModel("TestModel2").state_forward("models", state)
 
     assert ("models", "TestModel2") not in state.models
-    with pytest.raises(KeyError):
+    with pytest.raises(ConfigurationError, match="No model with name"):
         state.apps.get_model("models.TestModel2")
     # Target of the (now-deleted) model's own self-reference is itself - nothing else to check.
 

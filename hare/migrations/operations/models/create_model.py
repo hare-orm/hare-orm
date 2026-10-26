@@ -28,6 +28,7 @@ from hare.migrations.operations.models.rename_model import RenameModel
 from hare.migrations.operations.operation import Operation
 from hare.migrations.operations.schema_objects.object_types.constraint_object_type import ConstraintObjectType
 from hare.migrations.operations.schema_objects.object_types.index_object_type import IndexObjectType
+from hare.migrations.operations.schema_objects.object_types.trigger_object_type import TriggerObjectType
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
@@ -42,6 +43,7 @@ class CreateModel(ModelTableOperation, HareOperation):
     """Creates a model and its table."""
 
     reads_old_state = False
+    backward_reads_state_reached = False
 
     def __init__(
         self,
@@ -148,10 +150,15 @@ class CreateModel(ModelTableOperation, HareOperation):
             return [self.with_changes(options=options)]
         if isinstance(other, AlterModelTable) and self.is_same_model_name(self.name, other.name):
             options = dict(self.options or {})
-            options.pop(ModelOption.TABLE, None)
-            options.pop(str(ModelOption.TABLE), None)
-            if other.table != self.name.lower():
+            for option in (ModelOption.TABLE, ModelOption.TABLE_IS_EXPLICIT):
+                options.pop(option, None)
+                options.pop(str(option), None)
+            # As the alteration leaves the state - a table other than the class's is the model's own, which
+            # a later rename keeps.
+            table_is_explicit = other.table != self.name.lower()
+            if table_is_explicit:
                 options[str(ModelOption.TABLE)] = other.table
+            options[str(ModelOption.TABLE_IS_EXPLICIT)] = table_is_explicit
             return [self.with_changes(options=options)]
         if isinstance(other, (AddField, AlterField, RemoveField, RenameField)) and self.is_same_model_name(
             self.name, other.model_name
@@ -387,6 +394,9 @@ class CreateModel(ModelTableOperation, HareOperation):
             IndexObjectType.raise_if_object_unsupported(schema_editor, model, index)
         for constraint in model._meta.constraints:
             ConstraintObjectType.raise_if_object_unsupported(schema_editor, model, constraint)
+        # Created with the table - a database without triggers refused them after it.
+        for trigger in model._meta.triggers:
+            TriggerObjectType.raise_if_object_unsupported(schema_editor, model, trigger)
 
     async def database_forward(
         self,

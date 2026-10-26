@@ -9,12 +9,11 @@ from dataclasses import dataclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.core.config.app_config import AppConfig
 from hare.core.config.cli_config import CliConfig
 from hare.core.config.config_section import ConfigSection
 from hare.core.config.connection_config import ConnectionConfig
-from hare.core.config.constants import READ_YOUR_WRITES_MAXIMUM_SECONDS, SWAPPABLE_MODEL_LABEL_PATTERN
+from hare.core.config.constants import SWAPPABLE_MODEL_LABEL_PATTERN
 from hare.core.config.db_url_config import DBUrlConfig
 from hare.core.config.migrations_config import MigrationsConfig
 from hare.core.constants import (
@@ -53,66 +52,32 @@ class HareConfig(ConfigSection):
     migrations: MigrationsConfig | None = None
 
     def __post_init__(self) -> None:
-        self._check_connections_and_apps()
-        self._check_options()
+        self._check_apps()
         if self.swappable is not None:
-            self._check_swappable()
-        if self.migrations is not None and not isinstance(self.migrations, MigrationsConfig):
-            raise ConfigurationError("HareConfig.migrations must be a MigrationsConfig or None")
+            self._check_swappable(self.swappable)
 
-    def _check_connections_and_apps(self) -> None:
-        """Checks the connections, the apps and the routers.
+    def _check_apps(self) -> None:
+        """Checks the apps name configured connections.
 
         Raises:
-            ConfigurationError: A connection or an app is missing or of a wrong type, an app names
-                an unknown connection, or a router is neither a path nor a class.
+            ConfigurationError: An app names an unknown connection.
         """
-        if not isinstance(self.connections, dict) or not self.connections:
-            raise ConfigurationError("HareConfig.connections must be a non-empty dict")
-        for name, connection_config in self.connections.items():
-            if not isinstance(name, str) or not name:
-                raise ConfigurationError("Connection names must be non-empty strings")
-            if not isinstance(connection_config, (ConnectionConfig, DBUrlConfig)):
-                raise ConfigurationError("Connection values must be ConnectionConfig or DBUrlConfig")
-
-        if not isinstance(self.apps, dict) or not self.apps:
-            raise ConfigurationError("HareConfig.apps must be a non-empty dict")
         for name, app in self.apps.items():
-            if not isinstance(name, str) or not name:
-                raise ConfigurationError("App names must be non-empty strings")
-            if not isinstance(app, AppConfig):
-                raise ConfigurationError("App values must be AppConfig")
             if app.default_connection and app.default_connection not in self.connections:
                 raise ConfigurationError(f"App {name!r} refers to unknown connection {app.default_connection!r}")
 
-    def _check_options(self) -> None:
-        """Checks the options of plain values.
-
-        Raises:
-            ConfigurationError: An option is of a wrong type or out of its range.
-        """
-        if self.read_your_writes_seconds is not None and (
-            isinstance(self.read_your_writes_seconds, bool)
-            or not isinstance(self.read_your_writes_seconds, int | float)
-            or not 0 < self.read_your_writes_seconds <= READ_YOUR_WRITES_MAXIMUM_SECONDS
-        ):
-            raise ConfigurationError(
-                f"HareConfig.read_your_writes_seconds must be a number above 0 and up to "
-                f"{READ_YOUR_WRITES_MAXIMUM_SECONDS}, or None, got "
-                f"{ValueDescriptions.get_shown_value(self.read_your_writes_seconds)}"
-            )
-
-    def _check_swappable(self) -> None:
+    def _check_swappable(self, swappable: dict[str, str | dict[str, str]]) -> None:
         """Checks every ``swappable`` setting name and the model label it points at.
 
+        Args:
+            swappable: The ``swappable`` settings.
+
         Raises:
-            ConfigurationError: ``swappable`` isn't a dict, a setting name isn't an upper-case
-                identifier, a value is neither an ``"app_label.ModelName"`` label nor a non-empty
-                dict of branch name to one, or a label's app isn't configured.
+            ConfigurationError: A setting name isn't an upper-case identifier, a value is neither an
+                ``"app_label.ModelName"`` label nor a non-empty dict of branch name to one, or a
+                label's app isn't configured.
         """
-        if not isinstance(self.swappable, dict):
-            raise ConfigurationError('Config "swappable" must be a mapping of setting name to "app_label.ModelName"')
-        for setting, value in self.swappable.items():
+        for setting, value in swappable.items():
             if not isinstance(setting, str) or not SWAPPABLE_SETTING_NAME_PATTERN.fullmatch(setting):
                 raise ConfigurationError(
                     f'Swappable setting name {setting!r} must be an upper-case identifier such as "USER_MODEL"'
@@ -194,10 +159,8 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: A section is missing, unknown or of the wrong form.
+            ConfigurationError: A section is missing or unknown.
         """
-        if not isinstance(data, Mapping):
-            raise ConfigurationError("HareConfig must be created from a mapping")
         cls.check_known_keys(data, "the config")
 
         if "connections" not in data:
@@ -205,26 +168,13 @@ class HareConfig(ConfigSection):
         if "apps" not in data:
             raise ConfigurationError('Config must define "apps" section')
 
-        raw_connections = data["connections"]
-        if not isinstance(raw_connections, Mapping):
-            raise ConfigurationError('Config "connections" must be a mapping')
-        connections: dict[str, ConnectionConfig | DBUrlConfig] = {}
-        for name, connection_config in raw_connections.items():
-            if isinstance(connection_config, str):
-                connections[name] = DBUrlConfig(connection_config)
-            elif isinstance(connection_config, Mapping):
-                connections[name] = ConnectionConfig.from_dict(connection_config, f"connection {name!r}")
-            else:
-                raise ConfigurationError("Connection values must be mapping or string")
-
-        raw_apps = data["apps"]
-        if not isinstance(raw_apps, Mapping):
-            raise ConfigurationError('Config "apps" must be a mapping')
-        apps: dict[str, AppConfig] = {}
-        for name, app in raw_apps.items():
-            if not isinstance(app, Mapping):
-                raise ConfigurationError("App values must be mappings")
-            apps[name] = AppConfig.from_dict(app, f"app {name!r}")
+        connections: dict[str, ConnectionConfig | DBUrlConfig] = {
+            name: DBUrlConfig(connection_config)
+            if isinstance(connection_config, str)
+            else ConnectionConfig.from_dict(connection_config, f"connection {name!r}")
+            for name, connection_config in data["connections"].items()
+        }
+        apps = {name: AppConfig.from_dict(app, f"app {name!r}") for name, app in data["apps"].items()}
 
         routers = data.get("routers")
         if routers is not None:
@@ -234,8 +184,6 @@ class HareConfig(ConfigSection):
         cli = CliConfig.from_dict(cli_section) if cli_section is not None else None
 
         swappable = data.get("swappable")
-        if swappable is not None and not isinstance(swappable, Mapping):
-            raise ConfigurationError('Config "swappable" must be a mapping of setting name to "app_label.ModelName"')
 
         migrations_section = data.get("migrations")
         migrations = MigrationsConfig.from_dict(migrations_section) if migrations_section is not None else None
@@ -311,13 +259,8 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: ``modules`` isn't a mapping, or the URL or the modules aren't valid.
+            ConfigurationError: The URL or the modules aren't valid.
         """
-        if not isinstance(modules, Mapping):
-            raise ConfigurationError(
-                f"modules must be a mapping of app label to module paths, got {type(modules).__name__} - "
-                "write {'models': [...]} instead"
-            )
         config_dict = DbUrlConfigGenerator.build(db_url, app_modules=modules)
         return cls.from_dict(config_dict)
 
@@ -340,10 +283,6 @@ class HareConfig(ConfigSection):
             return source
         if isinstance(source, Mapping):
             return cls.from_dict(source)
-        if not isinstance(source, str):
-            raise ConfigurationError(
-                f"config must be a HareConfig, a dict, a file path or 'module.VARIABLE', got {type(source).__name__}"
-            )
         if os.path.splitext(source)[1].lower() in SUPPORTED_CONFIG_FILE_EXTENSIONS or cls.is_file_path(source):
             return cls.from_config_file(source)
         return cls.from_module_variable(source)
@@ -365,9 +304,8 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: The path names no importable module or no such variable, the
-                module fails as it is imported, or the variable holds neither a dict nor a
-                ``HareConfig``.
+            ConfigurationError: The path names no importable module or no such variable, or the
+                module fails as it is imported.
         """
         module_path, _, variable_name = path.strip().rpartition(".")
         if not module_path or not variable_name:
@@ -400,8 +338,4 @@ class HareConfig(ConfigSection):
             raise ConfigurationError(f"Variable {variable_name!r} not found in module {module_path!r}{hint}")
         if isinstance(value, HareConfig):
             return cast("Self", value)
-        if not isinstance(value, Mapping):
-            raise ConfigurationError(
-                f"Config variable {path!r} must be a dict or a HareConfig, got {type(value).__name__}"
-            )
         return cls.from_dict(value)

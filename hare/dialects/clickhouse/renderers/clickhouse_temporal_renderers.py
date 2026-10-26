@@ -4,13 +4,12 @@ from typing import TYPE_CHECKING
 
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DATETIME_PRECISION
 from hare.dialects.clickhouse.renderers.constants import (
-    CLICKHOUSE_DATE_OUT_OF_RANGE_MESSAGE,
     CLICKHOUSE_DATE_PART_FUNCTIONS,
     CLICKHOUSE_NOW_SQL,
-    CLICKHOUSE_SHIFTED_MOMENT_TEMPLATE,
+    CLICKHOUSE_REMAINDER_TRUNC_MICROSECONDS,
+    CLICKHOUSE_REMAINDER_TRUNC_TEMPLATE,
     CLICKHOUSE_TIME_OFFSET_PATTERN,
     CLICKHOUSE_TIME_TEXT_FORMAT,
-    CLICKHOUSE_TIMESTAMP_OUT_OF_RANGE_MESSAGE,
     CLICKHOUSE_UTC_ZONE_SQL,
     CLICKHOUSE_WHOLE_SECOND_FRACTION_PATTERN,
 )
@@ -155,6 +154,10 @@ class ClickhouseTemporalRenderers:
                 return f"toDate32({field_sql}, {zone_sql})"
             if function.trunc_type == TruncType.TIME:
                 return cls.get_time_text_sql(field_sql, zone_sql)
+            remainder_unit_microseconds = CLICKHOUSE_REMAINDER_TRUNC_MICROSECONDS.get(function.trunc_type)
+            if remainder_unit_microseconds is not None:
+                moment_sql = f"toDateTime64({field_sql}, {CLICKHOUSE_DATETIME_PRECISION}, 'UTC')"
+                return CLICKHOUSE_REMAINDER_TRUNC_TEMPLATE.format(moment_sql, zone_sql, remainder_unit_microseconds)
             # The moment is truncated at the zone's wall clock - its midnight is a moment of the zone
             # too, not of UTC. dateTrunc rounds a fraction of a moment before 1970 toward 1970 - whole
             # seconds first.
@@ -195,19 +198,16 @@ class ClickhouseTemporalRenderers:
 
     @staticmethod
     def render_temporal_shift(function: functions.TemporalShift, sql_context: SqlContext) -> str:
-        """The moment or the date shifted by whole microseconds - never a calendar day - and refused
-        beyond the ones ClickHouse holds, which its own functions turn into the last one."""
+        """The moment or the date shifted by whole microseconds - never a calendar day - by ClickHouse's
+        own ``addMicroseconds()``."""
         base_term, microseconds_term = function.args
         base_sql = function.get_arg_sql(base_term, sql_context)
         microseconds_sql = function.get_arg_sql(microseconds_term, sql_context)
         moment_sql = f"toDateTime64({base_sql}, {CLICKHOUSE_DATETIME_PRECISION}, 'UTC')"
-        message = (
-            CLICKHOUSE_DATE_OUT_OF_RANGE_MESSAGE if function.is_date else CLICKHOUSE_TIMESTAMP_OUT_OF_RANGE_MESSAGE
-        )
         shift_sql = f"toInt64({microseconds_sql})"
         if function.is_subtraction:
             shift_sql = f"negate({shift_sql})"
-        shifted_sql = CLICKHOUSE_SHIFTED_MOMENT_TEMPLATE.format(moment_sql, shift_sql, message)
+        shifted_sql = f"addMicroseconds({moment_sql}, {shift_sql})"
         if function.is_date:
             return f"toDate32({shifted_sql}, 'UTC')"
         return shifted_sql

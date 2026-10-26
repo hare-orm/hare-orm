@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.criteria.empty_criterion import EmptyCriterion
@@ -44,6 +46,29 @@ class QueryModifier:
             negation_depth=max(self.negation_depth, other.negation_depth),
             has_nullable_column=self.has_nullable_column or other.has_nullable_column,
         )
+
+    @staticmethod
+    def get_paired(
+        modifiers: list[QueryModifier], combine: Callable[[QueryModifier, QueryModifier], QueryModifier]
+    ) -> QueryModifier:
+        """Modifiers joined in pairs, level by level, in order: a condition of thousands of parts (a key
+        list compared column by column, a chain of thousands of ``filter()`` calls) is as deep as their
+        logarithm, not their number - each level of a criterion is a level of recursion where it is read
+        and rendered, and of the database's parser.
+
+        Args:
+            modifiers: The modifiers.
+            combine: Joins two of them - by AND or by OR.
+
+        Returns:
+            The joined modifier; an empty one for none.
+        """
+        while len(modifiers) > 1:
+            modifiers = [
+                combine(*modifiers[position : position + 2]) if position + 1 < len(modifiers) else modifiers[position]
+                for position in range(0, len(modifiers), 2)
+            ]
+        return modifiers[0] if modifiers else QueryModifier()
 
     def _and_criterion(self) -> Criterion:
         return QueryModifier._and(self.where_criterion, self.having_criterion)

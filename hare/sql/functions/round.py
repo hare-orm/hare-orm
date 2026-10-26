@@ -16,5 +16,3 @@ class Round(Function):
         # The precision is a SQL literal, not a bind parameter - it's part of the SQL text.
         super().__init__("ROUND", term, LiteralValue(str(int(precision))), alias=alias)
         self.precision = int(precision)
-        #: Whether the value rounded is a Decimal - a dialect rounding a double rounds it otherwise.
-        self.rounds_decimal = False

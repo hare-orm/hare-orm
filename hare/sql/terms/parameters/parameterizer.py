@@ -18,7 +18,7 @@ class Parameterizer:
         parameterizer = Parameterizer()
         customers = Table("customers")
         query = Query.from_(customers).select(customers.id).where(customers.lname == "Mustermann")
-        query.get_sql(SqliteQuery.SQL_CONTEXT.copy(parameterizer=parameterizer))
+        query.get_sql(DEFAULT_SQL_CONTEXT.copy(parameterizer=parameterizer))
         # 'SELECT "id" FROM "customers" WHERE "lname"=?', parameterizer.values == ['Mustermann']
     """
 

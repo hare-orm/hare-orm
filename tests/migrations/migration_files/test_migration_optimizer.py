@@ -65,7 +65,16 @@ def test_a_created_model_takes_its_rename_options_and_table():
     assert result[0].name == "Volume"
     assert result[0].options == {"ordering": ["id"]}
     result = optimize(create_book(), AlterModelTable("Book", "books"))
-    assert result[0].options == {"table": "books"}
+    assert result[0].options == {"table": "books", "table_is_explicit": True}
+
+
+def test_a_table_altered_and_then_the_model_renamed_keeps_its_name():
+    """The folded alteration left the table unmarked as the model's own - the rename then named it after the
+    new class, and a clean database got another table than the migrated one."""
+    result = optimize(create_book(), AlterModelTable("Book", "books"), RenameModel("Book", "Volume"))
+    assert describe(result) == ["CreateModel"]
+    assert result[0].name == "Volume"
+    assert result[0].options["table"] == "books"
 
 
 def test_field_operations_fold_into_each_other():
@@ -247,3 +256,26 @@ def test_a_created_models_field_altered_to_have_no_index_keeps_the_declared_inde
     assert describe(result) == ["CreateModel"]
     assert not dict(result[0].fields)["pages"].index
     assert result[0].options == {"indexes": [Index(fields=("id", "pages"))]}
+
+
+def test_a_field_of_an_enum_type_is_never_moved_before_the_type_is_created():
+    """A field of an ENUM type added to a model created two operations earlier was folded into the model's
+    creation - before the CreateEnumType, so a clean database had no type for its column."""
+    from enum import Enum
+
+    from hare.dialects.postgresql.fields import NativeEnumField
+    from hare.migrations.operations import CreateEnumType
+
+    class Status(Enum):
+        A = "a"
+
+    status_field = NativeEnumField(Status)
+    result = optimize(
+        create_book(),
+        CreateModel("Shelf", [("id", fields.IntField(primary_key=True))]),
+        CreateEnumType(status_field.requires_enum_type.name, ["a"]),
+        AddField("Book", "status", status_field),
+    )
+    assert describe(result) == ["CreateModel", "CreateEnumType", "CreateModel"]
+    assert result[-1].name == "Book"
+    assert [name for name, _field in result[-1].fields] == ["id", "title", "status"]

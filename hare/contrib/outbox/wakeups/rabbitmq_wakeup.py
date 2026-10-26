@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.brokers.rabbitmq_connection import RabbitMQConnection
 from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL, WAKEUP_TOPIC_SEPARATOR
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+from hare.contrib.package_checks import PackageChecks
 
 
 class RabbitMQWakeup(OutboxWakeup):
@@ -17,15 +17,12 @@ class RabbitMQWakeup(OutboxWakeup):
         exchange: The fanout exchange of the signals.
 
     Raises:
-        ConfigurationError: An empty ``url`` or ``exchange``, or the ``aio-pika`` package isn't
-            installed.
+        ConfigurationError: The ``aio-pika`` package isn't installed.
     """
 
     def __init__(self, url: str, *, exchange: str = DEFAULT_WAKEUP_CHANNEL) -> None:
         super().__init__()
-        BrokerArguments.require_package(RabbitMQConnection.aio_pika, "RabbitMQWakeup", "aio-pika", "rabbitmq")
-        BrokerArguments.require_text("url", url, "AMQP URL")
-        BrokerArguments.require_text("exchange", exchange)
+        PackageChecks.require_package(RabbitMQConnection.aio_pika, "RabbitMQWakeup", "aio-pika", "rabbitmq")
         self.exchange_name = exchange
         self.broker_connection = RabbitMQConnection(url, self.open_exchange)
 

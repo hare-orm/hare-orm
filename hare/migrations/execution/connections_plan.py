@@ -77,9 +77,13 @@ class ConnectionsPlan:
         """
         groups, applied = await self.get_groups(targets)
         for alias, steps in groups:
-            await self.report(reporter, alias, steps, fake, dry_run)
             executor = self.executors[alias]
-            # A tenant's schema, with a journal of its own, is migrated as far as the steps reach.
+
+            async def report_steps(run_steps: list[PlanStep], alias: str = alias) -> None:
+                await self.report(reporter, alias, run_steps, fake, dry_run)
+
+            # A tenant's schema, with a journal of its own, is migrated as far as the steps reach; the
+            # steps are reported under the connection's lock, without the ones another migrate ran.
             await executor.migrate(
                 executor.get_targets_of_steps(steps),
                 steps=steps,
@@ -87,6 +91,7 @@ class ConnectionsPlan:
                 fake=fake,
                 dry_run=dry_run,
                 progress=progress,
+                report=report_steps,
             )
             for step in steps:
                 key = MigrationKey(app_label=step.migration.app_label, name=step.migration.name)

@@ -56,7 +56,9 @@ It then cuts them into migrations per app — an operation needing a new migrati
 already depends on its own app's goes into a next migration of its app — and each migration depends on
 the new migrations of what it needs and on the existing migrations of an app whose model it needs. A
 relation closing a cycle among models created together is added by an `AddField` after them (a
-many-to-many relation rather than a foreign key).
+many-to-many relation rather than a foreign key), and one closing a cycle among models deleted together
+— a model deleted with the through model of its many-to-many relation, two models pointing at each
+other — is removed by a `RemoveField` before them.
 
 Deleting a model referenced from another app makes the deleting migration depend on the other app's new
 migration that removes or repoints the reference. `makemigrations` for the deleting app alone is refused
@@ -71,7 +73,7 @@ relation field is removed first. An added model with exactly the same fields and
 model of the same app that isn't renamed (the rename question answered no, or not asked — e.g. two
 identical models renamed at once) gets a "possible unrecognized rename" warning from `makemigrations` —
 the generated `CreateModel`/`DeleteModel` pair drops the old table's rows; answer the rename with
-`--rename` if it's a rename.
+`--rename` if it's a rename — for several identical models, one `--rename` for each.
 
 `AlterModelOptions.options` is the model's whole set of options that have no operation of their own
 (everything except the table, schema, indexes, constraints, triggers, primary key, views, materialized
@@ -204,17 +206,16 @@ empty value (`0`, `''`) — a `unique=True` field too, its rows then sharing tha
 
 ### <a id="remove-field"></a>`RemoveField`
 
-`RemoveField` on SQLite drops the column with `ALTER TABLE ... DROP COLUMN`
-(`features.supports_drop_column`) when the model keeps SQLite from nothing — decided by the migration
-state alone, nothing read from the database: the field isn't a key, unique, indexed, a relation or
-generated; the model has no CHECK constraint, generated column or trigger; and none of its indexes is a
-partial or an expression index or names the field, nor is any unique constraint conditional or naming it.
-An object the migrations don't know of over the column (an index, a trigger or a view made by `RunSQL`)
-makes SQLite refuse the `DROP COLUMN`. Otherwise the table is rebuilt from the model the migrations know:
-created anew, the rows copied, its indexes, unique constraints and triggers created again. A rebuild keeps
-only the columns the migration state has, so a column the state no longer knows (removed with
-[`SeparateDatabaseAndState`](#separate-database-and-state)) is dropped by the next rebuild of its table;
-an index, trigger or view created by `RunSQL` on the table isn't created again either.
+`RemoveField` on SQLite drops the column with `ALTER TABLE ... DROP COLUMN` when the model keeps SQLite from
+nothing — decided by the migration state alone, nothing read from the database: the field isn't a key, unique,
+indexed, a relation or generated; the model has no CHECK constraint, generated column or trigger; and none of
+its indexes is a partial or an expression index or names the field, nor is any unique constraint conditional
+or naming it. An object the migrations don't know of over the column (an index, a trigger or a view made by
+`RunSQL`) makes SQLite refuse the `DROP COLUMN`. Otherwise the table is rebuilt from the model the migrations
+know: created anew, the rows copied, its indexes, unique constraints and triggers created again. A rebuild
+keeps only the columns the migration state has, so a column the state no longer knows (removed with
+[`SeparateDatabaseAndState`](#separate-database-and-state)) is dropped by the next rebuild of its table; an
+index, trigger or view created by `RunSQL` on the table isn't created again either.
 
 ### <a id="alter-field"></a>`AlterField`
 
@@ -226,15 +227,21 @@ type; on SQLite the referencing tables are rebuilt. The values are converted wit
 PostgreSQL a type pair it can't cast (`integer` to `uuid`) fails.
 
 `AlterField` to a column type that can't hold a value the table already stores raises
-`FieldNarrowingDataLossError` before anything changes, on every dialect: a shorter `max_length` (or a
-text, number or boolean turned into a `CharField` too short for its text), a `DecimalField` with fewer
-decimal places or whole digits, a smaller integer type, and a float or decimal turned into an integer or
-a decimal it doesn't fit. PostgreSQL would otherwise cut or round the value in the cast, and SQLite would
-keep it beyond the column's declared size. Fix or widen those values first; a narrower type every stored
-value fits in alters as usual. SQLite copies every value into the rebuilt table as it is, so a value the new
-field doesn't read — a text that is no number, date or boolean, no `UUID`, no JSON document, no duration,
-no bytes — raises `OperationalError` before the table changes (`the column holds "abc", which is no
-UUIDField`).
+`FieldNarrowingDataLossError` before anything changes, on every dialect: a shorter `max_length` (or a text,
+number or boolean turned into a `CharField` too short for its text), a `DecimalField` with fewer decimal
+places or whole digits, a smaller integer type, a float or decimal turned into an integer or a decimal it
+doesn't fit, an integer or decimal turned into a float that rounds it (a `BigIntField` past 2⁵³, a
+`DecimalField` of more than 15 digits), a datetime with a time of day turned into a date, an integer other
+than 0 and 1 turned into a boolean, an integer or a text of no member turned into an
+`IntEnumField`/`CharEnumField` (or an enum losing a member a row holds), and on ClickHouse a `Float64` turned
+into a `Float32` (`Float32Field`), a moment past a `DateTime`'s range or with more digits after the second
+than its precision (`ClickhouseDatetimeField`), a day outside a `Date`'s range (`ClickhouseDateField`) and a
+text longer in bytes than a `FixedStringField`. PostgreSQL would otherwise cut or round the value in the cast,
+SQLite would keep it beyond the column's declared size, and ClickHouse would wrap it around. Fix or widen
+those values first; a narrower type every stored value fits in alters as usual. SQLite copies every value into
+the rebuilt table as it is, so a value the new field doesn't read — a text that is no number, date or boolean,
+no `UUID`, no JSON document, no duration, no bytes — raises `OperationalError` before the table changes (`the
+column holds "abc", which is no UUIDField`).
 
 On ClickHouse, a text column changed to another type converts its texts after the column has taken the new
 type: a text the server can't read as a value of that type would leave the table unreadable, turn into NULL
@@ -480,7 +487,8 @@ class RemoveCollation(CreateCollation):
 ```
 
 `DropSchema`, and `CreateSchema` going back, drop only an empty schema — the database refuses one that still
-holds objects, so a schema made outside the migrations is never dropped with what it holds.
+holds objects, so a schema made outside the migrations is never dropped with what it holds. On SQLite,
+which creates no schema by DDL (an attached database stands for one), both are skipped.
 
 `CreateCollation` creates a collation for `Collate(...)` — e.g. a case-insensitive ICU one:
 `CreateCollation("case_insensitive", "und-u-ks-level2", provider="icu", deterministic=False)`.
@@ -490,7 +498,8 @@ collation DDL (`Features.supports_collations`) — both are skipped there with a
 The `apps` given to `code` and `reverse_code` hold the models as the migrations applied before this one left
 them. On a rollback they hold only migrations still applied: an app depending on this one that the same
 run has already unapplied is not in them, so deleting rows through `apps.get_model()` does not cascade
-into its dropped tables.
+into its dropped tables. `apps.get_model("app.Model")` takes the model's label, as `HareContext.get_model()`
+does.
 
 `RunPython.noop` is a ready-made no-op you can use as `reverse_code` for a one-way data migration.
 `elidable=True` leaves the operation out when its migration is
@@ -582,6 +591,14 @@ Override `deconstruct()` only when the arguments aren't stored as given.
 
 hare's own operations subclass `HareOperation` (`hare.migrations.operations`), an `Operation` that
 changes the state and the database separately; an operation of your own subclasses `Operation`.
+
+`migrate` takes migrations back on one state, operation by operation, with what each operation changed in
+it kept aside — a rollback of many migrations costs what applying them does. An operation of your own may
+change a field of a model state in place, so the state before it is kept whole; its `database_backward()`
+gets the state after the operation (`old_state`) and a copy of the state before it (`new_state`). Set
+`backward_reads_state_left = False` when `database_backward()` doesn't read `old_state`, or
+`backward_reads_state_reached = False` when it doesn't read `new_state` — the state is then not copied for
+it, and the side it doesn't read is the other state.
 
 ## <a id="extensions"></a>Extensions
 

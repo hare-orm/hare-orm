@@ -16,6 +16,7 @@ from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import F, Q, Value
 from hare.query.functions import Count, JSONArray, JSONObject, Sum, Upper
 from tests.shared_models.typed_row_models import TypedRow, TypedRowNote
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.sqlite_float_text import SqliteFloatText
 
 
@@ -32,6 +33,11 @@ async def json_object_context() -> AsyncGenerator[Any]:
         yield ctx
 
 
+def amount(value: Decimal) -> dict[str, Decimal]:
+    """The amount of a row where the database has a DecimalField - SQLite has none."""
+    return {"amount": value} if DatabaseUnderTest.holds_decimal_fields() else {}
+
+
 @pytest_asyncio.fixture
 async def rows(json_object_context: Any) -> AsyncGenerator[list[TypedRow]]:
     created = [
@@ -40,7 +46,7 @@ async def rows(json_object_context: Any) -> AsyncGenerator[list[TypedRow]]:
             number=3,
             big_number=2**40,
             ratio=1.5,
-            amount=Decimal("1.20"),
+            **amount(Decimal("1.20")),
             name="a\"b\\c'",
             body="é\n\t",
             flag=True,
@@ -56,14 +62,14 @@ async def rows(json_object_context: Any) -> AsyncGenerator[list[TypedRow]]:
             id=2,
             number=-7,
             ratio=1e20,
-            amount=Decimal("-0.05"),
+            **amount(Decimal("-0.05")),
             name="z",
             flag=False,
             at=datetime.datetime(2020, 1, 2, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30))),
             clock=datetime.time(8, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30))),
             data={"k": 2, "n": {"m": False}},
         ),
-        await TypedRow.objects.create(id=3, ratio=2.0, amount=Decimal("100"), data="text"),
+        await TypedRow.objects.create(id=3, ratio=2.0, **amount(Decimal("100")), data="text"),
         await TypedRow.objects.create(id=4, number=4, ratio=0.1 + 0.2, name="z", data={"k": 2}),
         await TypedRow.objects.create(id=5, ratio=1e-7, data=12.5),
     ]
@@ -75,7 +81,7 @@ COLUMNS = (
     "number",
     "big_number",
     "ratio",
-    "amount",
+    *(("amount",) if DatabaseUnderTest.holds_decimal_fields() else ()),
     "name",
     "body",
     "flag",
@@ -121,7 +127,7 @@ async def test_json_object_writes_every_type(rows):
         "number": 3,
         "big_number": 2**40,
         "ratio": 1.5,
-        "amount": 1.2,
+        **amount(1.2),
         "name": "a\"b\\c'",
         "body": "é\n\t",
         "flag": written["flag"][0],
@@ -136,7 +142,7 @@ async def test_json_object_writes_every_type(rows):
     assert objects[1]["flag"] == written["flag"][1]
     assert objects[1]["at"] == written["at"][1]
     assert objects[1]["clock"] == written["clock"][1]
-    assert objects[1]["amount"] == -0.05
+    assert objects[1].get("amount", -0.05) == -0.05
     assert objects[4]["body"] is None
     assert objects[2]["data"] == "text"
     assert objects[4]["data"] == 12.5
@@ -153,6 +159,7 @@ async def test_json_object_writes_a_float_as_its_database_does(rows):
         assert ratios == [1.5, 10**20, 2, 0.30000000000000004, 1e-07]
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_json_object_literals_expressions_and_nesting(rows):
     [value] = (
@@ -181,15 +188,15 @@ async def test_json_object_literals_expressions_and_nesting(rows):
         "text": "x'y",
         "integer": 5,
         "number": 2.5,
-        "flag": 1 if is_sqlite() else True,
+        "flag": True,
         "nothing": None,
         "amount": 1.5,
         "day": "2021-03-04",
-        "at": "2021-03-04 05:06:07+00:00" if is_sqlite() else "2021-03-04T05:06:07+00:00",
+        "at": "2021-03-04T05:06:07+00:00",
         "raw_integer": 7,
         "raw_number": 0.5,
         "document": {"a": [1]},
-        "payload": "0010" if is_sqlite() else "\\x0010",
+        "payload": "\\x0010",
         "nested": {"upper": "A\"B\\C'", "doubled": 6, "empty": {}},
         "computed": 2.4,
     }
@@ -213,6 +220,7 @@ async def test_json_array_writes_every_type_in_order(rows):
     assert arrays == [[json_object[column] for column in COLUMNS] for json_object in objects]
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_json_array_literals_expressions_and_nesting(rows):
     [value] = (
@@ -234,8 +242,7 @@ async def test_json_array_literals_expressions_and_nesting(rows):
         )
         .values_list("value", flat=True)
     )
-    flag = 1 if is_sqlite() else True
-    assert value == ["x'y", 5, None, flag, 1.5, "2021-03-04", 7, 0.5, {"a": [1]}, ["A\"B\\C'", 6, []], {"inner": [3]}]
+    assert value == ["x'y", 5, None, True, 1.5, "2021-03-04", 7, 0.5, {"a": [1]}, ["A\"B\\C'", 6, []], {"inner": [3]}]
 
 
 @pytest.mark.asyncio

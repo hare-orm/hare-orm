@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS "event" ( /* This table contains a list of all the ev
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE /* FK to tournament */,
     "modified" TIMESTAMP NOT NULL,
-    "prize" VARCHAR(40),
+    "prize" REAL,
     "token" VARCHAR(100) NOT NULL /* Unique token */,
     "key" VARCHAR(100) NOT NULL
 );
@@ -311,8 +311,8 @@ async def test_a_cycle_of_foreign_keys_is_created_with_its_foreign_keys():
     async with hare_test_context(
         ["tests.schema.models_cyclic_nullable"], db_url=db_url, connection_label="models"
     ) as ctx:
-        head_model = ctx.apps.get_model("models", "CycleHead")
-        tail_model = ctx.apps.get_model("models", "CycleTail")
+        head_model = ctx.apps.get_model("models.CycleHead")
+        tail_model = ctx.apps.get_model("models.CycleTail")
         head = await head_model.objects.create(id=1)
         tail = await tail_model.objects.create(id=1, head=head)
         head.tail = tail
@@ -621,7 +621,7 @@ SQLITE_SCHEMA_NO_DB_CONSTRAINT_SQL = r"""CREATE TABLE "event" ( /* This table co
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL /* FK to tournament */,
     "modified" TIMESTAMP NOT NULL,
-    "prize" VARCHAR(40),
+    "prize" REAL,
     "token" VARCHAR(100) NOT NULL /* Unique token */,
     "key" VARCHAR(100) NOT NULL
 );
@@ -716,7 +716,7 @@ CREATE TABLE "event" ( /* This table contains a list of all the events */
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE /* FK to tournament */,
     "modified" TIMESTAMP NOT NULL,
-    "prize" VARCHAR(40),
+    "prize" REAL,
     "token" VARCHAR(100) NOT NULL /* Unique token */,
     "key" VARCHAR(100) NOT NULL
 );
@@ -759,7 +759,7 @@ CREATE TABLE "event" ( /* This table contains a list of all the events */
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE /* FK to tournament */,
     "modified" TIMESTAMP NOT NULL,
-    "prize" VARCHAR(40),
+    "prize" REAL,
     "token" VARCHAR(100) NOT NULL /* Unique token */,
     "key" VARCHAR(100) NOT NULL
 );
@@ -785,7 +785,7 @@ ASYNCPG_SCHEMA_NO_DB_CONSTRAINT_SQL = """CREATE TABLE "event" (
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL,
     "modified" TIMESTAMPTZ NOT NULL,
-    "prize" DECIMAL(10,2),
+    "prize" DOUBLE PRECISION,
     "token" VARCHAR(100) NOT NULL,
     "key" VARCHAR(100) NOT NULL,
     CONSTRAINT "uid_event_tournam_a5b7304a103a" UNIQUE ("tournament_id", "key"),
@@ -900,7 +900,7 @@ CREATE TABLE "event" (
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE,
     "modified" TIMESTAMPTZ NOT NULL,
-    "prize" DECIMAL(10,2),
+    "prize" DOUBLE PRECISION,
     "token" VARCHAR(100) NOT NULL,
     "key" VARCHAR(100) NOT NULL,
     CONSTRAINT "uid_event_tournam_a5b7304a103a" UNIQUE ("tournament_id", "key"),
@@ -1003,7 +1003,7 @@ CREATE TABLE IF NOT EXISTS "event" (
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE,
     "modified" TIMESTAMPTZ NOT NULL,
-    "prize" DECIMAL(10,2),
+    "prize" DOUBLE PRECISION,
     "token" VARCHAR(100) NOT NULL,
     "key" VARCHAR(100) NOT NULL,
     CONSTRAINT "uid_event_tournam_a5b7304a103a" UNIQUE ("tournament_id", "key"),
@@ -1104,7 +1104,7 @@ CREATE TABLE "event" (
     "name" TEXT NOT NULL,
     "tournament_id" SMALLINT NOT NULL CONSTRAINT "fk_event_tournam_c084288f171c" REFERENCES "tournament" ("tid") ON DELETE CASCADE,
     "modified" TIMESTAMPTZ NOT NULL,
-    "prize" DECIMAL(10,2),
+    "prize" DOUBLE PRECISION,
     "token" VARCHAR(100) NOT NULL,
     "key" VARCHAR(100) NOT NULL,
     CONSTRAINT "uid_event_tournam_a5b7304a103a" UNIQUE ("tournament_id", "key"),
@@ -1277,9 +1277,9 @@ async def test_sqlite_schema_qualified_models_run_queries():
         ["tests.schema.models_schema_qualified"],
         db_url=get_url_with_attached_databases("sqlite+aiosqlite://:memory:", ["custom"]),
     ) as ctx:
-        category_model = ctx.apps.get_model("models", "SchemaCategory")
-        product_model = ctx.apps.get_model("models", "SchemaProduct")
-        tag_model = ctx.apps.get_model("models", "SchemaTag")
+        category_model = ctx.apps.get_model("models.SchemaCategory")
+        product_model = ctx.apps.get_model("models.SchemaProduct")
+        tag_model = ctx.apps.get_model("models.SchemaTag")
 
         category = await category_model.objects.create(name="books")
         product = await product_model.objects.create(name="novel", category=category)
@@ -1430,7 +1430,7 @@ async def test_generate_schemas_creates_meta_triggers():
     async with hare_test_context(
         ["tests.schema.test_generate_schema"], db_url=db_url, app_label=app_label, connection_label="models"
     ) as ctx:
-        counter_model = ctx.apps.get_model(app_label, model_name)
+        counter_model = ctx.apps.get_model(f"{app_label}.{model_name}")
         first_counter = await counter_model.objects.create(n=3)
         await first_counter.refresh_from_db()
 

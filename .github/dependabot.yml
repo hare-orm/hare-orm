@@ -21,6 +21,11 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      # The arrays postgres-protocol reads iterate by fallible-iterator 0.2's trait, which a newer one's
+      # doesn't reach - it moves when postgres-protocol does.
+      - dependency-name: fallible-iterator
+        versions: [">= 0.3"]
 
   - package-ecosystem: github-actions
     directory: /

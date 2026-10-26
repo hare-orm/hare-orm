@@ -179,11 +179,11 @@ async def test_branches_follow_the_targets_through_migrations(project: GenericFo
         await migrate(context, apps_config)
         assert {"gfk_note", "gfk_tag"} <= await get_table_names(context)
 
-        blog_post_model = context.apps.get_model("blog", "Post")
-        forum_post_model = context.apps.get_model("forum", "Post")
-        photo_model = context.apps.get_model("blog", "Photo")
-        note_model = context.apps.get_model("notes", "Note")
-        tag_model = context.apps.get_model("notes", "Tag")
+        blog_post_model = context.apps.get_model("blog.Post")
+        forum_post_model = context.apps.get_model("forum.Post")
+        photo_model = context.apps.get_model("blog.Photo")
+        note_model = context.apps.get_model("notes.Note")
+        tag_model = context.apps.get_model("notes.Tag")
         blog_post = await blog_post_model.objects.create(id=1, title="b")
         forum_post = await forum_post_model.objects.create(id=1, subject="f")
         photo = await photo_model.objects.create(id=1, url="u")
@@ -209,8 +209,8 @@ async def test_branches_follow_the_targets_through_migrations(project: GenericFo
         assert any(isinstance(operation, AddConstraint) for operation in operations)
         project.keep_written(written)
         await migrate(context, apps_config)
-        note_model = context.apps.get_model("notes", "Note")
-        photo_model = context.apps.get_model("blog", "Photo")
+        note_model = context.apps.get_model("notes.Note")
+        photo_model = context.apps.get_model("blog.Photo")
         assert await note_model.objects.order_by("id").values_list("id", "target__type") == [
             (1, "post"),
             (2, "forum_post"),
@@ -223,7 +223,7 @@ async def test_branches_follow_the_targets_through_migrations(project: GenericFo
     apps_config = project.write_version(THIRD_TARGETS)
     config = build_config(connection_config, apps_config, {"TAG_TARGETS": TAG_TARGETS})
     async with open_context(config, drop_db=True) as context:
-        note_model = context.apps.get_model("notes", "Note")
+        note_model = context.apps.get_model("notes.Note")
         await note_model.objects.filter(id=3).delete()
         _written, operations = await make_migrations(context, apps_config)
         assert any(isinstance(operation, RemoveField) and operation.name == "photo" for operation in operations)

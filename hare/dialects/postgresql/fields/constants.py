@@ -113,3 +113,10 @@ EXPORTED_MODULES = {
     "RangeField": "hare.dialects.postgresql.fields.ranges",
     "TSVectorField": "hare.dialects.postgresql.fields.ts_vector_field",
 }
+
+#: The types of values of the PostgreSQL fields no other field's values are stored in, as refusals name them -
+#: an UPDATE setting such a field to another type's value, or another field to one, is refused.
+MAC_ADDRESS_VALUE_TYPE = "a MAC address"
+TEXT_SEARCH_VECTOR_VALUE_TYPE = "a text search vector"
+HSTORE_VALUE_TYPE = "an hstore"
+INTERVAL_VALUE_TYPE = "an interval"

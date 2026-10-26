@@ -73,6 +73,8 @@ CLICKHOUSE_DISTRIBUTED_CREATE_PATTERN = re.compile(
 )
 #: The macro a replica path names its shard by - a replicated table's replicas are then those of one shard.
 CLICKHOUSE_SHARD_MACRO = "{shard}"
+#: The macro a replica path names its table's own UUID by - the one a remade table's path differs by.
+CLICKHOUSE_UUID_MACRO = "{uuid}"
 #: The refusal of a distributed table whose local tables a plain engine keeps on a cluster with several
 #: replicas of a shard - a written row lands on one replica, and a read may ask another.
 CLICKHOUSE_UNREPLICATED_LOCAL_TABLES_MESSAGE = (

@@ -40,8 +40,8 @@ ENUM_MEMBER_NAME_PATTERN = re.compile(r"\W+")
 TRIGGER_EVENT_KEYWORD_RE = re.compile(r"\b(?:INSERT|UPDATE|DELETE|TRUNCATE|OR|OF)\b", re.IGNORECASE)
 
 
-#: An index key's order when it places NULLs as its direction does by default (Postgres: last
-#: ascending, first descending) - declarable as a plain or ``"-"``-prefixed field name.
+#: An index key's order when it places NULLs as its direction does by default (last ascending, first
+#: descending) - declarable as a plain or ``"-"``-prefixed field name.
 DEFAULT_KEY_ORDERS = frozenset({"ASC NULLS LAST", "DESC NULLS FIRST"})
 
 INT_LITERAL_RE = re.compile(r"^-?\d+$")

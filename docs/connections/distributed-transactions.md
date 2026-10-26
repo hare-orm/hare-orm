@@ -56,7 +56,7 @@ raised.
 An exception raised inside the block itself (before step 1) rolls everything back as normal. An empty
 `participants`, an alias given twice (the coordinator among the participants too) and an alias already
 inside a transaction raise `QueryError` before anything opens. An empty alias (`""` or `None`) is the
-default connection, as in `Transactions.atomic()` - one given among the participants names the
+default connection, as in `Transactions.atomic()` — one given among the participants names the
 coordinator when that is the default connection, which is an alias given twice.
 
 A cancellation that arrives while a participant's `PREPARE TRANSACTION` is in flight waits for it to

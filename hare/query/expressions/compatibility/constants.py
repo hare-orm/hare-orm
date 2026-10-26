@@ -34,9 +34,6 @@ COALESCE_NUMERIC_FIELD_DEFAULT_FIELD_CLASSES: dict[type[Field[Any]], tuple[type[
     FloatField: (IntField, FloatField, DecimalField),
     DecimalField: (IntField, DecimalField),
 }
-#: The numeric main-field classes of `Coalesce` - a Decimal default next to one of them (or next to
-#: a main argument of unknown type) is compared/aggregated as a number, never as text.
-COALESCE_NUMERIC_FIELD_CLASSES: tuple[type[Field[Any]], ...] = tuple(COALESCE_NUMERIC_FIELD_LITERAL_TYPES)
 
 #: The names of the types of values, as refusals name them. The type of values every function of numbers
 #: refuses is text - what tells such a function from another.

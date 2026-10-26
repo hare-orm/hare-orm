@@ -5,6 +5,7 @@ from hare.core.connections.connections import Connections
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
+from hare.fields.data.numeric.int_field import IntField
 from hare.fields.enums import OnDelete
 from hare.inspectdb import (
     DuplicateModelClassNameError,
@@ -212,6 +213,21 @@ async def test_inspect_whole_schema_covers_all_tables(connection):
 
 
 @pytest.mark.asyncio
+async def test_inspect_whole_schema_leaves_out_the_migration_journal(connection):
+    """A whole schema's inspectdb made a model of hare's own migration journal."""
+    await connection.execute_script(
+        "CREATE TABLE hare_migrations (id INTEGER PRIMARY KEY, app VARCHAR(255), name VARCHAR(255))"
+    )
+    try:
+        source = await SchemaInspector.inspect(connection)
+        assert "hare_migrations" not in source
+        assert "class Tournament(Model):" in source
+        assert "hare_migrations" in await SchemaInspector.inspect(connection, ["hare_migrations"])
+    finally:
+        await connection.execute_script("DROP TABLE hare_migrations")
+
+
+@pytest.mark.asyncio
 async def test_inspect_whole_schema_names_each_view_and_the_triggers_on_it(connection):
     """A view isn't a model - inspectdb names it, with the triggers on it, instead of leaving it out
     silently."""
@@ -292,14 +308,14 @@ def test_sqlite_type_map_orders_varchar_before_char():
 def test_sqlite_json_text_column_maps_back_to_jsonfield():
     """JSONField's own SQLite column type (JSON_TEXT, chosen for its TEXT affinity) must still
     read back as a JSONField, not a TextField."""
-    from hare.dialects.enums import DialectName
+    from hare.dialects.sqlite.enums import SqliteDialectName
     from hare.fields.data.json import JSONField
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     column_type = JSONField().get_column_type(DialectRegistry.get_dialect("sqlite"))
     column = ColumnInfo(name="payload", db_type=column_type, nullable=True, is_pk=False, is_unique=False)
 
-    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(DialectName.SQLITE, column)
+    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(SqliteDialectName.SQLITE, column)
 
     assert (field_path, is_ambiguous) == ("hare.fields.data.json.JSONField", False)
 
@@ -311,20 +327,20 @@ def test_postgres_naive_timestamp_is_ambiguous_not_datetimefield():
     without time zone", so a genuine naive-timestamp column used to map to DatetimeField too,
     silently changing its semantics (naive -> tz-aware) the next time a migration diffs
     against the real schema."""
-    from hare.dialects.enums import DialectName
+    from hare.dialects.postgresql.enums import PostgresqlDialectName
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     def column(db_type: str) -> ColumnInfo:
         return ColumnInfo(name="created_at", db_type=db_type, nullable=False, is_pk=False, is_unique=False)
 
     naive_path, _, naive_ambiguous = ColumnTypeMapper.map_column_type(
-        DialectName.POSTGRESQL, column("timestamp without time zone")
+        PostgresqlDialectName.POSTGRESQL, column("timestamp without time zone")
     )
     assert naive_path == "hare.dialects.postgresql.fields.NaiveDatetimeField"
     assert naive_ambiguous is False
 
     aware_path, _, aware_ambiguous = ColumnTypeMapper.map_column_type(
-        DialectName.POSTGRESQL, column("timestamp with time zone")
+        PostgresqlDialectName.POSTGRESQL, column("timestamp with time zone")
     )
     assert aware_path == "hare.fields.data.temporal.DatetimeField"
     assert aware_ambiguous is False
@@ -382,18 +398,22 @@ def test_sqlite_char_36_maps_to_uuidfield_not_charfield():
     UUIDField column round-tripped through inspectdb silently lost its real type. A genuine
     VARCHAR(36) (never what UUIDField itself declares) must still map to CharField, not get
     swept up by the same heuristic."""
-    from hare.dialects.enums import DialectName
+    from hare.dialects.sqlite.enums import SqliteDialectName
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     def column(db_type: str) -> ColumnInfo:
         return ColumnInfo(name="token", db_type=db_type, nullable=False, is_pk=False, is_unique=False, max_length=36)
 
-    uuid_path, uuid_kwargs, uuid_ambiguous = ColumnTypeMapper.map_column_type(DialectName.SQLITE, column("CHAR(36)"))
+    uuid_path, uuid_kwargs, uuid_ambiguous = ColumnTypeMapper.map_column_type(
+        SqliteDialectName.SQLITE, column("CHAR(36)")
+    )
     assert uuid_path == "hare.fields.data.uuid_field.UUIDField"
     assert uuid_kwargs == {}
     assert uuid_ambiguous is False
 
-    varchar_path, _, varchar_ambiguous = ColumnTypeMapper.map_column_type(DialectName.SQLITE, column("VARCHAR(36)"))
+    varchar_path, _, varchar_ambiguous = ColumnTypeMapper.map_column_type(
+        SqliteDialectName.SQLITE, column("VARCHAR(36)")
+    )
     assert varchar_path == "hare.fields.data.text.CharField"
     assert varchar_ambiguous is False
 
@@ -720,6 +740,7 @@ async def test_generate_model_source_fk_target_uses_given_app_label(connection):
     assert "'models.Employee'" not in source
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_literal_db_defaults(connection):
     table = await DatabaseCatalog.inspect_table(connection, "defaultmodel")
@@ -746,6 +767,18 @@ async def test_generate_model_source_reconstructs_db_default_on_primary_key(conn
     compile(source, "<generated>", "exec")
     assert "from hare.fields.db_defaults import" in source
     assert "token" in source and "primary_key=True" in source and "SqlDefault(" in source
+
+
+@pytest.mark.postgresql_models
+@pytest.mark.asyncio
+async def test_a_generated_array_column_keeps_its_element_field(connection):
+    """The output field of a generated array column was built without its element field - inspectdb
+    failed on ArrayField() missing base_field."""
+    source = await SchemaInspector.inspect(connection, tables=["generatedarraything"])
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - the generated module imports
+    tags = namespace["Generatedarraything"]._meta.fields_map["tags"]
+    assert type(tags.output_field.base_field) is IntField
 
 
 @requires_features(dialect="postgresql")
@@ -804,10 +837,9 @@ async def test_generate_model_source_reconstructs_decimal_precision(connection):
     assert "decimal_nodec = fields.DecimalField(max_digits=18, decimal_places=0)" in source
 
 
-@requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_column_description(connection):
-    """SQLite has no column-comment feature at all - Postgres-only."""
+    """SQLite keeps a column's comment inside CREATE TABLE - read back from there too."""
     table = await DatabaseCatalog.inspect_table(connection, "comments")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -1032,10 +1064,9 @@ async def test_generate_model_source_plain_index_has_no_special_kwargs(connectio
     assert "condition=" not in source
 
 
-@requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_table_description(connection):
-    """SQLite has no table-comment feature at all - Postgres-only."""
+    """SQLite keeps the table's comment inside CREATE TABLE - read back from there too."""
     table = await DatabaseCatalog.inspect_table(connection, "comments")
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
@@ -1514,6 +1545,83 @@ async def test_generate_model_source_reconstructs_array_of_varchar_length(connec
     assert isinstance(field, ArrayField)
     assert isinstance(field.base_field, CharField)
     assert field.base_field.max_length == 12
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_generate_model_source_reconstructs_array_dimensions(connection):
+    """format_type() writes integer[][] as integer[] - a two-dimensional column was inspected as an
+    array of integers, whose rows then failed to read. Its declared dimensions are attndims."""
+    await connection.execute_script(
+        "CREATE TABLE scratch_array_dimensions (id serial primary key, grid integer[][] NOT NULL, "
+        "cube varchar(5)[][][], line integer[])"
+    )
+
+    table = await DatabaseCatalog.inspect_table(connection, "scratch_array_dimensions")
+    source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
+
+    compile(source, "<generated>", "exec")
+    assert "grid = fields.ArrayField(base_field=fields.ArrayField(base_field=fields.IntField()))" in source
+    assert (
+        "cube = fields.ArrayField(base_field=fields.ArrayField(base_field=fields.ArrayField("
+        "base_field=fields.CharField(max_length=5))), null=True)" in source
+    )
+    assert "line = fields.ArrayField(base_field=fields.IntField(), null=True)" in source
+
+    generated_cls = await _load_generated_model(source, "ScratchArrayDimensions")
+    from hare.fields import ArrayField
+    from hare.fields.data.numeric import IntField
+
+    field = generated_cls._meta.fields_map["grid"]
+    assert isinstance(field.base_field, ArrayField)
+    assert isinstance(field.base_field.base_field, IntField)
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_generate_model_source_reconstructs_arrays_of_postgresql_specific_types(connection):
+    """An array of intervals, times, timestamps or addresses came back as a TextField with a TODO - a table
+    made from the model held text."""
+    await connection.execute_script(
+        "CREATE TABLE scratch_array_specific_types (id serial primary key, lasts interval[], opens time[], "
+        "stamps timestamp[], hosts inet[], networks cidr[], cards macaddr[], rounded timestamptz(2)[])"
+    )
+
+    table = await DatabaseCatalog.inspect_table(connection, "scratch_array_specific_types")
+    source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
+
+    compile(source, "<generated>", "exec")
+    for line in (
+        "lasts = fields.ArrayField(base_field=IntervalField(), null=True)",
+        "opens = fields.ArrayField(base_field=NaiveTimeField(), null=True)",
+        "stamps = fields.ArrayField(base_field=NaiveDatetimeField(), null=True)",
+        "hosts = fields.ArrayField(base_field=InetField(), null=True)",
+        "networks = fields.ArrayField(base_field=CidrField(), null=True)",
+        "cards = fields.ArrayField(base_field=MacAddressField(), null=True)",
+    ):
+        assert line in source, line
+    assert "couldn't confidently map" not in source
+    # The precision of its elements is kept by no field - said where the field is.
+    rounded_line = next(line for line in source.splitlines() if line.strip().startswith("rounded ="))
+    assert "TODO" in source[source.index(rounded_line) - 400 : source.index(rounded_line) + len(rounded_line) + 400]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_an_array_made_with_no_declaration_is_one_dimensional(connection):
+    """A column of CREATE TABLE AS records no dimensions (attndims 0) - inspected as an array of one, as a
+    declared integer[] is, so drift compares it equal to the table the model makes. A character(n)[] is of
+    FixedCharField, not of CharField - the table the model made held varchar(n)[]."""
+    await connection.execute_script(
+        "CREATE TABLE scratch_array_ctas AS SELECT ARRAY[[1, 2], [3, 4]] AS grid, ARRAY['ab']::char(3)[] AS codes"
+    )
+
+    table = await DatabaseCatalog.inspect_table(connection, "scratch_array_ctas")
+    source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
+
+    assert [column.array_dimensions for column in table.columns] == [1, 1]
+    assert "grid = fields.ArrayField(base_field=fields.IntField(), null=True)" in source
+    assert "codes = fields.ArrayField(base_field=FixedCharField(max_length=3), null=True)" in source
 
 
 @requires_features(dialect="postgresql")
@@ -3269,11 +3377,10 @@ async def test_a_through_table_without_a_unique_index_is_a_many_to_many_field_li
 @requires_features(dialect="sqlite")
 @pytest.mark.asyncio
 async def test_sqlite_columns_hare_declares_for_several_fields_are_marked(connection):
-    """hare declares BooleanField columns INT and DecimalField columns VARCHAR(40) on SQLite - inspectdb
-    gave IntField and CharField(max_length=40) without saying the column may be either."""
-    source = await SchemaInspector.inspect(connection, tables=["booleanfields", "decimalfields"])
+    """hare declares BooleanField columns INT on SQLite - inspectdb gave IntField without saying the
+    column may be either."""
+    source = await SchemaInspector.inspect(connection, tables=["booleanfields"])
     assert "a column of 0/1 may be a BooleanField" in source
-    assert "a column of decimal text may be a DecimalField" in source
 
 
 @requires_features(dialect="postgresql")

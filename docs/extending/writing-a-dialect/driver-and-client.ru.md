@@ -240,6 +240,9 @@ hare/dialects/sqlite/
 задаёт то, что добавляет его драйвер, а версия сервера меняет их для отдельного подключения. Ядро читает
 `connection.features` там, где у него есть подключение, и `dialect.features` там, где есть только диалект
 (команды схемы для файла миграции, список операторов фильтров).
+Возможность, которую читают только части самого диалекта, — поле его собственного подкласса `Features`
+(как `SqliteFeatures`, `PostgresqlFeatures`, `ClickhouseFeatures`), экземпляр которого — его
+`Dialect.features`; ядро ни одно такое поле не читает.
 
 | Возможность | Что делает hare, если её нет |
 |---|---|
@@ -281,8 +284,6 @@ hare/dialects/sqlite/
 | `max_bind_parameters` | Массовые записи, предзагрузка и каскады делят свои команды, чтобы не превысить его. |
 | `max_bulk_update_rows` | `bulk_update()` пишет не больше стольких строк одной командой. |
 | `supports_nulls_distinct` | `UniqueConstraint(nulls_distinct=...)` даёт `UnSupportedError` до отправки команды создания. |
-| `supports_unhex` | Длинный `__in` по байтам передаёт по параметру на значение, а не один массив JSON. |
-| `supports_drop_column` | Редактор схемы, который пересобирает таблицы (у SQLite), пересобирает её при каждом удалении поля. |
 | `explain_options` | Параметр `EXPLAIN`, которого нет в списке, даёт `UnSupportedError` до отправки команды. |
 | `supports_schemas` | Миграции не создают и не удаляют схем; таблица модели со схемой пишется как есть и должна существовать. Методы редактора схемы `get_index_name_sql()`, `get_indexed_table_sql()` и `get_referenced_table_sql()` пишут имена, которые получают индекс, триггер и внешний ключ, в собственной форме базы. |
 | `supports_distinct_on` | `distinct(*fields)` даёт `UnSupportedError` при построении запроса. |
@@ -291,26 +292,25 @@ hare/dialects/sqlite/
 | `supports_table_sample` | `QuerySet.sample(...)` даёт `UnSupportedError`. |
 | `supports_asof_join` | `AsofJoin(...)` даёт `UnSupportedError`. |
 | `supports_array_join` | `ArrayJoin(...)` даёт `UnSupportedError`. |
-| `supports_json_type` | Собственный признак ClickHouse: тип `JSON`, который читает драйвер подключения. |
 | `supports_dictionaries` | `Meta.dictionaries` даёт `UnSupportedError` до DDL; иначе — `dictionaries_class` редактора схемы (`Dictionaries`: `get_dictionary_create_sqls()`, `drop_dictionary()`, `alter_dictionary()`, `rename_dictionary()`, `reload_dictionary()`). |
 | `supports_merge` | `QuerySet.merge()` даёт `UnSupportedError`. |
 | `supports_merge_returning` | `merge().returning()` даёт `UnSupportedError`. |
 | `supports_merge_not_matched_by_source` | `merge().when_not_matched_by_source()` даёт `UnSupportedError`. |
-| `supports_partitioned_exclusion_constraints` | `ExclusionConstraint` у партиционированной модели даёт `UnSupportedError`. |
 | `supports_pool_status` | `get_pool_status()` даёт `UnSupportedError`, а пулы клиента не попадают в `Connections.get_pool_statuses()`. |
 | `sorts_nulls_first` | Где по умолчанию оказывается NULL при сортировке — `nulls_first`/`nulls_last` добавляют фразу, только если она меняет порядок. |
 | `divides_integers_exactly` | Включите, если `/` двух целых даёт точное частное: поле вывода выражения — `FloatField` вместо целого поля. |
+| `computes_integer_statistics_exactly` | Включите, если база считает `AVG`, `STDDEV` и `VARIANCE` от целых точными десятичными числами: результат читается как `Decimal`; без этого hare читает его как число с плавающей точкой. |
+| `computes_decimal_statistics_exactly` | Включено по умолчанию. Выключите, если база считает `AVG`, `STDDEV` и `VARIANCE` от десятичных числами с плавающей точкой: тогда hare читает результат как такое число, а не `Decimal`. |
+| `keeps_enum_columns` | Включите, если колонка поля-перечисления — перечислимого типа, который хранит только элементы: тогда hare не добавляет `CHECK` по значениям элементов. |
 | `supports_conflict_constraint_names`, `supports_conflict_where` | `bulk_create(on_conflict_constraint=...)` / `conflict_where=` дают `UnSupportedError`. |
 | `matches_ordering_to_grouping_by_sql` | Задайте его, если выражение сортировки, по которому идёт и группировка, нужно записать точно как в `GROUP BY`. |
 | `supports_virtual_generated_columns` | `GeneratedField(stored=False)` даёт `UnSupportedError`. |
-| `supports_strict_tables` | `SqliteTableOptions(strict=True)` даёт `UnSupportedError` — опция таблиц SQLite. |
 | `supports_text_search_configurations` | Конфигурация поиска, `SearchVector` как значение, лексемы, веса меток, `normalization` и `cover_density` у `SearchRank` и параметры фрагментов `SearchHeadline` дают `UnSupportedError`. |
 | `supports_full_text_index` | `FullTextIndex` и веса полей у `SearchRank` дают `UnSupportedError`. |
 | `supports_vector_search` | Расстояния векторов и `__nearby` дают `UnSupportedError`. |
 | `supports_tenant_schemas` | `TenantSchemas.create()`/`drop()`/`get_tenants()` дают `UnSupportedError`; нужны `get_tenant_client_settings(schema_name)` клиента (путь поиска схемы арендатора), параметр подключения `tenant_schema_template` и `fetch_schema_names()` интроспектора. |
 | `supports_spatial` | Операторы, пути, функции и агрегаты `hare.gis` дают `UnSupportedError`; зарегистрируйте рендереры `GeometryValue`, `SpatialRelationTerm`, `SpatialFunctionTerm` и имена `SpatialAggregateFunction`, а также тип колонки `GeometryField` и преобразования его значений. |
 | `supports_geography` | Операторы и функции `GeometryField(geography=True)` дают `UnSupportedError`. |
-| `supports_spatial_index` | `SpatialiteIndex` даёт `UnSupportedError` — это индекс SQLite; диалект со своим пространственным индексом объявляет свой класс индекса. |
 | `spatial_reference_ids` | None: geography и пространственный индекс принимают любую SRID. Множество SRID — те, что есть в пространственных метаданных базы, прочитанные при открытии соединения, — и geography или пространственный индекс в другой SRID дают `UnSupportedError`. |
 | `supports_ordered_aggregates` | Агрегат с `order_by=`, у которого нет другой формы, даёт `UnSupportedError` (`MakeLine`). |
 | `supports_uuid_v7` | `db_default=UuidV7()` даёт `UnSupportedError` до DDL. |

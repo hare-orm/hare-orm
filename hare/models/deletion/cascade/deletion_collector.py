@@ -202,7 +202,8 @@ class DeletionCollector:
             return False, None
         if parent_action is None:
             return True, None
-        child_soft = bool(meta.soft_delete_field) and (not parent_hard or not foreign_key_field.db_constraint)
+        # A row deleted for real takes its children with it, a soft-delete one too.
+        child_soft = bool(meta.soft_delete_field) and not parent_hard
         if self.hands_over_rows and (DeletionGraph.overrides_delete(model) or child_soft == parent_hard):
             return False, None
         return True, DeletionAction.SOFT_DELETE if child_soft else DeletionAction.DELETE
@@ -289,8 +290,8 @@ class DeletionCollector:
         by_database: bool,
     ) -> DeletionAction | None:
         """What the delete does to the rows an ``on_delete=CASCADE`` relation leads to. A hard delete
-        through a database-enforced relation removes the row physically, as the database's cascade
-        would; any other step deletes the row the way its own model deletes.
+        removes the row physically, a soft-delete one too, as the database's cascade would; a soft
+        delete deletes the row the way its own model deletes.
 
         Args:
             related_model: The model of the rows.
@@ -308,9 +309,8 @@ class DeletionCollector:
         if by_database:
             return DeletionAction.DELETE_BY_DATABASE
         parent_hard = parent_action in {DeletionAction.DELETE, DeletionAction.DELETE_BY_DATABASE}
-        child_soft = bool(related_model._meta.soft_delete_field) and (
-            not parent_hard or not foreign_key_field.db_constraint
-        )
+        # A row deleted for real takes its children with it, a soft-delete one too.
+        child_soft = bool(related_model._meta.soft_delete_field) and not parent_hard
         if self.hands_over_rows and parent_hard and not child_soft and related_model._meta.soft_delete_field:
             # Deleted for real - its delete() would only mark it deleted: its own hard_delete() takes
             # it, or the cascade goes on below it to the overrides there.

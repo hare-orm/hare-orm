@@ -186,20 +186,21 @@ await Book.objects.all().annotate(
 )
 ```
 
-Result types: `Count` is always an `int` (and a `Sum`/`Max`/`Min` over a `Count()` annotation is too,
-`Avg` over it a `float`); `Avg` of integers is a `float` on every database, also inside arithmetic or
-`Concat`; `Avg` of a `FloatField` is a `float`, of a `DecimalField` a `Decimal` that is not rounded to
-the field's `decimal_places` (precision over dialect parity: PostgreSQL returns the numeric average at
-its own division scale — `1.7125`, not `1.71`, for a `DecimalField(decimal_places=2)`; SQLite and
-ClickHouse the exact sum divided, the quotient cut — not rounded — to 20 decimal places), the same in
-`.aggregate()`, `.annotate()` and a window; over no rows, `Min`/`Max`/`Avg`/`StdDev`/`Variance` give `None`
-on every database, and `Sum` gives `None` on PostgreSQL and SQLite but ClickHouse's own `0` (`0.00` for a
-Decimal); `Sum`/`Max`/ `Min`/`FirstValue`/`LastValue`/`Lag`/`Lead` keep the type of what they aggregate,
-including an expression or literal annotation (`Sum(F("duration") * 2)` is a `timedelta`, a window `Sum` over
+Result types: `Count` is always an `int` (and a `Sum`/`Max`/`Min` over a `Count()` annotation is too, `Avg`
+over it a `float`); `Avg` of integers is what the database computes: an exact `Decimal` on PostgreSQL, whose
+`numeric` average a `float` would cut, a `float` on SQLite and ClickHouse, also inside arithmetic or `Concat`;
+`Avg` of a `FloatField` is a `float`, of a `DecimalField` what the database computes: on PostgreSQL a
+`Decimal` that is not rounded to the field's `decimal_places` (the numeric average at its own division scale —
+`1.7125`, not `1.71`, for a `DecimalField(decimal_places=2)`), on ClickHouse a `float`
+(`Features.computes_decimal_statistics_exactly`), the same in `.aggregate()`, `.annotate()` and a window; over
+no rows, `Min`/`Max`/`Avg`/`StdDev`/`Variance` give `None` on every database, and `Sum` gives `None` on
+PostgreSQL and SQLite but ClickHouse's own `0` (`0.00` for a Decimal, `None` for a nullable field);
+`Sum`/`Max`/`Min`/`FirstValue`/`LastValue`/`Lag`/`Lead` keep the type of what they aggregate, including an
+expression or literal annotation (`Sum(F("duration") * 2)` is a `timedelta`, a window `Sum` over
 `Value(Decimal("1.5"))` a `Decimal`). A `Lag`/`Lead` `default` is encoded through the field like a value
-written to it (a `dict` for a `JSONField`, a `datetime`/`Decimal` for its field); a default the field's
-type can't hold without loss (`Lag("pages", 1, 0.5)`) raises `QueryError`. `StdDev`/`Variance` type their
-result like `Avg`; `CumeDist`/`PercentRank` are a `float` from 0 to 1, `NthValue` keeps the field's type.
+written to it (a `dict` for a `JSONField`, a `datetime`/`Decimal` for its field); a default the field's type
+can't hold without loss (`Lag("pages", 1, 0.5)`) raises `QueryError`. `StdDev`/`Variance` type their result
+like `Avg`; `CumeDist`/`PercentRank` are a `float` from 0 to 1, `NthValue` keeps the field's type.
 
 > [!NOTE]
 > **`LastValue` always sees the whole partition**

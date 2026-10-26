@@ -1,7 +1,6 @@
-"""Cast() as ClickHouse converts - a fraction cut off an integer - refusing what its own conversions
-would silently turn into another value: a value out of the target's range or precision, bad text even
-in a Nullable column, an impossible date (not rolled over); a NULL row stays NULL, a Decimal rounds half
-away from zero to its places, a float converts to one by its shortest digits."""
+"""Cast() as ClickHouse converts - its own conversions, hare checks nothing: a fraction cut off an integer
+and a Decimal's places, a value out of an integer type wrapped around, bad text NULL in a Nullable type,
+a text moment read by parseDateTime64BestEffort(); a NULL row stays NULL."""
 
 import datetime
 import decimal
@@ -49,49 +48,34 @@ async def test_a_number_converts_as_clickhouse_converts(clickhouse_db):
     assert await get_values(Cast(F("rating") * 3, fields.BigIntField())) == [7, -4, None]
     assert await get_values(Cast("score", fields.IntField())) == [2, -2, 0]
     assert await get_values(Cast("score", fields.DecimalField(max_digits=5, decimal_places=0))) == [
-        decimal.Decimal("3"),
-        decimal.Decimal("-3"),
+        decimal.Decimal("2"),
+        decimal.Decimal("-2"),
         decimal.Decimal("0"),
     ]
     assert await get_values(Cast("rating", fields.DecimalField(max_digits=5, decimal_places=0))) == [
-        decimal.Decimal("3"),
-        decimal.Decimal("-2"),
+        decimal.Decimal("2"),
+        decimal.Decimal("-1"),
         None,
     ]
 
 
 @pytest.mark.asyncio
-async def test_a_float_converts_to_a_decimal_by_its_shortest_digits(clickhouse_db):
+async def test_a_float_converts_to_a_decimal_as_clickhouse_converts(clickhouse_db):
+    """By the double itself, its places cut off - 2.675 is 2.67499..."""
     await create_players()
 
-    for value, places, expected in (
-        (2.675, 2, "2.68"),
-        (0.125, 2, "0.13"),
-        (-0.125, 2, "-0.13"),
-        (0.1 + 0.2, 20, "0.30000000000000004000"),
-        (1e-7, 10, "1E-7"),
-        (1e20, 2, "100000000000000000000.00"),
-        (0.0, 1, "0.0"),
-    ):
+    for value, places, expected in ((2.675, 2, "2.67"), (0.125, 2, "0.12"), (-0.125, 2, "-0.12"), (0.0, 1, "0.0")):
         target = fields.DecimalField(max_digits=30, decimal_places=places)
         assert await get_values(Cast(Value(value), target), id=1) == [decimal.Decimal(expected)]
 
 
 @pytest.mark.asyncio
-async def test_a_value_out_of_the_target_is_refused(clickhouse_db):
+async def test_a_value_out_of_the_target_is_converted_as_clickhouse_converts(clickhouse_db):
     await create_players()
 
-    for expression, message in (
-        (Cast(Value(3e9), fields.IntField()), "cannot be safely converted"),
-        (Cast(Value(40000.0), fields.SmallIntField()), "cannot be safely converted"),
-        (Cast(F("rating") * 1e10, fields.IntField()), "cannot be safely converted"),
-        (Cast(Value(decimal.Decimal("123456.5")), fields.DecimalField(max_digits=5, decimal_places=1)), "digits"),
-        (Cast(Value(9999.95), fields.DecimalField(max_digits=5, decimal_places=1)), "more digits"),
-        (Cast(F("score") * 10000, fields.DecimalField(max_digits=5, decimal_places=2)), "more digits"),
-    ):
-        with pytest.raises(OperationalError, match=message):
-            await get_values(expression)
-    assert await get_values(Cast(Value(9999.94), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
+    assert await get_values(Cast(Value(3e9), fields.IntField()), id=1) == [-(2**31)]
+    assert await get_values(Cast(Value(40000.0), fields.SmallIntField()), id=1) == [40000 - 2**16]
+    assert await get_values(Cast(Value(9999.95), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
         decimal.Decimal("9999.9")
     ]
 
@@ -102,7 +86,7 @@ async def test_text_is_read_as_clickhouse_reads_it(clickhouse_db):
 
     assert await get_values(Cast(Value("42"), fields.IntField()), id=1) == [42]
     assert await get_values(Cast(Value("-1.25"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
-        decimal.Decimal("-1.3")
+        decimal.Decimal("-1.2")
     ]
     assert await get_values(Cast(Value("1.5e2"), fields.DecimalField(max_digits=5, decimal_places=1)), id=1) == [
         decimal.Decimal("150.0")
@@ -110,26 +94,24 @@ async def test_text_is_read_as_clickhouse_reads_it(clickhouse_db):
     assert await get_values(Cast(Value("1.5"), fields.FloatField()), id=1) == [1.5]
     for text, expected in (("true", True), ("0", False), ("YES", True), ("N", False)):
         assert await get_values(Cast(Value(text), fields.BooleanField()), id=1) == [expected]
-    # ClickHouse reads no number padded with spaces.
-    with pytest.raises(OperationalError):
-        await get_values(Cast("name", fields.IntField()), id=1)
 
 
 @pytest.mark.asyncio
-async def test_bad_text_is_refused_also_in_a_nullable_column(clickhouse_db):
+async def test_bad_text_is_null_as_clickhouse_converts_it_into_a_nullable_type(clickhouse_db):
+    """ClickHouse reads no number padded with spaces either."""
     await create_players()
 
     for expression in (
         Cast("name", fields.IntField()),
         Cast("name", fields.DecimalField(max_digits=5, decimal_places=1)),
         Cast("name", fields.FloatField()),
-        Cast(Value("4.2"), fields.IntField()),
-        Cast(Value(""), fields.IntField()),
-        Cast(Value("o"), fields.BooleanField()),
-        Cast(Value("maybe"), fields.BooleanField()),
     ):
+        assert await get_values(expression) == [None, None, None]
+    for expression in (Cast(Value("4.2"), fields.IntField()), Cast(Value(""), fields.IntField())):
+        assert await get_values(expression, id=1) == [None]
+    for expression in (Cast(Value("o"), fields.BooleanField()), Cast(Value("maybe"), fields.BooleanField())):
         with pytest.raises(OperationalError):
-            await get_values(expression, id__in=[2, 3])
+            await get_values(expression, id=1)
 
 
 @pytest.mark.asyncio
@@ -150,41 +132,24 @@ async def test_a_text_date_is_read_as_written_and_an_impossible_one_refused(clic
 
 @pytest.mark.parametrize("target", [fields.DateField, fields.DatetimeField])
 @pytest.mark.asyncio
-async def test_a_text_naming_no_whole_date_is_refused(clickhouse_db, target):
-    """ClickHouse completed it with the current year, month or day - "12" was the 12th of January."""
+async def test_a_text_date_is_read_as_clickhouse_reads_it(clickhouse_db, target):
+    """parseDateTime64BestEffort() - a date it lacks a part of completed, a clock past its day rolled
+    over, a year past the ones it holds read as the nearest day it holds."""
     await create_players()
 
-    for text in ("12", "2.5", "10:20", "2024", "2024-01"):
-        with pytest.raises(OperationalError):
-            await get_values(Cast(Value(text), target()), id=1)
-    for text in ("2024/01/12", "20240112", "Jan 12 2024"):
-        assert [
-            value if target is fields.DateField else value.date()
-            for value in await get_values(Cast(Value(text), target()), id=1)
-        ] == [datetime.date(2024, 1, 12)]
-
-
-@pytest.mark.parametrize("target", [fields.DateField, fields.DatetimeField])
-@pytest.mark.asyncio
-async def test_an_impossible_clock_or_a_date_clickhouse_cant_hold_is_refused(clickhouse_db, target):
-    """ClickHouse rolled "25:00" over into the next day and read "9999-12-31" as 2299-12-31."""
-    await create_players()
-
-    for text in (
-        "2024-01-12 25:00:00",
-        "2024-01-12 24:00:00",
-        "2024-01-12 12:60:00",
-        "2024-01-12 12:30:60",
-        "9999-12-31",
-        "1899-12-31",
-    ):
-        with pytest.raises(OperationalError):
-            await get_values(Cast(Value(text), target()), id=1)
-    for text, day in (
+    cases = [
+        ("2024/01/12", datetime.date(2024, 1, 12)),
+        ("20240112", datetime.date(2024, 1, 12)),
+        ("Jan 12 2024", datetime.date(2024, 1, 12)),
+        ("2024-01", datetime.date(2024, 1, 1)),
+        ("2024-01-12 25:00:00", datetime.date(2024, 1, 13)),
         ("1900-01-01", datetime.date(1900, 1, 1)),
-        ("2299-12-31", datetime.date(2299, 12, 31)),
         ("2024-01-12 23:59:59+05:30", datetime.date(2024, 1, 12)),
-    ):
+    ]
+    # ClickHouse 26.7 widened DateTime64 to the years 1 to 9999 - such a year is no longer moved to the nearest one.
+    if (await Player.get_connection().get_server_version())[:2] < (26, 7):
+        cases += [("9999-12-31", datetime.date(2299, 12, 31)), ("1899-12-31", datetime.date(1900, 1, 1))]
+    for text, day in cases:
         assert [
             value if target is fields.DateField else value.date()
             for value in await get_values(Cast(Value(text), target()), id=1)
@@ -192,17 +157,19 @@ async def test_an_impossible_clock_or_a_date_clickhouse_cant_hold_is_refused(cli
 
 
 @pytest.mark.asyncio
-async def test_a_text_naming_no_time_of_day_is_refused(clickhouse_db):
-    """Hare read the text after the first day of 1970 - an empty one was midnight, "-1" one o'clock."""
+async def test_a_text_time_of_day_is_read_as_clickhouse_reads_it(clickhouse_db):
+    """After the first day of 1970 - a clock past its day rolled over."""
     await create_players()
 
-    for text in ("", " ", "-1", "abc", "25:00", "12:60", "2024-01-12"):
-        with pytest.raises(OperationalError):
-            await get_values(Cast(Value(text), fields.TimeField()), id=1)
-    assert await get_values(Cast(Value(" 7:05 "), fields.TimeField()), id=1) == [
-        datetime.time(7, 5, tzinfo=datetime.UTC)
-    ]
-    assert await get_values(Cast(Value(None), fields.TimeField()), id=1) == [None]
+    for text, expected in (
+        (" 7:05 ", datetime.time(7, 5, tzinfo=datetime.UTC)),
+        ("25:00", datetime.time(1, 0, tzinfo=datetime.UTC)),
+        ("12:60", datetime.time(13, 0, tzinfo=datetime.UTC)),
+        (None, None),
+    ):
+        assert await get_values(Cast(Value(text), fields.TimeField()), id=1) == [expected]
+    with pytest.raises(OperationalError):
+        await get_values(Cast(Value("abc"), fields.TimeField()), id=1)
 
 
 @pytest.mark.asyncio

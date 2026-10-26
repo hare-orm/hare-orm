@@ -8,9 +8,9 @@ hare-orm против SQLAlchemy и Django на ClickHouse: 12 сценарие�
 
 ## <a id="summary"></a>Сводка
 
-Во сколько раз каждая библиотека в среднем медленнее, чем hare-orm на драйвере clickhouse-connect по
-HTTP (более быстром драйвере hare-orm в этом прогоне): отношение средних геометрических времени по
-всем сценариям, которые выполняют обе, кроме запуска.
+Во сколько раз каждая библиотека в среднем медленнее, чем hare-orm на драйвере clickhouse-driver по
+родному протоколу TCP (более быстром драйвере hare-orm в этом прогоне): отношение средних
+геометрических времени по всем сценариям, которые выполняют обе, кроме запуска.
 
 ![Во сколько раз медленнее hare-orm, в среднем](../assets/benchmarks/clickhouse-summary-slower-ru-light.svg#gh-light-mode-only)
 ![Во сколько раз медленнее hare-orm, в среднем](../assets/benchmarks/clickhouse-summary-slower-ru-dark.svg#gh-dark-mode-only)
@@ -44,16 +44,16 @@ HTTP (более быстром драйвере hare-orm в этом прого
 
 | | |
 |---|---|
-| Дата | 2026-10-19 |
+| Дата | 2026-10-26 |
 | Машина | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| Коммит hare-orm | `07215c80` |
+| Релиз hare-orm | 0.10.0 |
 | Прогонов | 3, медиана |
 | ClickHouse | 25.8.33.6 |
 | asynch | 0.2.5 |
 | clickhouse-connect | 1.10.0 |
 | clickhouse-driver | 0.2.11 |
-| hare-orm | 0.9.0 |
+| hare-orm | 0.10.0 |
 | clickhouse-sqlalchemy | 0.3.2, Python 3.12.3 |
 | django-clickhouse-backend | 2.0 |
 | Строк в таблице | 1 000 000 |
@@ -91,6 +91,7 @@ HTTP (более быстром драйвере hare-orm в этом прого
   новых версиях её асинхронный драйвер не запускается.
 - Каждый сценарий написан так, как его пишет документация этой ORM.
 
-Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/bench.py) в
-репозитории; в его [README](https://github.com/hare-orm/hare-orm/blob/dev/benchmarks/README.ru.md)
-перечислены все сценарии и описано, как повторить замер на своей машине.
+Стенд — [`benchmarks/bench.py`](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/bench.py)
+в репозитории; в его
+[README](https://github.com/hare-orm/hare-orm/blob/main/benchmarks/README.ru.md) перечислены все
+сценарии и описано, как повторить замер на своей машине.

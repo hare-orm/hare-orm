@@ -109,8 +109,9 @@ not — PostgreSQL refuses to change the type of a column a view reads. A raw SQ
 `read_columns` is left alone while its declaration doesn't change.
 
 Changing a view drops it and creates the new version, then grants the model's `Meta.grants` on it again —
-a view created anew has no privileges. A view another view reads can't be dropped this way; remove the
-reading view in the same migration first.
+a view created anew has no privileges. A view or materialized view whose `read_columns` name the changed
+view is dropped before it and created again after it, through any chain of such views; one reading it
+only from raw SQL without `read_columns` isn't known — remove it in the same migration first.
 
 ## <a id="materialized-views"></a>Materialized views
 
@@ -295,13 +296,19 @@ what it uses:
 - Then the model, field, index and constraint operations. A new model's `CreateModel` creates its
   sequences before the table; its other objects come next.
 - After every table is in place: sequences, functions, views, materialized views, row level security,
-  policies and grants created or changed — each type after the types it may use.
+  policies and grants created or changed — each type after the types it may use. A view or a
+  materialized view whose `read_columns` name another one comes after it (a view reading a materialized
+  view); raw SQL is never read for it, so name the columns read there.
 - Last: functions and sequences dropped.
 
 A view, materialized view or policy whose SQL names a field or column the migration removes or changes is
 dropped before the field operations and created again after them, even when it is otherwise unchanged —
-PostgreSQL won't drop or change a column one depends on. hare finds such a reference by the name in the
-view's query and in the policy's conditions.
+PostgreSQL won't drop or change a column one depends on. hare knows the columns a view reads from its
+queryset or `read_columns`, those a policy reads from its `Q` conditions and `TenantCondition()`, and those
+a trigger reads from its `Q` `when` condition (a trigger reading a changed column is dropped and created
+again the same way); a
+raw SQL query without `read_columns` or a raw SQL condition is left as written — change it in the same
+migration.
 
 Creating a view, materialized view, function or sequence grants the model's grants on it at once, so an
 object dropped and created again keeps its privileges. Dropping a model drops its views and materialized

@@ -80,16 +80,25 @@ class ValuePaths:
     @staticmethod
     def get_date_part_split(model: type[Model], name: str) -> tuple[str, str] | None:
         """Splits a name reading a part of a date, time or datetime field - ``created__year``,
-        ``created__date``, ``starts__hour`` - after any relations (``tournament__created__month``).
+        ``created__date``, ``starts__hour`` - after any relations (``tournament__created__month``),
+        or of such a value inside a range or an array (``during__startswith__year``).
 
         Args:
             model: The model the name starts at.
             name: The name.
 
         Returns:
-            The field's own path and the part, or None when the name reads no such part.
+            The path of the value and the part, or None when the name reads no such part.
         """
         lookup_path = LookupPath.parse(model, name)
+        if len(lookup_path.rest) > 2:
+            value_path, __, part = name.rpartition("__")
+            value_path_split = ValuePaths.get_value_path_split(model, value_path)
+            if value_path_split is None or isinstance(value_path_split[1], JSONField):
+                return None
+            __, path_field, path_segments = value_path_split
+            __, output_field, __ = FieldTransforms.get_path(path_field, path_segments)
+            return (value_path, part) if part in ValuePaths.get_date_part_segments(output_field) else None
         if len(lookup_path.rest) != 2:
             return None
         field_name, part = lookup_path.rest

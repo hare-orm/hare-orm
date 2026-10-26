@@ -23,11 +23,12 @@ class AddConstraint(AddSchemaObject):
     Args:
         model_name: The model.
         constraint: The constraint.
-        not_valid: For a check constraint: the existing rows needn't pass it yet (Postgres ``NOT
-            VALID``) - only new and updated rows are checked, so adding it doesn't scan and lock
-            the table; a later ``ValidateConstraint`` checks the rest. SQLite adds it the plain way.
+        not_valid: For a check constraint: the existing rows needn't pass it yet (``NOT VALID``, where
+            ``Features.supports_not_valid_constraints``) - only new and updated rows are checked, so adding
+            it doesn't scan and lock the table; a later ``ValidateConstraint`` checks the rest. Another
+            database adds it the plain way.
         using_index: For a named unique constraint without a condition: the unique index of the
-            model it takes over instead of building its own (Postgres ``UNIQUE USING INDEX``) - an
+            model it takes over instead of building its own (``UNIQUE USING INDEX``) - an
             index built before with ``AddIndex(..., concurrently=True)``, which leaves the model's
             ``Meta.indexes`` and becomes the constraint's, under the constraint's name.
 

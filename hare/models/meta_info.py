@@ -4,9 +4,9 @@ import inspect
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
+from hare.core.caching.cache import Cache
 from hare.core.caching.caches import Caches
 from hare.core.connections.connections import Connections
-from hare.core.constants import SWAPPABLE_SETTING_NAME_PATTERN
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import RowLevelSecurity
 from hare.ddl.indexes.index import Index
@@ -237,12 +237,6 @@ class MetaInfo:
         """
         #: The ``swappable`` config setting a project may point at another model instead of this one.
         self.swappable: str | None = getattr(meta, ModelOption.SWAPPABLE, None)
-        if self.swappable is not None and (
-            not isinstance(self.swappable, str) or not SWAPPABLE_SETTING_NAME_PATTERN.fullmatch(self.swappable)
-        ):
-            raise ConfigurationError(
-                f'Meta.swappable must be an upper-case setting name such as "USER_MODEL", got {self.swappable!r}'
-            )
         #: The ``app_label.ModelName`` label of the model the ``swappable`` setting points at
         #: instead of this one - None while this model is the one in use.
         self.swapped: str | None = None
@@ -690,6 +684,17 @@ class MetaInfo:
         LookupInfoBuilder.forget_descriptions()
         Caches.forget_model_caches((self._model,))
 
+    def remove_hidden_backward_relation(self, key: str) -> None:
+        """Reverses ``add_hidden_backward_relation()``.
+
+        Args:
+            key: The forward field's ``"app.Model.field"``.
+        """
+        if self.hidden_backward_relations.pop(key, None) is None:
+            return
+        LookupInfoBuilder.forget_descriptions()
+        Caches.forget_model_caches((self._model,))
+
     def place_key_columns(self) -> None:
         """Puts the key columns of each relation where the relation is declared among the columns -
         the table holds them there."""
@@ -865,7 +870,9 @@ class MetaInfo:
             lookup_infos = LookupInfoBuilder.lookup_infos.get_model_bucket(self._model)
         lookup_info = lookup_infos.get(key)
         if lookup_info is None:
-            lookup_info = lookup_infos[key] = LookupInfoBuilder.get_lookup_info(self._model, key, label=label)
+            lookup_info = Cache.set_bounded(
+                lookup_infos, key, LookupInfoBuilder.get_lookup_info(self._model, key, label=label)
+            )
         return lookup_info
 
     def get_lookups(self, path: str, dialect: Dialect | None = None) -> dict[str, LookupInfo]:
@@ -893,7 +900,9 @@ class MetaInfo:
         cache_key = (path, dialect)
         lookups = lookups_by_path.get(cache_key)
         if lookups is None:
-            lookups = lookups_by_path[cache_key] = LookupInfoBuilder.get_lookups(self._model, path, dialect)
+            lookups = Cache.set_bounded(
+                lookups_by_path, cache_key, LookupInfoBuilder.get_lookups(self._model, path, dialect)
+            )
         return dict(lookups)
 
     def get_ordering_info(self, name: str) -> OrderingInfo:
@@ -917,7 +926,9 @@ class MetaInfo:
             ordering_infos = LookupInfoBuilder.ordering_infos.get_model_bucket(self._model)
         ordering_info = ordering_infos.get(name)
         if ordering_info is None:
-            ordering_info = ordering_infos[name] = LookupInfoBuilder.get_ordering_info(self._model, name)
+            ordering_info = Cache.set_bounded(
+                ordering_infos, name, LookupInfoBuilder.get_ordering_info(self._model, name)
+            )
         return ordering_info
 
     def finalise_model(self) -> None:
@@ -1110,17 +1121,9 @@ class MetaInfo:
 
         Returns:
             The names, ``-`` before a descending one; empty without the option.
-
-        Raises:
-            ConfigurationError: The option is neither a field name nor a sequence of them.
         """
         declared = getattr(meta, ModelOption.GET_LATEST_BY, ())
-        names = (declared,) if isinstance(declared, str) else declared
-        if not isinstance(names, (list, tuple)) or not all(isinstance(name, str) and name for name in names):
-            raise ConfigurationError(
-                f"Meta.get_latest_by must be a field name or a sequence of field names, got {declared!r}"
-            )
-        return tuple(names)
+        return (declared,) if isinstance(declared, str) else tuple(declared)
 
     def _prepare_default_ordering(self, meta: type[Model.Meta] | None) -> tuple[tuple[str, Order], ...]:
         """``Meta.ordering`` as names and directions - an expression named by an alias of its own,

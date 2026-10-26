@@ -61,12 +61,15 @@ from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from hare.models import Model
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
     from hare.query.expressions.value_references.value_reference_types import ValueReference
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.query.lookup_info.lookup_info import LookupInfo
+    from hare.sql.terms.node import Node
 
 
 class FilterKwargs:
@@ -153,10 +156,6 @@ class FilterKwargs:
                     expression_context, lookup_info, raw_value
                 )
                 value, value_joins, value_field = FilterValues.get_filter_value(expression_context, raw_key, value)
-                if isinstance(raw_value, Expression):
-                    value = FilterValues.get_decimal_column_comparand(
-                        expression_context, compared_lookup_info, value, value_field
-                    )
                 # A lookup on a relation itself compares the key column or the related keys, and a
                 # query or expression value is resolved - a later value converts differently, so
                 # only the value given as it is binds in a plan. A forward relation compared through
@@ -334,16 +333,21 @@ class FilterKwargs:
     @staticmethod
     def hide_values_of_sensitive_key(modifier: QueryModifier, model: type[Model], key: str) -> None:
         """Marks every value a filter binds when its key compares a sensitive field's values - a
-        part of ``pk``, a key inside a JSON value, a relation compared by a sensitive key too.
+        part of ``pk``, a key inside a JSON value, a relation compared by a sensitive key too - or
+        its condition reads a sensitive field's column: an annotation or alias over the field.
 
         Args:
             modifier: The filter's parts.
             model: The filtered model.
             key: The filter key.
         """
-        if SensitiveFilterKeys.reads_sensitive_values(model, key):
-            FilterKwargs.hide_sensitive_values(modifier.where_criterion)
-            FilterKwargs.hide_sensitive_values(modifier.having_criterion)
+        criteria = (modifier.where_criterion, modifier.having_criterion)
+        # A sensitive column, a subquery selecting one's value, or a value already hidden.
+        if SensitiveFilterKeys.reads_sensitive_values(model, key) or any(
+            node.sensitive for criterion in criteria for node in cast("Iterator[Node]", criterion.nodes_())
+        ):
+            for criterion in criteria:
+                FilterKwargs.hide_sensitive_values(criterion)
 
     @staticmethod
     def hide_sensitive_values(criterion: Criterion) -> None:
@@ -543,8 +547,6 @@ class FilterKwargs:
         if parameter_converter is not None:
             value = parameter_converter(value)
         # An annotation has no field to tell whether it can be NULL - treated as nullable.
-        # A Decimal binds as text where the dialect stores it so, and an annotation has no column type: it
-        # is cast to NUMERIC, or compared as exact decimal text when every bound value is a Decimal.
         compared_term = annotation_info.term
         if isinstance(annotation, Value):
             # A bare `$1 = $2` can't be typed - the dialect types the literal where it has to.
@@ -555,10 +557,6 @@ class FilterKwargs:
             compared_term = compared_term.get_text_term()
         elif isinstance(annotation_output_field, JSONPathField) and isinstance(value, Term):
             value = JsonPathFilters.get_json_comparand(value, compared_value_field, expression_context.dialect)
-        if FilterValues.holds_decimal_value(value):
-            compared_term = expression_context.dialect.renderers.get_decimal_compared_term(
-                compared_term, only_decimals=FilterValues.holds_only_decimal_values(value)
-            )
         # HAVING whenever either side reads an aggregate - the annotation itself, one mixing an
         # aggregate with a column (Count(...) + F("id")), or an F() value naming an aggregate.
         criterion = operator(compared_term, value)

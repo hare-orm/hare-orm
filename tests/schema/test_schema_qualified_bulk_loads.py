@@ -14,9 +14,9 @@ SCHEMA_MODULES = ["tests.schema.models_schema_qualified"]
 async def test_a_bulk_load_writes_the_rows_of_a_model_in_its_schema():
     db_url = get_url_with_attached_databases(DatabaseUnderTest.get_url(), ["custom"])
     async with hare_test_context(SCHEMA_MODULES, db_url=db_url) as ctx:
-        category_model = ctx.apps.get_model("models", "SchemaCategory")
-        product_model = ctx.apps.get_model("models", "SchemaProduct")
-        tag_model = ctx.apps.get_model("models", "SchemaTag")
+        category_model = ctx.apps.get_model("models.SchemaCategory")
+        product_model = ctx.apps.get_model("models.SchemaProduct")
+        tag_model = ctx.apps.get_model("models.SchemaTag")
         connection = category_model._meta.connection
         if not (connection.features.supports_copy and connection.features.supports_schemas):
             pytest.skip("a bulk load into a schema of the database's own")

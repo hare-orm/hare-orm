@@ -20,7 +20,7 @@ class OffsetPagination(BaseOffsetPagination):
         queryset = await request_query.get_filtered_queryset()
         count = await queryset.count()
         ordered = request_query.get_ordered_queryset(queryset)
-        items = await request_query.after_fetch(list(await ordered.offset(offset).limit(limit)))
+        items = await request_query.finish_rows(list(await ordered.offset(offset).limit(limit)))
         return Page(
             result=items,
             count=count,

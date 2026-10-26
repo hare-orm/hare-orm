@@ -50,7 +50,7 @@ class ClickhouseMigrationLock:
             if not separator:
                 host, port_text = port_text, ""
             port = KEEPER_DEFAULT_PORT if not port_text else int(port_text) if port_text.isdigit() else 0
-            if not host or not 1 <= port <= 65535:
+            if not host or "\x00" in host or not 1 <= port <= 65535:
                 raise ConfigurationError(
                     f"keeper_hosts={keeper_hosts!r} is not a list of host:port addresses separated by commas"
                 )

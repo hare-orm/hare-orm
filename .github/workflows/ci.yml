@@ -1,12 +1,11 @@
 name: ci
+# A push to dev or main runs no tests: the squashed commit is the tree its pull request tested (the
+# rulesets require `ci-passed` on a branch up to date). The weekly run catches outside changes - new
+# servers, Pythons and libraries.
 on:
-  push:
-    branches:
-      - dev
-      - main
   pull_request:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 3 * * 1'
   workflow_dispatch:
   # release.yml runs this workflow on the tagged commit before publishing anything.
   workflow_call:
@@ -14,7 +13,7 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request cancels its older run; pushes to dev and main always finish.
+# A newer push to a pull request cancels its older run.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -25,19 +24,22 @@ concurrency:
 # on Linux, Windows and macOS - Python 3.12-3.14 x SQLite 3.35.5 to the newest, PostgreSQL 14-18 through
 # asyncpg and rust_pg, PgBouncer 1.22-1.26, ClickHouse 25.8 to the newest (a server and a cluster)
 # through both of its drivers, and the oldest and newest Redis, RabbitMQ and Kafka hare supports. Every
-# run - a push, a pull request, the nightly run, a run on demand, a release - runs the whole matrix; each
+# run - a pull request, the weekly run, a run on demand, a release - runs the whole matrix; each
 # job is one part of it, each version of an axis in at least one job (each job's comment says which
 # combinations run). The version lists below are those of tests/matrix/constants.py and of the
-# Makefile's matrix_* variables.
+# Makefile's matrix_* variables. A pull request from dev into main runs none of it: every pull
+# request into dev ran the whole matrix, and the release runs it again on the tag - `ci-passed`
+# passes for it.
 jobs:
   # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
   # the Rust unit tests, actionlint on these workflows and the documentation built in strict mode -
   # `make check`.
   check:
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -45,7 +47,7 @@ jobs:
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-check-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -59,11 +61,12 @@ jobs:
   # rust.native of Python 3.12, 3.13 and 3.14 for Linux, built in the maturin image (manylinux2014)
   # from this commit - `make build_native_linux`. Every Linux job below runs it.
   build-native-linux:
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/cache@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -76,7 +79,7 @@ jobs:
           for version in 312 313 314; do
             test -f "rust/native.cpython-$version-x86_64-linux-gnu.so" || { echo "::error::rust.native for cp$version is missing."; exit 1; }
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: native-Linux
           path: rust/native.cpython-*-x86_64-linux-gnu.so
@@ -87,6 +90,7 @@ jobs:
   # `make build_native_macos`. The jobs testing on Windows and macOS run them.
   build-native:
     name: build-native (${{ matrix.os }})
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +107,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
       # `python` poetry runs on.
       - uses: actions/setup-python@v6
@@ -121,7 +125,7 @@ jobs:
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: rust/native/target
           key: ${{ runner.os }}-cargo-native-${{ hashFiles('rust/native/Cargo.lock') }}
@@ -144,7 +148,7 @@ jobs:
           for python in "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"; do
             "$python" -c "from rust.native import pg, rows; print(pg.__version__)"
           done
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: native-${{ runner.os }}
           path: ${{ matrix.extension_files }}
@@ -163,12 +167,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -186,7 +190,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'sqlite-*' \
             --workers auto --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-sqlite-${{ matrix.python }}
@@ -210,12 +214,12 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-${{ runner.os }}
           path: rust/
@@ -225,7 +229,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite database-independent --workers auto \
             --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-database-independent-${{ runner.os }}-${{ matrix.python }}
@@ -247,12 +251,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -264,7 +268,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite asyncpg-${{ matrix.postgres }} \
             --suite rust_pg-${{ matrix.postgres }} --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-postgres-${{ matrix.postgres }}-${{ matrix.python }}
@@ -284,13 +288,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Install uv
         run: pipx install uv==0.12.7
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -313,12 +317,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -330,7 +334,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'redis-*' --suite 'rabbitmq-*' \
             --suite 'kafka-*' --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-brokers-${{ matrix.python }}
@@ -357,12 +361,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -374,7 +378,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} --suite 'clickhouse-*-${{ matrix.clickhouse }}' \
             --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-clickhouse-${{ matrix.clickhouse }}-${{ matrix.python }}
@@ -401,12 +405,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-Linux
           path: rust/
@@ -420,7 +424,7 @@ jobs:
         run: |
           make test_matrix MATRIX_OPTIONS="--python ${{ matrix.python }} \
             --suite 'pgbouncer-*-${{ matrix.pgbouncer }}-${{ matrix.postgres }}' --print-failed-logs"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: matrix-logs-pgbouncer-${{ matrix.pgbouncer }}-${{ matrix.postgres }}-${{ matrix.python }}
@@ -431,6 +435,7 @@ jobs:
   # `make test_poetry_add`.
   test-poetry-add:
     name: test-poetry-add (${{ matrix.os }}, ${{ matrix.python }})
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
       matrix:
@@ -442,7 +447,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
@@ -454,34 +459,27 @@ jobs:
       - name: Add hare-orm to a new poetry project
         run: make test_poetry_add
 
-  # Publishes docs/ to GitHub Pages on every push to main - the documentation of the released code, and
-  # the branch the github-pages environment deploys from -
-  # gated on `check` so a build with broken formatting/types doesn't get published, but not on
-  # the much slower test jobs, since a docs-only change shouldn't have to wait on those. Needs the
-  # repo's Pages source set to "GitHub Actions" (Settings -> Pages) once - `make docs`.
-  deploy-docs:
-    needs: [check]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  # The one status the rulesets require: every job passed, or was skipped for a pull request from dev
+  # into main.
+  ci-passed:
+    needs:
+      - check
+      - build-native-linux
+      - build-native
+      - test-sqlite
+      - test-database-independent
+      - test-postgres
+      - test-lowest-dependencies
+      - test-brokers
+      - test-clickhouse
+      - test-pgbouncer
+      - test-poetry-add
+    if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/setup-poetry
-        id: python
-        with:
-          python-version: '3.14'
-      - name: Build docs
-        run: make docs
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Every job passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::A job failed or was cancelled."
+          exit 1

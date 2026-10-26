@@ -24,8 +24,8 @@ class TableInfo:
     and comment - what its model is rebuilt from."""
 
     name: str
-    #: The schema this table lives in - an attached database on SQLite, a database of the server where
-    #: databases are the schemas.
+    #: The schema this table lives in - a schema, an attached database or a database of the server: the
+    #: namespace of tables the database has.
     schema: str | None = None
     #: Whether the table is in the connection's default schema - otherwise it is rebuilt with
     #: Meta.schema.
@@ -39,17 +39,16 @@ class TableInfo:
     #: The table's comment, where the database keeps table comments - reconstructed as
     #: Meta.table_description.
     table_description: str | None = None
-    #: Function+trigger pairs (Postgres) / triggers (SQLite), successfully parsed back into a
-    #: reconstructable Trigger(...) - see Meta.triggers.
+    #: The table's triggers - with the functions they call where the database keeps them apart - parsed
+    #: back into a reconstructable Trigger(...) - see Meta.triggers.
     triggers: list[Trigger] = dataclass_field(default_factory=list)
     #: (name, definition) of each trigger that couldn't be parsed - written as a comment.
     unparsed_triggers: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    #: EXCLUDE USING ... constraints (Postgres-only, pg_constraint.contype = 'x'), successfully
-    #: parsed back into a reconstructable ExclusionConstraint(...) - see Meta.constraints.
+    #: EXCLUDE USING ... constraints, successfully parsed back into a reconstructable
+    #: ExclusionConstraint(...) - see Meta.constraints.
     exclusion_constraints: list[ExclusionConstraint] = dataclass_field(default_factory=list)
-    #: (name, raw definition text) for an EXCLUDE constraint whose pg_get_constraintdef() text
-    #: didn't fit the shape PostgresqlDefinitions.parse_exclusion_constraint() can parse - same
-    #: surfaced-as-a-comment pattern as unparsed_triggers.
+    #: (name, raw definition text) for an EXCLUDE constraint whose definition didn't fit the shape the
+    #: dialect's parsing reconstructs - written as a comment, as unparsed_triggers.
     unparsed_exclusion_constraints: list[tuple[str, str]] = dataclass_field(default_factory=list)
     #: Composite (2+ column) foreign keys successfully reconstructed as a single
     #: ForeignKeyField(...) - see CompositeForeignKeyInfo and
@@ -74,27 +73,30 @@ class TableInfo:
         foreign_key_count = len(self.foreign_keys) + len(self.composite_foreign_keys)
         return foreign_key_count >= 2 and all_column_names <= foreign_key_column_names
 
-    #: (index name, CREATE INDEX text) of each Postgres index with an expression term that couldn't
+    #: (index name, CREATE INDEX text) of each index with an expression term that couldn't
     #: be rebuilt - written as a comment.
     unparsed_indexes: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    #: (column name, CREATE TABLE text) of each SQLite generated column whose expression couldn't be
+    #: (column name, CREATE TABLE text) of each generated column whose expression couldn't be
     #: parsed - written as a comment; the column is left out.
     unparsed_generated_columns: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    #: CHECK constraints (Postgres: pg_constraint.contype = 'c'; SQLite: regex-parsed out of
-    #: sqlite_master.sql, since SQLite exposes no PRAGMA for constraint text), successfully
-    #: parsed back into a reconstructable CheckConstraint(...) - see Meta.constraints.
+    #: CHECK constraints - from the catalog, or parsed out of the table's CREATE TABLE text where the
+    #: database keeps no other - successfully parsed back into a reconstructable CheckConstraint(...) -
+    #: see Meta.constraints.
     check_constraints: list[CheckConstraint] = dataclass_field(default_factory=list)
     #: (constraint name, raw definition text) for a CHECK constraint whose definition didn't fit
-    #: the shape this file's own regex parsing can reconstruct - same surfaced-as-a-comment
+    #: the shape the dialect's parsing can reconstruct - same surfaced-as-a-comment
     #: pattern as unparsed_exclusion_constraints.
     unparsed_check_constraints: list[tuple[str, str]] = dataclass_field(default_factory=list)
     #: The CHECK constraints added NOT VALID and not validated since - the existing rows may break
-    #: them (Postgres only).
+    #: them.
     not_valid_constraint_names: list[str] = dataclass_field(default_factory=list)
     #: The table's storage options as its dialect's ``TableOptions`` (``Dialect.table_options_class``),
     #: None when every option has its default or the dialect has none - reconstructed as
     #: ``Meta.table_options``.
     table_options: TableOptions | None = None
+    #: How the table is partitioned when hare declares no such partitioning - a key over an expression,
+    #: a partition partitioned itself - as the database writes it; None otherwise.
+    unparsed_partitioning: str | None = None
     #: Whether row level security filters the table's rows - reconstructed as
     #: ``Meta.row_level_security``; None when it doesn't (and on a dialect without it).
     row_level_security: RowLevelSecurity | None = None
@@ -108,5 +110,8 @@ class TableInfo:
     #: The sequences a column of the table owns, ``owned_by`` the column's name - reconstructed as
     #: ``Meta.sequences``.
     sequences: list[DatabaseSequence] = dataclass_field(default_factory=list)
-    #: The primary key holds its last key ``WITHOUT OVERLAPS`` (Postgres 18).
+    #: The sequences a column default of the table reads that the model of another table declares - by
+    #: name, each with that table.
+    sequences_of_other_tables: list[tuple[str, str]] = dataclass_field(default_factory=list)
+    #: The primary key holds its last key ``WITHOUT OVERLAPS``.
     primary_key_without_overlaps: bool = False

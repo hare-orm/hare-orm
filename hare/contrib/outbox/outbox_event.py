@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Self, cast
 from uuid import uuid4
 
 from hare import fields
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.outbox.constants import (
     ENQUEUE_ARGUMENT_FIELD_NAMES,
     OUTBOX_KEY_MAX_LENGTH,
@@ -152,7 +151,7 @@ class OutboxEvent(Model):
                 transaction and another connection has one - the event would commit on its own
                 instead of with that transaction's write. Pass ``using=`` if this is intended.
         """
-        cls.validate_enqueue_options(topic, idempotency_key, ordering_key, headers, extra_field_values)
+        cls.validate_enqueue_options(headers, extra_field_values)
         field_values = dict(extra_field_values or {})
         write_connection = cls.get_write_connection(using)
         if idempotency_key is None:
@@ -217,16 +216,13 @@ class OutboxEvent(Model):
 
     @staticmethod
     def validate_enqueue_options(
-        topic: str,
-        idempotency_key: str | None,
-        ordering_key: str | None,
-        headers: Mapping[str, Any] | None,
-        extra_field_values: Mapping[str, Any] | None,
+        headers: Mapping[str, Any] | None, extra_field_values: Mapping[str, Any] | None
     ) -> None:
         """Checks ``enqueue()``'s arguments.
 
         Raises:
-            ValidationError: An argument has the wrong type or is out of range.
+            ValidationError: ``extra_field_values`` sets a field of an argument or of the relay, or
+                ``headers`` isn't a mapping of non-empty text names.
         """
         extra_field_names = set(extra_field_values or ())
         argument_field_names = sorted(ENQUEUE_ARGUMENT_FIELD_NAMES & extra_field_names)
@@ -240,18 +236,6 @@ class OutboxEvent(Model):
                 f"extra_field_values can't set {', '.join(relay_managed_field_names)} - the ORM and "
                 "OutboxRelay maintain them"
             )
-        for argument_name, value, required in (
-            ("topic", topic, True),
-            ("idempotency_key", idempotency_key, False),
-            ("ordering_key", ordering_key, False),
-        ):
-            if (value is not None or required) and (
-                not isinstance(value, str) or not 1 <= len(value) <= OUTBOX_KEY_MAX_LENGTH
-            ):
-                raise ValidationError(
-                    f"{argument_name} must be a string of 1..{OUTBOX_KEY_MAX_LENGTH} characters, got "
-                    f"{ValueDescriptions.get_shown_value(value)}"
-                )
         if headers is not None and (
             not isinstance(headers, Mapping) or not all(isinstance(name, str) and name for name in headers)
         ):

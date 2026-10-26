@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from hare.dialects.enums import ParameterPosition
-from hare.exceptions import QueryError
+from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.binary_field import BinaryField
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.json.json_field import JSONField
@@ -18,10 +18,16 @@ from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.fields.data.temporal.time_field import TimeField
 from hare.fields.data.uuid_field import UUIDField
 from hare.fields.field import Field
+from hare.gis.enums import GeometryType
+from hare.gis.fields.geometry_field import GeometryField
+from hare.gis.geometries.geometry import Geometry
+from hare.gis.terms.geometry_value import GeometryValue
 from hare.query.expressions.constants import (
     BIG_INTEGER_LITERAL_RANGE,
+    DECIMAL_WITHOUT_TYPE_MESSAGE,
     INTEGER_LITERAL_RANGE,
     NO_CAST_SQL_TYPES,
+    SMALL_INTEGER_LITERAL_RANGE,
     VALUE_PARAMETER_MAX_DEPTH,
 )
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
@@ -68,6 +74,14 @@ class Value(Expression):
         (bytes, BinaryField()),
     )
 
+    #: The output field of a geometry literal, by its type and dimensions - a database reading a geometry of
+    #: a known type its own way (a point as a tuple) decodes it by the field of that type.
+    GEOMETRY_OUTPUT_FIELDS: ClassVar[dict[tuple[GeometryType, int], GeometryField]] = {
+        (geometry_type, dimensions): GeometryField(geometry_type, dimensions=dimensions)
+        for geometry_type in GeometryType
+        for dimensions in (2, 3)
+    }
+
     #: Encodes a dict literal to JSON text, kept alive for the same reason as LITERAL_OUTPUT_FIELDS.
     JSON_LITERAL_FIELD: ClassVar[JSONField[Any]] = JSONField()
     #: Encodes a bytes literal to a dialect's stored form of a binary column.
@@ -75,7 +89,10 @@ class Value(Expression):
     #: Encodes a UUID literal as a UUIDField writes it on the dialect.
     UUID_LITERAL_FIELD: ClassVar[UUIDField[Any]] = UUIDField()
 
-    plan_parts: ClassVar[DeclaredPlanParts] = (("value", PlanPartType.LITERAL),)
+    plan_parts: ClassVar[DeclaredPlanParts] = (
+        ("keeps_plan", PlanPartType.KEEPS_PLAN_METHOD),
+        ("value", PlanPartType.LITERAL),
+    )
 
     def __init__(self, value: Any) -> None:
         if isinstance(value, (list, tuple, dict)):
@@ -121,6 +138,8 @@ class Value(Expression):
             if decimal_output_field is None:
                 return NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD
             return decimal_output_field
+        if isinstance(value, Geometry):
+            return cls.GEOMETRY_OUTPUT_FIELDS[(value.GEOMETRY_TYPE, 3 if value.has_z else 2)]
         for literal_type, output_field in cls.LITERAL_OUTPUT_FIELDS:
             if isinstance(value, literal_type):
                 return output_field
@@ -139,7 +158,12 @@ class Value(Expression):
             binds, following ``use_timezone`` and the configured zone), a timedelta (whole
             microseconds), a UUID (text), a dict (JSON text) or bytes where the dialect stores them in
             a form of its own, else None.
+
+        Raises:
+            UnSupportedError: A Decimal on a database that stores no exact decimals.
         """
+        if isinstance(value, Decimal) and not NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD.exists_on(dialect):
+            raise UnSupportedError(DECIMAL_WITHOUT_TYPE_MESSAGE.format(value=value, dialect=dialect.name))
         if isinstance(value, datetime):
             return TemporalArithmetic.get_field_encoder(TemporalArithmetic.DATETIME_OUTPUT_FIELD, dialect)
         if isinstance(value, time):
@@ -221,8 +245,10 @@ class Value(Expression):
         bound_value = cls.get_bound_value(value)
         cast_sql_type = cast_sql_types.get(type(bound_value))
         if cast_sql_type is None and type(bound_value) is int:
-            # Beyond the integer a database reads it as beside an integer column.
-            if not INTEGER_LITERAL_RANGE[0] <= bound_value <= INTEGER_LITERAL_RANGE[1]:
+            # Beyond the integer a database reads it as beside a smallint column.
+            if not SMALL_INTEGER_LITERAL_RANGE[0] <= bound_value <= SMALL_INTEGER_LITERAL_RANGE[1]:
+                if INTEGER_LITERAL_RANGE[0] <= bound_value <= INTEGER_LITERAL_RANGE[1]:
+                    return SqlTypes.INTEGER
                 in_big_range = BIG_INTEGER_LITERAL_RANGE[0] <= bound_value <= BIG_INTEGER_LITERAL_RANGE[1]
                 return SqlTypes.BIGINT if in_big_range else SqlTypes.NUMERIC
         return cast_sql_type
@@ -231,7 +257,17 @@ class Value(Expression):
         """The shared field of the literal's own type - see ``get_literal_output_field()``."""
         return self.get_literal_output_field(self.value)
 
+    def get_result_literals(self) -> list[Any]:
+        return [self.value]
+
+    def keeps_plan(self) -> bool:
+        """Whether the value keeps a plan - not a geometry, written into the SQL text its own way."""
+        return not isinstance(self.value, Geometry)
+
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        if isinstance(self.value, Geometry):
+            # As a geometry from Python is given to a spatial function - the driver binds no geometry.
+            return ExpressionResult(term=GeometryValue(self.value, self.value.srid, False))  # type: ignore[arg-type]
         return self.get_encoded_result(
             expression_context, self.get_literal_encoder(self.value, expression_context.dialect)
         )

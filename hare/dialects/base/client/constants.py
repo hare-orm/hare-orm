@@ -13,15 +13,10 @@ TRANSACTION_END_WAIT_TIMEOUT_SECONDS = 30.0
 #: The bound of DatabaseClient.ping() - a server that stopped answering without closing the socket
 #: never makes the driver raise.
 PING_TIMEOUT_SECONDS = 5.0
-#: The longest DatabaseClient.ping() timeout taken.
-MAX_PING_TIMEOUT_SECONDS = 3600.0
 
 #: The statement of DatabaseClient.ping() - standard SQL every database runs.
 PING_SQL = "SELECT 1"
 
-#: The text of a PoolTimeoutError - waiting for a connection of a pool ran out of
-#: ``pool_acquire_timeout``.
-POOL_TIMEOUT_MESSAGE = "Timed out after {seconds}s waiting for a free connection of the pool of {connection_alias!r}"
 
 #: The error of a statement or an ending on a transaction that ended already.
 TRANSACTION_FINALISED_MESSAGE = "Transaction already finalised"

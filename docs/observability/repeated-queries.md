@@ -63,11 +63,8 @@ innermost frame outside hare: the observer runs inline in the task that issued i
 
 ## <a id="options"></a>Options
 
-`threshold` must be an `int` in `1..REPEATED_QUERY_MAX_THRESHOLD` (1 000 000) and `window_seconds` a
-finite number in `(0, REPEATED_QUERY_MAX_WINDOW_SECONDS]` (one day) — anything else (`threshold=0`, which
-could never fire, or a zero/negative window, which restarts the count on every query) raises
-`ConfigurationError` when the detector is created. Both limits live in
-`hare.contrib.repeated_queries.constants`. `action="warn"` (the default) logs via
+`threshold` is how many queries of one shape within `window_seconds` are repeated; a shape below the
+threshold that long after its first query starts counting fresh. `action="warn"` (the default) logs via
 `hare.core.log.logger.warning`; pass a callable instead (`Callable[[RepeatedQueryReport], None]`) for
 custom routing — a metric, a structured log event. An exception it raises is logged and never reaches the
 query — to fail a test on an N+1, assert on [`collect()`](#collect) instead. Any other string is a

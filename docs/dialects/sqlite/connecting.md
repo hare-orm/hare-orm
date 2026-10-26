@@ -68,9 +68,9 @@ database. SpatiaLite registers and indexes the geometry columns of the main data
 hare doesn't work around a fault of a particular SQLite library — the library's own result stands:
 
 - SQLite 3.38.0 to 3.41.0 build automatic indexes that ignore the collating sequence of the comparison
-  they serve, so a decimal or time comparison over a joined table — hare compares both under collations
-  of its own — can find no rows. On these libraries turn automatic indexes off yourself with
-  `automatic_index=False` in the connection's settings. SQLite 3.41.1 fixed it.
+  they serve, so a comparison under a collation (`Collate()`) over a joined table can find no rows. On
+  these libraries turn automatic indexes off yourself with `automatic_index=False` in the connection's
+  settings. SQLite 3.41.1 fixed it.
 - SQLite 3.38.0 to 3.38.5 report a foreign key broken by a statement with `RETURNING` as a plain error
   instead of a constraint failure — hare raises it as `OperationalError` there, not `IntegrityError`.
   SQLite 3.39.0 fixed it.

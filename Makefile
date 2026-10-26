@@ -39,6 +39,17 @@ test_db_data_tmpfs = --tmpfs /var/lib/postgresql:$(test_db_data_tmpfs_options)
 test_db_data_dir = $$(if [ $$version -ge 18 ]; then echo /var/lib/postgresql; else echo /var/lib/postgresql/data; fi)
 clickhouse_data_tmpfs = --tmpfs /var/lib/clickhouse:rw,size=3g --tmpfs /var/log/clickhouse-server:rw,size=256m
 clickhouse_node_data_tmpfs = --tmpfs /var/lib/clickhouse:rw,size=1g --tmpfs /var/log/clickhouse-server:rw,size=128m
+# The most memory each test server takes, its tmpfs data included - without a limit one server grown by a
+# long run took the whole of Docker's virtual machine. A ClickHouse server from 26.7 takes the tmpfs data
+# out of its own memory limit, so its limit is its 3g (a node's 2g) plus the size of its tmpfs.
+test_db_memory = --memory 4g --memory-swap 4g
+clickhouse_memory = --memory 6400m --memory-swap 6400m
+clickhouse_node_memory = --memory 3200m --memory-swap 3200m
+# A ClickHouse server that crashes writes no core dump - one dump took 10 GB of the host's disk.
+clickhouse_no_core_dumps = --ulimit core=0
+# The output each test container keeps - Docker keeps all of it by default: a cluster node logging an error per
+# line of its full log tmpfs grew its log to 91 GB of the host's disk.
+test_container_logs = --log-opt max-size=20m --log-opt max-file=2
 
 # HARE_TEST_DB's "\{\}" is a literal, backslash-escaped "{}" placeholder - conftest.py's
 # _resolve_db_url() and DbUrlConfigGenerator.expand() both unescape it once and fill it with a
@@ -180,7 +191,7 @@ test_poetry_add:
 
 test_db_up:
 	docker build -t $(test_db_image) tests/docker/postgres
-	docker start $(test_db_container) 2>/dev/null || docker run -d --name $(test_db_container) --restart unless-stopped $(test_db_data_tmpfs) 		-p $(HARE_POSTGRES_PORT):5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) -e POSTGRES_PASSWORD=$(HARE_POSTGRES_PASS) 		$(test_db_image) -c fsync=off -c synchronous_commit=off -c full_page_writes=off 		-c max_prepared_transactions=64 -c max_connections=400 -c shared_buffers=512MB $(test_db_wal_options)
+	docker start $(test_db_container) 2>/dev/null || docker run -d $(test_container_logs) --name $(test_db_container) --restart unless-stopped $(test_db_data_tmpfs) $(test_db_memory) 		-p $(HARE_POSTGRES_PORT):5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) -e POSTGRES_PASSWORD=$(HARE_POSTGRES_PASS) 		$(test_db_image) -c fsync=off -c synchronous_commit=off -c full_page_writes=off 		-c max_prepared_transactions=64 -c max_connections=400 -c shared_buffers=512MB $(test_db_wal_options)
 	until docker exec $(test_db_container) pg_isready -q -h 127.0.0.1; do sleep 1; done
 
 test_db_down:
@@ -193,10 +204,10 @@ test_brokers_env = HARE_TEST_REDIS_URL=redis://localhost:6390/0 HARE_TEST_RABBIT
 	HARE_TEST_KAFKA_BOOTSTRAP=localhost:9095
 
 test_brokers_up:
-	docker start hare-orm-test-redis 2>/dev/null || docker run -d --name hare-orm-test-redis -p 6390:6379 redis:7-alpine
-	docker start hare-orm-test-rabbitmq 2>/dev/null || docker run -d --name hare-orm-test-rabbitmq -p 5673:5672 \
+	docker start hare-orm-test-redis 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-redis -p 6390:6379 redis:7-alpine
+	docker start hare-orm-test-rabbitmq 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-rabbitmq -p 5673:5672 \
 		rabbitmq:4-management-alpine
-	docker start hare-orm-test-kafka 2>/dev/null || docker run -d --name hare-orm-test-kafka -p 9095:9095 \
+	docker start hare-orm-test-kafka 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-kafka -p 9095:9095 \
 		-e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
 		-e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9095,CONTROLLER://0.0.0.0:9093 \
 		-e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9095 \
@@ -225,7 +236,7 @@ pgbouncer_options = transaction_pooling=true&direct_host=$(HARE_POSTGRES_HOST)&d
 
 test_pgbouncer_up:
 	docker build -t $(pgbouncer_image) tests/docker/pgbouncer
-	docker start $(pgbouncer_container) 2>/dev/null || docker run -d --name $(pgbouncer_container) \
+	docker start $(pgbouncer_container) 2>/dev/null || docker run -d $(test_container_logs) --name $(pgbouncer_container) \
 		--add-host=host.docker.internal:host-gateway -p 6432:6432 -e PGBOUNCER_SERVER_PORT=$(HARE_POSTGRES_PORT) \
 		$(pgbouncer_image)
 
@@ -247,7 +258,7 @@ HARE_CLICKHOUSE_PASS ?= clickhouse
 
 test_clickhouse_up:
 	docker build -t $(clickhouse_image) --build-arg CLICKHOUSE_VERSION=25.8 tests/docker/clickhouse
-	docker start $(clickhouse_container) 2>/dev/null || docker run -d --name $(clickhouse_container) $(clickhouse_data_tmpfs) 		--restart unless-stopped -p 8124:8123 -p 9124:9000 -p 9182:9181 -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) 		--ulimit nofile=262144:262144 $(clickhouse_image)
+	docker start $(clickhouse_container) 2>/dev/null || docker run -d $(test_container_logs) --name $(clickhouse_container) $(clickhouse_data_tmpfs) $(clickhouse_memory) 		--restart unless-stopped -p 8124:8123 -p 9124:9000 -p 9182:9181 -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) 		--ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) $(clickhouse_image)
 	until docker exec $(clickhouse_container) clickhouse-client --password $(HARE_CLICKHOUSE_PASS) -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done
 
 test_clickhouse_down:
@@ -267,7 +278,7 @@ clickhouse_cluster_nodes = 1 2
 
 test_clickhouse_cluster_up:
 	docker network create $(clickhouse_cluster_network) 2>/dev/null || true
-	for node in $(clickhouse_cluster_nodes); do 		docker build -t hare-orm-test-clickhouse-node$$node:25.8 --build-arg CLICKHOUSE_VERSION=25.8 --build-arg NODE=node$$node tests/docker/clickhouse_cluster && 		(docker start hare-orm-test-clickhouse-node$$node 2>/dev/null || docker run -d --name hare-orm-test-clickhouse-node$$node 			--hostname hare-orm-test-clickhouse-node$$node --network $(clickhouse_cluster_network) --restart unless-stopped $(clickhouse_node_data_tmpfs) 			-p 812$$((5 + node)):8123 -p 912$$((5 + node)):9000 -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) 			--ulimit nofile=262144:262144 hare-orm-test-clickhouse-node$$node:25.8); 	done
+	for node in $(clickhouse_cluster_nodes); do 		docker build -t hare-orm-test-clickhouse-node$$node:25.8 --build-arg CLICKHOUSE_VERSION=25.8 --build-arg NODE=node$$node tests/docker/clickhouse_cluster && 		(docker start hare-orm-test-clickhouse-node$$node 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-clickhouse-node$$node 			--hostname hare-orm-test-clickhouse-node$$node --network $(clickhouse_cluster_network) --restart unless-stopped $(clickhouse_node_data_tmpfs) $(clickhouse_node_memory) 			-p 812$$((5 + node)):8123 -p 912$$((5 + node)):9000 -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) 			--ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) hare-orm-test-clickhouse-node$$node:25.8); 	done
 	until docker exec hare-orm-test-clickhouse-node2 clickhouse-client --password $(HARE_CLICKHOUSE_PASS) -q "SELECT count() FROM system.zookeeper WHERE path = '/'" >/dev/null 2>&1; do sleep 1; done
 
 test_clickhouse_cluster_down:
@@ -320,8 +331,8 @@ MATRIX_OPTIONS ?=
 test_db_matrix_up:
 	for version in $(matrix_postgres_versions); do \
 		docker build -t hare-orm-test-postgres:$$version --build-arg PG_MAJOR=$$version tests/docker/postgres || exit 1; \
-		docker start hare-orm-test-db-$$version 2>/dev/null || docker run -d --name hare-orm-test-db-$$version \
-			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) -p 54$$version:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
+		docker start hare-orm-test-db-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-db-$$version \
+			--restart unless-stopped --tmpfs $(test_db_data_dir):$(test_db_data_tmpfs_options) $(test_db_memory) -p 54$$version:5432 -e POSTGRES_USER=$(HARE_POSTGRES_USER) \
 			-e POSTGRES_PASSWORD=$(HARE_POSTGRES_PASS) hare-orm-test-postgres:$$version -c fsync=off \
 			-c synchronous_commit=off -c full_page_writes=off -c max_prepared_transactions=64 \
 			-c max_connections=400 -c shared_buffers=256MB $(test_db_wal_options) || exit 1; \
@@ -348,7 +359,7 @@ test_pgbouncer_matrix_up:
 		[ -n "$$image" ] || { echo "No PgBouncer image for $$version in matrix_pgbouncer_images"; exit 1; }; \
 		docker build -t hare-orm-test-pgbouncer:$$version --build-arg PGBOUNCER_IMAGE=$$image tests/docker/pgbouncer || exit 1; \
 		port=1$$(printf %02d $${version#*.})$$postgres; \
-		docker start hare-orm-test-pgbouncer-$$version-$$postgres 2>/dev/null || docker run -d \
+		docker start hare-orm-test-pgbouncer-$$version-$$postgres 2>/dev/null || docker run -d $(test_container_logs) \
 			--name hare-orm-test-pgbouncer-$$version-$$postgres --add-host=host.docker.internal:host-gateway \
 			-p $$port:6432 -e PGBOUNCER_SERVER_PORT=54$$postgres hare-orm-test-pgbouncer:$$version || exit 1; \
 	done
@@ -362,9 +373,9 @@ test_clickhouse_matrix_up:
 	for version in $(matrix_clickhouse_versions); do \
 		digits=$$(printf %02d%02d $${version%%.*} $${version#*.}); \
 		docker build -t hare-orm-test-clickhouse:$$version --build-arg CLICKHOUSE_VERSION=$$version tests/docker/clickhouse || exit 1; \
-		docker start hare-orm-test-clickhouse-$$version 2>/dev/null || docker run -d --name hare-orm-test-clickhouse-$$version \
-			$(clickhouse_data_tmpfs) -p 3$$digits:8123 -p 4$$digits:9000 -p 6$$digits:9181 \
-			-e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) --ulimit nofile=262144:262144 hare-orm-test-clickhouse:$$version || exit 1; \
+		docker start hare-orm-test-clickhouse-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-clickhouse-$$version \
+			$(clickhouse_data_tmpfs) $(clickhouse_memory) -p 3$$digits:8123 -p 4$$digits:9000 -p 6$$digits:9181 \
+			-e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) --ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) hare-orm-test-clickhouse:$$version || exit 1; \
 	done
 	for version in $(matrix_clickhouse_versions); do \
 		until docker exec hare-orm-test-clickhouse-$$version clickhouse-client --password $(HARE_CLICKHOUSE_PASS) -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done; \
@@ -384,11 +395,11 @@ test_clickhouse_cluster_matrix_up:
 			docker build -t hare-orm-test-clickhouse-node$$node:$$version --build-arg CLICKHOUSE_VERSION=$$version \
 				--build-arg NODE=node$$node tests/docker/clickhouse_cluster || exit 1; \
 			if [ $$node = 1 ]; then ports="-p 5$$digits:8123 -p 2$$digits:9000"; else ports=; fi; \
-			docker start hare-orm-test-clickhouse-$$version-node$$node 2>/dev/null || docker run -d \
+			docker start hare-orm-test-clickhouse-$$version-node$$node 2>/dev/null || docker run -d $(test_container_logs) \
 				--name hare-orm-test-clickhouse-$$version-node$$node --hostname hare-orm-test-clickhouse-node$$node \
 				--network hare-orm-test-clickhouse-cluster-$$version --network-alias hare-orm-test-clickhouse-node$$node \
-				$(clickhouse_node_data_tmpfs) $$ports -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) \
-				--ulimit nofile=262144:262144 hare-orm-test-clickhouse-node$$node:$$version || exit 1; \
+				$(clickhouse_node_data_tmpfs) $(clickhouse_node_memory) $$ports -e CLICKHOUSE_PASSWORD=$(HARE_CLICKHOUSE_PASS) \
+				--ulimit nofile=262144:262144 $(clickhouse_no_core_dumps) hare-orm-test-clickhouse-node$$node:$$version || exit 1; \
 		done; \
 	done
 	for version in $(matrix_clickhouse_versions); do \
@@ -408,19 +419,19 @@ test_clickhouse_cluster_matrix_down:
 test_brokers_matrix_up:
 	for version in $(matrix_redis_versions); do \
 		port=16$${version%%.*}$$(printf %02d $${version#*.}); \
-		docker start hare-orm-test-redis-$$version 2>/dev/null || docker run -d --name hare-orm-test-redis-$$version \
+		docker start hare-orm-test-redis-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-redis-$$version \
 			--tmpfs /data:rw,size=256m -p $$port:6379 redis:$$version-alpine || exit 1; \
 	done
 	for version in $(matrix_rabbitmq_versions); do \
 		port=15$${version%%.*}$$(printf %02d $${version#*.}); \
-		docker start hare-orm-test-rabbitmq-$$version 2>/dev/null || docker run -d --name hare-orm-test-rabbitmq-$$version \
+		docker start hare-orm-test-rabbitmq-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-rabbitmq-$$version \
 			--tmpfs /var/lib/rabbitmq:rw,size=512m -p $$port:5672 rabbitmq:$$version-management-alpine || exit 1; \
 	done
 	for version in $(matrix_kafka_versions); do \
 		image=$$(for entry in $(matrix_kafka_images); do [ "$${entry%%=*}" = "$$version" ] && echo "$${entry#*=}"; done); \
 		[ -n "$$image" ] || { echo "No Kafka image for $$version in matrix_kafka_images"; exit 1; }; \
 		port=19$${version%%.*}$$(printf %02d $${version#*.}); \
-		docker start hare-orm-test-kafka-$$version 2>/dev/null || docker run -d --name hare-orm-test-kafka-$$version \
+		docker start hare-orm-test-kafka-$$version 2>/dev/null || docker run -d $(test_container_logs) --name hare-orm-test-kafka-$$version \
 			--tmpfs /tmp/kraft-combined-logs:rw,size=1g -p $$port:$$port \
 			-e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
 			-e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:$$port,CONTROLLER://0.0.0.0:9093 \

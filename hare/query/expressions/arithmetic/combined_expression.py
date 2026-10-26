@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from hare.exceptions import FieldError, QueryError
-from hare.fields.data.constants import INT32_MAX, INT32_MIN, INT64_MAX, INT64_MIN
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.numeric.float_field import FloatField
@@ -15,11 +15,7 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
 from hare.query.expressions.arithmetic.constants import (
-    CHECKED_INTEGER_RANGE,
     DECIMAL_MAX_SCALE_CONNECTORS,
-    DECIMAL_OPERATION_CONNECTORS,
-    EXACT_INTEGER_CONNECTORS,
-    INTEGER_TYPE_NAME,
     MAX_ARITHMETIC_DEPTH,
 )
 from hare.query.expressions.compatibility.constants import ARITHMETIC_REFUSED_VALUE_TYPES, JSON_ARITHMETIC_MESSAGE
@@ -30,9 +26,9 @@ from hare.query.expressions.enums import ArithmeticOperator, NumericValueType, T
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.f import F
 from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.temporal.constants import DURATION_TEMPORAL_TYPES
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.temporal.temporal_operand import TemporalOperand
 from hare.query.expressions.value import Value
@@ -98,32 +94,6 @@ class CombinedExpression(CombinableExpression):
             return term
         return Cast(term, cast_sql_type)
 
-    def _get_result_range(
-        self, left_output_field: Field[Any] | None, right_output_field: Field[Any] | None
-    ) -> tuple[int, int] | None:
-        """The range of the widest integer type of the operands - a literal's, the smallest of 32 or
-        64 bits holding it.
-
-        Args:
-            left_output_field: The left operand's field, if it has one.
-            right_output_field: The right operand's field, if it has one.
-
-        Returns:
-            The range, None when an operand's isn't known.
-        """
-        ranges = []
-        for operand, output_field in ((self.left, left_output_field), (self.right, right_output_field)):
-            if isinstance(operand, Value) and isinstance(operand.value, int) and not isinstance(operand.value, bool):
-                ranges.append(
-                    (INT32_MIN, INT32_MAX) if INT32_MIN <= operand.value <= INT32_MAX else (INT64_MIN, INT64_MAX)
-                )
-                continue
-            operand_range = getattr(output_field, "COLUMN_TYPE_RANGE", None)
-            if operand_range is None:
-                return None
-            ranges.append(operand_range)
-        return min(low for low, _high in ranges), max(high for _low, high in ranges)
-
     @staticmethod
     def _get_operand_numeric_type(operand: Expression, output_field: Field[Any] | None) -> NumericType | None:
         """The type of number an operand is - a TimeDeltaField counts as its whole microseconds.
@@ -162,10 +132,10 @@ class CombinedExpression(CombinableExpression):
             return None
         return known_numeric_types
 
-    def _get_scaled_timedelta_field(
+    def _get_scaled_duration_field(
         self, left_output_field: Field[Any] | None, right_output_field: Field[Any] | None
     ) -> Field[Any] | None:
-        """The timedelta field of a duration multiplied or divided by a number - a duration, as in
+        """The field of a duration multiplied or divided by a number - a duration, as in
         Python: ``F("duration") * 2``, ``2 * F("duration")``, ``F("duration") / F("count")``.
 
         Args:
@@ -185,13 +155,13 @@ class CombinedExpression(CombinableExpression):
             candidates = ((left_output_field, self.right, right_output_field),)
         else:
             return None
-        for timedelta_field, number_operand, number_field in candidates:
+        for duration_field, number_operand, number_field in candidates:
             if (
-                TemporalArithmetic.get_field_temporal_type(timedelta_field) is TemporalType.TIMEDELTA
+                TemporalArithmetic.get_field_temporal_type(duration_field) in DURATION_TEMPORAL_TYPES
                 and TemporalArithmetic.get_field_temporal_type(number_field) is None
                 and self._get_operand_numeric_type(number_operand, number_field) is not None
             ):
-                return timedelta_field
+                return duration_field
         return None
 
     def _get_output_field(
@@ -371,38 +341,71 @@ class CombinedExpression(CombinableExpression):
                 f"({type(left_output_field).__name__}, {type(right_output_field).__name__})"
             )
 
-    def raise_if_number_added_to_duration(
+    def raise_if_duration_arithmetic_refused(
         self, left_output_field: Field[Any] | None, right_output_field: Field[Any] | None
     ) -> None:
-        """Refuses a number added to or taken from a duration - hare keeps a duration as its
-        microseconds, which the sum would expose as a number; a duration is scaled by a number (``*``,
-        ``/``) and added to a duration.
+        """Refuses arithmetic a duration has no result of - a duration (a ``TimeDeltaField``'s
+        microseconds, an interval) is added to or taken from a duration, multiplied by a number and
+        divided by one; a number added to one would expose the microseconds as a number, the rest a
+        database computes of the microseconds or refuses.
 
         Args:
             left_output_field: The left operand's field, if it has one.
             right_output_field: The right operand's field, if it has one.
 
         Raises:
-            FieldError: A number stands beside a duration in ``+`` or ``-``.
+            FieldError: A duration is in any other arithmetic.
         """
-        if self.connector not in (ArithmeticOperator.ADD, ArithmeticOperator.SUB):
+        is_left_duration = self.is_duration_field(left_output_field)
+        is_right_duration = self.is_duration_field(right_output_field)
+        if not (is_left_duration or is_right_duration):
             return
-        for duration_field, other_operand, other_field in (
-            (left_output_field, self.right, right_output_field),
-            (right_output_field, self.left, left_output_field),
-        ):
-            if duration_field is None or not isinstance(
-                GeneratedField.get_effective_field(duration_field), TimeDeltaField
-            ):
-                continue
-            if isinstance(other_operand, Value):
-                is_number = isinstance(other_operand.value, (int, float, Decimal)) and not isinstance(
-                    other_operand.value, bool
-                )
-            else:
-                is_number = NumericTyping.get_field_type(other_field) is not None
-            if is_number:
+        is_left_number = self.is_number_operand(self.left, left_output_field)
+        is_right_number = self.is_number_operand(self.right, right_output_field)
+        if self.connector in (ArithmeticOperator.ADD, ArithmeticOperator.SUB):
+            if is_left_number or is_right_number:
                 raise FieldError("Cannot add a number to a duration or take one from it - give a timedelta")
+            return
+        if self.connector is ArithmeticOperator.MUL and (
+            (is_left_duration and is_right_number) or (is_right_duration and is_left_number)
+        ):
+            return
+        if self.connector is ArithmeticOperator.DIV and is_left_duration and is_right_number:
+            return
+        raise FieldError(
+            f"Cannot use {TemporalArithmetic.get_operator_symbol(self.connector)} with a duration here - a "
+            "duration is added to or taken from a duration, multiplied by a number and divided by one"
+        )
+
+    @staticmethod
+    def is_duration_field(field: Field[Any] | None) -> bool:
+        """Whether a field holds durations - a ``TimeDeltaField``, or a dialect's interval.
+
+        Args:
+            field: The field, None for a value of no field.
+
+        Returns:
+            True for a duration field.
+        """
+        if field is None:
+            return False
+        effective_field = GeneratedField.get_effective_field(field)
+        return isinstance(effective_field, TimeDeltaField) or effective_field.holds_intervals
+
+    @staticmethod
+    def is_number_operand(operand: Expression, field: Field[Any] | None) -> bool:
+        """Whether an operand is a number - a numeric literal, or a value of a numeric field.
+
+        Args:
+            operand: The operand.
+            field: The field its value is decoded through, if it has one.
+
+        Returns:
+            True for a number.
+        """
+        if isinstance(operand, Value):
+            return isinstance(operand.value, (int, float, Decimal)) and not isinstance(operand.value, bool)
+        return NumericTyping.get_field_type(field) is not None
 
     def raise_if_text_literal_beside_number(
         self, left_output_field: Field[Any] | None, right_output_field: Field[Any] | None
@@ -431,9 +434,16 @@ class CombinedExpression(CombinableExpression):
             )
 
     @staticmethod
-    def _get_operand(operand: Expression, result: ExpressionResult) -> TemporalOperand:
+    def _get_operand(
+        operand: Expression, result: ExpressionResult, interval_field: Field[Any] | None
+    ) -> TemporalOperand:
         if isinstance(operand, Value):
             temporal_type = TemporalArithmetic.get_literal_temporal_type(operand.value)
+            if temporal_type is TemporalType.TIMEDELTA and interval_field is not None:
+                # A duration beside an interval column is an interval, bound as the column binds one.
+                return TemporalOperand(
+                    term=result.term, type=TemporalType.INTERVAL, field=interval_field, is_literal=True
+                )
             return TemporalOperand(term=result.term, type=temporal_type, field=None, is_literal=True)
         field = operand.get_value_field(result)
         return TemporalOperand(
@@ -441,28 +451,46 @@ class CombinedExpression(CombinableExpression):
         )
 
     @staticmethod
-    def _may_be_null(operand: Expression, field: Field[Any] | None, expression_context: ExpressionContext) -> bool:
-        """Whether an operand can be NULL - anything but a number literal or a NOT NULL column of the
-        queried model itself: a relation's column, an annotation, an aggregate or a subquery can be."""
-        if isinstance(operand, Value):
-            return operand.value is None
-        if not isinstance(operand, F) or operand.name in expression_context.annotations:
-            return True
-        model_field = expression_context.model._meta.fields_map.get(operand.name)
-        return model_field is None or model_field is not field or model_field.null
+    def _get_literal_result(
+        literal: Value, interval_field: Field[Any] | None, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Resolves a literal operand; a date/time one is converted to its stored form first - a timedelta
+        beside an interval column to the column's.
+
+        Args:
+            literal: The literal.
+            interval_field: The interval field of the other operand, if it is one.
+            expression_context: The context being resolved.
+
+        Returns:
+            The resolved literal.
+        """
+        temporal_type = TemporalArithmetic.get_literal_temporal_type(literal.value)
+        if temporal_type is None:
+            return literal.get_result(expression_context)
+        if temporal_type is TemporalType.TIMEDELTA and interval_field is not None:
+            encoder: Callable[[Any], Any] | None = TemporalArithmetic.get_field_encoder(
+                interval_field, expression_context.dialect
+            )
+        else:
+            encoder = TemporalArithmetic.get_literal_encoder(temporal_type, expression_context.dialect)
+        return literal.get_encoded_result(expression_context, encoder)
 
     @staticmethod
-    def _get_operand_result(operand: Expression, expression_context: ExpressionContext) -> ExpressionResult:
-        """Resolves an operand; a date/time literal is converted to its stored form first."""
-        if (
-            isinstance(operand, Value)
-            and (temporal_type := TemporalArithmetic.get_literal_temporal_type(operand.value)) is not None
-        ):
-            return operand.get_encoded_result(
-                expression_context,
-                TemporalArithmetic.get_literal_encoder(temporal_type, expression_context.dialect),
-            )
-        return operand.get_result(expression_context)
+    def get_interval_field(operand: Expression, result: ExpressionResult | None) -> Field[Any] | None:
+        """The field of an operand holding a dialect's interval.
+
+        Args:
+            operand: The operand.
+            result: Its resolved result, None for a literal.
+
+        Returns:
+            The interval field, None for any other operand.
+        """
+        if result is None:
+            return None
+        field = operand.get_value_field(result)
+        return field if TemporalArithmetic.get_field_temporal_type(field) is TemporalType.INTERVAL else None
 
     def _get_arithmetic_term(
         self,
@@ -470,7 +498,7 @@ class CombinedExpression(CombinableExpression):
         right_term: Term,
         numeric_types: list[NumericType] | None,
         expression_context: ExpressionContext,
-        operands_may_be_null: tuple[bool, bool],
+        operand_fields: tuple[Field[Any] | None, Field[Any] | None],
     ) -> Term:
         """Builds the SQL of the arithmetic.
 
@@ -479,7 +507,7 @@ class CombinedExpression(CombinableExpression):
             right_term: The right operand's term.
             numeric_types: Both operands' numeric types, None when not both known numbers.
             expression_context: The context being resolved.
-            operands_may_be_null: Whether each operand can be NULL (``_may_be_null()``).
+            operand_fields: Each operand's field, if it has one.
 
         Returns:
             The arithmetic term - an exact remainder for integers and Decimals, a floating-point
@@ -488,23 +516,13 @@ class CombinedExpression(CombinableExpression):
         """
         value_types = {numeric_type.type for numeric_type in numeric_types} if numeric_types is not None else set()
         if numeric_types is not None and value_types == {NumericValueType.INTEGER, NumericValueType.FLOAT}:
-            # The integer operand of a float result - a wide integer (a checked result) meets no float
-            # on every database.
+            # Some databases have no arithmetic of a wide integer and a float - the dialect converts the
+            # integer operand.
             renderers = expression_context.dialect.renderers
             if numeric_types[0].type is NumericValueType.INTEGER:
-                left_term = renderers.get_float_operand(left_term)
+                left_term = renderers.get_float_operand(left_term, operand_fields[0])
             else:
-                right_term = renderers.get_float_operand(right_term)
-        if (
-            self.connector in DECIMAL_OPERATION_CONNECTORS
-            and NumericValueType.DECIMAL in value_types
-            and NumericValueType.FLOAT not in value_types
-        ):
-            decimal_term = expression_context.dialect.renderers.get_decimal_operation_term(
-                str(self.connector), left_term, right_term, NumericTyping.get_decimal_scales(numeric_types or [])
-            )
-            if decimal_term is not None:
-                return decimal_term
+                right_term = renderers.get_float_operand(right_term, operand_fields[1])
         if self.connector is ArithmeticOperator.MOD:
             if numeric_types is None:
                 return Mod(left_term, right_term)
@@ -516,32 +534,21 @@ class CombinedExpression(CombinableExpression):
             known_scales = [scale for scale in decimal_scales if scale is not None]
             scale = max(known_scales) if len(known_scales) == len(decimal_scales) else None
             return DecimalMod(left_term, right_term, scale)
-        if self.connector is ArithmeticOperator.DIV and value_types == {NumericValueType.INTEGER}:
-            return left_term / right_term
-        if (
-            self.connector is ArithmeticOperator.DIV
-            and NumericValueType.DECIMAL in value_types
-            and NumericValueType.FLOAT not in value_types
-        ):
-            left_term = expression_context.dialect.renderers.get_decimal_dividend(left_term)
-        elif (
-            value_types == {NumericValueType.INTEGER}
-            and self.connector in EXACT_INTEGER_CONNECTORS
-            and not expression_context.writes_column_value
-        ):
-            # Widened - a read result's range check sees the exact result; a written one is the database's.
-            renderers = expression_context.dialect.renderers
-            left_term = renderers.get_exact_integer_operand(left_term, operands_may_be_null[0])
-            right_term = renderers.get_exact_integer_operand(right_term, operands_may_be_null[1])
         # Term's own SQL arithmetic - an operand term (RawSQL, Subquery) overrides the operators to
         # build a CombinedExpression instead.
         return getattr(Term, f"__{self.connector}__")(left_term, right_term)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        left = self._get_operand_result(self.left, expression_context)
-        right = self._get_operand_result(self.right, expression_context)
-        left_operand = self._get_operand(self.left, left)
-        right_operand = self._get_operand(self.right, right)
+        left = None if isinstance(self.left, Value) else self.left.get_result(expression_context)
+        right = None if isinstance(self.right, Value) else self.right.get_result(expression_context)
+        left_interval_field = self.get_interval_field(self.left, left)
+        right_interval_field = self.get_interval_field(self.right, right)
+        if left is None:
+            left = self._get_literal_result(cast("Value", self.left), right_interval_field, expression_context)
+        if right is None:
+            right = self._get_literal_result(cast("Value", self.right), left_interval_field, expression_context)
+        left_operand = self._get_operand(self.left, left, right_interval_field)
+        right_operand = self._get_operand(self.right, right, left_interval_field)
         for operand in (left_operand, right_operand):
             EncryptedFieldBase.raise_if_encrypted(operand.field, "an arithmetic expression")
         left_output_field, right_output_field = left_operand.field, right_operand.field
@@ -553,9 +560,9 @@ class CombinedExpression(CombinableExpression):
                 output_field=temporal_output_field,
             )
         self.raise_if_text_literal_beside_number(left_output_field, right_output_field)
-        self.raise_if_number_added_to_duration(left_output_field, right_output_field)
-        scaled_timedelta_field = self._get_scaled_timedelta_field(left_output_field, right_output_field)
-        if scaled_timedelta_field is None:
+        self.raise_if_duration_arithmetic_refused(left_output_field, right_output_field)
+        scaled_duration_field = self._get_scaled_duration_field(left_output_field, right_output_field)
+        if scaled_duration_field is None:
             self._raise_if_different_field_types(left_output_field, right_output_field)
         self._raise_if_not_a_number(self.left, left_output_field)
         self._raise_if_not_a_number(self.right, right_output_field)
@@ -566,9 +573,9 @@ class CombinedExpression(CombinableExpression):
         if NumericTyping.is_enum_field(right_output_field):
             right_term = expression_context.dialect.renderers.get_enum_number_term(right_term)
         numeric_types = self._get_numeric_types(left_output_field, right_output_field)
-        output_field = scaled_timedelta_field or self._get_output_field(left_output_field, right_output_field)
+        output_field = scaled_duration_field or self._get_output_field(left_output_field, right_output_field)
         if (
-            scaled_timedelta_field is None
+            scaled_duration_field is None
             and self.connector is ArithmeticOperator.DIV
             and numeric_types is not None
             and {numeric_type.type for numeric_type in numeric_types} == {NumericValueType.INTEGER}
@@ -577,7 +584,7 @@ class CombinedExpression(CombinableExpression):
             # The database's own quotient of integers - a fraction.
             output_field = NumericTyping.FLOAT_OUTPUT_FIELD
         if (
-            scaled_timedelta_field is not None
+            scaled_duration_field is not None
             and self.connector is ArithmeticOperator.DIV
             and numeric_types is not None
             and {numeric_type.type for numeric_type in numeric_types} == {NumericValueType.INTEGER}
@@ -585,28 +592,12 @@ class CombinedExpression(CombinableExpression):
             renderers = expression_context.dialect.renderers
             term = renderers.get_duration_quotient(left_term, right_term)
         else:
-            operands_may_be_null = (
-                self._may_be_null(self.left, left_output_field, expression_context),
-                self._may_be_null(self.right, right_output_field, expression_context),
-            )
             term = self._get_arithmetic_term(
-                left_term, right_term, numeric_types, expression_context, operands_may_be_null
+                left_term, right_term, numeric_types, expression_context, (left_output_field, right_output_field)
             )
-        if (
-            not expression_context.writes_column_value
-            and self.connector in EXACT_INTEGER_CONNECTORS
-            and numeric_types is not None
-            and {numeric_type.type for numeric_type in numeric_types} == {NumericValueType.INTEGER}
-            and (operand_range := self._get_result_range(left_output_field, right_output_field)) is not None
-            and operand_range[0] >= CHECKED_INTEGER_RANGE[0]
-            and operand_range[1] <= CHECKED_INTEGER_RANGE[1]
-        ):
-            # A read result past 64 bits, or past a wider operand's type, is refused - a database turns it
-            # into a REAL, another wraps it around.
-            minimum, maximum = min(operand_range[0], INT64_MIN), max(operand_range[1], INT64_MAX)
-            term = expression_context.dialect.renderers.get_checked_integer_result(
-                term, minimum, maximum, INTEGER_TYPE_NAME
-            )
+        if TemporalArithmetic.get_field_temporal_type(scaled_duration_field) is TemporalType.TIMEDELTA:
+            # A duration hare keeps as microseconds stays of its column's type.
+            term = expression_context.dialect.renderers.get_scaled_duration(term)
         return ExpressionResult(
             term=term,
             joins=ExpressionResult.dedup_joins(left.joins, right.joins),

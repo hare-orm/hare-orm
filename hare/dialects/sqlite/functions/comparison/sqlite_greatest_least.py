@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from functools import partial
 from typing import Any
 
@@ -15,18 +14,14 @@ from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeF
 
 class SqliteGreatestLeast:
     """Backs ``SQLITE_GREATEST_FUNCTION_NAME``/``SQLITE_LEAST_FUNCTION_NAME`` - SQLite's multi-argument
-    ``max()``/``min()``, NULL when any argument is NULL, with numbers compared as numbers, a
-    DecimalField's stored text included."""
+    ``max()``/``min()``, NULL when any argument is NULL, with numbers compared as numbers - a text as
+    SQLite reads one, as a float."""
 
     @staticmethod
     def get_sort_key(value: Any, comparison_type: str) -> Any:
-        """What an argument is compared by - a Decimal for a number."""
-        if comparison_type == "number":
-            return (
-                value
-                if isinstance(value, (int, float))
-                else Decimal(value.decode() if isinstance(value, bytes) else value)
-            )
+        """What an argument is compared by - a number as itself, a text as a float."""
+        if comparison_type == "number" and not isinstance(value, (int, float)):
+            return float(value.decode() if isinstance(value, bytes) else value)
         return value
 
     @classmethod
@@ -39,8 +34,7 @@ class SqliteGreatestLeast:
             values: The arguments.
 
         Returns:
-            The picked argument as it was passed - a float of a number picked among floats, the type
-            the result of a float and a Decimal is.
+            The picked argument as it was passed - a float of a number picked among floats.
         """
         if any(value is None for value in values):
             return None

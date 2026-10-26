@@ -7,6 +7,7 @@ from hare import Connections
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.postgresql.query import PostgresqlQuery
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
+from hare.exceptions import UnSupportedError
 from hare.query.expressions import F, Value
 from hare.query.functions import Coalesce, Concat
 from hare.sql import Criterion, EmptyCriterion, Field, Table, functions as sql_functions
@@ -14,7 +15,8 @@ from hare.sql.constants import DEFAULT_SQL_CONTEXT, NEUTRAL_SQL_CONTEXT
 from hare.sql.exceptions import FunctionException
 from hare.sql.functions import Count
 from hare.sql.terms import CustomFunction, Interval, Not, Parameterizer
-from tests.shared_models.testmodels import CharPkModel, DecimalFields, Drink, Event, FloatFields, IntFields
+from tests.shared_models.testmodels import CharPkModel, Drink, Event, FloatFields, IntFields
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 @pytest.fixture
@@ -104,34 +106,30 @@ def test_annotate_coalesce_compatible_literal_default_is_not_cast(sql_context):
 
 def test_annotate_coalesce_incompatible_numeric_literal_default_is_cast(sql_context):
     db, dialect = sql_context
-    sql = IntFields.objects.all().annotate(num=Coalesce("intnum_null", Decimal("5.55"))).values("num").sql()
+    queryset = IntFields.objects.all().annotate(num=Coalesce("intnum_null", Decimal("5.55"))).values("num")
     if dialect == "postgresql":
-        assert sql == 'SELECT COALESCE("intnum_null",CAST($1 AS NUMERIC)) "num" FROM "intfields"'
+        assert queryset.sql() == 'SELECT COALESCE("intnum_null",CAST($1 AS NUMERIC)) "num" FROM "intfields"'
     else:
-        # A Decimal result is its exact text on SQLite - a numeric cast would make it a double.
-        assert sql == (
-            'SELECT (COALESCE(hare_decimal_text("intnum_null"),hare_decimal_text(?)) COLLATE hare_decimal) '
-            '"num" FROM "intfields"'
-        )
+        # SQLite stores no exact decimal.
+        with pytest.raises(UnSupportedError, match="no exact decimals"):
+            queryset.sql()
 
 
 def test_annotate_coalesce_incompatible_value_default_is_cast(sql_context):
     db, dialect = sql_context
     placeholder = "$1" if dialect == "postgresql" else "?"
-    incompatible = (
-        IntFields.objects.all().annotate(num=Coalesce("intnum_null", Value(Decimal("5.55")))).values("num").sql()
-    )
+    incompatible = IntFields.objects.all().annotate(num=Coalesce("intnum_null", Value(Decimal("5.55")))).values("num")
     if dialect == "postgresql":
-        assert incompatible == 'SELECT COALESCE("intnum_null",CAST($1 AS NUMERIC)) "num" FROM "intfields"'
+        assert incompatible.sql() == 'SELECT COALESCE("intnum_null",CAST($1 AS NUMERIC)) "num" FROM "intfields"'
     else:
-        assert incompatible == (
-            'SELECT (COALESCE(hare_decimal_text("intnum_null"),hare_decimal_text(?)) COLLATE hare_decimal) '
-            '"num" FROM "intfields"'
-        )
+        # SQLite stores no exact decimal.
+        with pytest.raises(UnSupportedError, match="no exact decimals"):
+            incompatible.sql()
     compatible = IntFields.objects.all().annotate(num=Coalesce("intnum_null", Value(5))).values("num").sql()
     assert compatible == f'SELECT COALESCE("intnum_null",{placeholder}) "num" FROM "intfields"'
 
 
+@pytest.mark.postgresql_models
 def test_annotate_coalesce_wider_numeric_default_cast_for_decimal_and_float_fields(sql_context):
     db, dialect = sql_context
     placeholder = "$1" if dialect == "postgresql" else "?"
@@ -143,32 +141,12 @@ def test_annotate_coalesce_wider_numeric_default_cast_for_decimal_and_float_fiel
         (FloatFields, "floatnum_null", "floatfields", Value(Decimal("2.5"))),
     ):
         sql = model.objects.all().annotate(num=Coalesce(field_name, default)).values("num").sql()
-        # SQLite wraps a DecimalField column itself in CAST(... AS NUMERIC) - unrelated to the
-        # default value, which is what must stay uncast here.
-        column_sql = (
-            f'CAST("{field_name}" AS NUMERIC)'
-            if dialect != "postgresql" and model is DecimalFields
-            else f'"{field_name}"'
-        )
-        # A Decimal default is cast to NUMERIC on SQLite only (it binds as TEXT there and would
-        # otherwise compare above every number).
         default_literal = default.value if isinstance(default, Value) else default
-        default_sql = (
-            f"CAST({placeholder} AS NUMERIC)"
-            if dialect != "postgresql" and isinstance(default_literal, Decimal)
-            else placeholder
-        )
+        default_sql = placeholder
         if model is DecimalFields and isinstance(default_literal, float):
             # A float default makes the result a float - cast so Postgres doesn't type it numeric.
             default_sql = f"CAST({placeholder} AS FLOAT)"
-        if dialect != "postgresql" and model is DecimalFields and isinstance(default_literal, Decimal):
-            # A Decimal result is its exact text on SQLite - a numeric cast would make it a double.
-            assert sql == (
-                f'SELECT (COALESCE(hare_decimal_text("{field_name}"),hare_decimal_text(?)) COLLATE hare_decimal) '
-                f'"num" FROM "{table}"'
-            ), default
-            continue
-        assert sql == f'SELECT COALESCE({column_sql},{default_sql}) "num" FROM "{table}"', default
+        assert sql == f'SELECT COALESCE("{field_name}",{default_sql}) "num" FROM "{table}"', default
 
 
 @pytest.mark.database_independent

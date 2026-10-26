@@ -32,8 +32,7 @@ WARNING: risky on a database in use if the tables are large - `hare checkmigrati
 config = {**HARE_CONFIG, "migrations": {"safety": {"large_table_rows": 1_000_000}}}
 ```
 
-`large_table_rows` — целое число от 0 (любая таблица большая) до 10<sup>12</sup>; иное значение даёт
-`ConfigurationError` при загрузке конфига.
+`large_table_rows` — целое число строк; при 0 любая таблица большая.
 
 Та же проверка из кода:
 
@@ -221,13 +220,14 @@ class AlterColumnNotNullSafe:
 (принимается и объект модели). Имя без одной колонки в базе даёт `ConfigurationError`. Пакет выбирает
 строки по первичному ключу — по всем колонкам составного, — а у модели без первичного ключа по
 собственному имени строки в базе (`ctid` в PostgreSQL, `rowid` в SQLite); база без такого имени даёт
-`ConfigurationError` для модели без первичного ключа.
+`ConfigurationError` для модели без первичного ключа. В миграции, которая идёт вне транзакции, оба
+отказа случаются до того, как выполнится любая из её операций.
 
 `AlterColumnNotNullSafe` делает колонку NOT NULL, проверив, что ни одна строка не хранит там `NULL`:
 такая строка даёт `hare.exceptions.ConfigurationError` с именами модели и поля и советом использовать
 `BackfillColumn` — вместо ошибки нарушения NOT NULL из базы; в миграции с `atomic = False` она становится
-причиной (`__cause__`) `PartiallyAppliedMigrationError`, которую даёт любая ошибка такой миграции. Как
-это делается:
+причиной (`__cause__`) `PartiallyAppliedMigrationError`, которую даёт ошибка такой миграции после первой
+выполненной команды, а при отказе до первой команды выходит как есть. Как это делается:
 
 - **PostgreSQL, миграция с `atomic = False`** — таблица никогда не сканируется под блокировкой:
   `CHECK (column IS NOT NULL)` добавляется `NOT VALID` (без сканирования), проверяется через
@@ -333,6 +333,12 @@ class Migration(Migration):
         AddIndex("Loan", Index(fields=("status",), name="loan_status"), concurrently=True),
     ]
 ```
+
+Неудачная сборка — дубликат под уникальным индексом, отменённый запрос — оставляет индекс в базе
+`INVALID`: он есть, но ни один запрос его не использует и он ничего не обеспечивает. `hare drift`
+сообщает, что он отличается от объявленного, а `inspectdb` помечает его `# TODO`; повторный `AddIndex`
+миграции падает на его имени. Сначала удалите его (`RunSQL("DROP INDEX CONCURRENTLY IF EXISTS
+loan_status")` в неатомарной миграции или вручную), затем мигрируйте снова.
 
 ## <a id="adding-a-constraint"></a>Приём 4: добавление ограничения
 

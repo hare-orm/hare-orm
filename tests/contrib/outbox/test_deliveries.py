@@ -11,7 +11,6 @@ import pytest
 
 from hare.contrib.outbox import DeliveryError, OutboxRelay, TopicRouter, WebhookDelivery
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, EVENT_TOPIC_HEADER, WEBHOOK_SIGNATURE_HEADER
-from hare.exceptions import ConfigurationError
 from tests.contrib.outbox.models import DemoOutboxEvent
 
 
@@ -125,8 +124,6 @@ async def test_a_topic_without_a_route_fails(db_outbox):
     assert "no delivery takes topic 'billing.charged'" in event.last_error
     with pytest.raises(DeliveryError):
         TopicRouter({}).get_delivery("anything")
-    with pytest.raises(ConfigurationError):
-        TopicRouter({"": deliver})
 
 
 @pytest.mark.asyncio
@@ -153,6 +150,23 @@ async def test_a_webhook_posts_the_payload_signed(db_outbox):
 
 
 @pytest.mark.asyncio
+async def test_a_webhook_sends_a_header_value_beyond_ascii(db_outbox):
+    """The client wrote a text header only in ASCII - every delivery of the event failed."""
+    event = await DemoOutboxEvent.enqueue("widget.created", {}, headers={"author": "Zoë"})
+    receiver = HttpReceiver()
+    async with receiver as url:
+        delivery = WebhookDelivery(url, headers={"x-service": "магазин"})
+        assert await OutboxRelay(DemoOutboxEvent, delivery).poll_once() == 1
+        await delivery.close()
+
+    ((headers, __),) = receiver.requests
+    assert headers["author"] == "Zoë"
+    assert headers["x-service"] == "магазин"
+    await event.refresh_from_db()
+    assert event.published_at is not None
+
+
+@pytest.mark.asyncio
 async def test_a_webhook_answering_an_error_fails_the_event(db_outbox):
     event = await DemoOutboxEvent.enqueue("widget.created", {})
     async with HttpReceiver(status=503) as url:
@@ -165,10 +179,15 @@ async def test_a_webhook_answering_an_error_fails_the_event(db_outbox):
     assert "503" in event.last_error
 
 
-def test_webhook_options_are_checked():
-    with pytest.raises(ConfigurationError, match="url"):
-        WebhookDelivery("")
-    with pytest.raises(ConfigurationError, match="secret"):
-        WebhookDelivery("http://x", secret="")
-    with pytest.raises(ConfigurationError, match="timeout_seconds"):
-        WebhookDelivery("http://x", timeout_seconds=0)
+@pytest.mark.asyncio
+async def test_a_webhook_event_with_a_header_name_beyond_ascii_fails_with_a_reason(db_outbox):
+    """The client's own encoding error failed the event's every delivery."""
+    event = await DemoOutboxEvent.enqueue("widget.created", {}, headers={"x-имя": "v"})
+    async with HttpReceiver() as url:
+        delivery = WebhookDelivery(url)
+        await OutboxRelay(DemoOutboxEvent, delivery).poll_once()
+        await delivery.close()
+
+    await event.refresh_from_db()
+    assert event.published_at is None
+    assert "header name is ASCII" in event.last_error

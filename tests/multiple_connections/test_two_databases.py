@@ -3,7 +3,7 @@ import os
 import pytest
 import pytest_asyncio
 
-from hare import prefetch_related_objects
+from hare import Prefetch, prefetch_related_objects
 from hare.contrib.test import requires_features
 from hare.exceptions import OperationalError, QueryError
 from hare.transactions.transactions import Transactions
@@ -151,6 +151,31 @@ async def test_select_related_and_prefetched_instances_remember_their_connection
     )
     prefetched_event = tournament.events[0]
     assert (await prefetched_event.tournament).name == "replica tournament"
+
+
+@pytest.mark.asyncio
+async def test_prefetch_queryset_reads_on_the_parent_connection(default_and_replica):
+    _default_db, replica_db = default_and_replica
+    tournament = (
+        await Tournament.objects.all()
+        .using("replica")
+        .prefetch_related(Prefetch("events", Event.objects.filter(name__contains="event")))
+        .get(name="replica tournament")
+    )
+    assert [event.name for event in tournament.events] == ["replica event"]
+
+    tournament = await Tournament.objects.all().using("replica").get(name="replica tournament")
+    await prefetch_related_objects([tournament], Prefetch("events", Event.objects.all(), to_attribute="all_events"))
+    assert [event.name for event in tournament.all_events] == ["replica event"]
+
+    # A connection the Prefetch queryset chose itself is kept.
+    tournament = (
+        await Tournament.objects.all()
+        .using(replica_db)
+        .prefetch_related(Prefetch("events", Event.objects.using("models")))
+        .get(name="replica tournament")
+    )
+    assert [event.name for event in tournament.events] == ["default event"]
 
 
 @pytest.mark.asyncio

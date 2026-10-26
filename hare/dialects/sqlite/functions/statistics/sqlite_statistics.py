@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from functools import partial
 from typing import Any, ClassVar
 
@@ -40,7 +39,6 @@ class SqliteStatistics:
                     statistic_class.sample,
                     statistic_class.is_deviation,
                     SqliteStatistic.get_statistic,
-                    Decimal,
                 )
             # aiosqlite wraps create_function() but not create_window_function().
             await connection._execute(  # type: ignore[no-untyped-call]

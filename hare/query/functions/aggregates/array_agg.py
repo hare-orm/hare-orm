@@ -30,7 +30,7 @@ class ArrayAgg(Aggregate):
     populate_field_object = True
     allows_order_by = True
 
-    def _coerce_output_field(self, field_object: Field[Any]) -> Field[Any]:
+    def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         return ArrayField(base_field=field_object)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

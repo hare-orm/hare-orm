@@ -6,13 +6,8 @@ import pytest
 import pytest_asyncio
 
 from hare.exceptions import FieldError
-from tests.shared_models.testmodels import (
-    BooleanFields,
-    CharFields,
-    CharFkRelatedModel,
-    CharPkModel,
-    DecimalFields,
-)
+from tests.shared_models.testmodels import BooleanFields, CharFields, CharFkRelatedModel, CharPkModel
+from tests.shared_models.testmodels_postgres import DecimalFields
 
 
 class MyEnum(StrEnum):
@@ -295,6 +290,7 @@ async def decimal_fields_data(db):
     await DecimalFields.objects.create(decimal="0.230", decimal_nodec=1)
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_sorting(db, decimal_fields_data):
     assert await DecimalFields.objects.all().order_by("decimal").values_list("decimal", flat=True) == [
@@ -306,6 +302,7 @@ async def test_decimal_field_sorting(db, decimal_fields_data):
     ]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_gt(db, decimal_fields_data):
     assert await DecimalFields.objects.filter(decimal__gt=Decimal("1.2345")).order_by("decimal").values_list(
@@ -313,6 +310,7 @@ async def test_decimal_field_gt(db, decimal_fields_data):
     ) == [Decimal("2.3"), Decimal("2.3457"), Decimal("23")]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_between_and(db, decimal_fields_data):
     assert await DecimalFields.objects.filter(decimal__range=(Decimal("1.2344"), Decimal("1.2346"))).values_list(
@@ -320,6 +318,7 @@ async def test_decimal_field_between_and(db, decimal_fields_data):
     ) == [Decimal("1.2345")]
 
 
+@pytest.mark.postgresql_models
 @pytest.mark.asyncio
 async def test_decimal_field_in(db, decimal_fields_data):
     assert await DecimalFields.objects.filter(decimal__in=[Decimal("1.2345"), Decimal("1000")]).values_list(

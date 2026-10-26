@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 
 from hare.sql.constants import BRACKETED_CRITERION_DEPTH
-from hare.sql.enums import Comparator, JSONOperators
+from hare.sql.enums import Comparator
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.term import Term
@@ -14,7 +14,7 @@ class ComplexCriterion(BasicCriterion):
 
     def __init__(
         self,
-        comparator: Comparator | JSONOperators | Enum,
+        comparator: Comparator | Enum,
         left: Term,
         right: Term,
         alias: str | None = None,

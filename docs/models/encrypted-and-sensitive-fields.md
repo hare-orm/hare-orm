@@ -91,7 +91,10 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
 - Anything the database would compute over the ciphertext is rejected with `FieldError` at query-build
   time, since it would be meaningless (or would try to decrypt a plaintext fallback): `order_by()`,
   `group_by()`, `distinct("field")` (PostgreSQL `DISTINCT ON`), `.distinct()` with
-  `.values()`/`.values_list()` selecting an encrypted field (unless the primary key is selected too), and
+  `.values()`/`.values_list()` selecting an encrypted field (unless the primary key is selected too), an
+  aggregate annotated after `.values()`/`.values_list()` selecting one (it groups by them — through a
+  relation or a bare `F()` annotation too), `union()` (but `union(all=True)`), `intersection()` and
+  `difference()` of values selecting one, and
   an encrypted field inside any function, `Case`/`When`, arithmetic, aggregate or `Window`
   (`partition_by`/`order_by` included). Still allowed: `Count("field")` (without `distinct=True`), a bare
   `F("field")` annotation, and the `FirstValue`/`LastValue`/`Count`/ `Lag`/`Lead` window functions
@@ -148,8 +151,8 @@ plaintext, never from a value assigned to it; after a write the instance holds t
 give. A write given values takes a plain value or `F()` of another field with a blind index for the field;
 any other expression (`F("merge_source__email")` included) raises `FieldError` — the index is computed in
 Python. `insert_from()` refuses such a field with `FieldError`: the source rows never pass through Python
-(write them with `bulk_create()`). Giving the index itself to a write as a value - `create()`,
-`update()`, `bulk_update()` or `save()` naming it in `update_fields` - raises `QueryError`; a value
+(write them with `bulk_create()`). Giving the index itself to a write as a value — `create()`,
+`update()`, `bulk_update()` or `save()` naming it in `update_fields` — raises `QueryError`; a value
 assigned to an instance's index is replaced by the one of the plaintext.
 
 With it, the field takes `=`, `__not`, `__in` and `__not_in` (and `get(email=...)`): the filter value's
@@ -215,10 +218,16 @@ Reader._meta.sensitive_fields  # frozenset({"email", "password_hash", "api_key"}
   error, the database's `DETAIL` line included, may hold the value. A filter hides the values of a key
   reaching a sensitive field any way: through relations, as a part of `pk`
   (`pk__in=[(region, account)]`), as a key inside a sensitive JSON field (`data__token=...`), or as a
-  relation compared by a sensitive key (`owner=user`); `save()`, `delete()` and `refresh_from_db()` hide
+  relation compared by a sensitive key (`owner=user`) — and the values of an annotation or an alias
+  reading a sensitive field (`annotate(code=Lower("passport")).filter(code=...)`), a path of a sensitive
+  JSON field or a `Subquery` selecting one; `save()`, `delete()`
+  and `refresh_from_db()` hide
   a sensitive primary key in their `WHERE`, and a many-to-many relation keyed by a sensitive field on
   either side shows none of the parameters of its through-table statements. The DEBUG records the
   `aiosqlite` and `clickhouse_driver` libraries write of each statement, its values included, are dropped
   from their loggers. The message of a
   `get_or_create()`/`update_or_create()` whose `defaults` contradict its lookups shows `<hidden>` too.
-  Raw SQL (`execute_sql()`, `RawSQL`) names no field, so its parameters are shown as they are.
+  Raw SQL (`execute_sql()`, `RawSQL`) names no field, so its parameters are shown as they are. What a
+  query returns to its caller is the real thing: `explain()` gives the plan as the database writes it —
+  PostgreSQL's shows the value a filter compares with — and `sql(parameters_inline=True)` the statement
+  with its values; don't log them where the value mustn't go.

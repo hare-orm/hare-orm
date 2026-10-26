@@ -31,9 +31,6 @@ class Term(Node):
     #: Whether the term is a query built apart from the statement it is written into - its query is
     #: ``get_nested_query()``.
     holds_nested_query = False
-    #: Whether the term's value is a ``sensitive=True`` field's - its parameter is never shown
-    #: (``QueryParameters``).
-    sensitive = False
 
     @staticmethod
     def get_combined_is_aggregate(values: list[bool | None]) -> bool | None:

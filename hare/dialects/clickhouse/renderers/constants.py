@@ -1,45 +1,13 @@
 from __future__ import annotations
 
-import datetime
 import re
 
-from hare.dialects.clickhouse.constants import (
-    CLICKHOUSE_DATETIME_PRECISION,
-    CLICKHOUSE_FIRST_YEAR,
-    CLICKHOUSE_LAST_YEAR,
-)
-from hare.sql.enums import AnalyticFunctionName, Order
+from hare.dialects.clickhouse.constants import CLICKHOUSE_DATETIME_PRECISION
+from hare.sql.enums import AnalyticFunctionName, TruncType
+from hare.sql.order import Order
 
 #: A ClickHouse integer type, nullable or not - ``UInt64``, ``Nullable(Int8)``.
 CLICKHOUSE_INTEGER_TYPE_PATTERN = re.compile(r"(?:Nullable\()?(?P<unsigned>U?)Int(?P<bits>\d+)\)?")
-#: The first and the last microsecond since 1970 a ``DateTime64`` column holds.
-CLICKHOUSE_FIRST_MICROSECOND = (
-    datetime.datetime(CLICKHOUSE_FIRST_YEAR, 1, 1) - datetime.datetime(1970, 1, 1)
-) // datetime.timedelta(microseconds=1)
-CLICKHOUSE_LAST_MICROSECOND = (
-    datetime.datetime(CLICKHOUSE_LAST_YEAR + 1, 1, 1) - datetime.datetime(1970, 1, 1)
-) // datetime.timedelta(microseconds=1) - 1
-
-#: A moment shifted by whole microseconds, refused beyond the moments ClickHouse holds - its own
-#: functions stop at the last one. The column holds its moment as microseconds, compared with the
-#: bounds less the shift, which the server computes once. {0}: the moment, {1}: the shift as an
-#: ``Int64``, {2}: the error.
-CLICKHOUSE_SHIFTED_MOMENT_TEMPLATE = (
-    "addMicroseconds({0}, {1} + throwIf(ifNull(abs({1}) > "
-    + str(CLICKHOUSE_LAST_MICROSECOND - CLICKHOUSE_FIRST_MICROSECOND)
-    + " OR toUnixTimestamp64Micro({0}) > "
-    + str(CLICKHOUSE_LAST_MICROSECOND)
-    + " - {1} OR toUnixTimestamp64Micro({0}) < "
-    + str(CLICKHOUSE_FIRST_MICROSECOND)
-    + " - {1}, 0), '{2}'))"
-)
-
-#: The error of a moment shifted beyond the moments ClickHouse holds - it would roll over.
-CLICKHOUSE_TIMESTAMP_OUT_OF_RANGE_MESSAGE = "timestamp out of range"
-
-#: The error of a date shifted beyond the dates ClickHouse holds - it would roll over.
-CLICKHOUSE_DATE_OUT_OF_RANGE_MESSAGE = "date out of range"
-
 #: hare's text functions by the name hare writes them under -> ClickHouse's function counting
 #: characters, not bytes, where it has both.
 CLICKHOUSE_TEXT_FUNCTION_NAMES = {
@@ -82,27 +50,19 @@ CLICKHOUSE_MATH_FUNCTION_NAMES = {
     "RADIANS": "radians",
 }
 
-#: An integer result refused out of its type's range, the result written once: {0} the result,
-#: {1} and {2} the type's least and greatest values, {3} the type as the error names it.
-CLICKHOUSE_CHECKED_INTEGER_TEMPLATE = (
-    "arrayMap(x -> x + throwIf(ifNull(x < {1} OR x > {2}, 0), '{3} out of range'), [{0}])[1]"
-)
-
 #: A number written into an integer enum column, refused when no member has it - a mutation writes it
-#: even through a CAST to the column's type. {0}: the number, {1}: the members' numbers.
+#: even through a CAST to the column's type. A member's number is an Int16: ClickHouse converts no wider
+#: integer (the Int256 of exact arithmetic) to an enum. {0}: the number, {1}: the members' numbers.
 CLICKHOUSE_ASSIGNED_ENUM_TEMPLATE = (
     "arrayMap(x -> if(throwIf(ifNull(x NOT IN ({1}), 0), 'the value is the number of no member of the enum') = 0, "
-    "x, x), [{0}])[1]"
+    "toInt16(x), toInt16(x)), [{0}])[1]"
 )
 
 #: hare's math functions ClickHouse has none of, or writes otherwise -> its SQL of them. ``{0}`` and ``{1}``
-#: are the arguments. ``abs()`` of a signed integer is unsigned there - no common type with a signed one in
-#: Coalesce()/Case() - so it is cast back to its argument's type, refused for the type's minimum, whose
-#: absolute value the type doesn't hold (a plain CAST would wrap it round to the minimum again).
+#: are the arguments.
 CLICKHOUSE_MATH_FUNCTION_TEMPLATES = {
     "LOG": "(log({1})/log({0}))",
     "COT": "(1/tan({0}))",
-    "ABS": "accurateCast(abs({0}), toTypeName({0}))",
 }
 
 #: A character of a code point, written as its UTF-8 bytes - ``char()`` takes bytes; a code point no
@@ -143,12 +103,6 @@ CLICKHOUSE_CAST_FUNCTIONS = {
 #: The plain SQL type of a decimal of any scale.
 CLICKHOUSE_NUMERIC_TYPE_NAME = "NUMERIC"
 
-#: The type the operands of an integer sum, difference or product a query reads are cast to - wide
-#: enough for the exact result of 64-bit operands; a written one is the server's.
-CLICKHOUSE_EXACT_INTEGER_TYPE = "'Int256'"
-#: The same for an operand that can be NULL.
-CLICKHOUSE_NULLABLE_EXACT_INTEGER_TYPE = "'Nullable(Int256)'"
-
 #: The scale of a decimal of any scale - the widest decimal's, half its digits after the point.
 CLICKHOUSE_NUMERIC_SCALE = 38
 
@@ -180,6 +134,21 @@ CLICKHOUSE_GENERIC_FUNCTION_NAMES = {
 
 #: The function reading each part of a moment or a date, in Python's ``datetime`` meaning - the
 #: week day counted from Sunday as 1 (mode 3), the ISO week day from Monday as 1.
+#: The units a moment is truncated to by taking its local remainder off the moment itself, by their
+#: microseconds - the wall clock of a moment in an hour a DST change repeats is ambiguous, and dateTrunc()
+#: of a zone changing its offset by half an hour keeps the half hour.
+CLICKHOUSE_REMAINDER_TRUNC_MICROSECONDS = {
+    TruncType.HOUR: 3_600_000_000,
+    TruncType.MINUTE: 60_000_000,
+    TruncType.SECOND: 1_000_000,
+}
+#: A moment ({0}) less its remainder of a unit ({2}, in microseconds) on the wall clock of a zone ({1}) -
+#: the wall clock is the moment and the zone's offset at it.
+CLICKHOUSE_REMAINDER_TRUNC_TEMPLATE = (
+    "subtractMicroseconds({0}, positiveModulo(toUnixTimestamp64Micro({0}) "
+    "+ timeZoneOffset(toTimeZone({0}, {1})) * 1000000, {2}))"
+)
+
 CLICKHOUSE_DATE_PART_FUNCTIONS = {
     "YEAR": "toYear({})",
     "ISOYEAR": "toISOYear({})",
@@ -197,24 +166,9 @@ CLICKHOUSE_DATE_PART_FUNCTIONS = {
 
 #: The ``formatDateTime`` pattern of a time of day written as text, with its microseconds.
 CLICKHOUSE_TIME_TEXT_FORMAT = "%H:%i:%S.%f"
-#: The error of a text naming a clock no day has - ClickHouse would roll ``25:00`` over into the next
-#: day, ``12:60`` into the next hour.
-CLICKHOUSE_IMPOSSIBLE_CLOCK_MESSAGE = "the text names an impossible time of day"
-#: Whether the text ``t`` names an impossible clock: an hour past 23 (the first number of a clock, not
-#: its minutes or seconds) or a minute or a second past 59.
-CLICKHOUSE_IMPOSSIBLE_CLOCK_CONDITION = (
-    "(match(t, '(^|[^0-9:.])(2[4-9]|[3-9][0-9]):[0-9]{2}') OR match(t, ':[6-9][0-9]'))"
-)
 #: A text read as a time of day - the moment of it on the first day of 1970 in UTC, an offset it
-#: names taken. A text not starting with its hours and minutes is refused, as is an impossible clock -
-#: neither is read as some time of day. A NULL's text is read as midnight, its result left out.
-CLICKHOUSE_TIME_OF_TEXT_TEMPLATE = (
-    "if(isNull({0}), NULL, arrayMap(t -> if(throwIf("
-    + CLICKHOUSE_IMPOSSIBLE_CLOCK_CONDITION.replace("{", "{{").replace("}", "}}")
-    + f", '{CLICKHOUSE_IMPOSSIBLE_CLOCK_MESSAGE}') = 0, parseDateTime64BestEffort(if("
-    "match(t, '^[0-9]{{1,2}}:[0-9]{{2}}'), concat('1970-01-01 ', t), ''), 6, 'UTC'), NULL), "
-    "[trimBoth(ifNull({0}, '00:00'))])[1])"
-)
+#: names taken, by ClickHouse's own parsing.
+CLICKHOUSE_TIME_OF_TEXT_TEMPLATE = "parseDateTime64BestEffort(concat('1970-01-01 ', trimBoth({0})), 6, 'UTC')"
 
 #: The fraction of a whole second, cut off a time of day's text - the text then is the one
 #: ``datetime.time.isoformat()`` writes, which a ``TimeField`` stores and a filter compares with.
@@ -258,49 +212,6 @@ CLICKHOUSE_NULL_FOR_NO_ROWS_AGGREGATE_NAMES = {
 #: The aggregates ClickHouse names otherwise in a grouped statement, where a group has a row.
 CLICKHOUSE_GROUPED_AGGREGATE_NAMES = {"ARG_MAX": "argMax", "ARG_MIN": "argMin"}
 
-#: The digits a Decimal256 holds - a sum or product past them wraps around without an error.
-CLICKHOUSE_WIDE_DECIMAL_DIGITS = 76
-#: The error of a Decimal past the digits its type holds - it would wrap around.
-CLICKHOUSE_NUMERIC_OVERFLOW_MESSAGE = "the value has more digits than the decimal holds"
-
-#: The name an average of Decimals is rendered under - ClickHouse's avg() of a Decimal is a Float64.
-CLICKHOUSE_DECIMAL_AVERAGE_NAME = "HARE_DECIMAL_AVG"
-#: The aggregates of Decimals taking the place of SQL's, by its name.
-CLICKHOUSE_DECIMAL_AGGREGATE_NAMES = {"AVG": CLICKHOUSE_DECIMAL_AVERAGE_NAME}
-
-#: A Decimal rounded to its target's places (``{1}``) half away from zero, refused when its whole part
-#: has more digits than the target holds (``{2}`` is ten to their number), converted to the target type
-#: (``{3}``).
-CLICKHOUSE_DECIMAL_CAST_TEMPLATE = (
-    "arrayMap(v -> if(throwIf(ifNull(abs(v) >= toDecimal256('{2}', 0), 0), "
-    "'the value has more digits than the decimal holds') = 0, CAST(v AS {3}), NULL), [round({0}, {1})])[1]"
-)
-
-#: The error of a text naming a date outside the ones ClickHouse stores - it would read the nearest of them.
-CLICKHOUSE_TEXT_DATE_OUT_OF_RANGE_MESSAGE = (
-    f"the text names a date outside {CLICKHOUSE_FIRST_YEAR}-01-01 to {CLICKHOUSE_LAST_YEAR}-12-31, which "
-    "ClickHouse would turn into the nearest of them"
-)
-#: A text read as a moment in UTC - an impossible date or clock is refused, not rolled over, and so is a
-#: text naming no whole date (a year of four digits with a month and a day: three groups of digits, eight
-#: digits in a row, or a month's name and two groups), which ClickHouse would complete with the current
-#: year, month or day ("12" the 12th of January), and a date outside the years hare stores there - a
-#: server before 26 reads it as the first or the last day it holds, a moment read as that day's midnight
-#: from a text not naming its year.
-#: A NULL's text is read as the epoch, its result left out.
-CLICKHOUSE_TEXT_MOMENT_TEMPLATE = (
-    "if(isNull({0}), NULL, arrayMap(t -> arrayMap(m -> if(throwIf("
-    + CLICKHOUSE_IMPOSSIBLE_CLOCK_CONDITION.replace("{", "{{").replace("}", "}}")
-    + f", '{CLICKHOUSE_IMPOSSIBLE_CLOCK_MESSAGE}') + throwIf("
-    f"toYear(m) < {CLICKHOUSE_FIRST_YEAR} OR toYear(m) > {CLICKHOUSE_LAST_YEAR} OR (m IN ("
-    f"toDateTime64('{CLICKHOUSE_FIRST_YEAR}-01-01', 6, {{1}}), "
-    f"toDateTime64('{CLICKHOUSE_LAST_YEAR}-12-31', 6, {{1}})) "
-    f"AND position(t, toString(toYear(m))) = 0), '{CLICKHOUSE_TEXT_DATE_OUT_OF_RANGE_MESSAGE}') = 0, m, NULL), "
-    "[parseDateTime64BestEffort(if(match(t, '[0-9]{{4}}') AND (length(extractAll(t, '[0-9]+')) >= 3 "
-    "OR match(t, '[0-9]{{8}}') OR (match(t, '[A-Za-z]{{3}}') AND length(extractAll(t, '[0-9]+')) >= 2)), "
-    "t, ''), 6, {1})])[1], [ifNull({0}, '1970-01-01')])[1])"
-)
-
 #: A text moment's clock without the UTC offset after it - a naive timestamp reads its text's own clock.
 CLICKHOUSE_TEXT_WITHOUT_OFFSET_TEMPLATE = (
     "replaceRegexpOne({0}, '(\\\\d{{2}}:\\\\d{{2}}(:\\\\d{{2}}(\\\\.\\\\d+)?)?)"
@@ -339,3 +250,6 @@ CLICKHOUSE_NOW_SQL = f"now64({CLICKHOUSE_DATETIME_PRECISION}, 'UTC')"
 
 #: The zone an aware moment is written and read in.
 CLICKHOUSE_UTC_ZONE_SQL = "'UTC'"
+#: The digits after the point of a quotient, an average or a statistic of Decimals ClickHouse works out
+#: through hare - its own gives a double or cuts the quotient to the dividend's scale.
+DECIMAL_QUOTIENT_SCALE = 20

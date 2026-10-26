@@ -15,10 +15,11 @@ Each test:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import IntEnum, StrEnum
 
 import pytest
 
-from hare import Connections
+from hare import Connections, fields
 from hare.contrib.test import requires_features
 from hare.ddl import Index, RawSQLTerm
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
@@ -28,7 +29,7 @@ from hare.exceptions import ConfigurationError, QueryError, UnSupportedError
 from hare.fields.constants import RESTRICT
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.numeric import BigIntField, DecimalField, FloatField, IntField, PositiveIntField, SmallIntField
-from hare.fields.data.temporal import DatetimeField
+from hare.fields.data.temporal import DateField, DatetimeField
 from hare.fields.data.text import CharField, TextField
 from hare.fields.db_defaults import Now
 from hare.fields.generated_field import GeneratedField
@@ -63,6 +64,16 @@ from hare.models import Model
 from hare.query.expressions import Q
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.operations import apply_operations
+
+
+class NarrowedSize(IntEnum):
+    SMALL = 1
+    LARGE = 2
+
+
+class NarrowedColor(StrEnum):
+    RED = "red"
+    BLUE = "blue"
 
 
 def get_with_and_without_field(models: list[type[Model]], model_name: str, field_name: str) -> tuple[type, type]:
@@ -633,7 +644,7 @@ async def test_add_indexed_field_creates_a_real_index(db_simple):
         await apply_operations("models", state, add_field_op, schema_editor=editor)
 
         index = Index(fields=("name",))
-        widget_model = state.apps.get_model("models", "Widget")
+        widget_model = state.apps.get_model("models.Widget")
         index_name = editor.index_statements.index_name_for_model(widget_model, index)
         assert await index_exists("test_indexed_widget", index_name)
     finally:
@@ -680,7 +691,7 @@ async def test_second_makemigrations_after_indexed_field_addition_does_not_drop_
             "models", tracked_state, AddField(model_name="Widget", name="name", field=name_field), schema_editor=editor
         )
         index = Index(fields=("name",))
-        widget_model = tracked_state.apps.get_model("models", "Widget")
+        widget_model = tracked_state.apps.get_model("models.Widget")
         index_name = editor.index_statements.index_name_for_model(widget_model, index)
         assert await index_exists(table, index_name)
 
@@ -1980,7 +1991,8 @@ async def test_alter_field_class_change_preserves_data(db_simple):
         alter_op = AlterField(
             model_name="Invoice",
             name="amount",
-            field=DecimalField(max_digits=10, decimal_places=2),
+            # SQLite keeps no exact decimal: a FloatField there.
+            field=DecimalField(max_digits=10, decimal_places=2) if dialect != "sqlite" else FloatField(),
         )
         await apply_operations("models", state, alter_op, schema_editor=editor)
 
@@ -2507,13 +2519,13 @@ async def test_sqlite_create_model_with_generated_field_and_check_constraint_kee
         name="Product",
         fields=[
             ("id", IntField(primary_key=True)),
-            ("price", DecimalField(max_digits=10, decimal_places=2)),
+            ("price", FloatField()),
             ("quantity", IntField()),
             (
                 "total_value",
                 GeneratedField(
                     expression=RawSQLTerm("price * quantity"),
-                    output_field=DecimalField(max_digits=12, decimal_places=2),
+                    output_field=FloatField(),
                 ),
             ),
         ],
@@ -2567,7 +2579,7 @@ async def test_sqlite_add_field_for_a_generated_field_keeps_generated_column(db_
         name="Product",
         fields=[
             ("id", IntField(primary_key=True)),
-            ("price", DecimalField(max_digits=10, decimal_places=2)),
+            ("price", FloatField()),
             ("quantity", IntField()),
         ],
         options={"table": "test_product_addfield_generated"},
@@ -2583,7 +2595,7 @@ async def test_sqlite_add_field_for_a_generated_field_keeps_generated_column(db_
             name="total_value",
             field=GeneratedField(
                 expression=RawSQLTerm("price * quantity"),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
+                output_field=FloatField(),
             ),
         )
         await apply_operations("models", state, add_op, schema_editor=editor)
@@ -2626,7 +2638,7 @@ async def test_sqlite_add_field_for_a_generated_field_on_a_non_empty_table(db_si
         name="Product",
         fields=[
             ("id", IntField(primary_key=True)),
-            ("price", DecimalField(max_digits=10, decimal_places=2)),
+            ("price", FloatField()),
             ("quantity", IntField()),
         ],
         options={"table": "test_product_addfield_generated_nonempty"},
@@ -2645,7 +2657,7 @@ async def test_sqlite_add_field_for_a_generated_field_on_a_non_empty_table(db_si
             name="total_value",
             field=GeneratedField(
                 expression=RawSQLTerm("price * quantity"),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
+                output_field=FloatField(),
             ),
         )
         await apply_operations("models", state, add_op, schema_editor=editor)
@@ -2682,7 +2694,7 @@ async def test_alter_field_generated_field_output_field_change_raises_clean_erro
         name="Product",
         fields=[
             ("id", IntField(primary_key=True)),
-            ("price", DecimalField(max_digits=10, decimal_places=2)),
+            ("price", FloatField()),
             ("quantity", IntField()),
         ],
         options={"table": "test_product_alter_generated_output_field"},
@@ -2707,7 +2719,7 @@ async def test_alter_field_generated_field_output_field_change_raises_clean_erro
             name="total",
             field=GeneratedField(
                 expression=RawSQLTerm("price * quantity"),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
+                output_field=FloatField(),
             ),
         )
         with pytest.raises(ConfigurationError, match="Modifying generated fields is not supported"):
@@ -2740,7 +2752,7 @@ async def test_sqlite_alter_field_generated_field_expression_change_raises_clean
         name="Product",
         fields=[
             ("id", IntField(primary_key=True)),
-            ("price", DecimalField(max_digits=10, decimal_places=2)),
+            ("price", FloatField()),
             ("quantity", IntField()),
         ],
         options={"table": "test_product_alter_generated_expression"},
@@ -2754,7 +2766,7 @@ async def test_sqlite_alter_field_generated_field_expression_change_raises_clean
             name="total",
             field=GeneratedField(
                 expression=RawSQLTerm("price * quantity"),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
+                output_field=FloatField(),
             ),
         )
         await apply_operations("models", state, create_op, schema_editor=editor)
@@ -2768,7 +2780,7 @@ async def test_sqlite_alter_field_generated_field_expression_change_raises_clean
             name="total",
             field=GeneratedField(
                 expression=RawSQLTerm("price * quantity * 2"),
-                output_field=DecimalField(max_digits=12, decimal_places=2),
+                output_field=FloatField(),
             ),
         )
         with pytest.raises(ConfigurationError, match="Modifying generated fields is not supported"):
@@ -4690,6 +4702,7 @@ async def test_alter_field_narrowing_max_length_succeeds_when_no_row_overflows(d
         await conn.execute_script(f"DROP TABLE IF EXISTS {tbl}")
 
 
+@pytest.mark.decimal_fields
 @pytest.mark.asyncio
 async def test_alter_field_narrowing_decimal_places_raises_instead_of_rounding(db_simple):
     """Same silent-narrowing risk as max_length, but for DecimalField.max_digits/decimal_places -
@@ -4727,23 +4740,56 @@ NARROWING_CASES = [
     ("text_to_char", TextField(), "'ABCDEFGHIJ'", CharField(max_length=5)),
     ("int_to_char", IntField(), "123456", CharField(max_length=3)),
     ("bool_to_char", BooleanField(), "TRUE", CharField(max_length=3)),
-    (
+    pytest.param(
         "decimal_whole_digits",
         DecimalField(max_digits=10, decimal_places=2),
         "12345678.12",
         DecimalField(max_digits=10, decimal_places=5),
+        marks=pytest.mark.decimal_fields,
     ),
-    ("float_to_decimal", FloatField(), "1.23456", DecimalField(max_digits=6, decimal_places=2)),
-    ("int_to_decimal", IntField(), "123456", DecimalField(max_digits=5, decimal_places=2)),
+    pytest.param(
+        "float_to_decimal",
+        FloatField(),
+        "1.23456",
+        DecimalField(max_digits=6, decimal_places=2),
+        marks=pytest.mark.decimal_fields,
+    ),
+    pytest.param(
+        "int_to_decimal",
+        IntField(),
+        "123456",
+        DecimalField(max_digits=5, decimal_places=2),
+        marks=pytest.mark.decimal_fields,
+    ),
     ("bigint_to_smallint", BigIntField(), "100000", SmallIntField()),
     ("float_to_int", FloatField(), "1.5", IntField()),
-    ("decimal_to_int", DecimalField(max_digits=10, decimal_places=2), "3.25", IntField()),
+    ("bigint_to_float", BigIntField(), "9007199254740993", FloatField()),
+    pytest.param(
+        "decimal_to_float",
+        DecimalField(max_digits=30, decimal_places=20),
+        "0.12345678901234567891",
+        FloatField(),
+        marks=pytest.mark.decimal_fields,
+    ),
+    ("int_to_bool", IntField(), "5", BooleanField()),
+    ("int_to_int_enum", IntField(), "7", fields.IntEnumField(NarrowedSize)),
+    ("char_to_char_enum", CharField(max_length=10), "'pink'", fields.CharEnumField(NarrowedColor)),
+    ("datetime_to_date", DatetimeField(), "'2024-01-02 03:04:05'", DateField()),
+    pytest.param(
+        "decimal_to_int",
+        DecimalField(max_digits=10, decimal_places=2),
+        "3.25",
+        IntField(),
+        marks=pytest.mark.decimal_fields,
+    ),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("label", "old_field", "stored_sql", "new_field"), NARROWING_CASES, ids=[case[0] for case in NARROWING_CASES]
+    ("label", "old_field", "stored_sql", "new_field"),
+    NARROWING_CASES,
+    ids=[case.values[0] if hasattr(case, "values") else case[0] for case in NARROWING_CASES],
 )
 async def test_alter_field_refuses_values_the_new_type_cannot_hold(db_simple, label, old_field, stored_sql, new_field):
     """Every dialect refuses an AlterField whose new column type can't hold an existing value -
@@ -4776,22 +4822,43 @@ async def test_alter_field_refuses_values_the_new_type_cannot_hold(db_simple, la
 
 
 FITTING_CHANGES = [
-    (
+    pytest.param(
         "decimal_trailing_zeros",
         DecimalField(max_digits=10, decimal_places=5),
         "12.50000",
         DecimalField(max_digits=10, decimal_places=2),
+        marks=pytest.mark.decimal_fields,
     ),
     ("float_whole_to_int", FloatField(), "7", IntField()),
-    ("decimal_whole_to_int", DecimalField(max_digits=10, decimal_places=2), "3", IntField()),
+    pytest.param(
+        "decimal_whole_to_int",
+        DecimalField(max_digits=10, decimal_places=2),
+        "3",
+        IntField(),
+        marks=pytest.mark.decimal_fields,
+    ),
     ("int_to_positive", IntField(), "-5", PositiveIntField()),
+    ("bigint_exact_to_float", BigIntField(), "9007199254740992", FloatField()),
+    pytest.param(
+        "decimal_exact_to_float",
+        DecimalField(max_digits=30, decimal_places=20),
+        "0.1",
+        FloatField(),
+        marks=pytest.mark.decimal_fields,
+    ),
+    ("int_one_to_bool", IntField(), "1", BooleanField()),
+    ("int_member_to_int_enum", IntField(), "2", fields.IntEnumField(NarrowedSize)),
+    ("char_member_to_char_enum", CharField(max_length=10), "'red'", fields.CharEnumField(NarrowedColor)),
+    ("datetime_midnight_to_date", DatetimeField(), "'2024-01-02 00:00:00'", DateField()),
     ("text_fits_char", TextField(), "'ABC'", CharField(max_length=5)),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("label", "old_field", "stored_sql", "new_field"), FITTING_CHANGES, ids=[case[0] for case in FITTING_CHANGES]
+    ("label", "old_field", "stored_sql", "new_field"),
+    FITTING_CHANGES,
+    ids=[case.values[0] if hasattr(case, "values") else case[0] for case in FITTING_CHANGES],
 )
 async def test_alter_field_narrowing_keeps_values_that_fit(db_simple, label, old_field, stored_sql, new_field):
     """A narrower type every existing value fits in alters normally - a PositiveIntField has the
@@ -5023,6 +5090,61 @@ async def test_alter_field_narrowing_the_values_an_array_holds_raises(db_simple)
 
 
 @pytest.mark.asyncio
+async def test_alter_field_to_a_network_or_other_array_dimensions_keeps_the_values(db_simple):
+    """An address with host bits set turned into a network would lose them, and an array column keeps the
+    dimensions each row was written with - both refuse the ALTER, a fitting column changes."""
+    from hare.dialects.postgresql.fields import CidrField, InetField
+    from hare.fields import ArrayField
+
+    conn = db_simple.get_connection()
+    dialect = DatabaseUnderTest.get_engine_name(conn.dialect)
+    if dialect != "postgresql":
+        pytest.skip("network and many-dimensional array columns are PostgreSQL's")
+    editor = _get_schema_editor(conn)
+    state = State()
+    table = q("test_widget_kept_values", dialect)
+    try:
+        await apply_operations(
+            "models",
+            state,
+            CreateModel(
+                name="Widget",
+                fields=[
+                    ("id", IntField(primary_key=True)),
+                    ("host", InetField()),
+                    ("network", InetField()),
+                    ("counts", ArrayField(IntField())),
+                ],
+                options={"table": "test_widget_kept_values"},
+            ),
+            schema_editor=editor,
+        )
+        await conn.execute_script(
+            f"INSERT INTO {table} (host, network, counts) VALUES ('10.0.0.1/8', '10.0.0.0/8', ARRAY[1, 2])"
+        )
+        for name, changed_field in (("host", CidrField()), ("counts", ArrayField(ArrayField(IntField())))):
+            with pytest.raises(FieldNarrowingDataLossError, match=name):
+                await apply_operations(
+                    "models",
+                    state,
+                    AlterField(model_name="Widget", name=name, field=changed_field),
+                    schema_editor=editor,
+                )
+        await apply_operations(
+            "models",
+            state,
+            AlterField(model_name="Widget", name="network", field=CidrField()),
+            schema_editor=editor,
+        )
+        rows = await conn.execute_dicts(
+            f"SELECT CAST(host AS TEXT) AS host, CAST(network AS TEXT) AS network FROM {table}"
+        )
+        assert (rows[0]["host"], rows[0]["network"]) == ("10.0.0.1/8", "10.0.0.0/8")
+    finally:
+        await conn.execute_script(f"DROP TABLE IF EXISTS {table}")
+
+
+@pytest.mark.asyncio
 async def test_the_collected_sql_of_an_index_dropped_around_a_column_change_runs_as_migrate_does(db_isolated):
     """The collected SQL of a change rebuilding the table of an indexed field (a SQLite rebuild) creates
     the field's index once and runs as migrate does - the rebuild reads the indexes from the model,
@@ -5049,7 +5171,7 @@ async def test_the_collected_sql_of_an_index_dropped_around_a_column_change_runs
         )
         collected = [statement for statement in collecting_editor.collected_sql if "INDEX" in statement.upper()]
         index_name = collecting_editor.index_statements.index_name_for_model(
-            state.apps.get_model("models", "Shelf"), Index(fields=["label"])
+            state.apps.get_model("models.Shelf"), Index(fields=["label"])
         )
         # Created again once by a rebuild (SQLite), not at all where the column changes in place.
         assert (

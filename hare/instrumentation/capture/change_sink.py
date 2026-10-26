@@ -4,6 +4,7 @@ import abc
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from hare.core.apps.apps import Apps
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.captured_change import CapturedChange
     from hare.instrumentation.enums import ChangePayload, RowOperation
@@ -22,6 +23,14 @@ class ChangeSink(abc.ABC):
     payload: ChangePayload
     #: The operations captured.
     operations: frozenset[RowOperation]
+
+    def link_models(self, apps: Apps) -> None:
+        """Finds the models the sink names by reference in the registry of the models it is declared on -
+        called as the registry links the relations; nothing by default.
+
+        Args:
+            apps: The registry.
+        """
 
     @abc.abstractmethod
     def get_field_names(self, model: type[Model]) -> tuple[str, ...]:

@@ -3,13 +3,10 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any
 
-from hare.classes.value_descriptions import ValueDescriptions
 from hare.contrib.frameworks.constants import (
     DEFAULT_LIVENESS_PATH,
     DEFAULT_READINESS_PATH,
     LIVENESS_ANSWER,
-    MAX_HEALTH_STATUS_CODE,
-    MIN_HEALTH_STATUS_CODE,
     UNHEALTHY_STATUS_CODE,
 )
 from hare.health.enums import HealthStatus
@@ -35,11 +32,6 @@ class HealthRoutes:
             still takes traffic.
         include_details: Whether the readiness answer carries each connection's latency, reasons and
             pools - else only the statuses, for an answer anyone may read.
-
-    Raises:
-        TypeError: An argument is of the wrong type.
-        ValueError: A path doesn't start with ``/``, the paths are equal, or the status is outside
-            200-599.
     """
 
     def __init__(
@@ -51,16 +43,6 @@ class HealthRoutes:
         degraded_status_code: int = HTTPStatus.OK.value,
         include_details: bool = False,
     ) -> None:
-        for name, path in (("readiness_path", readiness_path), ("liveness_path", liveness_path)):
-            if not path.startswith("/"):
-                raise ValueError(f"{name} must start with '/', got {path!r}")
-        if readiness_path == liveness_path:
-            raise ValueError(f"readiness_path and liveness_path must differ, both are {readiness_path!r}")
-        if not MIN_HEALTH_STATUS_CODE <= degraded_status_code <= MAX_HEALTH_STATUS_CODE:
-            raise ValueError(
-                f"degraded_status_code must be between {MIN_HEALTH_STATUS_CODE} and {MAX_HEALTH_STATUS_CODE}, "
-                f"got {ValueDescriptions.get_shown_text(degraded_status_code)}"
-            )
         self.health_check = health_check
         self.readiness_path = readiness_path
         self.liveness_path = liveness_path

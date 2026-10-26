@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.sql.builder_methods import BuilderMethods
-from hare.sql.constants import ARRAY_JOIN_TYPES
 from hare.sql.enums import JoinType
 from hare.sql.sql_context import SqlContext
 
@@ -39,11 +38,11 @@ class Join:
         else:
             item_sql = self.item.get_sql(join_context)
         how = self.item.join_type or self.how
-        # An ARRAY JOIN unfolds the row's own array - it reads no other table.
-        prefix = "" if how in ARRAY_JOIN_TYPES else dialect.clauses.get_distributed_read_prefix_sql(sql_context)
-        if how:
-            return f"{prefix}{how} JOIN {item_sql}"
-        return f"{prefix}JOIN {item_sql}"
+        # A source joined without a condition unfolds the row's own values - it reads no other table.
+        prefix = (
+            "" if self.item.joined_without_condition else dialect.clauses.get_distributed_read_prefix_sql(sql_context)
+        )
+        return f"{prefix}{dialect.clauses.get_join_keyword_sql(how)} {item_sql}"
 
     def validate(self, _from: Sequence[Table], _joins: Sequence[Table]) -> None:
         """Checks the join against the tables of the query - nothing for a join without a condition.

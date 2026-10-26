@@ -54,6 +54,12 @@ class StateApps(Apps):
         if app_label in self._default_connections:
             model._meta.default_connection = self._default_connections[app_label]
 
+    def get_identifier_key(self, model: type[Model], name: str) -> str:
+        if self._connections._db_config is None or model._meta.default_connection is None:
+            # A state rendered without connections - its models were checked as they were declared.
+            return name
+        return super().get_identifier_key(model, name)
+
     def get_swappable_label(self, setting: str) -> str:
         """The label a ``swappable`` setting points at, read from the live app registry - a
         migration state has no configuration of its own. Falls back to this state's own models
@@ -114,9 +120,33 @@ class StateApps(Apps):
         if live_apps is None:
             return None
         try:
-            return live_apps.get_model(app_label, model_name)
+            return live_apps.get_model(f"{app_label}.{model_name}")
         except ConfigurationError:
             return None
+
+    @staticmethod
+    def get_live_model_of_lower_name(app_label: str, lower_model_name: str) -> type[Model] | None:
+        """A model of the running application by its name in lower case, as dependencies name models.
+
+        Args:
+            app_label: The model's app.
+            lower_model_name: The model's name in lower case.
+
+        Returns:
+            The model, None outside an initialized Hare or for an unknown model.
+        """
+        live_context = HareContext.get_current()
+        live_apps = live_context.apps if live_context is not None else None
+        if live_apps is None:
+            return None
+        return next(
+            (
+                model
+                for model_name, model in live_apps.apps.get(app_label, {}).items()
+                if model_name.lower() == lower_model_name
+            ),
+            None,
+        )
 
     def _reference_is_missing(self, reference: Any) -> bool:
         """Whether a relation's ``"app.Model"`` reference names a model this state can't load
@@ -150,12 +180,13 @@ class StateApps(Apps):
 
     def _clone_unmanaged_model(self, app_label: str, live_model: type[Model]) -> type[Model]:
         """A state-only copy of an unmanaged model, rendered like ``CreateModel`` renders a model -
-        relation setup changes the copy, not the live class.
+        relation setup changes the copy, not the live class. Only its table and relations are copied: no
+        migration makes its objects, and a view's query would need the connections.
         """
         # Imported here: the model state module imports this one.
         from hare.migrations.state.model_state import ModelState
 
-        model_state = ModelState.make_from_model(app_label, live_model)
+        model_state = ModelState.make_from_model(app_label, live_model, with_schema_objects=False)
         return model_state.render(self, deepcopy_fields=False)
 
     def _check_table_name_collisions(self) -> None:
@@ -273,11 +304,6 @@ class StateApps(Apps):
         if len(items := reference.split(".")) != 2:
             raise ConfigurationError(f"{reference!r} is not a valid model reference. Should be <app>.<model>.")
         return items[0], items[1]
-
-    def get_model(self, app_label: str, model_name: str | None = None) -> type[Model]:
-        if model_name is None:
-            app_label, model_name = self.split_reference(app_label)
-        return self.apps[app_label][model_name]
 
     def clone(
         self,

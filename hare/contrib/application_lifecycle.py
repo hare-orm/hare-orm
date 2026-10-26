@@ -37,36 +37,23 @@ class ApplicationLifecycle:
     ) -> None:
         self.config = config
         self.transactions_option = transactions_option
-        self.transaction_connection_names = self.get_transaction_connection_names(transactions, transactions_option)
+        self.transaction_connection_names = self.get_transaction_connection_names(transactions)
         self.context: HareContext | None = None
 
     @staticmethod
-    def get_transaction_connection_names(
-        transactions: bool | Sequence[str], transactions_option: str
-    ) -> tuple[str | None, ...]:
+    def get_transaction_connection_names(transactions: bool | Sequence[str]) -> tuple[str | None, ...]:
         """The connections a unit of work's transaction runs on.
 
         Args:
             transactions: True, False, or connection aliases.
-            transactions_option: The option's name, for the error messages.
 
         Returns:
             ``(None,)`` - the default connection - for True, the names for a sequence, nothing for
             False.
-
-        Raises:
-            ConfigurationError: ``transactions`` is neither a bool nor a sequence of distinct names.
         """
         if isinstance(transactions, bool):
             return (None,) if transactions else ()
-        if isinstance(transactions, str) or not isinstance(transactions, Sequence):
-            raise ConfigurationError(
-                f"{transactions_option} must be a bool or a sequence of connection aliases, got {transactions!r}"
-            )
-        names = tuple(transactions)
-        if not all(isinstance(name, str) and name for name in names) or len(set(names)) != len(names):
-            raise ConfigurationError(f"{transactions_option} must name each connection once, got {transactions!r}")
-        return names
+        return tuple(transactions)
 
     def check_application(self) -> None:
         """Checks what the application declares once the context is set up - nothing by default.

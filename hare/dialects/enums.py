@@ -7,8 +7,6 @@ class DialectName(StrEnum):
     """The SQL dialect a client, schema editor or migration targets."""
 
     SQL = "sql"
-    SQLITE = "sqlite"
-    POSTGRESQL = "postgresql"
 
 
 class ParameterPosition(StrEnum):

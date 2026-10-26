@@ -29,7 +29,7 @@ class Trigger:
         timing: ``TriggerTiming.BEFORE``, ``AFTER`` or ``INSTEAD_OF`` (on views, where the dialect's
             triggers take it).
         for_each: ``TriggerForEach.ROW`` or ``STATEMENT`` - the latter refused where a trigger fires
-            for every row (SQLite).
+            for every row.
         when: The ``WHEN`` condition - a ``Q`` over the model's own fields, compared on the row the
             trigger fires for (``NEW``; ``OLD`` for a ``DELETE`` trigger), or ``RawSQLTerm`` of a raw
             SQL condition.

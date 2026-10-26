@@ -181,3 +181,29 @@ async def test_a_naive_moment_is_cast_and_written_as_text_at_its_local_wall_cloc
         assert await get_value(Cast("at", fields.TimeField())) == datetime.time(1, 30)
         assert await get_value(Cast("day", fields.DatetimeField())) == datetime.datetime(2024, 3, 1)
         assert await get_value(Cast(Value("2024-03-01 01:30:00"), fields.DatetimeField())) == wall_clock
+
+
+@pytest.mark.asyncio
+async def test_an_hour_is_truncated_in_a_zone_changing_its_offset_by_half_an_hour(moments):
+    """ClickHouse's dateTrunc() of an hour at Lord Howe Island, whose daylight saving moves the clock by 30
+    minutes, kept the half hour after the change - an hour, a minute and a second are truncated by taking
+    the wall clock's remainder off the moment, as on PostgreSQL."""
+    lord_howe = ZoneInfo("Australia/Lord_Howe")
+    await ZonedMoment.objects.bulk_create(
+        [
+            # 03:30 of daylight time, after the change of 2021-10-03.
+            ZonedMoment(id=2, at=datetime.datetime(2021, 10, 2, 16, 30, tzinfo=datetime.UTC), clock=datetime.time(0)),
+            # 02:00 of standard time, after the change of 2021-04-04.
+            ZonedMoment(id=3, at=datetime.datetime(2021, 4, 3, 15, 30, tzinfo=datetime.UTC), clock=datetime.time(0)),
+        ]
+    )
+    truncated = await (
+        ZonedMoment.objects.filter(id__in=[2, 3])
+        .order_by("id")
+        .annotate(value=Trunc("at", "hour", tzinfo="Australia/Lord_Howe"))
+        .values_list("value", flat=True)
+    )
+    assert truncated == [
+        datetime.datetime(2021, 10, 3, 3, tzinfo=lord_howe),
+        datetime.datetime(2021, 4, 4, 2, tzinfo=lord_howe),
+    ]

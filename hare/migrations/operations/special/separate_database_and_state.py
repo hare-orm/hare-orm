@@ -27,6 +27,8 @@ class SeparateDatabaseAndState(HareOperation):
         state_operations: The operations applied to the migration state.
     """
 
+    backward_reads_state_left = False
+
     def __init__(
         self, database_operations: list[Operation] | None = None, state_operations: list[Operation] | None = None
     ) -> None:

@@ -11,10 +11,12 @@ class EnumTypeOperation(HareOperation):
 
     name: str
     schema: str | None
+    backward_reads_state_left = False
+    backward_reads_state_reached = False
 
     @staticmethod
     def get_checked_labels(labels: Any, label: str) -> tuple[str, ...]:
-        """The labels of a type - texts, an empty one too, as PostgreSQL takes it.
+        """The labels of a type - texts, an empty one too, as a database with ENUM types takes it.
 
         Args:
             labels: The labels.

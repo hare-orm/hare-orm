@@ -91,6 +91,20 @@ class ClickhouseJsonValues:
         return text
 
     @staticmethod
+    def to_db_path_value(field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
+        """The JSON text of a value at a path - any JSON value, not only an object.
+
+        Args:
+            field: The path's field.
+            value: The Python value.
+            instance: The model (class) it is written or compared for.
+
+        Returns:
+            The text, None for None.
+        """
+        return cast("JSONField[Any]", field).to_db_value(value, instance)
+
+    @staticmethod
     def may_hold_not_kept_values(text: str) -> bool:
         """Whether a JSON text may hold a value the column doesn't keep - read off the text, much
         faster than a walk of the value.
@@ -99,7 +113,7 @@ class ClickhouseJsonValues:
             text: The JSON text.
 
         Returns:
-            False for a text holding no null, no empty object and no integer of 16 digits.
+            False for a text holding no null, no empty object, no boolean and no integer of 16 digits.
         """
         return any(mark in text for mark in CLICKHOUSE_JSON_NOT_KEPT_MARKS) or (
             CLICKHOUSE_JSON_LONG_INTEGER_MARK in text.translate(CLICKHOUSE_JSON_DIGITS_AS_ZEROS)
@@ -108,8 +122,10 @@ class ClickhouseJsonValues:
     @staticmethod
     def raise_if_not_kept(field: Field[Any], value: dict[str, Any]) -> None:
         """Refuses an object the column would read back otherwise - it keeps no path to a null or an
-        empty object, an integer past an Int64/UInt64 only as a float, and the numbers of one array
-        (its nested arrays included) as one type: floats, when one of them is.
+        empty object, an integer past an Int64/UInt64 only as a float, and the values of one array
+        (its nested arrays included) as one type: its numbers as floats when one of them is, a
+        boolean beside a number or a text as that number or text - an UPDATE's mutation reads the
+        document with the server's own settings, whatever the session's are.
 
         Args:
             field: The JSON field.
@@ -117,7 +133,8 @@ class ClickhouseJsonValues:
 
         Raises:
             ValidationError: A key holds None or an empty object, an integer is out of range, or an
-                array holds a float beside an integer a float doesn't hold exactly.
+                array holds a float beside an integer a float doesn't hold exactly, or a boolean
+                beside a number or a text.
         """
         minimum, maximum = CLICKHOUSE_JSON_INTEGER_RANGE
         name = field.model_field_name
@@ -137,13 +154,20 @@ class ClickhouseJsonValues:
                 # their own.
                 array_items: list[Any] = [item]
                 holds_float = False
+                holds_boolean = False
+                holds_number_or_text = False
                 widest_integer = 0
                 while array_items:
                     for element in array_items.pop():
                         if isinstance(element, list | tuple):
                             array_items.append(element)
+                        elif type(element) is bool:
+                            holds_boolean = True
                         elif type(element) is float:
                             holds_float = True
+                            holds_number_or_text = True
+                        elif type(element) is str:
+                            holds_number_or_text = True
                         elif type(element) is int:
                             if not minimum <= element <= maximum:
                                 raise ValidationError(
@@ -151,12 +175,18 @@ class ClickhouseJsonValues:
                                     f"{maximum} - another one is read back as a float"
                                 )
                             widest_integer = max(widest_integer, abs(element))
+                            holds_number_or_text = True
                         else:
                             pending.append(element)
                 if holds_float and widest_integer > CLICKHOUSE_JSON_EXACT_FLOAT_INTEGER:
                     raise ValidationError(
                         f"{name}: a JSON column of ClickHouse reads an array holding a float as floats - an "
                         f"integer past {CLICKHOUSE_JSON_EXACT_FLOAT_INTEGER} beside one would lose digits"
+                    )
+                if holds_boolean and holds_number_or_text:
+                    raise ValidationError(
+                        f"{name}: a JSON column of ClickHouse reads an array holding a boolean beside a number "
+                        "or a text as one type - the boolean would be read back as 1/0 or as 'true'/'false'"
                     )
             elif type(item) is int and not minimum <= item <= maximum:
                 raise ValidationError(

@@ -5,7 +5,6 @@ import datetime
 import os
 import sys
 import types
-from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -27,7 +26,7 @@ class RoutedItem(Model):
     ratio = fields.FloatField(default=0)
     name = fields.CharField(max_length=40, default="")
     data = fields.JSONField(default=dict)
-    amount = fields.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
+    amount = fields.IntField(default=0)
     stamp = fields.DatetimeField(null=True)
 
     class Meta:
@@ -55,13 +54,13 @@ def get_postgresql_url() -> str | None:
 ROUTED_TABLE_SQL = {
     "pg": (
         'CREATE TABLE "cross_dialect_item" ("id" SERIAL PRIMARY KEY, "ratio" DOUBLE PRECISION NOT NULL, '
-        '"name" VARCHAR(40) NOT NULL, "data" JSONB NOT NULL, "amount" NUMERIC(10,2) NOT NULL, "stamp" TIMESTAMPTZ);'
+        '"name" VARCHAR(40) NOT NULL, "data" JSONB NOT NULL, "amount" INT NOT NULL, "stamp" TIMESTAMPTZ);'
         'CREATE TABLE "cross_dialect_tag" ("id" SERIAL PRIMARY KEY, "label" VARCHAR(20) NOT NULL, '
         '"item_id" INT NOT NULL REFERENCES "cross_dialect_item" ("id") ON DELETE CASCADE)'
     ),
     "lite": (
         'CREATE TABLE "cross_dialect_item" ("id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, "ratio" REAL NOT NULL, '
-        '"name" VARCHAR(40) NOT NULL, "data" JSON_TEXT NOT NULL, "amount" VARCHAR(40) NOT NULL, "stamp" TIMESTAMP);'
+        '"name" VARCHAR(40) NOT NULL, "data" JSON_TEXT NOT NULL, "amount" INT NOT NULL, "stamp" TIMESTAMP);'
         'CREATE TABLE "cross_dialect_tag" ("id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, '
         '"label" VARCHAR(20) NOT NULL, '
         '"item_id" INT NOT NULL REFERENCES "cross_dialect_item" ("id") ON DELETE CASCADE)'
@@ -100,7 +99,7 @@ async def routed_context(request):
         await routed.execute_script(ROUTED_TABLE_SQL[routed_alias])
         stamp = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.UTC)
         await RoutedItem.objects.using(routed).create(
-            ratio=1.25, name="ab", data={"a": 5, "s": "x"}, amount=Decimal("1.50"), stamp=stamp
+            ratio=1.25, name="ab", data={"a": 5, "s": "x"}, amount=2, stamp=stamp
         )
         await RoutedTag.objects.using(routed).create(id=1, item_id=1, label="first")
         await RoutedTag.objects.using(routed).create(id=2, item_id=1, label="second")
@@ -137,7 +136,7 @@ async def test_lookups_render_for_the_routed_dialect(routed_context):
         RoutedItem.objects.filter(data__a__gt=3),
         RoutedItem.objects.filter(data__s="x"),
         RoutedItem.objects.filter(data__has_key="a"),
-        RoutedItem.objects.filter(amount__gt=Decimal("1.2")),
+        RoutedItem.objects.filter(amount__gt=1),
         RoutedItem.objects.filter(name__posix_regex="^a"),
         RoutedItem.objects.filter(id__in=[1, 2, 3]),
         RoutedItem.objects.filter(ratio__gt=F("amount") - 1),

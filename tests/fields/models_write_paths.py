@@ -6,6 +6,7 @@ from enum import Enum, IntEnum, StrEnum
 from hare import Model, fields
 from hare.fields import Field
 from hare.fields.validators import MaxLengthValidator
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 class PaintColor(StrEnum):
@@ -44,7 +45,8 @@ class WritePathRecord(Model):
     identifier = fields.UUIDField(null=True)
     rank = fields.CharEnumField(Rank, null=True)
     name = fields.CharField(max_length=4, null=True)
-    amount = fields.DecimalField(max_digits=6, decimal_places=2, null=True)
+    if DatabaseUnderTest.holds_decimal_fields():
+        amount = fields.DecimalField(max_digits=6, decimal_places=2, null=True)
 
 
 class WritePathSecretKey(Model):
@@ -55,13 +57,27 @@ class WritePathSecretKey(Model):
     pk = fields.CompositePrimaryKey("region", "number")
 
 
+class WritePathSecretTag(Model):
+    """A sensitive primary key - a relation to it stores the secret in its own key column."""
+
+    code = fields.CharField(max_length=20, primary_key=True, sensitive=True)
+
+
+class WritePathTaggedNote(Model):
+    id = fields.IntField(primary_key=True)
+    tag = fields.ForeignKeyField("models.WritePathSecretTag", related_name="notes", null=True)
+
+
 class WritePathDefaults(Model):
     id = fields.IntField(primary_key=True)
     color = fields.CharEnumField(PaintColor, default="red")
     priority = fields.IntEnumField(Priority, default=2)
-    price = fields.DecimalField(max_digits=6, decimal_places=2, default=1.5)
-    price_text = fields.DecimalField(max_digits=6, decimal_places=2, default="2.5")
-    exact_price = fields.DecimalField(max_digits=6, decimal_places=2, default=Decimal("3.5"))
+    if DatabaseUnderTest.holds_decimal_fields():
+        price = fields.DecimalField(max_digits=6, decimal_places=2, default=1.5)
+    if DatabaseUnderTest.holds_decimal_fields():
+        price_text = fields.DecimalField(max_digits=6, decimal_places=2, default="2.5")
+    if DatabaseUnderTest.holds_decimal_fields():
+        exact_price = fields.DecimalField(max_digits=6, decimal_places=2, default=Decimal("3.5"))
     naive_moment = fields.DatetimeField(default=datetime.datetime(2020, 1, 1, 12, 0))
     text_moment = fields.DatetimeField(default="2020-01-01T12:00:00+03:00")
     current_moment = fields.DatetimeField(default=datetime.datetime.now)

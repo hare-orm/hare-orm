@@ -7,7 +7,7 @@ from typing import Any
 
 from hare.fields.field import Field
 from hare.sql import Table
-from hare.sql.enums import Order
+from hare.sql.order import Order
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
 

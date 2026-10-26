@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.contrib.outbox.broker_arguments import BrokerArguments
 from hare.contrib.outbox.brokers.redis_connection import RedisConnection
 from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL, WAKEUP_TOPIC_SEPARATOR
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+from hare.contrib.package_checks import PackageChecks
 from hare.exceptions import ConfigurationError
 
 
@@ -19,16 +19,15 @@ class RedisWakeup(OutboxWakeup):
         channel: The pub/sub channel.
 
     Raises:
-        ConfigurationError: Neither or both of ``url`` and ``client``, an empty ``channel``, or the
-            ``redis`` package isn't installed.
+        ConfigurationError: Neither or both of ``url`` and ``client``, or the ``redis`` package isn't
+            installed.
     """
 
     def __init__(self, url: str | None = None, *, client: Any = None, channel: str = DEFAULT_WAKEUP_CHANNEL) -> None:
         super().__init__()
-        BrokerArguments.require_package(RedisConnection.redis, "RedisWakeup", "redis", "redis")
+        PackageChecks.require_package(RedisConnection.redis, "RedisWakeup", "redis", "redis")
         if (url is None) == (client is None):
             raise ConfigurationError("RedisWakeup takes either url or client")
-        BrokerArguments.require_text("channel", channel)
         self.channel = channel
         self.broker_connection = RedisConnection(url, client)
 

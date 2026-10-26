@@ -165,7 +165,7 @@ class ClickhouseGeometryValues:
         """The geometry an equality compares the column with - in the column's SRID.
 
         Raises:
-            ValidationError: The value isn't a geometry.
+            ValidationError: The value isn't a geometry, or one of another type than the column's.
             UnSupportedError: The geometry has another SRID than the column - ClickHouse transforms none.
         """
         if value is None:
@@ -176,7 +176,9 @@ class ClickhouseGeometryValues:
             raise UnSupportedError(
                 CLICKHOUSE_OTHER_SRID_MESSAGE.format(target_srid=geometry_field.srid, srid=geometry.srid)
             )
-        return cls.get_typed_value(geometry)
+        # Of the column's type, as a write is - a geometry of another type compared reached the server, which
+        # refused the comparison of two types.
+        return cls.get_typed_value(geometry_field.get_checked_geometry(geometry))
 
     @staticmethod
     def to_python(field: Field[Any], value: Any) -> Any:

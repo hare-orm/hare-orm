@@ -40,7 +40,6 @@ class OrderingConfig(RequestOption):
                 f"OrderingConfig.fields names fields without a direction, got {self.fields!r} - "
                 "a request chooses the direction itself"
             )
-        self.check_parameter_name(type(self).__name__, self.parameter)
 
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         if not self.fields:

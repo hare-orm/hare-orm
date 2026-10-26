@@ -874,3 +874,214 @@ async def test_an_index_no_migrate_could_apply_is_refused_before_one_is_written(
     with pytest.raises(UnSupportedError, match="keeps nothing unique"):
         add_index.raise_if_unsupported("models", state, new_state, editor)
     await apply_operations("models", state, DeleteModel(name="Coded"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_narrowing_of_clickhouse_specific_types_that_would_lose_data_is_refused(clickhouse_db):
+    """A Float64 made a Float32, a DateTime64 a DateTime, a Date32 a Date, a text a FixedString rounded, cut
+    off or moved a value without an error; a bound past 64 bits was read as a Float64."""
+    from hare.dialects.clickhouse.fields import (
+        ClickhouseDateField,
+        ClickhouseDatetimeField,
+        FixedStringField,
+        Float32Field,
+        Int128Field,
+        Int256Field,
+    )
+    from hare.fields import DateField, DatetimeField, FloatField
+    from hare.migrations.exceptions import FieldNarrowingDataLossError
+
+    connection = Team._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+    await apply_operations(
+        "models",
+        state,
+        CreateModel(
+            name="NarrowOwn",
+            fields=[
+                ("id", BigIntField(primary_key=True, generated=False)),
+                ("ratio", FloatField()),
+                ("moment", DatetimeField()),
+                ("stamp", DatetimeField()),
+                ("day", DateField()),
+                ("code", CharField(max_length=10)),
+                ("huge", Int256Field()),
+            ],
+            options={"table": "clickhouse_narrow_specific"},
+        ),
+        schema_editor=editor,
+    )
+    await connection.execute_script(
+        'INSERT INTO "clickhouse_narrow_specific" VALUES '
+        "(1, 0.1, '2024-01-02 03:04:05.5', '2024-01-02 03:04:05.5', '1960-01-01', 'жжж', "
+        "toInt256('170141183460469231731687303715884105728'))"
+    )
+    for name, narrowed_field in (
+        ("ratio", Float32Field()),
+        ("moment", ClickhouseDatetimeField()),
+        ("stamp", ClickhouseDatetimeField(precision=0)),
+        ("day", ClickhouseDateField()),
+        ("code", FixedStringField(length=5)),
+        ("huge", Int128Field()),
+    ):
+        with pytest.raises(FieldNarrowingDataLossError):
+            await apply_operations(
+                "models",
+                state,
+                AlterField(model_name="NarrowOwn", name=name, field=narrowed_field),
+                schema_editor=editor,
+            )
+    for name, narrowed_field in (
+        ("stamp", ClickhouseDatetimeField(precision=3)),
+        ("code", FixedStringField(length=6)),
+    ):
+        await apply_operations(
+            "models", state, AlterField(model_name="NarrowOwn", name=name, field=narrowed_field), schema_editor=editor
+        )
+    await apply_operations("models", state, DeleteModel(name="NarrowOwn"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_column_change_keeps_what_the_rows_hold(clickhouse_db):
+    """A FixedString narrowed to a width its values fit was refused, its padding counted; an array's elements
+    made NOT NULL failed the change halfway on a NULL element; a Nullable enum narrowed beside a NULL row
+    failed its check."""
+    from enum import IntEnum
+
+    from hare.dialects.clickhouse.fields import FixedStringField
+    from hare.fields import ArrayField, IntEnumField, IntField
+    from hare.migrations.exceptions import FieldNarrowingDataLossError
+
+    class Level(IntEnum):
+        LOW = 1
+        HIGH = 2
+
+    class NarrowerLevel(IntEnum):
+        LOW = 1
+
+    connection = Team._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+    await apply_operations(
+        "models",
+        state,
+        CreateModel(
+            name="Kept",
+            fields=[
+                ("id", BigIntField(primary_key=True, generated=False)),
+                ("count", IntField()),
+                ("code", FixedStringField(length=8, null=True)),
+                ("numbers", ArrayField(IntField(null=True))),
+                ("level", IntEnumField(Level, null=True)),
+            ],
+            options={"table": "clickhouse_kept"},
+        ),
+        schema_editor=editor,
+    )
+    await connection.execute_script(
+        "INSERT INTO \"clickhouse_kept\" VALUES (1, 1, 'ab', [1, NULL], 'LOW'), (2, 2, NULL, [2], NULL), "
+        "(3, 3, 'abcd', [], 'LOW')"
+    )
+    await apply_operations(
+        "models",
+        state,
+        AlterField(model_name="Kept", name="code", field=FixedStringField(length=4, null=True)),
+        schema_editor=editor,
+    )
+    codes = await connection.execute_dicts('SELECT id, "code" FROM "clickhouse_kept" ORDER BY id')
+    codes_text = [row["code"].decode() if isinstance(row["code"], bytes) else row["code"] for row in codes]
+    assert [code if code is None else code.rstrip("\x00") for code in codes_text] == ["ab", None, "abcd"]
+    with pytest.raises(FieldNarrowingDataLossError, match="NULL element"):
+        await apply_operations(
+            "models",
+            state,
+            AlterField(model_name="Kept", name="numbers", field=ArrayField(IntField())),
+            schema_editor=editor,
+        )
+    assert await connection.execute_dicts('SELECT count(*) AS n FROM "clickhouse_kept"') == [{"n": 3}]
+    await apply_operations(
+        "models",
+        state,
+        AlterField(model_name="Kept", name="level", field=IntEnumField(NarrowerLevel, null=True)),
+        schema_editor=editor,
+    )
+    await connection.execute_script("INSERT INTO \"clickhouse_kept\" VALUES (4, 4, NULL, [], 'LOW')")
+    await apply_operations("models", state, DeleteModel(name="Kept"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_dynamic_column_changes_its_max_types(clickhouse_db):
+    """A Dynamic column's max_types changed with a raw ILLEGAL_TYPE_OF_ARGUMENT - the conversion check
+    cast its values to a Nullable Dynamic, which the server has no type of. A Dynamic holds any value."""
+    from hare.dialects.clickhouse.fields import DynamicField
+
+    connection = Team._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+    await apply_operations(
+        "models",
+        state,
+        CreateModel(
+            name="Loose",
+            fields=[("id", BigIntField(primary_key=True, generated=False)), ("value", DynamicField(max_types=2))],
+            options={"table": "clickhouse_loose"},
+        ),
+        schema_editor=editor,
+    )
+    await connection.execute_script(
+        "INSERT INTO \"clickhouse_loose\" VALUES (1, 1), (2, 'x'), (3, 2.5), (4, [1, 2]), (5, NULL)"
+    )
+    select_sql = 'SELECT id, toString("value") AS value FROM "clickhouse_loose" ORDER BY id'
+    stored = await connection.execute_dicts(select_sql)
+    for max_types in (1, 16, None, 0):
+        await apply_operations(
+            "models",
+            state,
+            AlterField(model_name="Loose", name="value", field=DynamicField(max_types=max_types)),
+            schema_editor=editor,
+        )
+        assert await connection.execute_dicts(select_sql) == stored
+    await apply_operations("models", state, DeleteModel(name="Loose"), schema_editor=editor)
+
+
+@pytest.mark.asyncio
+async def test_a_nested_member_made_not_null_beside_a_null_is_refused(clickhouse_db):
+    """A Nested field's member made NOT NULL failed the change's mutation halfway on a NULL member - now
+    refused before the column changes, and changed once no row holds one."""
+    from hare.fields import NestedField
+    from hare.migrations.exceptions import FieldNarrowingDataLossError
+
+    connection = Team._meta.connection
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+
+    def nested(code_null: bool) -> NestedField:
+        return NestedField({"code": CharField(max_length=10, null=code_null), "count": IntField(null=True)})
+
+    await apply_operations(
+        "models",
+        state,
+        CreateModel(
+            name="Basket",
+            fields=[("id", BigIntField(primary_key=True, generated=False)), ("lines", nested(True))],
+            options={"table": "clickhouse_basket"},
+        ),
+        schema_editor=editor,
+    )
+    await connection.execute_script(
+        "INSERT INTO \"clickhouse_basket\" VALUES (1, [('a', 1), (NULL, 2)]), (2, []), (3, [('c', NULL)])"
+    )
+    with pytest.raises(FieldNarrowingDataLossError, match="1 existing row"):
+        await apply_operations(
+            "models", state, AlterField(model_name="Basket", name="lines", field=nested(False)), schema_editor=editor
+        )
+    await connection.execute_script(
+        'ALTER TABLE "clickhouse_basket" DELETE WHERE "id" = 1 SETTINGS mutations_sync = 2'
+    )
+    await apply_operations(
+        "models", state, AlterField(model_name="Basket", name="lines", field=nested(False)), schema_editor=editor
+    )
+    rows = await connection.execute_dicts('SELECT id, length("lines") AS n FROM "clickhouse_basket" ORDER BY id')
+    assert rows == [{"id": 2, "n": 0}, {"id": 3, "n": 1}]
+    await apply_operations("models", state, DeleteModel(name="Basket"), schema_editor=editor)

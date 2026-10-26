@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from types import ModuleType
 from typing import Any, ClassVar
@@ -65,6 +66,20 @@ class ShellLauncher:
         model_names = [name for name in namespace if name not in {"Hare", "hare", "apps"}]
         return f"Available models: {', '.join(model_names)}" if model_names else "No models loaded"
 
+    @staticmethod
+    def get_current_task(loop: asyncio.AbstractEventLoop | None = None) -> asyncio.Task[Any] | None:
+        """The task running now - one of asyncio's Python tasks the shell's cells run in, or one of its C
+        tasks.
+
+        Args:
+            loop: The loop - the running one when None.
+
+        Returns:
+            The task, None outside of one.
+        """
+        tasks_module: Any = asyncio.tasks
+        return tasks_module._py_current_task(loop) or tasks_module._c_current_task(loop)
+
     @classmethod
     def launch_ipython(cls, namespace: dict[str, Any]) -> None:
         """Runs IPython with top-level ``await`` on the event loop the Hare context was opened on.
@@ -74,6 +89,10 @@ class ShellLauncher:
         """
         assert cls.interactive_shell_class is not None and cls.nest_asyncio is not None  # nosec B101
         cls.nest_asyncio.apply()
+        # nest_asyncio runs the cells in tasks of asyncio's Python implementation, which mark themselves
+        # current where only the Python current_task() looks - asyncio.timeout(), wait_for() and the
+        # connections waiting with them found no task. Both are asked.
+        asyncio.current_task = asyncio.tasks.current_task = ShellLauncher.get_current_task
         banner = (
             "Hare ORM Shell (IPython with async support)\n"
             f"{cls._shell_models_info(namespace)}\n"

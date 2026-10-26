@@ -67,6 +67,7 @@ and `kwargs` what `Robyn()` takes.
   | `TransactionRetryError` (a serialization failure or deadlock — the request may be sent again) | `409 Conflict`, `{"detail": "Conflict"}` |
   | `ValidationError` (a value a field refuses: out of its range, too long, a null byte PostgreSQL refuses) | `422 Unprocessable Content`, the field's message in `detail` |
   | `RequestQueryForbidden` (a parameter asks for what the request may not see: deleted rows without `may_see_deleted()`) | `403 Forbidden`, the reason in `detail` |
+  | `ApiGetterError` (a value of another service a request query's `Meta.api_getter` requires couldn't be loaded) | `502 Bad Gateway`, without the error's message, which names the service and the values asked |
 
   Any other error is left to Robyn (`500`). Robyn keeps one exception handler per application and hands
   it to each route when the route is declared: an application answering errors itself sets its handler

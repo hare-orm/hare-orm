@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from typing import TYPE_CHECKING
 
-from hare.classes.value_descriptions import ValueDescriptions
-from hare.dialects.base.client.constants import MAX_PING_TIMEOUT_SECONDS, PING_SQL
+from hare.dialects.base.client.constants import PING_SQL
 from hare.dialects.base.client.declarations import PingResult
 from hare.exceptions import DatabaseError
 
@@ -30,16 +28,7 @@ class ConnectionPing:
 
         Returns:
             How it went.
-
-        Raises:
-            ValueError: ``timeout`` isn't above 0 and at most ``MAX_PING_TIMEOUT_SECONDS`` - NaN
-                stopped the event loop itself.
         """
-        if not math.isfinite(timeout) or not 0 < timeout <= MAX_PING_TIMEOUT_SECONDS:
-            raise ValueError(
-                f"A ping timeout must be above 0 and at most {MAX_PING_TIMEOUT_SECONDS:g} seconds, got "
-                f"{ValueDescriptions.get_shown_text(timeout)}"
-            )
         start_time = time.perf_counter()
         try:
             await asyncio.wait_for(client.execute(PING_SQL), timeout)

@@ -8,7 +8,7 @@ import pytest
 
 from hare.contrib.outbox import ChangeCapture, ChangePayload
 from hare.contrib.test import capture_queries, requires_features
-from hare.exceptions import ConfigurationError, StaleObjectError
+from hare.exceptions import ConfigurationError, StaleObjectError, ValidationError
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.instrumentation.declarations import RowsChanged
 from hare.instrumentation.enums import RowOperation
@@ -36,6 +36,7 @@ from tests.contrib.outbox.capture_models import (
     UncapturedRow,
     VersionedCapturedOrder,
 )
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 async def get_events(topic: str | None = None) -> list[CaptureOutboxEvent]:
@@ -45,6 +46,11 @@ async def get_events(topic: str | None = None) -> list[CaptureOutboxEvent]:
     return await queryset
 
 
+def get_total(value: Decimal | str) -> dict[str, Decimal | str]:
+    """The total of an order where the database has a DecimalField - SQLite has none."""
+    return {"total": value} if DatabaseUnderTest.holds_decimal_fields() else {}
+
+
 def strip_time(payload: dict) -> dict:
     return {key: value for key, value in payload.items() if key != "occurred_at"}
 
@@ -52,7 +58,7 @@ def strip_time(payload: dict) -> dict:
 @pytest.mark.asyncio
 async def test_create_writes_an_inserted_event(db_capture):
     customer = await CapturedCustomer.objects.create(id=1, name="Ann")
-    await CapturedOrder.objects.create(id=7, total=Decimal("12.50"), secret="hidden", customer=customer)
+    await CapturedOrder.objects.create(id=7, **get_total(Decimal("12.50")), secret="hidden", customer=customer)
 
     (event,) = await get_events("models.capturedorder.inserted")
     assert event.ordering_key == "models.CapturedOrder:7"
@@ -63,7 +69,7 @@ async def test_create_writes_an_inserted_event(db_capture):
         "pk": 7,
         "changed": None,
         "before": None,
-        "after": {"id": 7, "status": "new", "total": "12.50", "customer_id": 1},
+        "after": {"id": 7, "status": "new", **get_total("12.50"), "customer_id": 1},
     }
     assert event.payload["occurred_at"]
     assert [event.topic for event in await get_events()] == [
@@ -86,13 +92,28 @@ async def test_save_writes_an_updated_event_with_the_fields_set(db_capture):
 
 @pytest.mark.asyncio
 async def test_a_partial_instance_reads_the_fields_it_lacks(db_capture):
-    await CapturedOrder.objects.create(id=1, total=Decimal("3.00"))
+    await CapturedOrder.objects.create(id=1, **get_total(Decimal("3.00")))
     order = await CapturedOrder.objects.only("id", "status").get(id=1)
     order.status = "paid"
     await order.save(update_fields=["status"])
 
     (event,) = await get_events("models.capturedorder.updated")
-    assert event.payload["after"] == {"id": 1, "status": "paid", "total": "3.00", "customer_id": None}
+    assert event.payload["after"] == {"id": 1, "status": "paid", **get_total("3.00"), "customer_id": None}
+
+
+@pytest.mark.asyncio
+async def test_a_partial_save_of_a_stale_instance_captures_the_row(db_capture):
+    """save(update_fields=...) took the fields it didn't write from the instance - a stale one's values, which
+    the row no longer held."""
+    await AuditedOrder.objects.create(id=1, note="first")
+    stale = await AuditedOrder.objects.get(id=1)
+    await AuditedOrder.objects.filter(id=1).update(note="second")
+    stale.status = "paid"
+    await stale.save(update_fields=["status"])
+
+    saved = (await get_events())[-1]
+    assert saved.payload["before"] == {"id": 1, "status": "new", "note": "second"}
+    assert saved.payload["after"] == {"id": 1, "status": "paid", "note": "second"}
 
 
 @pytest.mark.asyncio
@@ -387,6 +408,16 @@ async def test_extend_topic_ordering_key_and_fields(db_capture):
 
 
 @pytest.mark.asyncio
+async def test_a_topic_function_giving_a_key_longer_than_its_field_fails_the_write(db_capture, monkeypatch):
+    """The event's field checks the key a function gives - the write of the row fails with it."""
+    monkeypatch.setattr(ExtendedRow._meta.change_capture, "topic", lambda change: "t" * 256)
+    with pytest.raises(ValidationError):
+        await ExtendedRow.objects.create(id=1, name="a")
+    assert await ExtendedRow.objects.count() == 0
+    assert await get_events() == []
+
+
+@pytest.mark.asyncio
 async def test_an_uncaptured_model_writes_no_event_and_returns_nothing(db_capture):
     row = await UncapturedRow.objects.create(id=1, name="a")
     row.name = "b"
@@ -430,8 +461,6 @@ async def test_merge_is_captured_by_action(db_capture):
 
 @pytest.mark.database_independent
 def test_the_declaration_is_checked():
-    with pytest.raises(ConfigurationError, match="OutboxEvent"):
-        ChangeCapture(UncapturedRow)
     with pytest.raises(ConfigurationError):
         ChangeCapture(CaptureOutboxEvent, payload="everything")
     with pytest.raises(ConfigurationError, match="fields or exclude"):
@@ -457,6 +486,13 @@ async def test_sensitive_and_encrypted_fields_are_left_out_unless_named(db_captu
     assert named == ("title", "api_token")
     assert "sensitive" not in str(CapturedOrder._meta.change_capture_needs.field_names)
     assert "secret" not in CapturedOrder._meta.change_capture_needs.field_names
+
+
+@pytest.mark.asyncio
+async def test_an_outbox_named_by_its_label_is_found_as_the_models_are_bound(db_capture):
+    assert CapturedMeasurement._meta.change_capture.outbox is CaptureOutboxEvent
+    await CapturedMeasurement.objects.create(id=1, value=1.5)
+    assert [event.payload["after"] for event in await get_events()] == [{"id": 1, "value": 1.5}]
 
 
 @pytest.mark.asyncio

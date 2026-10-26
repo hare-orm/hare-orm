@@ -244,7 +244,7 @@ class QuerySet:
 No args: plain `DISTINCT`. With args: one row per combination of the fields — a field, a relation, an
 annotation or a [date part](values.md#date-part-paths) (`"created__date"`), the first in the ordering —
 `order_by` must start with the same fields in the same order; `count()`/`exists()` (also sliced) count
-the rows it picks; `aggregate()` raises `QueryError`. It runs `DISTINCT ON (fields)` - which row of a
+the rows it picks; `aggregate()` raises `QueryError`. It runs `DISTINCT ON (fields)` — which row of a
 combination it keeps is the database's own choice unless the ordering goes on past the fields; a database
 without it (SQLite, ClickHouse — `Features.supports_distinct_on` off) raises `UnSupportedError` when the
 query is built. A plain `distinct()` of a query ordered by a field it doesn't select selects the ordering
@@ -480,9 +480,17 @@ across a relation updates exactly the rows `await qs` returns, through a `pk IN 
 `bulk_update()` on such a queryset writes only the objects whose rows match it. A value that is an aggregate
 (`Sum("qty")`) or reads an aggregate annotation (`F("n")` after `annotate(n=Count(...))`) raises `FieldError`
 — an `UPDATE` has no groups to aggregate over; a `Subquery()` aggregating the related rows works. An integer
-field set from a fraction (`update(quantity=F("price"))`) is converted as `Cast()` to an integer converts it —
-PostgreSQL rounds (a Decimal's half away from zero, a float's half to even), SQLite and ClickHouse cut the
-fraction off.
+field set from a fraction (`update(quantity=F("price"))`) takes the database's own conversion — PostgreSQL
+rounds (a Decimal's half away from zero, a float's half to even), ClickHouse cuts the fraction off, and on
+SQLite, whose `INTEGER` column would keep the fraction, hare writes SQLite's `CAST` of it, the fraction cut
+off. A value of a type the field doesn't store raises `FieldError`: text into a number, a number into a
+boolean, and bytes, JSON, an IP or MAC address, an array, a map, a tuple, a vector, a text search vector, a
+geometry, an hstore, a range or a PostgreSQL interval into a field of another type (`update(data=F("id"))` of
+a `JSONField`) — an array of other elements (`text[]` into `integer[]`) and a range of other bounds
+(`int8range` into `int4range`) too; a text field takes any value as its text. A literal the expression may
+give — a branch of `Case`, an argument of `Coalesce`, `Greatest` or `Least`, the first one of `NullIf` — is
+checked by the field as a plain value is (`ValidationError` for a text past `max_length`, a number of no enum
+member).
 
 ### <a id="count"></a>`count()`
 
@@ -654,7 +662,8 @@ onto the objects unless `returning=True` (via `RETURNING`; SQLite doesn't keep t
 multi-row `RETURNING`, so there every object needs its pk set — the rows are matched back by it, by the
 `on_conflict` fields when given: an object updating a stored row takes that row's key — and an object
 without one raises `UnSupportedError`; on a database without `RETURNING` — ClickHouse — `returning=True`
-raises `UnSupportedError`). Without it a `GeneratedField` of a written object is left unloaded — reading
+raises `UnSupportedError`, and a key hare takes before the insert (a ClickHouse key series) is on the
+objects without it). Without it a `GeneratedField` of a written object is left unloaded — reading
 it raises `NoValuesFetched` until `refresh_from_db()` reads it. Left as `None` (the default), falls back to
 `Meta.returning` (itself `False` by default) — set that on a shared base to opt in without passing
 `returning=True` on every call; an explicit `True`/`False` here always overrides it, and a value only
@@ -664,8 +673,10 @@ instead of a parameterized `INSERT` — faster for large batches, but mutually e
 `returning=True` and every conflict-handling kwarg (no `RETURNING`/`ON CONFLICT` support on `COPY`), and
 not supported on SQLite. On ClickHouse `bulk_create()` loads its rows in one binary insert with or
 without `use_copy=True` — see [Bulk loads](../dialects/clickhouse/differences.md#bulk-loads). `COPY`
-doesn't support an array/range field or a PostgreSQL-extension field type (`CitextField`, `PostGISField`,
-`TSVectorField`) on the model on either driver — raises `UnSupportedError` naming the offending field,
+loads columns of the integer, float, numeric, boolean, text, UUID, date, time, timestamp, JSON and binary
+types alone — a model with any other column (an array, a range or multirange, an interval, a network
+address, a native enum, an extension's type such as `CitextField`, `HStoreField`, `LtreeField`,
+`PostGISField`, `TSVectorField`) raises `UnSupportedError` naming the offending field on either driver,
 checked uniformly on the Python side before either driver is reached; fall back to `use_copy=False` for a
 model with one of those. `update_fields`/`on_conflict` take field names: a `source_field` column is
 resolved, a forward FK/O2O relation name means its key column(s) (`owner` → `owner_id`), an unknown name

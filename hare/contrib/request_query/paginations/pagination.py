@@ -35,7 +35,7 @@ class Pagination(RequestOption):
 
     Raises:
         ConfigurationError: A size isn't an int or isn't in ``1 <= default_limit <= max_limit <=
-            MAX_PAGE_LIMIT_CEILING``, or a parameter name isn't an identifier or repeats another.
+            MAX_PAGE_LIMIT_CEILING``.
     """
 
     default_limit: int = DEFAULT_PAGE_LIMIT
@@ -52,12 +52,6 @@ class Pagination(RequestOption):
                 f"{option_name} needs 1 <= default_limit <= max_limit <= {MAX_PAGE_LIMIT_CEILING}, "
                 f"got default_limit={self.default_limit}, max_limit={self.max_limit}"
             )
-        parameters = self.get_parameters()
-        for parameter in parameters:
-            if not isinstance(parameter, str) or not parameter.isidentifier():
-                raise ConfigurationError(f"{option_name} parameter names must be identifiers, got {parameter!r}")
-        if len(set(parameters)) != len(parameters):
-            raise ConfigurationError(f"{option_name} parameter names must differ, got {parameters!r}")
 
     def get_parameter_fields(self) -> tuple[ParameterField, ...]:
         return (

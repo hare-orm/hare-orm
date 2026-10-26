@@ -238,6 +238,27 @@ async def test_contains_and_overlap_lookups_work_on_a_generated_range_column(db_
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("field_class", "bound", "next_bound"),
+    [
+        (IntRangeField, 1, 2),
+        (BigIntRangeField, -3, -2),
+        (DateRangeField, datetime.date(2024, 1, 1), datetime.date(2024, 1, 2)),
+    ],
+)
+def test_a_discrete_range_holding_no_value_is_empty(field_class, bound, next_bound):
+    """(1, 1) of a discrete range was refused as reversed - its step made it [2, 1) before the check."""
+    field = field_class()
+    field.model_field_name = "span"
+
+    assert field.canonicalize(Range(bound, bound, lower_inc=False, upper_inc=False)).is_empty
+    assert field.canonicalize(Range(bound, next_bound, lower_inc=False, upper_inc=False)).is_empty
+    assert field.canonicalize(Range(bound, bound, lower_inc=True, upper_inc=True)) == Range(bound, next_bound)
+    with pytest.raises(ValidationError, match="is greater than upper bound"):
+        field.canonicalize(Range(next_bound, bound, lower_inc=False, upper_inc=False))
+
+
+@pytest.mark.database_independent
 def test_range_or_element_encoder_normalizes_a_naive_datetime_scalar_to_the_configured_timezone():
     """A bare naive datetime for `__contains` skipped `DateTimeRangeField.coerce_bound()` entirely
     (only the Range/tuple branch went through it), so the driver bound it using the client
@@ -574,3 +595,16 @@ async def test_a_range_given_as_its_schema_writes_it(db_ranges):
         await RangeThing.objects.create(span={"lower": 1, "high": 10})
     with pytest.raises(PydanticValidationError):
         schema(span={"lower": "a", "upper": "b"})
+
+
+@test.requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_bound_past_the_range_element_is_refused_before_the_query(db_ranges):
+    """A bound of an int4range was read through a 64-bit field - 2**40 went to the driver, which refused it
+    with its own error."""
+    await RangeThing.objects.create(span=Range(lower=1, upper=10))
+
+    for lookup in ("span__startswith", "span__endswith__gt"):
+        with pytest.raises(ValidationError, match="2147483647"):
+            await RangeThing.objects.filter(**{lookup: 2**40}).count()
+    assert await RangeThing.objects.filter(span__startswith=1).count() == 1

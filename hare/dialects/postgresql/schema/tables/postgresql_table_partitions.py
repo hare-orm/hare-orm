@@ -17,6 +17,7 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models import Model
 
 if TYPE_CHECKING:
+    from hare.dialects.postgresql.declarations import PostgresqlFeatures
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 
 
@@ -84,7 +85,8 @@ class PostgresqlTablePartitions(TablePartitions):
         options = self.editor.get_partitioned_options(model)
         if options is None:
             return []
-        if not self.editor.client.features.supports_partitioned_exclusion_constraints and any(
+        features = cast("PostgresqlFeatures", self.editor.client.features)
+        if not features.supports_partitioned_exclusion_constraints and any(
             isinstance(constraint, ExclusionConstraint) for constraint in model._meta.constraints
         ):
             raise UnSupportedError(

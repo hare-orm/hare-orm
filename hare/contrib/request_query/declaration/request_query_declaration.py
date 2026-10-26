@@ -4,6 +4,8 @@ import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from hare.contrib.request_query.api_getter.api_source import ApiSource
+from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.request_query.bounds.parameter_bounds import ParameterBounds
 from hare.contrib.request_query.options.deleted_config import DeletedConfig
 from hare.contrib.request_query.options.fields_config import FieldsConfig
@@ -55,6 +57,10 @@ class RequestQueryDeclaration:
             None without it.
         deleted: The option letting a request see soft-deleted rows, None without it.
         dialects: The dialects every filter was checked against.
+        api_sources: The sources of ``Meta.api_getter``.
+        api_mappings: The mappings of ``Meta.api_getter`` taking a value from the row itself.
+        api_target_fields: The fields of the row each target of ``Meta.api_getter`` is filled from, by the
+            target's name - loaded whenever a request's ``fields`` names the target.
         on_describe: Told of each description read after the declaration was built (a key or a
             name the query meets later) - the request query then knows every model its
             descriptions read; None to tell no one.
@@ -76,6 +82,9 @@ class RequestQueryDeclaration:
     versions: LatestVersions | None
     deleted: DeletedConfig | None
     dialects: tuple[Dialect, ...]
+    api_sources: tuple[ApiSource, ...]
+    api_mappings: tuple[ApiValueMapping, ...]
+    api_target_fields: dict[str, tuple[str, ...]]
     on_describe: Callable[[LookupInfo | OrderingInfo], None] | None = dataclasses.field(
         default=None, compare=False, repr=False
     )

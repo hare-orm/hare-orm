@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from copy import copy
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
 from hare.migrations.autodetection.constants import CREATE_MODEL_DEFERRED_OPTIONS
-from hare.migrations.autodetection.diffs.declarations import DictionaryDiff, FunctionDiff, PolicyDiff, SequenceDiff
+from hare.migrations.autodetection.diffs.declarations import DictionaryDiff, FunctionDiff, SequenceDiff
 from hare.migrations.autodetection.diffs.declared_schema_object_diff import DeclaredSchemaObjectDiff
 from hare.migrations.autodetection.diffs.grant_diff import GrantDiff
 from hare.migrations.autodetection.diffs.materialized_view_diff import MaterializedViewDiff
+from hare.migrations.autodetection.diffs.policy_diff import PolicyDiff
 from hare.migrations.autodetection.diffs.view_diff import ViewDiff
 from hare.migrations.operations import (
     AlterRowLevelSecurity,
@@ -73,6 +75,9 @@ class SchemaObjectOperations:
         self.last_removals_by_type: dict[type[SchemaObjectDiff], list[HareOperation]] = {
             diff_class: [] for diff_class in self.diff_classes
         }
+        #: The views and materialized views removed, by the removing operation - dropped in the reverse of
+        #: the order they are created in.
+        self.removed_views: dict[int, Any] = {}
 
     @staticmethod
     def without_deferred_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +119,10 @@ class SchemaObjectOperations:
                     self.last_removals_by_type[diff_class].append(operation)
                 elif isinstance(operation, RemoveSchemaObject):
                     self.removals_by_type[diff_class].append(operation)
+                    if diff_class in (ViewDiff, MaterializedViewDiff):
+                        self.removed_views[id(operation)] = next(
+                            view for view in diff.get_objects(old_model_state) if view.name == operation.name
+                        )
                 else:
                     self.additions_by_type[diff_class].append(operation)
         old_setting = old_model_state.options.get(ModelOption.ROW_LEVEL_SECURITY)
@@ -125,10 +134,22 @@ class SchemaObjectOperations:
 
     @property
     def early_removals(self) -> list[HareOperation]:
-        """Revokes and drops, the types created last first."""
-        return [
-            operation for diff_class in reversed(self.diff_classes) for operation in self.removals_by_type[diff_class]
-        ]
+        """Revokes and drops, the types created last first - a view or a materialized view before the ones
+        it reads."""
+        operations: list[HareOperation] = []
+        for diff_class in reversed(self.diff_classes):
+            if diff_class is MaterializedViewDiff:
+                view_removals = [*self.removals_by_type[ViewDiff], *self.removals_by_type[MaterializedViewDiff]]
+                operations.extend(
+                    reversed(
+                        ViewCreationOrder.get_ordered(
+                            view_removals, lambda operation: self.removed_views[id(operation)]
+                        )
+                    )
+                )
+            elif diff_class is not ViewDiff:
+                operations.extend(self.removals_by_type[diff_class])
+        return operations
 
     @property
     def late_operations(self) -> list[HareOperation]:
@@ -137,7 +158,16 @@ class SchemaObjectOperations:
         for diff_class in self.diff_classes:
             if diff_class is PolicyDiff:
                 operations.extend(self.row_level_security_operations)
-            operations.extend(self.additions_by_type[diff_class])
+            if diff_class is ViewDiff:
+                # A view and a materialized view are created each after the ones it reads.
+                view_operations = [*self.additions_by_type[ViewDiff], *self.additions_by_type[MaterializedViewDiff]]
+                operations.extend(
+                    ViewCreationOrder.get_ordered(
+                        view_operations, lambda operation: cast("Any", operation).schema_object
+                    )
+                )
+            elif diff_class is not MaterializedViewDiff:
+                operations.extend(self.additions_by_type[diff_class])
         return operations
 
     @property
