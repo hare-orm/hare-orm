@@ -2028,6 +2028,36 @@ async def test_union_all(db):
 
 
 @pytest.mark.asyncio
+async def test_a_set_operation_of_values_pairs_the_columns_in_the_order_named(db):
+    """values() selects a model's fields before its annotations - a branch naming an annotation first
+    paired its columns with another branch's by that order: {"label": 2, "id": "T2"}."""
+    first = await Tournament.objects.create(name="T1")
+    second = await Tournament.objects.create(name="T2")
+    labelled = Tournament.objects.filter(id=first.id).annotate(label=Value("first")).values("label", "id")
+    named = Tournament.objects.filter(id=second.id).values("name", "id")
+    assert sorted(await labelled.union(named), key=lambda row: row["id"]) == [
+        {"label": "first", "id": first.id},
+        {"label": "T2", "id": second.id},
+    ]
+    labelled_tuples = Tournament.objects.filter(id=first.id).annotate(label=Value("first")).values_list("label", "id")
+    named_tuples = Tournament.objects.filter(id=second.id).values_list("name", "id")
+    assert sorted(await labelled_tuples.union(named_tuples), key=lambda row: row[1]) == [
+        ("first", first.id),
+        ("T2", second.id),
+    ]
+    # One branch wrapped by its slice, the other not - both in the order named.
+    sliced = Tournament.objects.annotate(label=Value("x")).values("label", "id").order_by("id")[:1]
+    plain = Tournament.objects.filter(id=second.id).annotate(label=Value("y")).values("label", "id")
+    assert sorted(await plain.union(sliced), key=lambda row: row["id"]) == [
+        {"label": "x", "id": first.id},
+        {"label": "y", "id": second.id},
+    ]
+    assert await labelled.intersection(Tournament.objects.annotate(label=Value("first")).values("label", "id")) == [
+        {"label": "first", "id": first.id}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_union_mixed_models(db):
     r1 = await Reporter.objects.create(name="R1")
     r2 = await Reporter.objects.create(name="R2")

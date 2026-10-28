@@ -22,6 +22,12 @@ class PydanticMetaData:
     #: Computed fields can be listed here to use in pydantic model
     computed: tuple[str, ...] = dataclasses.field(default_factory=tuple)
 
+    #: Values read from the row by name, with their types - a query's annotation, an attribute set on the row
+    extra_fields: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    #: Values of related rows, flattened: a name to the path of the related field
+    related_values: dict[str, str] = dataclasses.field(default_factory=dict)
+
     #: Use backward relations without annotations - not recommended, it can be huge data
     #: without control
     backward_relations: bool = True
@@ -55,6 +61,8 @@ class PydanticMetaData:
             "include": tuple(get("include")),
             "exclude": tuple(get("exclude")),
             "computed": tuple(get("computed")),
+            "extra_fields": dict(get("extra_fields")),
+            "related_values": dict(get("related_values")),
             "backward_relations": bool(get("backward_relations")),
             "max_recursion": int(get("max_recursion")),
             "allow_cycles": bool(get("allow_cycles")),
@@ -92,11 +100,23 @@ class PydanticMetaData:
         """The computed fields of the model itself - ``computed`` without paths into relations."""
         return tuple(name for name in self.computed if "." not in name)
 
+    @property
+    def model_extra_fields(self) -> dict[str, Any]:
+        """The extra fields of the model itself - ``extra_fields`` without paths into relations."""
+        return {name: annotation for name, annotation in self.extra_fields.items() if "." not in name}
+
+    @property
+    def model_related_values(self) -> dict[str, str]:
+        """The related values of the model itself - ``related_values`` without paths into relations."""
+        return {name: value_path for name, value_path in self.related_values.items() if "." not in name}
+
     def finalize_meta(
         self,
         exclude: tuple[str, ...] = (),
         include: tuple[str, ...] = (),
         computed: tuple[str, ...] = (),
+        extra_fields: dict[str, Any] | None = None,
+        related_values: dict[str, str] | None = None,
         allow_cycles: bool | None = None,
         sort_alphabetically: bool | None = None,
         max_recursion: int | None = None,
@@ -109,6 +129,8 @@ class PydanticMetaData:
             exclude: The fields left out.
             include: The fields kept.
             computed: The computed fields.
+            extra_fields: The extra fields - added to the meta's, replacing one of the same name.
+            related_values: The related values - added to the meta's, replacing one of the same name.
             allow_cycles: Whether relations may lead back to a model in the schema.
             sort_alphabetically: Whether the fields are sorted by name.
             max_recursion: How deep relations are followed.
@@ -135,6 +157,8 @@ class PydanticMetaData:
             include=include,
             exclude=exclude,
             computed=computed,
+            extra_fields={**self.extra_fields, **(extra_fields or {})},
+            related_values={**self.related_values, **(related_values or {})},
             backward_relations=self.backward_relations,
             max_recursion=_max_recursion,
             exclude_raw_fields=self.exclude_raw_fields,

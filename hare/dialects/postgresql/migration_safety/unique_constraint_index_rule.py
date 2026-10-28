@@ -50,7 +50,13 @@ class UniqueConstraintIndexRule(MigrationSafetyRule):
         if not isinstance(operation, (AddField, AlterField)) or not context.may_be_large(operation.model_name):
             return None
         new_field = context.get_field_after(operation.model_name, operation.name)
-        if new_field is None or not new_field.unique or new_field.pk:
+        if (
+            new_field is None
+            or not new_field.unique
+            or new_field.pk
+            # A many-to-many relation's unique pairs live in the through table the operation creates.
+            or operation.name in new_field.model._meta.many_to_many_fields
+        ):
             return None
         if isinstance(operation, AlterField):
             old_field = context.get_field_before(operation.model_name, operation.name)

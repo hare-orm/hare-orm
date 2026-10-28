@@ -63,6 +63,10 @@ MANY_TO_MANY_EXISTS_LOOKUPS = (Lookup.ISNULL, Lookup.NOT_ISNULL)
 #: number by its value.
 VALUE_COMPARISON_LOOKUPS = frozenset({Lookup.EXACT, "exact", Lookup.NOT, Lookup.GT, Lookup.GTE, Lookup.LT, Lookup.LTE})
 
+#: The name a JSON path of the enclosing query (``OuterReference("data__k")``) is compared under, its
+#: comparison with a field mirrored - a space, which no annotation name holds.
+OUTER_JSON_PATH_ANNOTATION_NAME = "hare outer json path"
+
 #: A comparison lookup to the one giving the same result with its two sides swapped.
 MIRRORED_COMPARISON_LOOKUPS: dict[str, str] = {
     "": "",
@@ -113,7 +117,7 @@ JSON_TABLE_DEFAULT_COLUMN_PATH = "$.{name}"
 #: model's table in its base case and in its step.
 RECURSIVE_ROWS_CTE_NAME = "hare_recursive_rows"
 
-RECURSIVE_ROWS_DEPTH_COLUMN = "hare_depth"
+RECURSIVE_ROWS_DEPTH_COLUMN = "hare depth"
 
 RECURSIVE_ROWS_START_ALIAS = "hare_recursive_start"
 
@@ -124,7 +128,7 @@ MAX_RECURSIVE_DEPTH = 100_000
 
 #: The annotation a filter on a column of a named JOIN (``Lateral``, ``merge()``'s source row) reads the
 #: column under.
-NAMED_COLUMN_FILTER_ANNOTATION = "hare_named_column"
+NAMED_COLUMN_FILTER_ANNOTATION = "hare named column"
 
 #: No SQL type of any Python type - a literal cast only for its own range.
 NO_CAST_SQL_TYPES: dict[type, str] = {}

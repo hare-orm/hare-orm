@@ -6,7 +6,7 @@ from hare.exceptions import FieldError
 from hare.query.expressions import Case, F, Function, Q, When
 from hare.query.functions import Length, Trim
 from hare.sql import CustomFunction
-from tests.shared_models.testmodels import Event, Team, Tournament
+from tests.shared_models.testmodels import CompositePkThing, Event, Team, Tournament
 
 # .values() and .values_list() - `as_row` turns the field names and a row's values into the row the
 # method returns.
@@ -251,3 +251,16 @@ async def test_order_by_annotation_not_in_values(db, method_name, as_row):
         method_name,
     )("name")
     assert tournaments == [as_row(("name",), (name,)) for name in ("1", "2", "3")]
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_composite_primary_key_is_filtered_ordered_and_selected_by_its_new_name(db):
+    """values(key="pk") of a composite key made the alias F("pk") - a filter, an ordering or a selection by
+    the new name raised FieldError: there is no field pk."""
+    await CompositePkThing.objects.create(thing_id=1, revision=2, name="a")
+    await CompositePkThing.objects.create(thing_id=1, revision=1, name="b")
+    query = CompositePkThing.objects.values(key="pk")
+    assert await query.filter(key=(1, 2)) == [{"key": (1, 2)}]
+    assert await query.filter(key__in=[(1, 1)]) == [{"key": (1, 1)}]
+    assert await query.order_by("-key") == [{"key": (1, 2)}, {"key": (1, 1)}]
+    assert await query.order_by("key").values("key") == [{"key": (1, 1)}, {"key": (1, 2)}]

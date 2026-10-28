@@ -116,10 +116,17 @@ with Tenancy.scope(7):
     await Invoice.objects.count()                                # tenant_7.invoice - 0
 ```
 
+- A [scope given model by model](multi-tenancy.md#scope-by-model) works in the schema of the one tenant
+  it gives the connection's `Meta.tenant_schema` models — `Tenancy.scope({Invoice: "acme", Order:
+  Tenancy.any_of("msk", "kzn")})` reads `tenant_acme.invoice`, and `Order`'s shared table by its own
+  entry. A tenant's model takes one value there (several, or `Tenancy.ALL`, raise `QueryError` when the
+  scope is entered); values naming the same schema (`7` and `"7"`) are the same tenant here too.
+  A scope naming different schemas for the connection's tenant models raises `QueryError` on a query
+  of the connection — it works in one schema.
 - A tenant's model queried with no scope, a scope of several tenants (`Tenancy.any_of(...)`),
-  `Tenancy.ALL`, or a scope given model by model raises `QueryError` — its table is reached inside a
-  scope of a single tenant. A shared model works in every one of them, through the connection's own
-  client.
+  `Tenancy.ALL`, or a scope given model by model naming none of the connection's tenant models raises
+  `QueryError` — its table is reached inside a scope of a single tenant. A shared model works in every
+  one of them, through the connection's own client.
 - A queryset runs in the schema of the tenant active when it is awaited, as a `Meta.tenant_field` model's
   queryset filters by that tenant: built inside `Tenancy.scope("acme")` and awaited inside
   `Tenancy.scope(7)`, it reads `tenant_7`; awaited with no scope, it raises `QueryError`. The queries it
@@ -152,7 +159,11 @@ with Tenancy.scope("acme"):
             await Invoice.objects.count()              # QueryError - the transaction runs in tenant_acme
 ```
 
-`Transactions.autonomous()` inside a scope opens its connection in the same tenant's schema.
+A transaction begun in a scope given model by model runs in the schema of the tenant the scope gives the
+tenant's models; a query in it under a scope of another schema raises `QueryError` the same way.
+`Transactions.autonomous()` inside a scope opens its connection in the same tenant's schema; a delete's
+cascade into every tenant's schema, a change captured into an outbox of the tenant's schema, and
+`migrate` work in a scope given model by model as in a scope of one tenant.
 
 ## <a id="migrations"></a>Migrations
 
@@ -168,6 +179,8 @@ with Tenancy.scope("acme"):
 So a tenant added later (`create(..., create_tables=False)`) gets every migration on the next `migrate`,
 and the others get only what they lack. The migration state is the same for every schema —
 `CreateModel(..., options={"tenant_schema": True})` records the option.
+The Python API `MigrationExecutor.migrate(targets)` accepts one-shot iterables too: the targets are
+retained so that every schema is migrated to the same requested migrations.
 
 - An operation on a model's table (`CreateModel`, `AddField`, `AddIndex`, a view or policy declared on
   the model, ...) follows the model's `Meta.tenant_schema`.
@@ -176,7 +189,9 @@ and the others get only what they lack. The migration state is the same for ever
   run in each tenant's schema instead; the function of such a `RunPython` runs once per tenant, with the
   tenant's scope active, so its queries of tenant models reach that tenant's table.
 - Inside `Tenancy.scope(tenant)`, `migrate` brings only that tenant's schema to the target — the shared
-  schema and the other tenants are left as they are.
+  schema and the other tenants are left as they are. A scope given model by model migrates the schema
+  of the tenant it gives the connection's `Meta.tenant_schema` models; naming none of them, it migrates
+  as with no scope.
 - `migrate` to `app.zero` unapplies in the shared schema and in every tenant's schema.
 - `sqlmigrate` shows the SQL of every operation — shared and tenant ones — as written for one schema.
 - Changing `Meta.tenant_schema` of an existing model is refused by `makemigrations`

@@ -25,6 +25,8 @@ class FilterOperators:
         """
         self.dialect = dialect
         self.overrides = overrides
+        #: The operators of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
+        self.mirrors: list[FilterOperators] = []
 
     def register_operator(self, operator: Callable[..., Any], implementation: Callable[..., Any]) -> None:
         """Implements on this dialect a lookup operator only dialects implement
@@ -39,6 +41,8 @@ class FilterOperators:
         from hare.core.registries import Registries
 
         self.overrides[operator] = implementation
+        for mirror in self.mirrors:
+            mirror.register_operator(operator, implementation)
         Registries.changed()
 
     def get_overridden_operator(

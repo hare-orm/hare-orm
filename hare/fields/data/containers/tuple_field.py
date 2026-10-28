@@ -76,9 +76,16 @@ class TupleField(ContainerField):
 
         Raises:
             TypeError: A value inside it has no JSON form.
+            ValueError: The value holds another number of elements than the field.
         """
         if value is None:
             return None
+        if self.element_names is not None and not isinstance(value, (tuple, list)):
+            value = [value[name] for name in self.element_names]
+        if len(value) != len(self.fields_in_order):
+            raise ValueError(
+                f"{self.get_path()}: a value of {len(value)} elements for {len(self.fields_in_order)} element fields"
+            )
         return [
             element_field.get_json_value(element)
             for element_field, element in zip(self.fields_in_order, value, strict=True)

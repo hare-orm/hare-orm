@@ -85,7 +85,7 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         # The value references recorded while each annotation name was resolved again for one of
         # those clauses - see QueryAnnotations.get_expression_term_value_references().
         "_expression_term_references",
-        # The ORDER BY term of each annotation the query orders by, for a DISTINCT ON that must
+        # The ORDER BY term of each annotation the query orders by, for a distinct by fields that must
         # repeat it - the SELECT alias of a selected one, whose expression's parameters would
         # differ from the alias's.
         "_annotation_ordering_terms",

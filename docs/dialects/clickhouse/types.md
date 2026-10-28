@@ -54,7 +54,9 @@ type works as on PostgreSQL.
 
 - **`Float32Field`** reads a value back as the shortest decimal that is the same float32 — `0.1`, not the
   `0.10000000149011612` the drivers give; a value beyond its range, or so close to zero it would be
-  stored as 0 (`1e-50`), raises `ValidationError` — a float32 holds neither.
+  stored as 0 (`1e-50`), raises `ValidationError` — a float32 holds neither. A sum, an average and
+  arithmetic of its values are the `Float64` ClickHouse computes them in and read as a `FloatField`; a
+  statistic (`StdDev`, `Variance`) stays a float32.
 - **`FixedStringField(length)`** holds a text of at most `length` bytes in UTF-8, padded with zero bytes
   and read back without them; a text holding a zero byte of its own raises `ValidationError`, as the
   server would read it as the text's end.
@@ -65,7 +67,9 @@ type works as on PostgreSQL.
   column's precision, a tie away from zero, as a `DecimalField` rounds to its places; one outside a
   `DateTime` column's range raises `ValidationError`. **`ClickhouseDateField`** keeps a day in a `Date`
   (1970-01-01 to 2149-06-06), a day outside it raising `ValidationError`. Both are in
-  `hare.dialects.clickhouse.fields`; `inspectdb` maps these columns onto them.
+  `hare.dialects.clickhouse.fields`; `inspectdb` maps these columns onto them. A cast to a
+  `ClickhouseDatetimeField` (`Cast(value, ClickhouseDatetimeField(precision=3))`) converts to its own
+  type — its precision and zone.
 
 ## <a id="enums"></a>Enums
 
@@ -122,6 +126,10 @@ field there.
   `ValidationError` on every write — the server would store an empty array or a tuple of zeros instead.
   `null=True` on a scalar field inside makes that element `Nullable`. `Min`/`Max` of an array, a map or a
   tuple over no rows give its empty value (an empty array or map, a tuple of zeros), not `None`.
+  `Lag`/`Lead` of a container take a `default` of its type: without one — past the partition's edge the
+  value is NULL, which a container has no form of — and for `NthValue` they raise `UnSupportedError` before
+  any SQL. A `Dynamic` or a `Variant` holds NULL itself and takes all three.
+  A `GeneratedField` with a container `output_field` has the same behavior, including empty aggregates.
 - **Through a relation.** A related row that isn't there — a parent with no children, an unset foreign
   key — has its container and geometry columns read as their empty value, not `None`: in `values()`,
   `F()` and `order_by()`. A filter and an aggregate through the relation still tell it from a row: a

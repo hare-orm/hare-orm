@@ -308,6 +308,11 @@ class FilterValues:
             QueryError: An expression is an element of an ``__in``/``__not_in`` list.
         """
         value_field: Field[Any] | None = None
+        if isinstance(value, Subquery) and expression_context.filter_value_is_built:
+            value.raise_if_selects_more_columns(
+                key, CompositeKeyFilters.get_filter_column_count(expression_context.model, key)
+            )
+            return value, [], value.get_output_field()
         filter_value = FilterValues.get_subquery_filter_value(value, expression_context.value_wrapper_references)
         filter_value_joins: list[TableCriterionTuple] = []
         if isinstance(filter_value, Subquery):
@@ -364,6 +369,13 @@ class FilterValues:
         from hare.query.queryset import QuerySet
         from hare.query.statements import AwaitableQuery
 
+        if type(filter_value) is Subquery:
+            source = filter_value.source_query
+            if isinstance(source, QuerySet) and source._selection is None:
+                narrowed = FilterValues.get_subquery_filter_value(source, value_wrapper_references)
+                if isinstance(narrowed, Subquery):
+                    narrowed.shares_outer_scope = filter_value.shares_outer_scope
+                return narrowed
         if not isinstance(filter_value, (QuerySet, AwaitableQuery)):
             return filter_value
         # Imported only for a query value - an ordinary filter value loads no set-operation module.

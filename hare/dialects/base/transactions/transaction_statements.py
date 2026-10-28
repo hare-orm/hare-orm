@@ -6,7 +6,7 @@ from hare.exceptions import UnSupportedError
 from hare.transactions.enums import IsolationLevel
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from hare.dialects.base.dialect import Dialect
 
@@ -106,6 +106,22 @@ class TransactionStatements:
 
         Args:
             tenant_texts: The tenant values as text; None for every tenant.
+
+        Returns:
+            The statement.
+
+        Raises:
+            UnSupportedError: The database has no row level security - by default.
+        """
+        raise UnSupportedError(f"{self.dialect.name} has no row level security tenancy")
+
+    def get_table_tenants_setting_sql(self, table_tenant_texts: Mapping[str, Sequence[str] | None]) -> str:
+        """The statement setting the tenants each table's ``TenantCondition`` policy lets the transaction
+        see - under a scope given model by model.
+
+        Args:
+            table_tenant_texts: Each table's tenant values as text, None for every tenant, by the
+                table's key (``TenantCondition.get_table_key()``); a table left out has none.
 
         Returns:
             The statement.

@@ -60,13 +60,16 @@ await Book.objects.annotate(
 ## <a id="aggregates"></a>Агрегаты в массив и JSON
 
 `ArrayAgg`/`JSONBAgg` раскодируют каждый элемент через агрегируемое поле (элемент `JSONField`
-разбирается, элемент `DatetimeField` — в часовом поясе hare, элемент `TimeDeltaField` — `timedelta`).
+разбирается и получает объявленный `field_type`, если он задан; элемент `DatetimeField` — в часовом
+поясе hare, элемент `TimeDeltaField` — `timedelta`). Нечисловой float, который jsonb хранит текстом
+(`"NaN"`, `"Infinity"`), в `JSONBAgg` от `FloatField` и от массива чисел снова становится float.
 `JSONBAgg` от `DecimalField` даёт `Decimal`, округлённый до `decimal_places` поля: сам JSON хранит число
 с точностью числа с плавающей точкой, поэтому, если важны точные цифры, используйте `ArrayAgg`.
 `JSONBAgg` от поля диапазона даёт значения `Range` (включая пустой диапазон, сторону без границы и
 включённые/невключённые границы). `JSONBAgg` от `IntervalField` или `BinaryField` даёт `FieldError` — в
 JSON нет такого значения, только текст по `IntervalStyle`/`bytea_output` сервера; `ArrayAgg` отдаёт их
-точно. `ArrayAgg` от `ArrayField` строит один многомерный массив, строки
+точно. Отказ до SQL действует и для массивов этих полей любой вложенности, а также для вычисляемых
+полей с такими выходными типами. `ArrayAgg` от `ArrayField` строит один многомерный массив, строки
 которого PostgreSQL требует одной длины: массивы разной длины или пустой среди непустых дают
 `OperationalError` (`cannot accumulate arrays of different dimensionality`). `JSONBAgg` собирает их
 списком списков — `[['a', 'b'], [], ['c']]`, — как `ArrayAgg` в ClickHouse.

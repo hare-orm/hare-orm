@@ -286,9 +286,22 @@ Observers.observe(RowsChanged, notify_next_reader, models=[Loan, Reader])  # т�
 |---|---|
 | `model` | Модель, строки которой изменились. |
 | `operation` | `RowOperation.INSERT`, `UPDATE` или `DELETE` (`from hare.instrumentation import RowOperation`). |
-| `pks` | Первичные ключи изменённых строк. `None`, когда ORM их не называет: `QuerySet.update()`/`delete()` по фильтру может оставить их неназванными (обновление модели с `Meta.change_capture` их называет), строки, до которых дошёл `on_delete`, модель без первичного ключа. |
+| `pks` | Первичные ключи изменённых строк; `None`, когда ORM их не называет, — см. [ниже](#unnamed-pks). |
 | `fields` | Записанные поля. `None`, когда это неизвестно: вставка, `save()` без `update_fields`. |
 | `connection_alias` | Подключение, через которое шла запись. |
+
+### <a id="unnamed-pks"></a>Когда pks равен None
+
+`pks` равен `None`, когда ORM не называет изменённые строки:
+
+- `QuerySet.update()`/`delete()` по фильтру может оставить их неназванными — обновление модели с
+  `Meta.change_capture` их называет;
+- строки, до которых дошёл `on_delete`;
+- связанные строки `add()` «многие-ко-многим», если часть пар уже была связана и база пропустила их через
+  `ON CONFLICT`;
+- модель без первичного ключа.
+
+Строка называется один раз, сколько бы раз её ни передали.
 
 ### <a id="which-models"></a>Какие модели слышит наблюдатель
 

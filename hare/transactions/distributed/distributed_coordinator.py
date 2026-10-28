@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import string
 import uuid
 from collections.abc import AsyncGenerator, Collection, Sequence
@@ -21,6 +22,7 @@ from hare.exceptions import (
 from hare.transactions.atomic.atomic import Atomic
 from hare.transactions.constants import (
     DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
+    DISTRIBUTED_DECISIONS_TABLE_NAME,
     DISTRIBUTED_TRANSACTION_XID_PREFIX,
     DISTRIBUTED_TRANSACTION_XID_UNIQUE_PART_LENGTH,
 )
@@ -81,7 +83,11 @@ class DistributedCoordinator:
         Args:
             client: A connection to the coordinator alias.
         """
-        await client.execute(DistributedCoordinator._get_two_phase_commit(client).get_decisions_table_sql())
+        await client.execute(
+            DistributedCoordinator._get_two_phase_commit(client).get_decisions_table_sql(
+                client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
+            )
+        )
 
     @staticmethod
     async def mark_decision_resolved(client: DatabaseClient, xid: str) -> None:
@@ -91,7 +97,12 @@ class DistributedCoordinator:
             client: A connection to the coordinator alias.
             xid: The logical xid.
         """
-        await client.execute(DistributedCoordinator._get_two_phase_commit(client).get_finish_decision_sql(), [xid])
+        await client.execute(
+            DistributedCoordinator._get_two_phase_commit(client).get_finish_decision_sql(
+                client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
+            ),
+            [xid],
+        )
 
     @staticmethod
     def _make_xid(coordinator: str) -> str:
@@ -173,7 +184,7 @@ class DistributedCoordinator:
 
     @staticmethod
     def _get_gid_literal(client: DatabaseClient, connection_alias: str, xid: str) -> str:
-        """A participant's GID as an escaped literal - ``COMMIT``/``ROLLBACK PREPARED`` take no bind
+        """A participant's GID as an escaped literal - finishing a prepared transaction takes no bind
         parameter.
 
         Args:
@@ -248,7 +259,7 @@ class DistributedCoordinator:
 
     @staticmethod
     async def _roll_back_if_prepared_on_fresh_connection(connection_alias: str, xid: str) -> None:
-        """Issues ``ROLLBACK PREPARED`` for a participant whose ``PREPARE TRANSACTION`` outcome is
+        """Rolls back the prepared transaction of a participant whose prepare's outcome is
         unknown (it failed or was interrupted without marking the wrapper prepared) - only if the
         prepared transaction really exists.
 
@@ -273,11 +284,11 @@ class DistributedCoordinator:
         prepare_attempted_aliases: Collection[str] = (),
     ) -> None:
         """The cleanup of every failure path of ``distributed()``: rolls back every participant in
-        reverse order - ``ROLLBACK PREPARED`` for a prepared one - then the coordinator, each step
+        reverse order - the prepared transaction of a prepared one - then the coordinator, each step
         shielded from the others' exceptions, so a dead connection never stops the cleanup, masks
         the real failure or leaves the coordinator's transaction open. ``xid`` is read only for a
         finalized client - None before one exists. A participant in ``prepare_attempted_aliases``
-        not marked prepared may have prepared anyway - ``pg_prepared_xacts`` is checked.
+        not marked prepared may have prepared anyway - the database's prepared transactions are checked.
         """
         for connection_alias, client in reversed(participant_clients.items()):
             try:
@@ -331,7 +342,7 @@ class DistributedCoordinator:
 
     @staticmethod
     async def _abort_prepared_participant(connection_alias: str, client: TransactionClient, xid: str) -> None:
-        """Issues ``ROLLBACK PREPARED`` for a prepared participant on a new connection, then finishes
+        """Rolls back a prepared participant's prepared transaction on a new connection, then finishes
         its transaction like a top-level ``rollback()`` - the connection given back,
         ``on_rollback()`` callbacks run, the ROLLBACK event recorded. A failing callback is logged,
         never masking the reason of the abort.
@@ -513,8 +524,10 @@ class DistributedCoordinator:
         try:
             await DistributedCoordinator._ensure_distributed_decisions_table(transaction.coordinator_client)
             await transaction.coordinator_client.execute(
-                DistributedCoordinator._get_two_phase_commit(transaction.coordinator_client).get_decision_insert_sql(),
-                [transaction.xid, transaction.coordinator, ",".join(transaction.participants)],
+                DistributedCoordinator._get_two_phase_commit(transaction.coordinator_client).get_decision_insert_sql(
+                    transaction.coordinator_client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
+                ),
+                [transaction.xid, transaction.coordinator, json.dumps(list(transaction.participants))],
             )
         except BaseException:
             # Nothing durable has happened yet - the coordinator's own transaction (holding the
@@ -570,8 +583,16 @@ class DistributedCoordinator:
                 # `hare distributed-recover`, which reads the decision row. The coordinator's
                 # connection is rolled back either way: a ROLLBACK after a landed COMMIT is a no-op,
                 # and the connection must not go back to the pool still in a transaction.
-                for context in reversed(transaction.participant_contexts.values()):
-                    await context.__aexit__(None, None, None)
+                for connection_alias, context in reversed(transaction.participant_contexts.items()):
+                    try:
+                        await context.__aexit__(None, None, None)
+                    except BaseException:
+                        transaction.participant_clients[connection_alias].log.exception(
+                            "Failed to exit the transaction context after an ambiguous distributed commit "
+                            "(xid=%s, alias=%s).",
+                            transaction.xid,
+                            connection_alias,
+                        )
                 try:
                     # The dialect's own rollback statement - rollback() would run on_rollback()
                     # callbacks for what may have committed.
@@ -584,7 +605,14 @@ class DistributedCoordinator:
                     # __aexit__ doesn't try anything against it again.
                     pass
                 transaction.coordinator_client._finalized = True
-                await transaction.coordinator_context.__aexit__(None, None, None)
+                try:
+                    await transaction.coordinator_context.__aexit__(None, None, None)
+                except BaseException:
+                    transaction.coordinator_client.log.exception(
+                        "Failed to exit the coordinator's transaction context after an ambiguous "
+                        "distributed commit (xid=%s).",
+                        transaction.xid,
+                    )
                 raise DistributedTransactionCommitAmbiguousError(
                     f"Transactions.distributed() (xid={transaction.xid}) failed to confirm the coordinator's "
                     f"own commit - it may or may not have actually landed. Run `hare "
@@ -607,7 +635,7 @@ class DistributedCoordinator:
             callback_errors: The failures of on_commit() callbacks - the participants' appended.
 
         Returns:
-            The aliases whose COMMIT PREPARED failed or wasn't reached, and the cancellation that
+            The aliases whose prepared commit failed or wasn't reached, and the cancellation that
             stopped the commits, if any.
         """
         pending_aliases: list[str] = []
@@ -618,7 +646,7 @@ class DistributedCoordinator:
                 await DistributedCoordinator._get_prepared_on_fresh_connection(connection_alias, xid, commit=True)
             except asyncio.CancelledError as error:
                 # A cancellation stops the loop; this and the remaining participants are reported as
-                # unresolved, like a failed COMMIT PREPARED.
+                # unresolved, like a failed commit of a prepared transaction.
                 cancelled_during_participant_commit = error
                 pending_aliases.append(connection_alias)
                 pending_aliases.extend(remaining_alias for remaining_alias, _client in remaining_participants)
@@ -652,31 +680,55 @@ class DistributedCoordinator:
             callback_errors: The failures of on_commit() callbacks.
 
         Raises:
-            DistributedTransactionPartiallyCommittedError: A participant isn't committed.
-            BaseExceptionGroup: Everything committed, but two or more on_commit() callbacks failed - one
-                failure is raised alone.
+            DistributedTransactionPartiallyCommittedError: A participant isn't committed, with no other failure.
+            BaseExceptionGroup: A partial commit together with cleanup or callback failures, or two or
+                more cleanup or on_commit() callback failures - one failure is raised alone.
         """
-        if not pending_aliases:
-            # The coordinator's client is finalized - this UPDATE gets its own connection.
-            coordinator_followup = Connections.current().create_independent(transaction.coordinator)
+        cleanup_errors: list[BaseException] = []
+        try:
+            if not pending_aliases:
+                # The coordinator's client is finalized - this UPDATE gets its own connection.
+                coordinator_followup = Connections.current().create_independent(transaction.coordinator)
+                try:
+                    await DistributedCoordinator.mark_decision_resolved(coordinator_followup, transaction.xid)
+                finally:
+                    await coordinator_followup.close()
+        finally:
+            for context in reversed(transaction.participant_contexts.values()):
+                try:
+                    await context.__aexit__(None, None, None)
+                except BaseException as error:
+                    cleanup_errors.append(error)
             try:
-                await DistributedCoordinator.mark_decision_resolved(coordinator_followup, transaction.xid)
-            finally:
-                await coordinator_followup.close()
-
-        for context in reversed(transaction.participant_contexts.values()):
-            await context.__aexit__(None, None, None)
-        await transaction.coordinator_context.__aexit__(None, None, None)
+                await transaction.coordinator_context.__aexit__(None, None, None)
+            except BaseException as error:
+                cleanup_errors.append(error)
 
         if pending_aliases:
-            raise DistributedTransactionPartiallyCommittedError(
+            partial_commit_error = DistributedTransactionPartiallyCommittedError(
                 f"Transactions.distributed() (xid={transaction.xid}) committed, but the commit of the prepared "
                 f"transactions failed for {pending_aliases} - run `hare distributed-recover` to finish delivering "
                 "them",
                 transaction.xid,
                 transaction.coordinator,
                 pending_aliases,
+            )
+            errors = [partial_commit_error, *cleanup_errors, *callback_errors]
+            if len(errors) == 1:
+                raise partial_commit_error from cancelled_during_participant_commit
+            raise BaseExceptionGroup(
+                f"Transactions.distributed() (xid={transaction.xid}) was partially committed and its cleanup or "
+                "on_commit() callbacks failed",
+                errors,
             ) from cancelled_during_participant_commit
+
+        if cleanup_errors:
+            if len(cleanup_errors) == 1:
+                raise cleanup_errors[0]
+            raise BaseExceptionGroup(
+                f"Transactions.distributed() (xid={transaction.xid}) failed to close its transactions",
+                cleanup_errors,
+            )
 
         if callback_errors:
             # Everything committed; only callbacks failed. BaseExceptionGroup - a callback may raise
@@ -712,15 +764,20 @@ class DistributedCoordinator:
         # No age filter at all for 0: a server clock stepped backwards (NTP, VM time sync) makes a
         # just-written row look younger than zero seconds.
         _, decision_rows = await coordinator_connection.execute(
-            coordinator_two_phase_commit.get_pending_decisions_sql(with_age_limit=bool(older_than_seconds)),
+            coordinator_two_phase_commit.get_pending_decisions_sql(
+                coordinator_connection.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME),
+                with_age_limit=bool(older_than_seconds),
+            ),
             [older_than_seconds] if older_than_seconds else None,
         )
 
         stale: list[StalePreparedTransaction] = []
         xids_with_decisions: set[str] = set()
         for row in decision_rows:
+            if not DistributedCoordinator._xid_belongs_to_coordinator(row["xid"], coordinator):
+                continue
             xids_with_decisions.add(row["xid"])
-            for participant_alias in row["participant_aliases"].split(","):
+            for participant_alias in json.loads(row["participant_aliases"]):
                 try:
                     participant_connection = Atomic.get_connection(participant_alias)
                 except ConfigurationError:

@@ -32,7 +32,7 @@ class NullIf(Function):
         # The value itself, or NULL.
         return self.get_literals_of(self.field)
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> SqlFunction:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> SqlFunction:
         return SqlFunction("NULLIF", term, *default_values)
 
     def _get_result_term(
@@ -51,7 +51,7 @@ class NullIf(Function):
             ],
             "NullIf()",
         )
-        return term
+        return expression_context.dialect.renderers.get_null_if_result(term, function_arg.output_field)
 
     def _get_default_terms(
         self,

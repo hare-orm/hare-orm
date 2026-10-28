@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 import pytest_asyncio
 
@@ -5,10 +7,20 @@ from hare.exceptions import (
     FieldError,
     QueryError,
 )
-from hare.query.expressions import Exists, F, OuterReference, Q, Subquery, Window
+from hare.query.expressions import Exists, F, FilteredRelation, OuterReference, Q, Subquery, Window
 from hare.query.functions import Coalesce, Count, Length, Sum
 from hare.query.functions.window import RowNumber
-from tests.shared_models.testmodels import Address, Author, Book, Employee, Event, Tournament
+from tests.shared_models.testmodels import (
+    Address,
+    Author,
+    Book,
+    DateFields,
+    Employee,
+    Event,
+    IntFields,
+    JSONFields,
+    Tournament,
+)
 
 
 @pytest.mark.asyncio
@@ -572,3 +584,30 @@ async def test_outerref_to_window_annotation_raises(db):
 
     with pytest.raises(QueryError, match="window function"):
         await queryset
+
+
+@pytest.mark.asyncio
+async def test_an_outer_reference_reads_a_path_of_the_enclosing_query_as_f_does(db):
+    """A path that isn't a relation's went to the relation lookup - a JSON path rendered its column
+    unqualified, read on the subquery's own table, and an annotation, a date part and a named JOIN's field
+    were "not resolvable"."""
+    await JSONFields.objects.create(id=1, data={"k": 2})
+    await JSONFields.objects.create(id=2, data={"k": 9})
+    by_key = JSONFields.objects.filter(Exists(JSONFields.objects.filter(id=OuterReference("data__k"))))
+    assert await by_key.values_list("id", flat=True) == [1]
+    await DateFields.objects.create(id=1, date=datetime.date(2024, 5, 1))
+    await DateFields.objects.create(id=2, date=datetime.date(2025, 5, 1))
+    await IntFields.objects.create(id=1, intnum=2024)
+    by_year = DateFields.objects.filter(Exists(IntFields.objects.filter(intnum=OuterReference("date__year"))))
+    assert await by_year.values_list("id", flat=True) == [1]
+    cup = await Tournament.objects.create(id=1, name="cup")
+    await Tournament.objects.create(id=2, name="league")
+    await Event.objects.create(event_id=1, name="final", tournament=cup)
+    annotated = Tournament.objects.annotate(custom__id=F("id") + 2023).filter(
+        Exists(IntFields.objects.filter(intnum=OuterReference("custom__id")))
+    )
+    assert await annotated.values_list("id", flat=True) == [1]
+    joined = Tournament.objects.annotate(matches=FilteredRelation("events")).filter(
+        Exists(IntFields.objects.filter(id=OuterReference("matches__event_id")))
+    )
+    assert await joined.values_list("id", flat=True) == [1]

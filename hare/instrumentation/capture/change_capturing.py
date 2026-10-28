@@ -9,7 +9,7 @@ from hare.exceptions import ConfigurationError
 from hare.instrumentation.capture.capture_needs import CaptureNeeds
 from hare.instrumentation.capture.captured_change import CapturedChange
 from hare.instrumentation.enums import ChangePayload, RowOperation
-from hare.query.constants import RETURNING_OLD_COLUMN_ALIAS_PREFIX
+from hare.query.hare_column_names import HareColumnNames
 from hare.sql.terms.values.old_row_value import OldRowValue
 from hare.time import Timezone
 
@@ -232,8 +232,9 @@ class ChangeCapturing:
             A term per captured column.
         """
         projection = model._meta.fields_db_projection
+        old_value_names = HareColumnNames.get_old_value_names(model)
         return [
-            OldRowValue(column, alias=f"{RETURNING_OLD_COLUMN_ALIAS_PREFIX}{column}")
+            OldRowValue(column, alias=old_value_names[column])
             for column in dict.fromkeys(projection[name] for name in needs.field_names)
         ]
 
@@ -256,11 +257,13 @@ class ChangeCapturing:
         meta = model._meta
         projection = meta.fields_db_projection
         fields_map = meta.fields_map
-        prefix = RETURNING_OLD_COLUMN_ALIAS_PREFIX if old else ""
-        return {
-            name: types.get_python_value(fields_map[name], row[f"{prefix}{projection[name]}"])
-            for name in needs.field_names
-        }
+        if old:
+            old_value_names = HareColumnNames.get_old_value_names(model)
+            return {
+                name: types.get_python_value(fields_map[name], row[old_value_names[projection[name]]])
+                for name in needs.field_names
+            }
+        return {name: types.get_python_value(fields_map[name], row[projection[name]]) for name in needs.field_names}
 
     @staticmethod
     def get_row_key(

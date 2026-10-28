@@ -11,13 +11,15 @@ class TenantConditions(SchemaEditorPart):
     __slots__ = ()
 
     @classmethod
-    def get_tenant_condition_sql(cls, quoted_column: str, column_type: str) -> str:
+    def get_tenant_condition_sql(cls, quoted_column: str, column_type: str, table_key_literal: str) -> str:
         """The predicate of a policy's ``TenantCondition``: the row's tenant column holds one of the
-        tenants the transaction set.
+        tenants the transaction set - for every table, or for this one.
 
         Args:
             quoted_column: The quoted tenant column.
             column_type: The column's type.
+            table_key_literal: The string literal of the name the transaction gives the table's tenants
+                under (``TenantCondition.get_table_key()``).
 
         Returns:
             The SQL predicate.

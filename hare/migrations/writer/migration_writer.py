@@ -47,6 +47,7 @@ from hare.migrations.writer.constants import (
     MIGRATION_SLUG_RE,
     MIGRATION_UNDERSCORE_RUN_PATTERN,
 )
+from hare.migrations.writer.eager_reference_rewriter import EagerReferenceRewriter
 from hare.migrations.writer.import_manager import ImportManager
 from hare.query.enums import Connector
 from hare.query.expressions import Expression, F, Ordering, Q
@@ -124,18 +125,18 @@ class MigrationWriter:
         Returns:
             Python code rebuilding an equal value.
         """
-        imports.add_module("datetime")
+        module_name = imports.add_module("datetime")
         if isinstance(value, dt.datetime):
             base_class_name = "datetime"
         elif isinstance(value, dt.date):
-            return f"datetime.date.fromisoformat({dt.date.isoformat(value)!r})"
+            return f"{module_name}.date.fromisoformat({dt.date.isoformat(value)!r})"
         else:
             base_class_name = "time"
         tzinfo = value.tzinfo
         zone_key = getattr(tzinfo, "key", None)
         keeps_named_zone = isinstance(tzinfo, zoneinfo.ZoneInfo) and isinstance(zone_key, str)
         iso_text = (value.replace(tzinfo=None) if keeps_named_zone else value).isoformat()
-        rendered = f"datetime.{base_class_name}.fromisoformat({iso_text!r})"
+        rendered = f"{module_name}.{base_class_name}.fromisoformat({iso_text!r})"
         replacements = []
         if keeps_named_zone:
             zone_class_name = MigrationWriter.import_object(type(tzinfo), imports)
@@ -159,10 +160,9 @@ class MigrationWriter:
         """
         module_name, name, use_module = MigrationWriter._get_import(value)
         if use_module:
-            imports.add_module(module_name)
-        else:
-            imports.add_from(module_name, name)
-        return name
+            module_reference = imports.add_module(module_name)
+            return f"{module_reference}{name[len(module_name) :]}"
+        return imports.add_from(module_name, name)
 
     @staticmethod
     def render_value(value: Any, imports: ImportManager) -> str:
@@ -283,8 +283,7 @@ class MigrationWriter:
             return None
         for default_class in (Now, RandomHex, UuidV7):
             if isinstance(value, default_class):
-                imports.add_from("hare.fields.db_defaults", default_class.__name__)
-                return f"{default_class.__name__}()"
+                return f"{imports.add_from('hare.fields.db_defaults', default_class.__name__)}()"
         path, args, kwargs = value.deconstruct()
         module_name, _, class_name = path.rpartition(".")
         if (
@@ -294,8 +293,7 @@ class MigrationWriter:
         ):
             # A subclass keeps its class - a dialect's renderer of it, its own SQL.
             return MigrationWriter.render_call(path, args, kwargs, imports)
-        imports.add_from("hare.fields.db_defaults", "SqlDefault")
-        return f"SqlDefault({value.sql!r})"
+        return f"{imports.add_from('hare.fields.db_defaults', 'SqlDefault')}({value.sql!r})"
 
     @staticmethod
     def render_query_expression(value: Any, imports: ImportManager) -> str | None:
@@ -311,21 +309,20 @@ class MigrationWriter:
         if isinstance(value, Q):
             return MigrationWriter.render_condition(value, imports)
         if type(value) is F:
-            imports.add_from("hare.query.expressions", "F")
-            return f"F({value.name!r})"
+            return f"{imports.add_from('hare.query.expressions', 'F')}({value.name!r})"
         if isinstance(value, Ordering):
             direction = "asc" if value.order.is_ascending else "desc"
             nulls = {True: "nulls_first=True", False: "nulls_last=True", None: ""}[value.order.nulls_first]
             if isinstance(value.target, str):
-                imports.add_from("hare.query.expressions", "F")
-                return f"F({value.target!r}).{direction}({nulls})"
+                return f"{imports.add_from('hare.query.expressions', 'F')}({value.target!r}).{direction}({nulls})"
             return f"{MigrationWriter.render_query_expression(value.target, imports)}.{direction}({nulls})"
         if isinstance(value, OrderedIndexKey):
-            imports.add_from("hare.ddl.indexes", "OrderedIndexKey")
-            imports.add_from("hare.ddl", "RawSQLTerm")
-            imports.add_from("hare.sql", "Order")
+            key_name = imports.add_from("hare.ddl.indexes", "OrderedIndexKey")
+            term_name = imports.add_from("hare.ddl", "RawSQLTerm")
+            order_name = imports.add_from("hare.sql", "Order")
             return (
-                f"OrderedIndexKey(RawSQLTerm({value.term.get_sql(NEUTRAL_SQL_CONTEXT)!r}), Order.{value.order.name})"
+                f"{key_name}({term_name}({value.term.get_sql(NEUTRAL_SQL_CONTEXT)!r}), "
+                f"{order_name}.{value.order.name})"
             )
         if isinstance(value, Expression):
             # The expression itself, not its SQL: the database a migration runs on renders it.
@@ -361,8 +358,7 @@ class MigrationWriter:
             return MigrationWriter.render_call(object_path, object_args, object_kwargs, imports)
         if hasattr(value, "get_sql") and callable(value.get_sql):
             sql = value.get_sql(NEUTRAL_SQL_CONTEXT)
-            imports.add_from("hare.ddl", "RawSQLTerm")
-            return f"RawSQLTerm({sql!r})"
+            return f"{imports.add_from('hare.ddl', 'RawSQLTerm')}({sql!r})"
         return None
 
     @staticmethod
@@ -408,30 +404,25 @@ class MigrationWriter:
             The code, None when the value is none of them.
         """
         if isinstance(value, Decimal):
-            imports.add_from("decimal", "Decimal")
-            return f"Decimal({str(value)!r})"
+            return f"{imports.add_from('decimal', 'Decimal')}({str(value)!r})"
         if isinstance(value, uuid.UUID):
-            imports.add_module("uuid")
-            return f"uuid.UUID({str(value)!r})"
+            return f"{imports.add_module('uuid')}.UUID({str(value)!r})"
         if isinstance(value, dt.timedelta):
-            imports.add_module("datetime")
+            module_name = imports.add_module("datetime")
             # Exact integer components - total_seconds() loses microseconds for a large timedelta.
             return (
-                f"datetime.timedelta(days={value.days!r}, seconds={value.seconds!r}, "
+                f"{module_name}.timedelta(days={value.days!r}, seconds={value.seconds!r}, "
                 f"microseconds={value.microseconds!r})"
             )
         if isinstance(value, (dt.datetime, dt.date, dt.time)):
             return MigrationWriter.render_date_or_time(value, imports)
         # An interface is an address too - it goes first.
         if isinstance(value, (ipaddress.IPv4Interface, ipaddress.IPv6Interface)):
-            imports.add_module("ipaddress")
-            return f"ipaddress.ip_interface({str(value)!r})"
+            return f"{imports.add_module('ipaddress')}.ip_interface({str(value)!r})"
         if isinstance(value, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
-            imports.add_module("ipaddress")
-            return f"ipaddress.ip_address({str(value)!r})"
+            return f"{imports.add_module('ipaddress')}.ip_address({str(value)!r})"
         if isinstance(value, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
-            imports.add_module("ipaddress")
-            return f"ipaddress.ip_network({str(value)!r})"
+            return f"{imports.add_module('ipaddress')}.ip_network({str(value)!r})"
         return None
 
     @staticmethod
@@ -460,8 +451,8 @@ class MigrationWriter:
             f"{key}={MigrationWriter.render_value(item_value, imports)}" for key, item_value in value.keywords.items()
         ]
         function_reference = MigrationWriter.import_object(function, imports)
-        imports.add_module("functools")
-        return f"functools.partial({', '.join([function_reference, *arguments])})"
+        module_name = imports.add_module("functools")
+        return f"{module_name}.partial({', '.join([function_reference, *arguments])})"
 
     @staticmethod
     def render_type_expression(value: Any, imports: ImportManager) -> str | None:
@@ -489,8 +480,7 @@ class MigrationWriter:
         if typing_name is not None:
             # A typing alias (List, Dict) or a special form (Literal, Annotated) - not equal to the
             # builtin's own parameterized type, so written by its typing name.
-            imports.add_module("typing")
-            origin_text = f"typing.{typing_name}"
+            origin_text = f"{imports.add_module('typing')}.{typing_name}"
         else:
             origin_text = MigrationWriter.render_value(origin, imports)
         if not arguments:
@@ -594,8 +584,8 @@ class MigrationWriter:
         if getattr(value, "__module__", None) is None and isinstance(owner_class, type):
             # A builtin classmethod (datetime.date.today, datetime.datetime.now, ...) carries
             # no __module__ of its own - it's referenced through the class it's bound to.
-            imports.add_module(owner_class.__module__)
-            return f"{owner_class.__module__}.{owner_class.__qualname__}.{value.__name__}"
+            module_name = imports.add_module(owner_class.__module__)
+            return f"{module_name}.{owner_class.__qualname__}.{value.__name__}"
         if hasattr(value, "__qualname__") and "<locals>" in value.__qualname__:
             raise ConfigurationError(f"Cannot serialize local function: {value!r}")
         return MigrationWriter.import_object(value, imports)
@@ -612,15 +602,13 @@ class MigrationWriter:
             The code, None when the object says nothing about it.
         """
         if isinstance(value, SwappableModelReference):
-            imports.add_from("hare.models", "swappable")
-            return f"swappable({value.setting!r})"
+            return f"{imports.add_from('hare.models', 'swappable')}({value.setting!r})"
         # `migration_import_path` imports an existing instance (a Crypto - the constructor would put the
         # key into the file).
         import_path = getattr(value, "migration_import_path", None)
         if import_path:
             module_name, _, name = import_path.rpartition(".")
-            imports.add_from(module_name, name)
-            return name
+            return imports.add_from(module_name, name)
         # `deconstruct()` - for values that can be safely and fully rebuilt by calling the constructor
         # with literal arguments.
         if hasattr(value, "deconstruct") and callable(value.deconstruct):
@@ -682,8 +670,8 @@ class MigrationWriter:
     @staticmethod
     def declare_function(function: Any, imports: ImportManager) -> str:
         """Declares a function of a module the migration can't import - another migration's - at
-        the top of the migration: its source, with the imports of its module it uses moved into
-        its body, once per function.
+        the top of the migration: its source, with the imports its body uses moved into the body
+        and those its declaration needs kept at module level, once per function.
 
         Args:
             function: The function.
@@ -718,20 +706,47 @@ class MigrationWriter:
         if not isinstance(function_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             raise ConfigurationError(f"{function.__module__}.{function.__qualname__} is not a plain function")
         used_names = {node.id for node in ast.walk(function_node) if isinstance(node, ast.Name)}
+        body_names = {
+            node.id for statement in function_node.body for node in ast.walk(statement) if isinstance(node, ast.Name)
+        }
+        eager_nodes: list[ast.expr] = [*function_node.decorator_list, *function_node.args.defaults]
+        eager_nodes.extend(default for default in function_node.args.kw_defaults if default is not None)
+        arguments = (
+            *function_node.args.posonlyargs,
+            *function_node.args.args,
+            *function_node.args.kwonlyargs,
+            function_node.args.vararg,
+            function_node.args.kwarg,
+        )
+        eager_nodes.extend(argument.annotation for argument in arguments if argument and argument.annotation)
+        if function_node.returns is not None:
+            eager_nodes.append(function_node.returns)
+        eager_names = {
+            node.id for expression in eager_nodes for node in ast.walk(expression) if isinstance(node, ast.Name)
+        }
         module_import_nodes: list[ast.stmt] = []
+        eager_import_nodes: list[ast.Import | ast.ImportFrom] = []
         module_defined_names: set[str] = set()
         for statement in ast.parse(module_source).body:
             if isinstance(statement, (ast.Import, ast.ImportFrom)):
-                used_aliases = [
-                    alias for alias in statement.names if (alias.asname or alias.name.split(".", 1)[0]) in used_names
+                body_aliases = [
+                    alias for alias in statement.names if (alias.asname or alias.name.split(".", 1)[0]) in body_names
                 ]
-                if used_aliases:
-                    imported_statement = (
-                        ast.Import(names=used_aliases)
+                eager_aliases = [
+                    alias for alias in statement.names if (alias.asname or alias.name.split(".", 1)[0]) in eager_names
+                ]
+                if body_aliases:
+                    module_import_nodes.append(
+                        ast.Import(names=body_aliases)
                         if isinstance(statement, ast.Import)
-                        else ast.ImportFrom(module=statement.module, names=used_aliases, level=statement.level)
+                        else ast.ImportFrom(module=statement.module, names=body_aliases, level=statement.level)
                     )
-                    module_import_nodes.append(imported_statement)
+                if eager_aliases:
+                    eager_import_nodes.append(
+                        ast.Import(names=eager_aliases)
+                        if isinstance(statement, ast.Import)
+                        else ast.ImportFrom(module=statement.module, names=eager_aliases, level=statement.level)
+                    )
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if statement.name != function.__name__:
                     module_defined_names.add(statement.name)
@@ -740,7 +755,9 @@ class MigrationWriter:
                 module_defined_names.update(
                     node.id for target in targets for node in ast.walk(target) if isinstance(node, ast.Name)
                 )
-        if any(isinstance(node, ast.ImportFrom) and node.level for node in module_import_nodes):
+        if any(
+            isinstance(node, ast.ImportFrom) and node.level for node in [*module_import_nodes, *eager_import_nodes]
+        ):
             raise ConfigurationError(
                 f"{function.__module__}.{function.__qualname__} uses a relative import - write it as an absolute "
                 "one to copy the function into the migration"
@@ -752,6 +769,20 @@ class MigrationWriter:
                 "a copy of the function in another migration wouldn't have - move them into the function or into "
                 "an importable module"
             )
+        replacements: dict[str, str] = {}
+        for statement in eager_import_nodes:
+            for alias in statement.names:
+                if isinstance(statement, ast.ImportFrom):
+                    local_name = alias.asname or alias.name
+                    replacements[local_name] = imports.add_from(statement.module or "", alias.name)
+                else:
+                    replacements[alias.asname or alias.name] = imports.add_module(alias.name)
+
+        rewriter = EagerReferenceRewriter(replacements)
+        function_node.decorator_list = [rewriter.visit(expression) for expression in function_node.decorator_list]
+        function_node.args = rewriter.visit(function_node.args)
+        if function_node.returns is not None:
+            function_node.returns = rewriter.visit(function_node.returns)
         name = imports.get_free_name(function.__name__)
         function_node.name = name
         docstring_count = (
@@ -783,15 +814,18 @@ class MigrationWriter:
         """
         if condition.expression is not None:
             raise ConfigurationError(f"{condition!r}: a Q(Exists(...)) condition can't be written into a migration")
-        imports.add_from("hare.query.expressions", "Q")
+        q_name = imports.add_from("hare.query.expressions", "Q")
         arguments = [MigrationWriter.render_condition(child, imports) for child in condition.children]
         for key, value in condition.filters.items():
             # An expression (F("low") + 1) is written as itself, as an index key is.
             arguments.append(f"{key}={MigrationWriter.render_value(value, imports)}")
         if condition.connector == Connector.OR:
-            imports.add_from("hare.query.enums", "Connector")
-            return f"{condition.get_negation_prefix()}Q.with_connector({', '.join(['Connector.OR', *arguments])})"
-        return f"{condition.get_negation_prefix()}Q({', '.join(arguments)})"
+            connector_name = imports.add_from("hare.query.enums", "Connector")
+            return (
+                f"{condition.get_negation_prefix()}{q_name}.with_connector"
+                f"({', '.join([f'{connector_name}.OR', *arguments])})"
+            )
+        return f"{condition.get_negation_prefix()}{q_name}({', '.join(arguments)})"
 
     @staticmethod
     def get_public_field_name(path: str) -> str:
@@ -812,7 +846,7 @@ class MigrationWriter:
     @staticmethod
     def get_public_field_module(path: str) -> str | None:
         """The ``fields`` package of a dialect exporting the public ``*Field`` of a ``*FieldInstance``
-        class of it (``NativeEnumFieldInstance`` -> ``hare.dialects.postgresql.fields.NativeEnumField``).
+        class of it (``<Name>FieldInstance`` -> ``hare.dialects.<dialect>.fields.<Name>Field``).
 
         Args:
             path: Dotted path of a field class.
@@ -853,6 +887,42 @@ class MigrationWriter:
         )
 
     @staticmethod
+    def _split_import_path(path: str) -> tuple[str, str, bool]:
+        """How a migration imports the object of a dotted path - a nested class (``module.Outer.Inner``) by
+        its module and the attributes inside it, anything else from its module.
+
+        Args:
+            path: The dotted path.
+
+        Returns:
+            The module, the name - dotted inside the module for a nested class - and whether the module is
+            imported whole.
+        """
+        module_name, name = path.rsplit(".", 1)
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError as error:
+            if error.name != module_name:
+                raise
+            parts = path.split(".")
+            for end in range(len(parts) - 1, 0, -1):
+                candidate = ".".join(parts[:end])
+                try:
+                    value: Any = importlib.import_module(candidate)
+                except ModuleNotFoundError as candidate_error:
+                    if candidate_error.name != candidate:
+                        raise
+                    continue
+                attribute_names = parts[end:]
+                for attribute_name in attribute_names:
+                    value = getattr(value, attribute_name, None)
+                    if value is None:
+                        # No such class in the nearest module - written as the path names it.
+                        return module_name, name, False
+                return candidate, ".".join(attribute_names), True
+        return module_name, name, False
+
+    @staticmethod
     def get_callable(path: str) -> Any:
         """The object a ``render_call()`` expression for ``path`` calls once executed.
 
@@ -864,8 +934,13 @@ class MigrationWriter:
         """
         if path.startswith("hare.fields.") and MigrationWriter.is_fields_package_path(path):
             return getattr(importlib.import_module("hare.fields"), MigrationWriter.get_public_field_name(path))
-        module_name, name = path.rsplit(".", 1)
-        return getattr(importlib.import_module(module_name), name)
+        module_name, name, use_module = MigrationWriter._split_import_path(path)
+        value = importlib.import_module(module_name)
+        if use_module:
+            for part in name.split("."):
+                value = getattr(value, part)
+            return value
+        return getattr(value, name)
 
     @staticmethod
     def render_call(path: str, args: list[Any], kwargs: dict[str, Any], imports: ImportManager) -> str:
@@ -890,27 +965,22 @@ class MigrationWriter:
                 and "model_name" in kwargs
             ):
                 args = [kwargs.pop("model_name")] + list(args)
-            imports.add_fields_alias()
-            callee = f"fields.{class_name}"
+            callee = f"{imports.add_fields_alias()}.{class_name}"
         elif path.startswith("hare.ddl.indexes."):
             class_name = path.rsplit(".", 1)[1]
-            imports.add_index_class(class_name)
-            callee = class_name
+            callee = imports.add_index_class(class_name)
         elif path == "hare.ddl.constraints.UniqueConstraint":
-            imports.add_constraint_class("UniqueConstraint")
-            callee = "UniqueConstraint"
+            callee = imports.add_constraint_class("UniqueConstraint")
         elif path == "hare.ddl.constraints.CheckConstraint":
-            imports.add_constraint_class("CheckConstraint")
-            callee = "CheckConstraint"
+            callee = imports.add_constraint_class("CheckConstraint")
         elif path == "hare.ddl.constraints.ExclusionConstraint":
-            imports.add_constraint_class("ExclusionConstraint")
-            callee = "ExclusionConstraint"
+            callee = imports.add_constraint_class("ExclusionConstraint")
         else:
-            module, name = path.rsplit(".", 1)
             if (public_field_module := MigrationWriter.get_public_field_module(path)) is not None:
-                module, name = public_field_module, MigrationWriter.get_public_field_name(path)
-            imports.add_from(module, name)
-            callee = name
+                module, name, use_module = public_field_module, MigrationWriter.get_public_field_name(path), False
+            else:
+                module, name, use_module = MigrationWriter._split_import_path(path)
+            callee = f"{imports.add_module(module)}.{name}" if use_module else imports.add_from(module, name)
 
         rendered_args = [MigrationWriter.render_value(arg, imports) for arg in args]
         rendered_kwargs = [

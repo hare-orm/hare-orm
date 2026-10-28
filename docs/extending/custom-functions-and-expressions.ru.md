@@ -34,21 +34,37 @@ await book.save()
 await Book.objects.filter(pk=book.pk).update(metadata=JsonSet(F("metadata"), "$.edition", 3))
 ```
 
-Подклассу `Function` для [планов запросов](../querying/query-plan-cache.ru.md) больше ничего не нужно: он
-наследует то, как функция описывает свой план, — её класс, поле, тип каждого литерального аргумента (сами
-значения подставляются в каждом запросе) и `get_plan_options()`. Переопределите `get_plan_options()`,
-когда параметр функции записывается в текст SQL, а не подставляется как значение, — тогда два вызова с
-разными параметрами никогда не делят один план:
+Подкласс `Function` наследует то, как функция описывает свой [план запроса](../querying/query-plan-cache.ru.md):
+её класс, поле и тип каждого литерального аргумента (сами значения подставляются в каждом запросе).
+Собственный атрибут, который записывается в текст SQL, а не подставляется как значение, объявляется в
+`plan_parts` после унаследованных частей — как `PlanPartType.KEY`: тогда два вызова с разными его значениями
+никогда не делят один план. Атрибут, не объявленный в `plan_parts`, не попадает в ключ: два вызова, которые
+различаются только им, получат один план, а с ним — один текст SQL.
 
 ```python
-class RoundTo(Function):
-    def __init__(self, field: str, precision: int = 0) -> None:
-        super().__init__(field)
-        self.precision = precision
+from typing import ClassVar
 
-    def get_plan_options(self) -> tuple[Any, ...]:
-        return (self.precision,)
+from hare.query.expressions import Function
+from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
+from hare.query.plans.enums import PlanPartType
+from hare.sql.terms import Function as SqlFunction, LiteralValue
+
+
+class Prefix(Function):
+    plan_parts: ClassVar[DeclaredPlanParts] = (*Function.plan_parts, ("length", PlanPartType.KEY))
+
+    def __init__(self, field: str, length: int) -> None:
+        super().__init__(field)
+        self.length = int(length)
+
+    def get_function_term(self, term, *default_values):
+        return SqlFunction("SUBSTR", term, LiteralValue("1"), LiteralValue(str(self.length)))
 ```
+
+`get_function_term(term, *default_values)` строит SQL-терм вызова из термов аргументов — переопределите
+его, как здесь, когда функция пишет свой SQL сама. Подкласс `Function`, который не задаёт ни
+`function_name`, ни `database_function` и не переопределяет `get_function_term()`, не называет никакой
+SQL-функции: запрос с ним даёт `ConfigurationError` до отправки SQL.
 
 ## <a id="writing-a-custom-expression"></a>Своё выражение
 

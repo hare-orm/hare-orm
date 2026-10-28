@@ -61,10 +61,11 @@ class Tenancy:
 
         Returns:
             A tenant value, a ``TenantValues`` (several values), ``Tenancy.ALL``, or None when
-            no scope is active, the active one doesn't name the model, or the model has no
-            ``Meta.tenant_field``.
+            no scope is active, the active one doesn't name the model, or the model has neither
+            ``Meta.tenant_field`` nor ``Meta.tenant_schema``.
         """
-        if not model._meta.tenant_field:
+        meta = model._meta
+        if not meta.tenant_field and not meta.tenant_schema:
             return None
         scope = cls.current.get()
         return scope.get_for_model(model) if type(scope) is ModelTenants else scope
@@ -122,8 +123,9 @@ class Tenancy:
 
         Raises:
             QueryError: A scope given model by model names something that isn't a model with
-                ``Meta.tenant_field``, or gives a model None; or ``tenant`` is a list, a tuple
-                or a set - several values are ``Tenancy.any_of(*values)``.
+                ``Meta.tenant_field`` or ``Meta.tenant_schema``, gives a model None, or gives a
+                ``Meta.tenant_schema`` model several values or ``Tenancy.ALL``; or ``tenant`` is a list,
+                a tuple or a set - several values are ``Tenancy.any_of(*values)``.
         """
         if isinstance(tenant, dict):
             tenant = ModelTenants(tenant)
@@ -190,15 +192,18 @@ class Tenancy:
         ``tenant`` is a tenant value (for every model alike), ``Tenancy.any_of(...)`` (several
         values), ``Tenancy.ALL`` (every tenant), or a dict of those by model - its class or its
         ``"app.Model"`` label; a model takes the entry of its own class, else of its nearest base class
-        with the same ``Meta.tenant_field``.
+        with the same ``Meta.tenant_field`` (with ``Meta.tenant_schema`` for a ``Meta.tenant_schema``
+        model without one). A ``Meta.tenant_schema`` model's entry is one value, the tenant whose schema
+        its connection works in.
 
         A row written without a tenant gets the model's value when its scope is one value; otherwise
         the write has to name it. ``<Model>.objects.all_tenants()`` spans every tenant for one
         query.
 
         Raises:
-            QueryError: A dict names something that isn't a model with ``Meta.tenant_field``, or
-                gives a model None.
+            QueryError: A dict names something that isn't a model with ``Meta.tenant_field`` or
+                ``Meta.tenant_schema``, gives a model None, or gives a ``Meta.tenant_schema`` model
+                several values or ``Tenancy.ALL``.
         """
         token = cls.set(tenant)
         try:
@@ -285,7 +290,9 @@ class Tenancy:
     ) -> None:
         """Rejects written rows whose forward relation names a row of a tenant-scoped model its scope
         doesn't show. A related model with no scope, or with ``Tenancy.ALL``, isn't checked; a key
-        naming no row is left to the database.
+        naming no row is left to the database - except on a table of a ``TenantCondition`` policy of a
+        connection with ``tenant_row_level_security``, where the policy hides the rows of other tenants
+        from the check while the database's foreign key still accepts them.
 
         Args:
             model: The model the rows are written to.
@@ -339,12 +346,14 @@ class Tenancy:
     ) -> None:
         """Reads the tenant of each related row a relation names and compares it with the related
         model's scope - a key of a row of the scope passes, also where a database keeping no key unique
-        holds another tenant's row of it too."""
+        holds another tenant's row of it too. Under row level security a key whose row the read doesn't
+        see is refused."""
         related_model = field.related_model
         related_meta = related_model._meta
         table = related_meta.basetable
         key_columns = [related_meta.fields_db_projection[name] for name in field.to_field_names]
         tenant_column = related_meta.fields_db_projection[cast("str", related_meta.tenant_field)]
+        rows_hidden_by_policy = related_meta.tenant_row_level_security and connection.tenant_row_level_security
         ordered_keys = list(keys)
         for start in range(0, len(ordered_keys), TENANT_RELATION_CHECK_BATCH_SIZE):
             batch = ordered_keys[start : start + TENANT_RELATION_CHECK_BATCH_SIZE]
@@ -374,3 +383,10 @@ class Tenancy:
                         f"belongs to tenant {related_tenant!r}, not the active {related_scope!r} - a "
                         "relation can't cross tenants."
                     )
+            # A key of a policy's table is unique: fewer rows than keys - a row the policy hides.
+            if rows_hidden_by_policy and len(allowed_keys) < len(batch):
+                raise QueryError(
+                    f"{model.__name__}.{field_name}: a {related_model.__name__} row it points at isn't one "
+                    f"the active {related_scope!r} shows - row level security hides the rows of other "
+                    "tenants, and a relation can't cross tenants."
+                )

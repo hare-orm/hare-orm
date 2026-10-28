@@ -1,6 +1,7 @@
 """A request query's declaration is checked against the ORM's description of its filters: the
 path, the lookup, the value's shape and type, the dialects and the options."""
 
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from hare.contrib.request_query import (
     CursorPagination,
     Filter,
+    FilterField,
     KeyColumns,
     NoFilter,
     OffsetPagination,
@@ -15,6 +17,7 @@ from hare.contrib.request_query import (
     RequestQuery,
     SearchConfig,
 )
+from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.test import requires_features
 from hare.dialects.postgresql.request_query import PostgresqlRequestQuery
 from hare.dialects.sqlite.request_query import SqliteRequestQuery
@@ -354,3 +357,97 @@ def test_options_add_their_parameters():
     assert list(ParametersQuery.model_fields) == ["q", "sort", "size", "after"]
     assert list(InheritedParametersQuery.model_fields) == ["title", "q", "sort", "size", "after"]
     assert ParametersQuery.model_fields["size"].default == 100
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"pagination": "offset"}, r"Meta\.pagination requires .*get_page\(\)"),
+        ({"ordering": ("title",)}, r"Meta\.ordering requires .*fields, default"),
+        ({"filters": ("title",)}, r"Meta\.filters item requires get_filter_keys\(\), description"),
+        ({"fields": ["title"]}, r"Meta\.fields requires .*apply\(\), fields"),
+        ({"queryset": 5}, r"Meta\.queryset requires model"),
+        ({"join_type": None}, r"Meta\.join_type takes AND or OR"),
+        ({"filters": 5}, r"Meta\.filters must be iterable"),
+        ({"filters": [SimpleNamespace(get_filter_keys=None, description=None)]}, r"requires get_filter_keys\(\)$"),
+        ({"api_getter": ["title"]}, r"Meta\.api_getter items must be ApiSource or ApiValueMapping"),
+    ],
+    ids=[
+        "pagination",
+        "ordering",
+        "filters",
+        "fields",
+        "queryset",
+        "join_type",
+        "not-iterable",
+        "not-callable",
+        "api-item",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_meta_option_missing_required_structure_is_refused(library, options, message):
+    """It failed far from the declaration with a bare AttributeError of the value."""
+    with pytest.raises(ConfigurationError, match=message):
+        meta = type("Meta", (), {"queryset": Book.objects.all(), "__qualname__": "WrongOptionQuery.Meta", **options})
+        query_class = type(
+            "WrongOptionQuery",
+            (RequestQuery[Book],),
+            {"Meta": meta, "__module__": __name__, "__qualname__": "WrongOptionQuery"},
+        )
+        query_class.get_declaration()
+
+
+@pytest.mark.asyncio
+async def test_a_strenum_option_takes_a_member_s_value(library):
+    """join_type = "OR" worked as Connector.OR - a check of the option's type mustn't refuse it."""
+    meta = type("Meta", (), {"queryset": Book.objects.all(), "join_type": "OR", "__qualname__": "ValueJoinQuery.Meta"})
+    query_class = type(
+        "ValueJoinQuery",
+        (RequestQuery[Book],),
+        {"Meta": meta, "__module__": __name__, "__qualname__": "ValueJoinQuery"},
+    )
+    query_class.get_declaration()
+    assert query_class.get_meta_option("join_type") == "OR"
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+@pytest.mark.asyncio
+async def test_meta_collections_accept_compatible_filter_objects(library, container):
+    title_filter = FilterField("title", description="The exact title")
+
+    class BookQuery(RequestQuery[Book]):
+        class Meta:
+            queryset = Book.objects.all()
+            filters = container(
+                [SimpleNamespace(get_filter_keys=title_filter.get_filter_keys, description=title_filter.description)]
+            )
+            api_getter = container([ApiValueMapping(set_key="display_title", key="title")])
+
+    declaration = BookQuery.get_declaration()
+    assert BookQuery.model_fields["title"].description == "The exact title"
+    assert len(declaration.api_mappings) == 1
+    objs = await BookQuery(title="Alpha").fetch()
+    assert [obj.title for obj in objs] == ["Alpha"]
+    assert objs[0].display_title == "Alpha"
+
+
+@pytest.mark.asyncio
+async def test_pagination_accepts_an_object_implementing_its_contract(library):
+    page_option = OffsetPagination(default_limit=1)
+
+    class BookQuery(RequestQuery[Book]):
+        class Meta:
+            queryset = Book.objects.all().order_by("id")
+            pagination = SimpleNamespace(
+                get_parameter_fields=page_option.get_parameter_fields,
+                get_parameters=page_option.get_parameters,
+                check_request=page_option.check_request,
+                check_model=page_option.check_model,
+                check_ordering=page_option.check_ordering,
+                get_page=page_option.get_page,
+            )
+
+    page = await BookQuery().page()
+    assert list(BookQuery.model_fields) == ["limit", "offset"]
+    assert page.count == 5
+    assert [obj.title for obj in page.result] == ["Alpha"]

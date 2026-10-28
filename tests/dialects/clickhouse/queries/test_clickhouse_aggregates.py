@@ -7,6 +7,7 @@ import decimal
 import pytest
 import pytest_asyncio
 
+from hare.contrib.test import capture_queries
 from hare.dialects.clickhouse.functions import (
     AnyLast,
     AnyValue,
@@ -23,11 +24,13 @@ from hare.dialects.clickhouse.functions import (
     UniqCombined,
     UniqExact,
 )
+from hare.dialects.postgresql.functions import JSONBAgg
 from hare.exceptions import QueryError, UnSupportedError
-from hare.query.expressions import F, Q, Value
-from hare.query.functions import Abs, ArrayAgg, Coalesce, Count, Sum
+from hare.query.expressions import F, Q, Value, Window
+from hare.query.functions import Abs, ArrayAgg, Avg, Coalesce, Count, Sum
+from hare.query.functions.window import Avg as WindowAvg, Sum as WindowSum
 from tests.dialects.clickhouse.column_types.test_clickhouse_containers import make_shipment
-from tests.dialects.clickhouse.models import Account, Country, Player, Quote, Shipment
+from tests.dialects.clickhouse.models import Account, Country, Device, Player, Quote, Shipment
 
 
 @pytest_asyncio.fixture
@@ -271,3 +274,42 @@ async def test_an_absolute_value_of_an_aggregate_is_computed(clickhouse_db):
 async def test_an_aggregate_of_nothing_is_an_empty_dict(clickhouse_db):
     """It sent a select list of nothing, which ClickHouse refuses - every other database read it as {}."""
     assert await Player.objects.filter(active=True).aggregate() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_sum_an_average_and_arithmetic_of_float32_values_keep_their_float64_result(clickhouse_db):
+    """ClickHouse computes them as a Float64 - they were read through the float32 field, which rounded the
+    result to a float32: 16777217 came back as 16777216, 8388608.5 as 8388608."""
+    for device_id, ratio in ((1, 16777216.0), (2, 1.0)):
+        await Device.objects.create(
+            id=device_id,
+            tiny=1,
+            big=1,
+            ratio=ratio,
+            code="abcd",
+            country="DE",
+            status="online",
+            address="10.0.0.1",
+            labels=[],
+        )
+    totals = await Device.objects.aggregate(total=Sum("ratio"), mean=Avg("ratio"))
+    assert totals == {"total": 16777217.0, "mean": 8388608.5}
+    windowed = await Device.objects.annotate(
+        total=Window(WindowSum("ratio")), mean=Window(WindowAvg("ratio"))
+    ).values_list("total", "mean")
+    assert set(windowed) == {(16777217.0, 8388608.5)}
+    assert await Device.objects.filter(id=2).annotate(shifted=F("ratio") + 1e-8).values_list("shifted", flat=True) == [
+        1.00000001
+    ]
+    # A float32 read as it is stored keeps its shortest form.
+    await Device.objects.filter(id=2).update(ratio=0.1)
+    assert await Device.objects.filter(id=2).values_list("ratio", flat=True) == [0.1]
+
+
+@pytest.mark.asyncio
+async def test_a_function_of_another_database_is_refused_before_any_sql(clickhouse_db):
+    """JSONB_AGG went to ClickHouse - its own unknown-function error instead of hare's refusal."""
+    async with capture_queries() as counter:
+        with pytest.raises(UnSupportedError, match=r"JSONBAgg\(\) is a function of the postgresql database"):
+            await Player.objects.values("team_id").annotate(names=JSONBAgg("name"))
+    assert counter.count == 0

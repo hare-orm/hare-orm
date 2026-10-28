@@ -52,7 +52,7 @@ uses the connection (or open transaction) current at that moment.
 | `latest(*orderings)` / `earliest(*orderings)` | terminal | Sort `DESC`/`ASC` by the given fields — the model's `Meta.get_latest_by` when none is given — then `first()`; a `NULL` never wins (`NULLS LAST` on every dialect — see [NULL ordering](#null-ordering)). `FieldError` with neither. |
 | `reverse()` | chain | The ordering turned around exactly — direction and explicit `NULL` placement both — the one `order_by()` gave, else `Meta.ordering`; an unordered queryset stays unordered. `QueryError` on a slice or a `union()`. |
 | `dates(field_name, trunc_type, order="ASC")` | chain | The distinct truncated dates of a date field — see [`dates()`](#dates) |
-| `datetimes(field_name, trunc_type, order="ASC", tzinfo=None)` | chain | The same for a `DatetimeField`, as aware `datetime`s, `trunc_type` also `hour`, `minute` or `second`, truncated in `tzinfo` (an IANA name or a `ZoneInfo`; the current zone by default). Another field, `trunc_type` or order raises `FieldError`. |
+| `datetimes(field_name, trunc_type, order="ASC", tzinfo=None)` | chain | The same for a `DatetimeField` (or a `GeneratedField` of one), as aware `datetime`s, `trunc_type` also `hour`, `minute` or `second`, truncated in `tzinfo` (an IANA name or a `ZoneInfo`; the current zone by default). Another field, `trunc_type` or order raises `FieldError`. |
 | `get(*args, does_not_exist_exception=..., multiple_objects_returned_exception=..., **kwargs)` | terminal | The one matching object — see [`get()`](#get) |
 | `create(**kwargs)` | `async def` | Creates a row and returns its object — `Model(**kwargs)` saved on the queryset's connection (`Model.objects.using("replica").create(...)`); the queryset's filters don't take part — see [`create()`](#create) |
 | `get_or_create(defaults=None, **kwargs)` | `async def` | The object matching `kwargs` among the queryset's rows, or a new one created from `kwargs` and `defaults` — `(object, created)` — see [`get_or_create()`](#get-or-create) |
@@ -116,7 +116,8 @@ own rows. An `exclude()` across a to-many relation is a `NOT EXISTS` subquery, s
 the query: a later `.filter(books__...)` still builds the `JOIN` that `values("books__...")`,
 `order_by("books__...")` and `Count("books")` read. An empty `Q()` is a no-op here and everywhere else —
 `~Q()` and `exclude(Q())` match every row. See [NULL semantics](filters.md#null-semantics) below for how
-a NULL column/value is handled.
+a NULL column/value is handled. A parent without related rows is treated as having a NULL related value:
+`exclude(books__rating__in=[5, None])` excludes authors without books too.
 
 ### <a id="annotate"></a>`annotate()`
 
@@ -133,7 +134,15 @@ the model (or `pk`) raises `FieldError`, as does such a name for an expression p
 `alias()`/`values()`/`values_list()` — every other reference to it would read the annotation instead of
 the field. So does a name of a relation, of an attribute of the model's class (`save`, `delete`,
 `objects`, `_meta`) or one starting with `_` (the object's own state) — each object read would have the
-annotation's value in its place. An empty name raises `QueryError`, in `alias()` and `aggregate()` too. A
+annotation's value in its place. An empty name raises `QueryError`, in `alias()` and `aggregate()` too, and
+so does a name holding whitespace, quotes, brackets, a semicolon or an SQL comment. Any other name is the
+query's own, `hare_…` too: the annotations and columns hare adds itself (an iterator's page boundary, a sliced
+`Prefetch`'s row number, a union's model tag) hold spaces, which no name a query is given holds, and a column
+of a model named like one of them (`source_field="hare app"`, `"HARE APP"` too) makes hare take the next
+free name, told apart regardless of letter case and kept within the identifier length limit. An annotation
+named like a path — `data__score`, `author__country` — is read as itself wherever its name stands (a
+filter, `F()`, `order_by()`, `distinct()`, `OuterReference()`), and the rest of a path past a relation or a
+named JOIN reads the related model's fields, whatever the query's annotations are named. A
 value that isn't an expression (e.g. a bare field name string — use `F("field")`) raises `TypeError`, in
 `alias()` too. An `.alias()` nothing reads — no filter, ordering, grouping, other annotation or
 `values()` field — is left out of the query, so its to-many `JOIN` doesn't repeat rows.
@@ -190,7 +199,11 @@ queryset the boundary applies to the rows `DISTINCT ON` picks (through `pk IN (S
 `before_cursor()`'s. The rows are those strictly after the values: a walk of the pages needs an ordering
 no two rows share the values of — ending with the primary key (`order_by("-created", "pk")`) or a
 non-nullable unique field — or the rows sharing the values of a page's last row are skipped, and the
-order of such rows within a page isn't fixed either. `iterator()` appends the primary key itself.
+order of such rows within a page isn't fixed either. `iterator()` appends the primary key itself. A float
+boundary follows the database's own order of NaN — on ClickHouse, whose `<`/`>` are false for NaN and
+whose `ORDER BY` puts NaN between the numbers and the NULLs, on the side the NULLs go to, the boundary reads
+it as `x != x` there, with an explicit `nulls_first`/`nulls_last` too, so the rows of NaN are neither lost
+nor repeated.
 
 ### <a id="before-cursor"></a>`before_cursor()`
 
@@ -264,7 +277,10 @@ queryset API. Chained `union()`/`union(all=True)`/`intersection()`/`difference()
 branch with the whole result so far, in call order: `a.union(b).union(c, all=True)` is
 `(a UNION b) UNION ALL c` (the duplicates `c` brings stay), `a.union(b, all=True).union(c)` removes every
 duplicate, and `a.union(b).intersection(c)` is `(a UNION b) INTERSECT c` on every database (a derived
-table keeps PostgreSQL' tighter `INTERSECT` precedence out of it). Each branch can carry its own
+table keeps PostgreSQL' tighter `INTERSECT` precedence out of it). A sliced or empty combined queryset
+becomes one branch of a later set operation: `a.union(b).order_by("id")[:1].union(c)` keeps the slice
+inside the first branch, and `a.union(b).none().union(c)` returns `c`. A prefetch requested on the combined
+models stays on the final result. Each branch can carry its own
 `.annotate()`, as long as the annotation name doesn't collide with a real model field. An annotation is
 decoded through the field of the first branch that has one — a `Value(None)` branch has none and doesn't
 change it (a `date` stays a `date` on SQLite), and it stays undecoded only when another branch's value
@@ -349,8 +365,10 @@ class QuerySet:
 ```
 
 Before or after `.values()`/`.values_list()`, which then return one row per group. The fields are names
-of fields or annotations — an expression (`F("id") + 1`, `Count(...)`) raises `QueryError`: annotate it
-first and group by its name. Model instances are
+of fields or annotations, or paths into their values (`created__year`, `data__genre`) as in `values()` —
+an expression (`F("id") + 1`, `Count(...)`) raises `QueryError`: annotate it first and group by its name.
+`.values()`/`.values_list()` called again over rows grouped by such a path keeps the grouping. Model
+instances are
 always grouped by their primary key, so on an instance queryset it doesn't change the rows — `await qs`,
 `count()`, `exists()`, `contains()`, `update()` and `delete()` all see one row per instance.
 `aggregate()` runs over the grouped rows (the rows `.values()` would return) and can read only the
@@ -490,7 +508,9 @@ a `JSONField`) — an array of other elements (`text[]` into `integer[]`) and a 
 (`int8range` into `int4range`) too; a text field takes any value as its text. A literal the expression may
 give — a branch of `Case`, an argument of `Coalesce`, `Greatest` or `Least`, the first one of `NullIf` — is
 checked by the field as a plain value is (`ValidationError` for a text past `max_length`, a number of no enum
-member).
+member). A value expression that joins a related table, such as `F("author__name")`, raises `QueryError`:
+the `SET` clause cannot read that joined table. Read the values first and pass them to `bulk_update()`
+or individual updates; filtering the rows to update across a relation remains supported.
 
 ### <a id="count"></a>`count()`
 
@@ -540,8 +560,9 @@ The queryset's objects in a dict by their value of `field_name` — only the one
 `id_list` when it is given (an empty one gives `{}` without a query; a long list is one bound parameter —
 see [Large `__in` lists](filters.md#large-in-lists)). `field_name` is `"pk"` (a composite primary key's
 keys are tuples), a field declared unique without a condition (a relation gives its key value), or the
-one field of `distinct(...)`; any other field raises `QueryError`, an unknown one `FieldError`.
-`QueryError` on a sliced, a values or a combined queryset.
+one field of `distinct(...)` — a relation however named (`distinct("author")` beside
+`field_name="author_id"`); any other field raises `QueryError`, an unknown one `FieldError`. The key is read
+beside the fields `.only()`/`.defer()` choose. `QueryError` on a sliced, a values or a combined queryset.
 
 ### <a id="first-last"></a>`first()` / `last()`
 
@@ -692,7 +713,14 @@ whose row was inserted); an object a conflict skipped keeps the pk it was given 
 one — since no row was written for it. With `update_fields`, several objects sharing one conflict key in
 the same call are written in order on every driver, so the last one's values win; with `returning=True`
 each of them
-gets the row's pk. Every object must be an instance of the model itself (another model, a sibling sharing
+gets the row's pk. Conflict keys are compared as their fields store them: an `EmailField` always
+lowercases the domain, and lowercases the local part only with `lowercase=True`. These conversions also
+apply when classifying the rows as inserted or updated for change events. Objects whose conflict key is
+left to `db_default` are written in separate statements, since their keys are not known before the write.
+On a database without an inserted-row flag, reporting such writes may first read the existing primary
+keys to distinguish inserts from updates.
+
+Every object must be an instance of the model itself (another model, a sibling sharing
 an abstract base, or a subclass with a table of its own raises `QueryError`), and one loaded with
 `.only()`/`.defer()` must have every column the insert writes (`IncompleteInstanceError`). A statement's
 own extra parameters (an upsert's tenant scope and version bump) are counted against the bind-parameter
@@ -721,6 +749,9 @@ generates need `on_conflict=[...]` — without it the call raises `UnSupportedEr
 a database without `RETURNING`. Of several objects sharing one conflict key in the call the first is the
 one inserted.
 
+Matching uses the fields' stored values decoded through their read conversions, including converters
+registered by the dialect. A custom read conversion does not detach a returned row from its input object.
+
 ```python
 inserted = await Subscriber.objects.bulk_create(subscribers, ignore_conflicts=True, on_conflict=["email"])
 await notify_new_subscribers(inserted)   # no second query for the rows written
@@ -745,12 +776,16 @@ class QuerySet:
 ```
 
 Doesn't support M2M/backward-relation fields (`FieldError`) or `F()`/expression values (`QueryError` — use
-`.update()` or `save()`); requires every object to have a pk. An object that left an `auto_now` field
+`.update()` or `save()`); requires every object to have a pk, and two objects of one row raise `QueryError`
+before any SQL — keys compared as the database stores them (`"ann@EXAMPLE.com"` and `"ann@example.com"` of
+an `EmailField` key are one row). An object that left an `auto_now` field
 unloaded (`.only()`/`.defer()`) is stamped all the same. `returning=True` adds a `RETURNING` clause bringing
 back every `GeneratedField` column's fresh value the database recomputed onto each successfully-updated
-object — matched by primary key, not row position, so (unlike `bulk_create()`) this works on every
-dialect, not just PostgreSQL. No-op on a model with no `GeneratedField`. Same `Meta.returning` fallback
-as `bulk_create()` when left `None`. On a model with `Meta.optimistic_lock_field`, each object's
+object — matched by primary key, not row position, on databases supporting `RETURNING`.
+Explicit `returning=True` raises `UnSupportedError` before SQL on a database without `RETURNING`;
+otherwise it does nothing on a model with no `GeneratedField`. When left `None`, it inherits
+`Meta.returning`; without `RETURNING` support, inherited returning leaves generated fields unloaded
+after the write. On a model with `Meta.optimistic_lock_field`, each object's
 in-memory version is bumped (and, with `track_dirty_fields`, its dirty snapshot reset) for every row that
 actually wrote, before raising `StaleObjectError` for any row in that batch that didn't — an object whose
 row the queryset's own `.filter(...)` excludes is simply not updated, not reported as stale (a sliced
@@ -783,7 +818,12 @@ Whitelists fields → a partial model. `QueryError` if empty, or combined with `
 left out raises `NoValuesFetched` (an `AttributeError`, so `hasattr()` is `False`) naming it — `pk` too
 when the primary key is left out; name it to save or refresh the object. A `relation__field` entry also
 loads the primary key of every related model on the way, so a `NULL` foreign key yields `None` and an
-existing related row always yields an instance.
+existing related row always yields an instance. The key fields `prefetch_related()` needs are loaded too —
+of the model, and of a relation `relation__field` loads (`only("title", "author__name")` beside
+`prefetch_related("author__publisher")` loads `author__publisher_id`); a prefetch of an object missing such a
+key (`prefetch_related_objects()` of a partial one) raises `QueryError`, including nested prefetches.
+The required keys are kept on every intermediate model of a deeper `only()` path, including when an
+explicit `Prefetch` reloads a relation that path has already loaded.
 
 ### <a id="select-related"></a>`select_related()`
 
@@ -855,25 +895,32 @@ class QuerySet:
 Without an `.order_by()`, pages follow `Meta.ordering`, else the primary key (every component of a
 composite one); an ordering that can tie (it has no pk, no non-nullable unique field and no non-nullable
 unique-together set) gets the pk appended as a tie-breaker, so no row is skipped or repeated between
-pages — rows sharing ordering values come out in pk order. An ordering column that `.only()`/`.defer()`
+pages — rows sharing ordering values come out in pk order. A model without a primary key pages with
+`OFFSET` where its ordering can tie, and an unordered plain `.distinct()` of `values()`/`values_list()` pages
+by its selected fields — the primary key would be a column of its `SELECT DISTINCT`. An ordering column that
+`.only()`/`.defer()`
 leaves unloaded is still read for the page cursor, and stays unloaded on the yielded objects. Uses
 keyset/cursor pagination (safe under concurrent deletes) when every `order_by()` field is a plain column
 on this model; falls back to `LIMIT`/`OFFSET` (NOT safe under concurrent deletes — a deleted
-already-yielded row shifts later rows, skipping one) when the ordering includes a related-model lookup or
-an annotation, or an annotation is a window function (a keyset condition would change the rows it is
-computed over). Honors the queryset's own `.limit()`/`.offset()`/slice and `.after_cursor()`. A queryset
+already-yielded row shifts later rows, skipping one) when the ordering includes a related-model lookup,
+an annotation or a field whose values the database doesn't compare by `<`/`>` (an `HStoreField`, or a
+`GeneratedField` with one as its output field), or an annotation is a window function or an extension call
+changes which rows come (`limit_by()`) — a keyset condition would change the rows they pick from.
+Honors the queryset's own `.limit()`/`.offset()`/slice and `.after_cursor()`. A queryset
 that can return one primary key several times — a filter or annotation (`F()`, a function, `Case`,
-arithmetic) over a to-many relation, or a `.distinct()` one selecting such an annotation — pages with
-`OFFSET`, ordered by those annotations after the primary key, so no repeated row is dropped. A
+arithmetic) over a to-many relation, a `Lateral` of more than one row, or a `.distinct()` one selecting such
+an annotation — pages with `OFFSET`, ordered by those annotations after the primary key, so no repeated row
+is dropped; `values()`/`values_list()` rows too. A
 `.distinct(<fields>)` queryset pages over the rows `DISTINCT ON` picks. A page is fetched with one row
 more than `chunk_size`, which tells whether another page follows — a result ending on a page boundary
 needs no empty query after it.
 
 ### <a id="dates"></a>`dates()`
 
-The distinct values of a `DateField`/`DatetimeField` truncated to `trunc_type` (`year`, `quarter`,
-`month`, `week` — from Monday — or `day`) as `datetime.date`s, a datetime's in the current zone, `NULL`s
-left out, in `order` (`ASC`/`DESC`); a `values_list(flat=True)` queryset, filtered and sliced as usual.
+The distinct values of a `DateField`/`DatetimeField` — or a `GeneratedField` whose `output_field` is one —
+truncated to `trunc_type` (`year`, `quarter`, `month`, `week` — from Monday — or `day`) as `datetime.date`s,
+a datetime's in the current zone, `NULL`s left out, in `order` (`ASC`/`DESC`);
+a `values_list(flat=True)` queryset, filtered and sliced as usual.
 
 ## <a id="null-ordering"></a>NULL ordering
 
@@ -899,8 +946,9 @@ await Book.objects.all().order_by(F("editor__name").asc(nulls_last=True))  # NUL
 raises `QueryError`; neither leaves the dialect default). An `Ordering` and plain strings mix freely, and
 it is accepted everywhere an ordering is: `order_by()` (also on a `union()`), `latest()`/`earliest()`,
 `Meta.ordering`, `Window(order_by=[...])`, `distinct(...)` + `order_by()` (PostgreSQL),
-`values()`/`values_list()`, `stream()`/`iterator()`. Anything that is neither a string nor an `Ordering`
-raises `QueryError`. The rendered SQL is `ORDER BY ... NULLS FIRST|LAST` on every database.
+`values()`/`values_list()`, `stream()`/`iterator()`. Orderings also accept expressions such as `F("rating")`;
+anything that is neither a string, an expression nor an `Ordering` raises `QueryError`. Explicit NULL
+placement renders as `ORDER BY ... NULLS FIRST|LAST` on every database.
 
 - **`latest()` / `earliest()` are NULL-safe.** A plain field name gets `NULLS LAST` on every dialect, so
   a `NULL` never wins: `latest("rating")` is the row with the greatest non-`NULL` value and
@@ -931,8 +979,9 @@ class Prefetch:
     ) -> None: ...
 ```
 
-`queryset` can already have `.filter()`/`.only()`/`.order_by()` applied; it must be a model `QuerySet` —
-a `.values()`/`.values_list()` query raises `QueryError`. `to_attribute` can't be the name of a field,
+`queryset` can already have `.filter()`/`.only()`/`.order_by()` applied; it must be a model `QuerySet` of
+the relation's model — a `.values()`/`.values_list()` query or one of another model raises `QueryError`.
+`to_attribute` can't be empty or the name of a field,
 relation, key column (`author_id`) or other attribute of the model the prefetched relation belongs to —
 that raises `QueryError` instead of overwriting it on every instance. Nested prefetching is supported two
 ways:
@@ -982,10 +1031,16 @@ is compared with the slice's bounds — one query for a reverse foreign key; for
 whose row may belong to several parents and fall into each one's slice on its own, the numbered (parent,
 row) pairs are read first and then the rows. The ordering is the queryset's `order_by()`, else the
 model's `Meta.ordering`, else the primary key. Composite keys, `to_attribute` and nested prefetches of
-the sliced rows work as without a slice. An annotation reading a `Window(...)` is computed over the rows
+the sliced rows work as without a slice. An annotation reading a `Window(...)` or a SQL analytic term
+(such as `hare.sql.analytics.Count("*").over()`) is computed over the rows
 of every parent, as without a slice: for a reverse foreign key or a many-to-many relation those rows are
-read and each parent's slice taken of them. A forward relation and a reverse one-to-one have one row per
-parent at most: a slice starting at it keeps it, one past it leaves `None`.
+read and each parent's slice taken of them. A `.distinct()` queryset numbers the rows of each parent by
+`DENSE_RANK()` over its ordering and primary key, so the rows a to-many filter repeats count once. Rows
+picked by no key of their own — of a model without a primary key, rows a to-many filter repeats without
+`.distinct()`, and the rows of a many-to-many relation whose queryset filters through a to-many relation or
+whose tables are on other connections — are read whole for the parents and each parent's slice taken of them.
+A forward relation and a reverse one-to-one have one row per parent at most: a slice starting at it keeps it,
+one past it leaves `None`.
 
 ## <a id="stream"></a>A server-side cursor: `stream()`
 
@@ -1388,8 +1443,8 @@ WHEN NOT MATCHED THEN INSERT ("isbn", "copies") VALUES ("hare_merge_source"."isb
   `QueryError` for a `delete=True` branch — use `delete()`.
 - **`.returning(*fields)`** (PostgreSQL 17+) awaits to the written rows: a dict of the named fields plus
   `"merge_action"` — `"insert"`, `"update"` or `"delete"` (a deleted row as it was). At least one field
-  is named. `old=("copies",)` adds those fields as they were before the merge under `"old"` — None for an
-  inserted row (PostgreSQL 18, [as on `update()`](#returning)).
+  is named. `old=("copies",)` adds those fields as they were before the merge under `"old"` — each None
+  for an inserted row, `{"copies": None}` (PostgreSQL 18, [as on `update()`](#returning)).
 - PostgreSQL 15+ (`features.supports_merge`); `when_not_matched_by_source()` and `returning()` need
   PostgreSQL 17 (`supports_merge_not_matched_by_source`, `supports_merge_returning`). On another database
   or an older server the merge raises `UnSupportedError` before any SQL is sent. A merge without a branch

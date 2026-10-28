@@ -8,6 +8,7 @@ import decimal
 import pytest
 
 from hare import fields
+from hare.dialects.clickhouse.fields import ClickhouseDatetimeField
 from hare.exceptions import OperationalError
 from hare.query.expressions import F, Value
 from hare.query.functions import Cast, Concat, Upper
@@ -255,3 +256,23 @@ async def test_cast_of_a_text_expression_to_a_time_of_day_reads_its_text(clickho
     """Only a text column was read as one - a text expression of no field was formatted as a moment."""
     await Player.objects.create(id=1, name="10:20:30")
     assert await get_values(Cast(source, fields.TimeField())) == [datetime.time(10, 20, 30, tzinfo=datetime.UTC)]
+
+
+@pytest.mark.parametrize("precision", [None, 0, 3, 6])
+@pytest.mark.asyncio
+async def test_a_moment_cast_to_a_datetime_field_takes_its_precision(clickhouse_db, precision):
+    """A cast to a datetime was written as DateTime64(6) whatever the target field - a second-precision one
+    kept the microseconds a native CAST to its type drops."""
+    moment = datetime.datetime(2025, 1, 1, 0, 0, 0, 123456, tzinfo=datetime.UTC)
+    await Player.objects.create(id=1, name="p1", joined=moment)
+    column_type = "DateTime('UTC')" if precision is None else f"DateTime64({precision}, 'UTC')"
+    _, rows = await Player.get_connection().execute(
+        f'SELECT CAST("joined" AS {column_type}) AS native FROM "player"', returns_rows=True
+    )
+    native = rows[0]["native"].replace(tzinfo=datetime.UTC)
+    converted = (
+        await Player.objects.annotate(
+            converted=Cast("joined", ClickhouseDatetimeField(precision=precision))
+        ).values_list("converted", flat=True)
+    )[0]
+    assert converted == native

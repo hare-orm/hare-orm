@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 class QueryConditions:
     """The WHERE and the DISTINCT of a query: its filters resolved into criteria and their joins, and
-    DISTINCT or DISTINCT ON over the columns and orderings it needs."""
+    DISTINCT or the distinct by fields over the columns and orderings it needs."""
 
     @staticmethod
     def get_filters(
@@ -101,7 +101,9 @@ class QueryConditions:
 
         # A non-distinct aggregate is inflated by every other to-many JOIN of the query - rejected,
         # unless only the query's truthiness is read.
-        if not query.aggregate_value_is_unused and aggregated_multi_valued_paths.aggregate_crossings:
+        if (
+            not query.aggregate_value_is_unused or modifier.having_criterion
+        ) and aggregated_multi_valued_paths.aggregate_crossings:
             for lookup in query._get_row_join_lookups():
                 aggregated_multi_valued_paths.record_lookup(query.model, lookup)
             for lookup in QueryJoins.get_non_null_filtered_lookups(query):
@@ -144,19 +146,20 @@ class QueryConditions:
         orderings: Iterable[tuple[str, Order]],
         annotations: dict[str, Term | Expression],
     ) -> None:
-        """Applies ``distinct()`` to the query - a plain ``DISTINCT``, or ``DISTINCT ON`` the fields given.
+        """Applies ``distinct()`` to the query - a plain ``DISTINCT``, or one row of each combination of the
+        fields given.
 
         Args:
             query: The query.
             distinct: Whether the rows are distinct.
-            distinct_on: The fields of ``DISTINCT ON``.
+            distinct_on: The fields one row is kept of each combination of.
             orderings: The query's ordering.
             annotations: The query's annotations.
 
         Raises:
-            UnSupportedError: The database has no ``DISTINCT ON``.
+            UnSupportedError: The database keeps no row by fields (``Features.supports_distinct_on``).
             FieldError: A field is of no model, or encrypted.
-            QueryError: The ``DISTINCT ON`` fields don't lead the ordering.
+            QueryError: The distinct fields don't lead the ordering.
         """
         query.query._distinct = distinct
         query.query._distinct_on = []
@@ -164,7 +167,7 @@ class QueryConditions:
             return
         orderings = query._apply_default_ordering(orderings)
         if not distinct_on:
-            # A plain DISTINCT (no DISTINCT ON field list) - distinct_on's own
+            # A plain DISTINCT (no distinct fields) - distinct_on's own
             # "leading ORDER BY fields" validation below doesn't apply here.
             QueryOrdering.include_orderbys_in_select(query)
         else:
@@ -181,7 +184,11 @@ class QueryConditions:
                 ordering_field
                 for distinct_on_name in distinct_on
                 for ordering_field in (
-                    QueryOrdering.get_relation_ordering_key_names(query.model, distinct_on_name)
+                    (
+                        None
+                        if distinct_on_name in query._annotations
+                        else QueryOrdering.get_relation_ordering_key_names(query.model, distinct_on_name)
+                    )
                     or (
                         query.model._meta.primary_key_attribute_names
                         if distinct_on_name == "pk"
@@ -200,7 +207,7 @@ class QueryConditions:
                 )
             ):
                 if field_name in annotations:
-                    # The term ORDER BY orders the annotation by - DISTINCT ON must match it.
+                    # The term ORDER BY orders the annotation by - the distinct fields must match it.
                     annotation_term = query._annotation_ordering_terms.get(field_name)
                     if annotation_term is None:
                         annotation_term = QueryAnnotations.get_annotation_expression_term(

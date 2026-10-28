@@ -71,6 +71,8 @@ async def test_array_subquery_on_postgresql():
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("writers")
 async def test_array_subquery_takes_one_column():
+    if DatabaseUnderTest.get_dialect().name != "postgresql":
+        pytest.skip("another database refuses ArraySubquery itself first - test_array_subquery_on_postgresql")
     with pytest.raises(QueryError, match="one column"):
         await Writer.objects.annotate(titles=ArraySubquery(novels_of_writer("title", "rating")))
     with pytest.raises(QueryError, match="one column"):

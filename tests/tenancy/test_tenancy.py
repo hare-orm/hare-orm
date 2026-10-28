@@ -17,9 +17,10 @@ from hare.exceptions import (
     UnSupportedError,
 )
 from hare.fields import CASCADE, RESTRICT, SET_NULL
+from hare.instrumentation import Observers, RowsChanged
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.expressions import F, Q, Subquery, Value
+from hare.query.expressions import F, Q, RawSQL, Subquery, Value
 from hare.query.functions import Count
 from hare.query.queryset import QuerySet
 from hare.transactions.transactions import Transactions
@@ -1920,6 +1921,25 @@ async def test_an_update_computing_a_relation_key_is_checked_against_the_tenant(
         assert await widgets.update(factory_id=F("factory_id") + 0) == 1
 
 
+@pytest.mark.asyncio
+async def test_an_update_computing_a_relation_key_by_the_rows_of_a_cte_is_checked_against_the_tenant(
+    factories_of_two_tenants,
+):
+    """The check read the keys the update computes without the update's WITH - "no such table: picked"."""
+    own_factory, foreign_factory = factories_of_two_tenants
+    with Tenancy.scope(1):
+        widget = await TenantScopedWidget.objects.create(name="W", factory=own_factory)
+        widgets = TenantScopedWidget.objects.with_cte(
+            "picked", TenantScopedWidget.objects.filter(id=widget.id).values("id")
+        ).filter(id=RawSQL('(SELECT "id" FROM "picked")'))
+        assert await widgets.update(factory_id=F("factory_id") + 0) == 1
+        with pytest.raises(QueryError, match="can't cross tenants"):
+            await widgets.update(factory_id=F("factory_id") + (foreign_factory.id - own_factory.id))
+        assert await TenantScopedWidget.objects.filter(id=widget.id).values_list("factory_id", flat=True) == [
+            own_factory.id
+        ]
+
+
 @requires_features(supports_returning=True)
 @pytest.mark.asyncio
 async def test_an_update_returning_rows_checks_the_relation_key_it_computes_on_every_call(factories_of_two_tenants):
@@ -1991,3 +2011,23 @@ async def test_all_tenants_update_may_point_a_relation_across_tenants(factories_
         widget = await TenantScopedWidget.objects.create(name="W", factory=own_factory)
         assert await TenantScopedWidget.objects.all_tenants().filter(id=widget.id).update(factory=foreign_factory) == 1
     assert await TenantScopedWidget.objects.all_tenants().values_list("factory_id", flat=True) == [foreign_factory.id]
+
+
+@requires_features(supports_insert_conflicts=True, supports_unique_constraints=True)
+@pytest.mark.asyncio
+async def test_an_upsert_by_a_key_holding_the_tenant_reports_the_row_it_updates(db_truncate):
+    """The rows an upsert finds were read before the objects got the scope's tenant - an updated row was
+    reported inserted."""
+    with Tenancy.scope(1):
+        await TenantScopedWidget.objects.create(id=1, name="W")
+        changes: list[RowsChanged] = []
+        with Observers.observing(RowsChanged, changes.append):
+            await TenantScopedWidget.objects.bulk_create(
+                [TenantScopedWidget(id=2, name="W"), TenantScopedWidget(id=3, name="new")],
+                update_fields=["factory_id"],
+                on_conflict=["company_id", "name"],
+            )
+        assert sorted((change.operation.value, sorted(change.pks or ())) for change in changes) == [
+            ("insert", [3]),
+            ("update", [1]),
+        ]

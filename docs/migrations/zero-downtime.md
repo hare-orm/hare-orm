@@ -83,6 +83,7 @@ more.
 | Code | Databases | Found |
 | --- | --- | --- |
 | `add_field_backfills_rows` | all | A NOT NULL field with only a Python default added to a large table |
+| `add_field_without_default` | all | A NOT NULL field with no default at all added to a table that may hold rows |
 | `add_field_volatile_default` | PostgreSQL | A field with a volatile database default added to a large table |
 | `alter_field_rewrites_table` | all | A field change that rewrites a large table |
 | `add_index_without_concurrently` | PostgreSQL | An index built on a large table while its writes wait |
@@ -105,6 +106,15 @@ table. **Safely:** add it nullable, fill it with
 [`BackfillColumn`](#backfillcolumn-and-altercolumnnotnullsafe) in a migration with `atomic = False`, then
 make it NOT NULL with `AlterColumnNotNullSafe` ([pattern 1](#adding-a-required-column)) — or give it a
 constant `db_default`, which the database stores once without touching the rows.
+
+### <a id="add-field-without-default"></a>`add_field_without_default`
+
+`AddField` of a NOT NULL field with neither a `default=` (or `auto_now`) nor a `db_default`: the database has
+no value for the rows the table holds, and the migration fails on any table that isn't empty. It is
+reported for every table the migration doesn't create — by `makemigrations` and by `checkmigrations`
+without a connection, for one holding rows when the database is read. **Safely:** give the field a
+`default=` or a `db_default`, or add it nullable, fill it, then make it NOT NULL
+([pattern 1](#adding-a-required-column)).
 
 ### <a id="add-field-volatile-default"></a>`add_field_volatile_default`
 

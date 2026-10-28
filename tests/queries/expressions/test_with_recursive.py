@@ -11,7 +11,14 @@ import pytest
 from hare.exceptions import FieldError, QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions.constants import MAX_RECURSIVE_DEPTH
-from tests.shared_models.testmodels import Employee, RecursiveCompositeNode, RecursiveSoftNode, RecursiveTenantNode
+from hare.query.functions import Count
+from tests.shared_models.testmodels import (
+    Employee,
+    RecursiveCompositeNode,
+    RecursiveSoftCompositeNode,
+    RecursiveSoftNode,
+    RecursiveTenantNode,
+)
 
 
 async def create_company() -> dict[str, Employee]:
@@ -147,6 +154,39 @@ async def test_a_soft_deleted_row_is_not_walked_through(db):
     ]
     # A live start row's walk up stops at the deleted parent.
     assert await get_names(RecursiveSoftNode.objects.filter(id=3).with_recursive("parent")) == ["leaf"]
+
+
+@pytest.mark.asyncio
+async def test_a_start_picked_by_an_aggregate_of_soft_deleted_rows_with_a_composite_key(db):
+    """root -> (x, y deleted); x -> (x1, x2); y -> (y1, y2); x1 -> x11 - the start rows those with two
+    children or more, counted as the visibility sees them."""
+    nodes: dict[str, RecursiveSoftCompositeNode] = {}
+    for a, b, name, parent_name in (
+        (1, 1, "root", None),
+        (1, 2, "x", "root"),
+        (2, 1, "y", "root"),
+        (2, 2, "x1", "x"),
+        (3, 1, "x2", "x"),
+        (4, 1, "x11", "x1"),
+    ):
+        nodes[name] = await RecursiveSoftCompositeNode.objects.create(
+            a=a, b=b, name=name, parent=nodes[parent_name] if parent_name else None
+        )
+    await nodes["y"].delete()
+    # Live children under the deleted row.
+    for b, name in ((2, "y1"), (3, "y2")):
+        await RecursiveSoftCompositeNode.objects.create(a=3, b=b, name=name, parent=nodes["y"])
+
+    def walk(manager, max_depth):
+        start = manager.annotate(child_count=Count("children")).filter(child_count__gte=2)
+        return start.with_recursive("children", max_depth=max_depth)
+
+    live = RecursiveSoftCompositeNode.objects
+    assert await get_names(walk(live, 1)) == ["x", "x1", "x2"]
+    assert await get_names(walk(live, None)) == ["x", "x1", "x11", "x2"]
+    every_row = RecursiveSoftCompositeNode.objects.include_deleted()
+    assert await get_names(walk(every_row, 1)) == ["root", "x", "x1", "x2", "y", "y1", "y2"]
+    assert await get_names(walk(every_row, None)) == ["root", "x", "x1", "x11", "x2", "y", "y1", "y2"]
 
 
 @pytest.mark.asyncio

@@ -72,4 +72,4 @@ EMPTY_PENDING_DEFAULTS: MappingProxyType[str, Any] = MappingProxyType({})
 
 #: The start of the alias an expression of ``Meta.ordering`` is ordered by - never selected, followed
 #: by its place among the expressions.
-META_ORDERING_ALIAS_PREFIX = "hare_meta_ordering_"
+META_ORDERING_ALIAS_PREFIX = "hare meta ordering "

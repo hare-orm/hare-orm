@@ -23,7 +23,8 @@ arguments than it takes (`Upper("title", "x")`, `Coalesce("title")`) raises `Que
 All take `distinct: bool = False, _filter: Q | Exists | None = None` (an `Exists(...)` is the same as
 `Q(Exists(...))`, anything else raises `TypeError`; `Avg("x", distinct=True)` averages the distinct values).
 `_filter` is the aggregate's `FILTER (WHERE ...)`: a row failing it is left out of the aggregate (a group
-with no matching row gives `0` for `Count`, `None` for the others; `Sum` on ClickHouse gives its own `0`).
+with no matching row gives `0` for `Count`, `None` for the others; `Sum` on ClickHouse gives its own `0` for a
+field that isn't nullable).
 `Count` of a column of the queried model that holds no NULL (`Count("id")`, `Count("pk")`) counts the rows:
 PostgreSQL and ClickHouse write it `COUNT(*)` and don't read the column; a nullable column, `distinct=True`
 and a column across a relation are counted as they are. A `_filter` reading an aggregate annotation
@@ -112,9 +113,11 @@ before the query runs, on every database: a math function, `Round`,
 `StdDev`/`Variance` and `+ - * / % **` take numbers (the arithmetic also dates, moments and durations —
 see [Date/time arithmetic](expressions.md#date-time-arithmetic)), a text function (`Upper`, `Length`,
 `Trim`, ...) text, `Sum`/`Avg` numbers and durations (`Abs("name")`, `Length("price")`,
-`Sum("in_print")` raise). `Max`/`Min` take any field: a type the database has no `min()`/`max()` of
-(PostgreSQL's `jsonb`, ranges, `macaddr`, ...) is refused by the database itself, and SQLite takes the
-least and the greatest stored text of JSON. ClickHouse would compare a JSON value's text (`9` above `100`) —
+`Sum("in_print")` raise). `Max`/`Min` take any field the database orders: a type it has no `min()`/`max()`
+of (PostgreSQL's `boolean`, `uuid`, `jsonb`, `macaddr`, ranges and multiranges, `hstore`, `ltree`,
+`tsvector`, geometries, `vector`) and a field no query orders by (ClickHouse's `DynamicField`,
+`VariantField`) raise `UnSupportedError` before any SQL, and SQLite takes the least and the greatest stored
+text of JSON. ClickHouse would compare a JSON value's text (`9` above `100`) —
 `Max`/`Min` of a JSON field or key raise `FieldError` there. `Cast()` converts the value where that is meant:
 `Sum(Cast("in_print", IntField()))` counts the true values. A PostgreSQL range is no text either:
 `Upper("span")` raises rather than run PostgreSQL's `upper()` of a range, its upper bound. A JSON field and a
@@ -122,6 +125,9 @@ JSON key (`"data__title"`) are neither text nor a number to these functions and 
 would read the stored JSON its own way — SQLite a key's text with its quotes — so `Upper("data__title")`
 raises, and `Upper(Cast("data__title", CharField(max_length=200)))` takes the key's value as text. A field of
 another type (binary, an array, ...) isn't checked.
+
+`GeneratedField` uses its `output_field` for these type checks and ordering rules. On ClickHouse,
+computed JSON values have the same `Min`/`Max` and `Greatest`/`Least` restrictions as ordinary JSON fields.
 
 ```python
 await Book.objects.annotate(rounded=Ceil(F("price") / 10) * 10)
@@ -178,6 +184,9 @@ on SQLite.
 | `Greatest(*values)`, `Least(*values)` | the greatest/least of two or more values; a NULL among them is skipped on PostgreSQL and ClickHouse and gives NULL on SQLite |
 | `NullIf(expression, other)` | NULL when the value equals `other`, the value otherwise |
 | `Collate(expression, collation)` | the text compared and sorted by a database collation |
+
+`Coalesce()` checks a `GeneratedField` through its `output_field` too: a fractional fallback beside
+a computed integer is kept as a fraction, just as beside an ordinary integer column.
 
 `Cast` is the database's own conversion — PostgreSQL's and SQLite's `CAST`, ClickHouse's conversion
 functions; SQLite has no date types, so a date or a time is read from its stored text in UTC by hare. A cast

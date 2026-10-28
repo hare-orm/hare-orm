@@ -20,7 +20,7 @@ from hare.contrib.test import assert_query_count
 from hare.exceptions import (
     QueryError,
 )
-from tests.contrib.request_query.models import Author, Book, OrderLine
+from tests.contrib.request_query.models import Author, Book, Edition, OrderLine
 from tests.contrib.request_query.queries import AuthorQuery, BookQuery, BookScrollQuery, OrderLineQuery
 
 
@@ -131,6 +131,24 @@ async def test_cursor_pages_forward_and_back(library):
     start = await BookCursorQuery(cursor=back.previous_cursor).page()
     assert [book.title for book in start.result] == ["Alpha", "Epsilon"]
     assert start.previous_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_cursor_pages_by_scalar_json_values(db_request_query):
+    class EditionCursorQuery(RequestQuery[Edition]):
+        class Meta:
+            queryset = Edition.objects.all()
+            ordering = OrderingConfig(default=("details",))
+            pagination = CursorPagination(default_limit=1)
+
+    await Edition.objects.create(id=1, details=9)
+    await Edition.objects.create(id=2, details=10)
+
+    first = await EditionCursorQuery().page()
+    second = await EditionCursorQuery(cursor=first.next_cursor).page()
+
+    assert [row.id for row in first.result] == [1]
+    assert [row.id for row in second.result] == [2]
 
 
 @pytest.mark.asyncio

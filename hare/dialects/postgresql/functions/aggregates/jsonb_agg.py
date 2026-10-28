@@ -6,7 +6,7 @@ from hare.dialects.postgresql.fields.interval_field import IntervalField
 from hare.dialects.postgresql.functions.aggregates.jsonb_agg_field import JSONBAggField
 from hare.exceptions import FieldError
 from hare.fields.data.binary_field import BinaryField
-from hare.fields.data.json.json_field import JSONField
+from hare.fields.data.containers.array_field import ArrayField
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import (
     Aggregate,
@@ -28,7 +28,7 @@ class JSONBAgg(Aggregate):
     # aggregated field is.
     populate_field_object = True
     #: The fields JSON holds no value of - an interval and bytes become text of the server's own
-    #: IntervalStyle/bytea_output; ArrayAgg reads them as they are.
+    #: IntervalStyle/bytea_output, inside arrays too; ArrayAgg reads them as they are.
     refused_element_field_classes: ClassVar[tuple[type[Any], ...]] = (IntervalField, BinaryField)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
@@ -37,13 +37,12 @@ class JSONBAgg(Aggregate):
         result = super().get_result(expression_context)
         # A new result carrying the field - the expression instance may be shared by queries.
         source_field = result.output_field
-        element_field = None
         effective_field = GeneratedField.get_effective_field(source_field) if source_field is not None else None
+        while isinstance(effective_field, ArrayField):
+            effective_field = GeneratedField.get_effective_field(effective_field.base_field)
         if isinstance(effective_field, self.refused_element_field_classes):
             raise FieldError(
                 f"JSONBAgg() can't aggregate {type(effective_field).__name__} - JSON holds no such value; "
                 "aggregate it with ArrayAgg()"
             )
-        if source_field is not None and not isinstance(effective_field, JSONField):
-            element_field = source_field
-        return ExpressionResult(term=result.term, joins=result.joins, output_field=JSONBAggField(element_field))
+        return ExpressionResult(term=result.term, joins=result.joins, output_field=JSONBAggField(source_field))

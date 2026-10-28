@@ -20,7 +20,7 @@ class QueryCall:
     Attributes:
         method_name: The client method - ``execute``, ``execute_many``, ``execute_script``,
             ``execute_described``, ``copy`` or ``stream``.
-        sql: The statement text; ``COPY <table> (<columns>) FROM STDIN`` for a bulk load.
+        sql: The statement text; the dialect's text of a bulk load for one.
         parameters: The bound parameters, None when there are none to show.
         connection_alias: The connection it runs on.
         dialect: The connection's dialect.
@@ -36,11 +36,11 @@ class QueryCall:
 @dataclasses.dataclass(frozen=True, slots=True)
 class QueryExecuted:
     """A statement sent to the database - every query-executing call (``execute``,
-    ``execute_many``, ``execute_script``, a bulk ``COPY``, a stream), successful or not.
+    ``execute_many``, ``execute_script``, a bulk load, a stream), successful or not.
 
     Attributes:
-        sql: The statement text, its query tags included; ``COPY <table> (<columns>) FROM STDIN``
-            for a bulk load.
+        sql: The statement text, its query tags included; the dialect's text of a bulk load for
+            one.
         parameters: The bound parameters, None when there are none to show.
         duration_ms: How long the call took - for a stream, until it was read to the end or
             closed.

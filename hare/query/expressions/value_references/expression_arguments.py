@@ -69,6 +69,7 @@ class ExpressionArguments:
         position: ParameterPosition | None = None,
         index: int | None = None,
         binds_whole: bool = False,
+        typed_by_encoder: bool = False,
     ) -> ExpressionResult:
         """Resolves an argument as its description (``PlanParts.describe_argument()``) lists it.
 
@@ -83,6 +84,8 @@ class ExpressionArguments:
             index: Its position in a sequence held under ``attribute``.
             binds_whole: Whether a literal - a list or tuple too - is bound as one parameter, as an
                 ``ENCODED_ARGUMENT`` part describes it.
+            typed_by_encoder: Whether ``encoder`` writes a literal as a value of a field, whose type it
+                then has - an integer isn't cast to a SQL type of its own, which may be narrower.
 
         Returns:
             The argument's result - a None as ``NULL``; unless bound whole, a list or tuple as the
@@ -106,7 +109,11 @@ class ExpressionArguments:
                 ExpressionArguments.record_literal(
                     expression_context.value_wrapper_references, owner, attribute, term, encoder, index
                 )
-            if type(value) is int and (cast_sql_type := value_class.get_cast_sql_type(value, NO_CAST_SQL_TYPES)):
+            if (
+                type(value) is int
+                and not (typed_by_encoder and encoder is not None)
+                and (cast_sql_type := value_class.get_cast_sql_type(value, NO_CAST_SQL_TYPES))
+            ):
                 # An integer beyond the one a database reads a bare literal as.
                 term = Cast(term, cast_sql_type)
             elif position is not None:

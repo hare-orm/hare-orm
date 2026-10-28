@@ -78,6 +78,24 @@ class SqliteRenderers(CheckedTermRenderers):
 
         return Cast(term, "INTEGER")
 
+    def get_scaled_duration(self, term: Term) -> Term:
+        # The product is a REAL: its integer part cut toward zero, moved one away from zero past a half
+        # and to the even one at a half. Local imports: hare.sql's terms render through the dialect.
+        from hare.sql.functions.cast import Cast
+        from hare.sql.terms.case.case import Case
+        from hare.sql.terms.functions.function import Function
+        from hare.sql.terms.functions.mod import Mod
+
+        whole = Cast(term, "INTEGER")
+        fraction = term - whole
+        return (
+            Case()
+            .when(fraction > 0.5, whole + 1)
+            .when(fraction < -0.5, whole - 1)
+            .when(Function("ABS", fraction) == 0.5, whole + Mod(whole, 2, integer=True))
+            .else_(whole)
+        )
+
     def get_composite_distinct_key(self, terms: Sequence[Term]) -> Term:
         # Local import: hare.sql's terms render through the dialect.
         from hare.sql.terms.functions.function import Function

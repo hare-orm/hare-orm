@@ -36,6 +36,7 @@ from hare.contrib.request_query.constants import (
 from hare.contrib.request_query.declaration.declaration_builder import DeclarationBuilder
 from hare.contrib.request_query.declaration.filter_declaration import FilterDeclaration
 from hare.contrib.request_query.declaration.filter_parameter_builder import FilterParameterBuilder
+from hare.contrib.request_query.declaration.meta_option_checks import MetaOptionChecks
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
 from hare.contrib.request_query.declaration.request_query_parameters import RequestQueryParameters
 from hare.contrib.request_query.declaration.request_query_registry import RequestQueryRegistry
@@ -146,7 +147,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             ordering: An ``OrderingConfig``, None when a request can't choose the ordering.
             pagination: An ``OffsetPagination``, a ``ScrollPagination`` or a ``CursorPagination``,
                 None without pagination.
-            filters: A tuple of ``FilterField`` - the fields a request may filter by and each
+            filters: An iterable of ``FilterField`` - the fields a request may filter by and each
                 one's lookups: ``FilterField("status", lookups=(Lookup.EXACT, Lookup.IN))`` makes
                 the parameters ``status`` and ``status__in``, typed by the ORM. None for only the
                 parameters the class declares.
@@ -156,13 +157,13 @@ class RequestQuery[ModelType: Model](BaseModel):
             deleted: A ``DeletedConfig``, None when a request can't see soft-deleted rows.
             versions: ``LatestVersions()`` to keep only the latest version of each record of a
                 ``VersionedModel``, None for every version.
-            api_getter: A tuple of ``ApiSource`` - HTTP APIs of other services the rows are filled
+            api_getter: An iterable of ``ApiSource`` - HTTP APIs of other services the rows are filled
                 from - and ``ApiValueMapping`` - values of the rows copied to other attributes; None
                 for none.
         """
 
         queryset: QuerySet[Any] | None = None
-        filters: tuple[FilterField, ...] | None = None
+        filters: Iterable[FilterField] | None = None
         search: SearchConfig | None = None
         ordering: OrderingConfig | None = None
         pagination: Pagination | None = OffsetPagination()
@@ -171,7 +172,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         include: IncludeConfig | None = None
         deleted: DeletedConfig | None = None
         versions: LatestVersions | None = None
-        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = None
+        api_getter: Iterable[ApiSource | ApiValueMapping] | None = None
 
     _request: Any = PrivateAttr(default=None)
     _request_url: str | None = PrivateAttr(default=None)
@@ -300,11 +301,16 @@ class RequestQuery[ModelType: Model](BaseModel):
 
         Returns:
             The option.
+
+        Raises:
+            ConfigurationError: The option lacks required structure.
         """
         for klass in cls.__mro__:
             meta = vars(klass).get(META_CLASS_NAME)
             if meta is not None and name in vars(meta):
-                return vars(meta)[name]
+                value = vars(meta)[name]
+                MetaOptionChecks.check_option(cls.__qualname__, name, value)
+                return value
         return None
 
     @classmethod
@@ -346,7 +352,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         if cls in RequestQuery.prepared_classes:
             return
         queryset = cls.get_meta_option("queryset")
-        if isinstance(queryset, QuerySet):
+        if queryset is not None:
             RequestQueryRegistry.check_model_registered(cls, queryset.model)
             builder = FilterParameterBuilder(cls)
             fields = builder.build_fields(queryset)
@@ -389,7 +395,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             options = bucket[REQUEST_OPTIONS_BUCKET_KEY] = tuple(
                 option
                 for option_name in PARAMETER_OPTION_NAMES
-                if isinstance(option := cls.get_meta_option(option_name), RequestOption)
+                if (option := cls.get_meta_option(option_name)) is not None
             )
         return options
 
@@ -432,7 +438,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         *,
         name: str | None = None,
         queryset: QuerySet[FactoryModel] | None = None,
-        filters: tuple[FilterField, ...] | None = Meta.filters,
+        filters: Iterable[FilterField] | None = Meta.filters,
         search: SearchConfig | None = Meta.search,
         ordering: OrderingConfig | None = Meta.ordering,
         pagination: Pagination | None = Meta.pagination,
@@ -441,7 +447,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         deleted: DeletedConfig | None = Meta.deleted,
         versions: LatestVersions | None = Meta.versions,
         join_type: Connector = Meta.join_type,
-        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+        api_getter: Iterable[ApiSource | ApiValueMapping] | None = Meta.api_getter,
     ) -> type[RequestQuery[FactoryModel]]: ...
 
     @overload
@@ -452,7 +458,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         *,
         name: str | None = None,
         queryset: QuerySet[Any] | None = None,
-        filters: tuple[FilterField, ...] | None = Meta.filters,
+        filters: Iterable[FilterField] | None = Meta.filters,
         search: SearchConfig | None = Meta.search,
         ordering: OrderingConfig | None = Meta.ordering,
         pagination: Pagination | None = Meta.pagination,
@@ -461,7 +467,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         deleted: DeletedConfig | None = Meta.deleted,
         versions: LatestVersions | None = Meta.versions,
         join_type: Connector = Meta.join_type,
-        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+        api_getter: Iterable[ApiSource | ApiValueMapping] | None = Meta.api_getter,
     ) -> type[RequestQuery[Any]]: ...
 
     @classmethod
@@ -471,7 +477,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         *,
         name: str | None = None,
         queryset: QuerySet[Any] | None = None,
-        filters: tuple[FilterField, ...] | None = Meta.filters,
+        filters: Iterable[FilterField] | None = Meta.filters,
         search: SearchConfig | None = Meta.search,
         ordering: OrderingConfig | None = Meta.ordering,
         pagination: Pagination | None = Meta.pagination,
@@ -480,7 +486,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         deleted: DeletedConfig | None = Meta.deleted,
         versions: LatestVersions | None = Meta.versions,
         join_type: Connector = Meta.join_type,
-        api_getter: tuple[ApiSource | ApiValueMapping, ...] | None = Meta.api_getter,
+        api_getter: Iterable[ApiSource | ApiValueMapping] | None = Meta.api_getter,
     ) -> type[RequestQuery[Any]]:
         """A request query class of a model known only while the application runs - one
         registered with ``Hare.register_live_models()`` - built and checked at once::

@@ -1,12 +1,11 @@
 """OutboxEvent.enqueue(): only an idempotency_key conflict is deduplicated, reserved fields."""
 
-import uuid
-
 import pytest
 
 from hare.contrib.outbox.constants import RELAY_MANAGED_FIELD_NAMES
 from hare.contrib.test import requires_features
 from hare.exceptions import ConfigurationError, IntegrityError, QueryError, ValidationError
+from hare.fields.uuid7 import Uuid7
 from hare.models.tenancy.tenancy import Tenancy
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import (
@@ -49,7 +48,7 @@ async def test_primary_key_conflict_with_a_new_key_raises(db_outbox):
 @requires_features(supports_unique_constraints=True)
 @pytest.mark.asyncio
 async def test_same_key_and_explicit_id_again_returns_the_existing_row_as_not_new(db_outbox):
-    explicit_id = uuid.uuid4()
+    explicit_id = Uuid7.new()
     write_connection = DemoOutboxEvent.get_connection(for_write=True)
 
     first, first_is_new = await DemoOutboxEvent.insert_or_get_by_idempotency_key(
@@ -102,7 +101,7 @@ async def test_extra_field_values_cannot_set_relay_managed_fields(db_outbox, fie
 
 @pytest.mark.asyncio
 async def test_extra_field_values_can_set_the_primary_key(db_outbox):
-    explicit_id = uuid.uuid4()
+    explicit_id = Uuid7.new()
 
     event = await DemoOutboxEvent.enqueue("widget.created", {}, extra_field_values={"id": explicit_id})
 

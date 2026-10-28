@@ -519,7 +519,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             if type(ordering) is not str:
                 is_plain = False
             elif ordering == RANDOM_ORDERING:
-                return self.alias(**{RANDOM_ORDERING_ALIAS: Random()}).order_by(
+                return self._alias({RANDOM_ORDERING_ALIAS: Random()}).order_by(
                     *(
                         RANDOM_ORDERING_ALIAS if type(ordering) is str and ordering == RANDOM_ORDERING else ordering
                         for ordering in orderings
@@ -529,7 +529,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
             if expression_aliases:
                 # An expression is ordered by an alias of its own, never selected.
-                return self.alias(**expression_aliases).order_by(*orderings)
+                return self._alias(expression_aliases).order_by(*orderings)
         if GenericForeignKeyFieldInstance.declared_names and (
             type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, orderings)
         ):
@@ -756,7 +756,16 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             raise FieldError(LATEST_WITHOUT_FIELDS_MESSAGE.format(method="latest"))
         expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
         if expression_aliases:
-            return self.alias(**expression_aliases).latest(*orderings)
+            return self._alias(expression_aliases).latest(*orderings)
+        if GenericForeignKeyFieldInstance.declared_names and (
+            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, tuple(orderings))
+        ):
+            return self.alias(**type_aliases).latest(*orderings)
+        # A path into a JSON field, a date or an array orders by an alias of its own, as in order_by().
+        if path_annotations := AnnotationArguments.get_path_annotations(
+            self, (self._get_ordering_name(ordering)[0] for ordering in orderings)
+        ):
+            return self._alias(path_annotations).latest(*orderings)
         OrderingArguments.forbid_reordering_after_cursor(self, "latest")
         queryset = SingleRow.with_rows_as_subquery(self)
         queryset._orderings = OrderingArguments.parse_orderings(
@@ -782,7 +791,16 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             raise FieldError(LATEST_WITHOUT_FIELDS_MESSAGE.format(method="earliest"))
         expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
         if expression_aliases:
-            return self.alias(**expression_aliases).earliest(*orderings)
+            return self._alias(expression_aliases).earliest(*orderings)
+        if GenericForeignKeyFieldInstance.declared_names and (
+            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, tuple(orderings))
+        ):
+            return self.alias(**type_aliases).earliest(*orderings)
+        # A path into a JSON field, a date or an array orders by an alias of its own, as in order_by().
+        if path_annotations := AnnotationArguments.get_path_annotations(
+            self, (self._get_ordering_name(ordering)[0] for ordering in orderings)
+        ):
+            return self._alias(path_annotations).earliest(*orderings)
         OrderingArguments.forbid_reordering_after_cursor(self, "earliest")
         queryset = SingleRow.with_rows_as_subquery(self)
         queryset._orderings = OrderingArguments.parse_orderings(self, orderings, nulls_last_by_default=True)
@@ -923,7 +941,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
     def distinct(self, *field_names: str) -> Self:
         """Makes the queryset return distinct rows. Without arguments it adds ``DISTINCT``; with field
         names it keeps one row per combination of them - an ``order_by()`` must then begin with the
-        same fields: ``DISTINCT ON (fields)``, refused when run on a database without it.
+        same fields - refused when run on a database without it (``Features.supports_distinct_on``).
 
         Example:
             ::
@@ -932,7 +950,8 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 await Tournament.objects.all().distinct("name").order_by("name", "-desc")
 
         Args:
-            field_names: Field names for ``DISTINCT ON`` - an annotation, or a path inside a field's value
+            field_names: The fields one row is kept of each combination of - an annotation, or a path inside
+                a field's value
                 (``created__year``), too.
 
         Raises:
@@ -1139,7 +1158,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 a NOT NULL foreign key with a database constraint and no soft delete/tenant/
                 ``Select(extra_condition=...)`` condition. By default, all fetched rows are
                 locked - only the model's own rows when the query joins any relation.
-            no_key: If `True`, use the lower SELECT ... FOR NO KEY UPDATE lock strength to allow
+            no_key: If `True`, use the lower no-key update lock strength to allow
                 creating or deleting rows in other tables that reference the locked rows via foreign
                 keys; a plain ``FOR UPDATE`` where the dialect has no such strength
                 (``Features.supports_select_for_no_key_update``).
@@ -1184,6 +1203,19 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         Raises:
             TypeError: A value is neither an expression nor a SQL term - a bare field name, say.
             FieldError: A key is a field of the model or ``pk``.
+            QueryError: A key is empty, or holds whitespace, quotes, brackets, a semicolon or an SQL comment.
+        """
+        self._raise_if_annotation_names_are_unsafe(kwargs)
+        return self._annotate(kwargs)
+
+    def _annotate(self, kwargs: dict[str, Any]) -> Self:
+        """``annotate()`` of names hare may give - its own annotations too, whose names hold spaces.
+
+        Args:
+            kwargs: The annotations, by name.
+
+        Returns:
+            The annotated queryset.
         """
         QuerySetCombination.raise_if_combined(self, "annotate")
         kwargs = AnnotationArguments.get_annotations(kwargs)
@@ -1191,8 +1223,8 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         if relation_aliases:
             # A named JOIN (FilteredRelation, Lateral) is never a selected value - annotated, it is an alias.
             other_annotations = {key: value for key, value in kwargs.items() if key not in relation_aliases}
-            aliased = self.alias(**relation_aliases)
-            return aliased.annotate(**other_annotations) if other_annotations else aliased
+            aliased = self._alias(relation_aliases)
+            return aliased._annotate(other_annotations) if other_annotations else aliased
         AnnotationArguments.raise_if_annotation_names_collide_with_fields(self, kwargs)
         queryset = self._clone_keeping_calls()
         AnnotationArguments.detach_annotation_descriptions(queryset, kwargs)
@@ -1215,6 +1247,19 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         Raises:
             TypeError: A value is neither an expression nor a SQL term - a bare field name, say.
             FieldError: A key is a field of the model or ``pk``.
+            QueryError: A key is empty, or holds whitespace, quotes, brackets, a semicolon or an SQL comment.
+        """
+        self._raise_if_annotation_names_are_unsafe(kwargs)
+        return self._alias(kwargs)
+
+    def _alias(self, kwargs: dict[str, Any]) -> Self:
+        """``alias()`` of names hare may give - its own aliases too, whose names hold spaces.
+
+        Args:
+            kwargs: The aliases, by name.
+
+        Returns:
+            The queryset with the aliases.
         """
         QuerySetCombination.raise_if_combined(self, "alias")
         kwargs = AnnotationArguments.get_annotations(kwargs)
@@ -1271,6 +1316,22 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         grouping_set = grouping_sets[0] if grouping_sets else None
         # Checked as names below - an expression is refused, not left out.
         plain_names = tuple(field for field in fields if not isinstance(field, GroupingSet))
+        if GenericForeignKeyFieldInstance.declared_names and (
+            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
+                self, (*plain_names, *(grouping_set.field_names if grouping_set is not None else ()))
+            )
+        ):
+            return self.alias(**type_aliases).group_by(*fields)
+        # A path into a JSON field or a date groups by an alias of its own, as in values() and order_by().
+        if path_annotations := AnnotationArguments.get_path_annotations(
+            self,
+            [
+                name
+                for name in (*plain_names, *(grouping_set.field_names if grouping_set is not None else ()))
+                if isinstance(name, str)
+            ],
+        ):
+            return self._alias(path_annotations).group_by(*fields)
         FilterArguments.raise_if_not_names(
             self, (*plain_names, *(grouping_set.field_names if grouping_set is not None else ())), "group_by"
         )
@@ -1324,7 +1385,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         if flat and named:
             raise QueryError(".values_list() can't use flat=True and named=True together.")
         if GenericForeignKeyFieldInstance.declared_names and (
-            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, field_names)
+            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
+                self, (*field_names, *expressions.values())
+            )
         ):
             return self.alias(**type_aliases).values_list(*field_names, flat=flat, named=named, **expressions)
         queryset = self._get_values_source_queryset()
@@ -1367,7 +1430,9 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 QuerySetCombination.get_combined_query(self), lambda branch: branch.values(*field_names, **expressions)
             )
         if GenericForeignKeyFieldInstance.declared_names and (
-            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(self, field_names)
+            type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(
+                self, (*field_names, *expressions.values())
+            )
         ):
             return self.alias(**type_aliases).values(*field_names, **expressions)
         queryset = self._get_values_source_queryset()

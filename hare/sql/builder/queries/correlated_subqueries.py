@@ -11,6 +11,7 @@ from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder.tables.table import Table
 from hare.sql.constants import CORRELATED_CONDITION_PREFIX, CORRELATED_SORT_KEY_PREFIX
 from hare.sql.enums import Boolean, Equality
+from hare.sql.identifiers import Identifiers
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
 from hare.sql.terms.criteria.empty_criterion import EmptyCriterion
@@ -337,8 +338,16 @@ class CorrelatedSubqueries:
             for condition in (cls.iterate_conjuncts(query._wheres) if query._wheres is not None else ())
             if not isinstance(condition, EmptyCriterion)
         ]
-        condition_names = [f"{CORRELATED_CONDITION_PREFIX}{position}" for position in range(len(conditions))]
-        sort_key_names = [f"{CORRELATED_SORT_KEY_PREFIX}{position}" for position in range(len(query._orderbys))]
+        # Free of the columns the query selects - a column of a table may hold a space too.
+        taken_names = {name for select in query._selects if (name := select.alias or getattr(select, "name", None))}
+        condition_names = [
+            Identifiers.get_free_name(f"{CORRELATED_CONDITION_PREFIX}{position}", taken_names)
+            for position in range(len(conditions))
+        ]
+        sort_key_names = [
+            Identifiers.get_free_name(f"{CORRELATED_SORT_KEY_PREFIX}{position}", taken_names)
+            for position in range(len(query._orderbys))
+        ]
         inner_query = copy(query)
         inner_query._selects = [
             *query._selects,

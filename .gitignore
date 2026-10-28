@@ -123,6 +123,10 @@ knowledge
 
 .claude
 
+# The bug-hunt protocol (.bugs/HUNT.md, .bugs/BUGS.md) - local bookkeeping of the AI hunters,
+# never committed: the cards, statuses and repro scripts stay on the machine that ran the hunt.
+/.bugs/
+
 # MkDocs build output (regenerate with `mkdocs build`, not part of the source)
 site/
 

@@ -147,3 +147,21 @@ APPLICATION_TEST_NAMES = (
 )
 #: A test's outcome as ``pytest -v`` prints it: the module, the test, the outcome.
 PRINTED_TEST_OUTCOME_PATTERN = re.compile(r"^(\w+)\.py::(\w+) (PASSED|FAILED|ERROR|SKIPPED)", re.MULTILINE)
+
+#: The identity-generated copy of a sampled field and the operations compared with its source.
+GENERATED_VALUE_FIELD_NAME = "generated_value"
+GENERATED_FIELD_OPERATIONS = (
+    "json_object",
+    "json",
+    "values",
+    "annotation",
+    "ordering",
+    "annotation_ordering",
+    "filter",
+    "distinct",
+    "aggregate",
+    "aggregate_empty",
+    "greatest_least",
+    "coalesce_fractional",
+    "lag_fractional",
+)

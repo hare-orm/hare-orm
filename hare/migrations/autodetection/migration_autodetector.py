@@ -111,9 +111,10 @@ class MigrationAutodetector:
             self.moved_models.update(operation_generator.moved_models)
             self.warnings.extend(operation_generator.warnings)
             self.data_loss_warnings.extend(operation_generator.data_loss_warnings)
+            self.rename_questions.note_renames(app_label, operations)
             if operations:
                 operations_by_app[app_label] = operations
-        self.warnings.extend(self.rename_questions.get_unapplied_rename_warnings())
+        self.rename_questions.raise_if_renames_unapplied()
         apps_with_migrations = [
             app_label for app_label, config in self.apps_config.items() if config.get("migrations")
         ]

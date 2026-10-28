@@ -843,3 +843,16 @@ async def test_a_window_takes_arithmetic(db, intfields_data):
         .values_list("next_number", "doubled", "spread")
     )
     assert rows == [(2, 2, 0), (3, 4, 0), (4, 6, 1), (5, 8, 11), (6, 10, 22), (7, 12, 42)]
+
+
+@pytest.mark.asyncio
+async def test_a_window_filter_keeps_annotations_named_apart_by_letter_case(db, intfields_data):
+    """The derived table a window filter reads selected each annotation under its own name - SQLite takes
+    ``a`` and ``A`` for one name, and the outer query read the first one twice."""
+    query = (
+        IntFields.objects.filter(intnum_null=0)
+        .annotate(a=F("intnum") + 1, A=F("intnum") + 100, position=Window(RowNumber(), order_by=["intnum"]))
+        .filter(position=1)
+    )
+    assert await query.values("intnum", "a", "A") == [{"intnum": 0, "a": 1, "A": 100}]
+    assert await query.values_list("a", "A") == [(1, 100)]

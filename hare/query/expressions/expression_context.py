@@ -29,6 +29,9 @@ class ExpressionContext:
     # can bind a new value into, None otherwise (the query is then built in full every time). None
     # here means nothing is recorded.
     value_wrapper_references: RecordedValueReferences | None = None
+    # A nested relation filter receives its value already built against the root query. Rebuilding
+    # a Subquery would change its outer scope and replace the terms the root plan recorded.
+    filter_value_is_built: bool = False
     # Select(relation, extra_condition=Q(...)) conditions by dotted relation path - a nested filter
     # crossing such a relation builds its JOIN with the condition, since the JOIN built first is the
     # one kept.

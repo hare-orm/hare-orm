@@ -14,7 +14,7 @@ from hare.dialects.postgresql.transactions.constants import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 class PostgresqlTransactionStatements(TransactionStatements):
@@ -35,6 +35,17 @@ class PostgresqlTransactionStatements(TransactionStatements):
 
     def get_tenant_setting_sql(self, tenant_texts: Sequence[str] | None) -> str:
         value = POSTGRESQL_ALL_TENANTS_SETTING_VALUE if tenant_texts is None else json.dumps(list(tenant_texts))
+        return POSTGRESQL_SET_TENANT_SETTING_TEMPLATE.format(
+            setting=POSTGRESQL_TENANT_SETTING_NAME, value=self.dialect.literals.get_string_literal_sql(value)
+        )
+
+    def get_table_tenants_setting_sql(self, table_tenant_texts: Mapping[str, Sequence[str] | None]) -> str:
+        value = json.dumps(
+            {
+                table_key: POSTGRESQL_ALL_TENANTS_SETTING_VALUE if tenant_texts is None else list(tenant_texts)
+                for table_key, tenant_texts in table_tenant_texts.items()
+            }
+        )
         return POSTGRESQL_SET_TENANT_SETTING_TEMPLATE.format(
             setting=POSTGRESQL_TENANT_SETTING_NAME, value=self.dialect.literals.get_string_literal_sql(value)
         )

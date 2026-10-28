@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
+from hare.dialects.base.client.constants import TRANSACTION_BEGIN_ABANDONED_MESSAGE
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
+from hare.exceptions import TransactionManagementError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.transaction_client import TransactionClient
@@ -23,9 +25,13 @@ class PendingStatements:
         """
         top_level_transaction = client._outer_transaction or client
         if top_level_transaction._begin_pending:
+            if top_level_transaction._shielded_begin_abandoned_task is not None:
+                raise TransactionManagementError(TRANSACTION_BEGIN_ABANDONED_MESSAGE)
             # Shielded for the reason PendingStatements.send_pending_begin() gives.
             await TransactionEnding.run_shielded_from_cancellation(
-                top_level_transaction._driver_send_begin(), on_landed=top_level_transaction._mark_begin_sent
+                top_level_transaction._driver_send_begin(),
+                on_landed=top_level_transaction._mark_begin_sent,
+                on_timeout=top_level_transaction._mark_begin_operation_abandoned,
             )
         if top_level_transaction._pending_savepoints:
             await PendingStatements.send_pending_savepoints(client)
@@ -41,8 +47,12 @@ class PendingStatements:
         """
         top_level_transaction = client._get_top_level_transaction()
         if top_level_transaction._begin_pending:
+            if top_level_transaction._shielded_begin_abandoned_task is not None:
+                raise TransactionManagementError(TRANSACTION_BEGIN_ABANDONED_MESSAGE)
             await TransactionEnding.run_shielded_from_cancellation(
-                top_level_transaction._driver_send_begin(), on_landed=top_level_transaction._mark_begin_sent
+                top_level_transaction._driver_send_begin(),
+                on_landed=top_level_transaction._mark_begin_sent,
+                on_timeout=top_level_transaction._mark_begin_operation_abandoned,
             )
 
     @staticmethod

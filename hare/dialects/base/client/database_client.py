@@ -1089,6 +1089,30 @@ class DatabaseClient(abc.ABC):
         """
         raise UnSupportedError(f"The {self.dialect} database generates keys as it writes the rows")
 
+    def get_shared_table_name(self, table: str) -> str:
+        """The name a statement of the client reaches a table of hare's own bookkeeping by - kept in the
+        connection's shared schema, not in a tenant's.
+
+        Args:
+            table: The table's name.
+
+        Returns:
+            The name - as it is by default.
+        """
+        return table
+
+    async def get_generated_key_sql(self, model: type[Model]) -> str | None:
+        """The SQL expression giving each row of a statement inserting a model's rows the next key of the
+        model's series - for rows written by SQL of hare's own, such as rows carried over between tables.
+
+        Args:
+            model: The model.
+
+        Returns:
+            The expression; None when the database generates the keys as it writes the rows - by default.
+        """
+        return None
+
     async def synchronize_key_series(self, model: type[Model]) -> None:
         """Moves a model's series of keys past the greatest key its table holds - rows written with
         keys of their own leave the series behind. Nothing by default: a database generating keys as

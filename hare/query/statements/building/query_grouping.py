@@ -51,9 +51,10 @@ class QueryGrouping:
             aggregates_per_model_row = query._aggregates_per_model_row()
             if not aggregates_per_model_row and not query.group_by_must_include_primary_key:
                 QueryGrouping.raise_if_grouped_by_encrypted(query)
-            QueryGrouping.add_group_by_terms(
-                group_by_terms, grouped_sql, QueryGrouping.get_orderby_group_by_terms(query), namespaced_context
-            )
+            if aggregates_per_model_row or query.group_by_must_include_primary_key:
+                QueryGrouping.add_group_by_terms(
+                    group_by_terms, grouped_sql, QueryGrouping.get_orderby_group_by_terms(query), namespaced_context
+                )
             if not group_by_terms and not aggregates_per_model_row:
                 if not query.query._havings:
                     return
@@ -72,7 +73,7 @@ class QueryGrouping:
                     ],
                     namespaced_context,
                 )
-            if query.query._havings:
+            if query.query._havings and (aggregates_per_model_row or query.group_by_must_include_primary_key):
                 # A column HAVING reads outside its aggregates (Q(n__gte=2) | Q(dept__name="ops"),
                 # an aggregate compared with a column) must be grouped too - a database rejects it
                 # otherwise, or picks an arbitrary row's value.

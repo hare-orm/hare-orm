@@ -5,7 +5,11 @@ import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.fields.constants import ROLLBACK_RESTORE_UNSET
+from hare.models.write.rollback_restores import RollbackRestores
+
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.field import Field
     from hare.models import Model
@@ -27,8 +31,11 @@ class ReturnedValues:
         obj: Model,
         row: Any,
         columns: Iterable[str] | None = None,
+        *,
+        connection: DatabaseClient,
     ) -> None:
-        """Sets on an obj every field a ``RETURNING`` row holds a column of.
+        """Sets on an obj every field a ``RETURNING`` row holds a column of - put back as they were when the
+        write's transaction rolls back.
 
         Args:
             model: The written model.
@@ -36,14 +43,20 @@ class ReturnedValues:
             obj: The obj whose row was written.
             row: The row, by column name.
             columns: Only these columns of the row - every one by default.
+            connection: The connection the write ran on.
         """
         meta = model._meta
         field_names_by_column = meta.fields_db_projection_reverse
         fields_map = meta.fields_map
+        restores: list[tuple[Model, str, Any]] | None = [] if connection.is_transaction_client else None
         for column in row.keys() if columns is None else columns:
             field_name = field_names_by_column.get(column)
             if field_name is not None:
+                if restores is not None:
+                    restores.append((obj, field_name, obj.__dict__.get(field_name, ROLLBACK_RESTORE_UNSET)))
                 setattr(obj, field_name, types.get_python_value(fields_map[field_name], row[column]))
+        if restores:
+            RollbackRestores.register_rollback_restores(connection, restores)
 
     @staticmethod
     def match_rows(
@@ -113,10 +126,10 @@ class ReturnedValues:
             The first instance of each key.
         """
         instances_by_stored_key: dict[tuple[Any, ...], TInstance] = {}
-        for instance in instances:
-            instances_by_stored_key.setdefault(
-                ReturnedValues.get_stored_key(types, fields, field_names, instance), instance
-            )
+        for stored_key, instance in zip(
+            ReturnedValues.get_stored_keys(types, fields, field_names, instances), instances, strict=True
+        ):
+            instances_by_stored_key.setdefault(stored_key, instance)
         return instances_by_stored_key
 
     @staticmethod
@@ -144,10 +157,46 @@ class ReturnedValues:
         )
 
     @staticmethod
+    def get_stored_keys(
+        types: TypeRegistry, fields: Sequence[Field[Any]], field_names: Sequence[str], instances: Sequence[Model]
+    ) -> list[tuple[Any, ...]]:
+        """Instances' values of fields as the database stores them - ``get_stored_key()`` of each, a value of
+        its field's native key type (``TypeRegistry.get_native_key_type()``) taken as it is.
+
+        Args:
+            types: The connection's type registry.
+            fields: The fields.
+            field_names: Their names.
+            instances: The instances.
+
+        Returns:
+            Each instance's values, in the fields' order.
+        """
+        field_readers = [
+            (field, field_name, types.get_native_key_type(field))
+            for field, field_name in zip(fields, field_names, strict=True)
+        ]
+        get_db_value, get_python_value, get_hashable = (
+            types.get_db_value,
+            types.get_python_value,
+            ReturnedValues.get_hashable,
+        )
+        stored_keys: list[tuple[Any, ...]] = []
+        for instance in instances:
+            stored_values = []
+            for field, field_name, native_type in field_readers:
+                value = getattr(instance, field_name)
+                if value is not None and type(value) is not native_type:
+                    value = get_hashable(get_python_value(field, get_db_value(field, value, instance)))
+                stored_values.append(value)
+            stored_keys.append(tuple(stored_values))
+        return stored_keys
+
+    @staticmethod
     def get_hashable(value: Any) -> Any:
         """A value as a key can hold it - a list or tuple (an array, a JSON array) as the tuple of its items,
-        a dict or set (a JSON object, an hstore) as the frozenset of its items: the database gives a mapping's
-        keys back in an order of its own (jsonb, hstore). Every value inside them too.
+        a dict or set (a JSON object, a key-value mapping) as the frozenset of its items: a database may give a
+        mapping's keys back in an order of its own. Every value inside them too.
 
         Args:
             value: The value.
@@ -216,13 +265,14 @@ class ReturnedValues:
             # Nothing was skipped - each row is its instance's, whatever the instance gave the target.
             yield from ((instance, dict(raw_row)) for instance, raw_row in zip(instances, rows, strict=True))
             return
+        stored_keys = ReturnedValues.get_stored_keys(types, fields, field_names, instances)
         next_index = 0
         for raw_row in rows:
             # A driver's row may have no .items()/.get() - read as a dict.
             row = dict(raw_row)
             key = ReturnedValues.get_row_key(types, fields, columns, row)
             for index in range(next_index, len(instances)):
-                if ReturnedValues.get_stored_key(types, fields, field_names, instances[index]) == key:
+                if stored_keys[index] == key:
                     yield instances[index], row
                     next_index = index + 1
                     break
@@ -252,11 +302,12 @@ class ReturnedValues:
         meta = model._meta
         fields = [meta.fields_map[field_name] for field_name in field_names]
         columns = [meta.fields_db_projection[field_name] for field_name in field_names]
+        instances = list(instances)
         instances_by_stored_key: dict[tuple[Any, ...], collections.deque[TInstance]] = {}
-        for instance in instances:
-            instances_by_stored_key.setdefault(
-                ReturnedValues.get_stored_key(types, fields, field_names, instance), collections.deque()
-            ).append(instance)
+        for stored_key, instance in zip(
+            ReturnedValues.get_stored_keys(types, fields, field_names, instances), instances, strict=True
+        ):
+            instances_by_stored_key.setdefault(stored_key, collections.deque()).append(instance)
         for raw_row in rows:
             row = dict(raw_row)
             matching_instances = instances_by_stored_key.get(ReturnedValues.get_row_key(types, fields, columns, row))
@@ -264,23 +315,32 @@ class ReturnedValues:
                 yield matching_instances.popleft(), row
 
     @staticmethod
-    def leave_unloaded(model: type[Model], objs: Iterable[Model], columns: Iterable[str]) -> None:
+    def leave_unloaded(
+        model: type[Model], objs: Iterable[Model], columns: Iterable[str], *, connection: DatabaseClient
+    ) -> None:
         """Leaves the fields of columns the database gave values to unloaded on the written objects - a
         write returning no row tells none of them; ``refresh_from_db()`` reads them. A field left to its
         ``db_default`` keeps ``DatabaseDefault``, as before the write; a field the database computes
-        is read again by nothing, and reading it raises ``NoValuesFetched``.
+        is read again by nothing, and reading it raises ``NoValuesFetched``. Put back as they were when
+        the write's transaction rolls back.
 
         Args:
             model: The written model.
             objs: The written objects.
             columns: The columns.
+            connection: The connection the write ran on.
         """
         # Local import: the fields' package imports the models' package.
         from hare.fields.database_default import DatabaseDefault
 
         field_names_by_column = model._meta.fields_db_projection_reverse
         field_names = [field_names_by_column.get(column, column) for column in columns]
+        restores: list[tuple[Model, str, Any]] | None = [] if connection.is_transaction_client else None
         for obj in objs:
             for field_name in field_names:
-                if not isinstance(obj.__dict__.get(field_name), DatabaseDefault):
-                    obj.__dict__.pop(field_name, None)
+                if not isinstance(obj.__dict__.get(field_name), DatabaseDefault) and field_name in obj.__dict__:
+                    if restores is not None:
+                        restores.append((obj, field_name, obj.__dict__[field_name]))
+                    del obj.__dict__[field_name]
+        if restores:
+            RollbackRestores.register_rollback_restores(connection, restores)

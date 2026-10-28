@@ -25,6 +25,7 @@ from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
+from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.selection.values_selection import ValuesSelection
 from hare.query.queryset.specification_copying import SpecificationCopying
@@ -34,6 +35,7 @@ from hare.query.rows.values_rows.named_rows import NamedRows
 from hare.query.rows.values_rows.tuple_rows import TupleRows
 from hare.query.rows.values_rows.value_field import ValueField
 from hare.query.rows.values_rows.values_rows import ValuesRows
+from hare.query.statements.building.keyset_bounds import KeysetBounds
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
@@ -150,9 +152,9 @@ class ValuesQuery(SelectQuery[Any]):
         self._selected_fields_by_alias: dict[str, str] = {}
         output_column_aliases: list[tuple[str, ...]] = []
         for output_name, field_name in outputs:
-            components = ValuesOutput.get_composite_key_components(self.model, field_name, annotations) or (
-                field_name,
-            )
+            components = ValuesOutput.get_composite_key_components(
+                self.model, field_name, annotations, source_queryset._alias_keys
+            ) or (field_name,)
             column_aliases = rows_class.get_column_aliases(
                 output_name, len(self._selected_fields_by_alias), len(components)
             )
@@ -281,8 +283,8 @@ class ValuesQuery(SelectQuery[Any]):
 
         Args:
             sliced: Keep the slice; without it, the ordering is dropped too, unless a keyset
-                boundary, ``DISTINCT ON`` or a plain ``DISTINCT``, which runs over the ordering
-                columns, depends on it.
+                boundary, the distinct by fields or a plain ``DISTINCT``, which runs over the ordering
+                columns, depends on it, or its joins multiply the selected rows.
 
         Returns:
             The copy.
@@ -295,7 +297,13 @@ class ValuesQuery(SelectQuery[Any]):
         if not sliced:
             rows_query._limit = None
             rows_query._offset = None
-            if not (self._cursor_values or self._before_cursor_values or self._distinct_on or self._distinct):
+            if not (
+                self._cursor_values
+                or self._before_cursor_values
+                or self._distinct_on
+                or self._distinct
+                or RowMultiplication.ordering_joins_multi_valued_relation(self)
+            ):
                 rows_query._orderings = []
                 rows_query._default_ordering_disabled = True
         return rows_query
@@ -395,19 +403,26 @@ class ValuesQuery(SelectQuery[Any]):
         a selected column of the model itself.
 
         Returns:
-            The readers, or None for ``OFFSET`` paging.
+            The readers, or None for ``OFFSET`` paging - also an ordering by a field whose values aren't
+            compared by ``<``/``>`` (an ``HStoreField``), and rows that can repeat their values (a filter
+            through a to-many relation, a ``Lateral``), which a keyset boundary would skip.
         """
         if (
             self._distinct_on
             or RowMultiplication.reads_window_function(self)
             or ValuesOutput.selects_composite_key(self)
+            or (self._extension_calls and QuerySetExtensions.changes_rows(self))
+            or (not ValuesGrouping.is_grouped(self) and RowMultiplication.rows_repeat_per_primary_key(self))
+            or self._can_tie_without_primary_key()
         ):
-            # A keyset condition would change the rows a window function is computed over; a
-            # composite key doesn't line up with the selected columns.
+            # A keyset condition would change the rows a window function is computed over, or an extension
+            # call picks from (limit_by()); a composite key doesn't line up with the selected columns.
             return None
         readers: list[Callable[[Any], Any]] = []
         for field_name, _order in self._orderings:
             if field_name in self._annotations or field_name not in self.model._meta.direct_fields:
+                return None
+            if not KeysetBounds.compares_by_order(self.model._meta.fields_map[field_name]):
                 return None
             reader = ValuesOutput.get_output_reader(self, field_name)
             if reader is None:
@@ -415,17 +430,44 @@ class ValuesQuery(SelectQuery[Any]):
             readers.append(reader)
         return readers
 
+    def _can_tie_without_primary_key(self) -> bool:
+        """Whether rows of a model without a primary key can tie on the ordering - neither grouped nor
+        distinct, its fields not unique: rows past a keyset boundary equal to it would be skipped.
+
+        Returns:
+            True when they can.
+        """
+        return (
+            not self.model._meta.has_primary_key
+            and not ValuesGrouping.is_grouped(self)
+            and not self._distinct
+            and not self._ordering_field_names_are_unique({field_name for field_name, _order in self._orderings})
+        )
+
     def _get_default_iteration_orderings(self) -> list[tuple[str, Order]]:
-        """``Meta.ordering``, else the group key of a grouped query, else the primary key - like
-        Django."""
+        """``Meta.ordering``, else the group key of a grouped query or the selected fields of a distinct
+        one, else the primary key - like Django."""
+        row_key_names = self._get_row_key_names()
         return list(self._apply_default_ordering(self._orderings)) or [
             (name, Order.ASC)
-            for name in (
-                ValuesGrouping.get_group_key_names(self)
-                if ValuesGrouping.is_grouped(self)
-                else self.model._meta.primary_key_attribute_names
-            )
+            for name in (row_key_names if row_key_names is not None else self.model._meta.primary_key_attribute_names)
         ]
+
+    def _get_row_key_names(self) -> list[str] | None:
+        """The names telling one output row from another where a model row isn't one - the group key of a
+        grouped query, the selected fields of a ``distinct()`` one: an unordered query pages by them, as the
+        primary key would add a column to ``SELECT DISTINCT`` and repeat its rows.
+
+        Returns:
+            The names, None for rows of model rows.
+        """
+        if ValuesGrouping.is_grouped(self):
+            return list(ValuesGrouping.get_group_key_names(self))
+        if self._distinct and not self._distinct_on:
+            return [
+                ValuesOutput.get_concrete_field_path(self, name) for name in ValuesOutput.get_output_field_names(self)
+            ]
+        return None
 
     async def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
         value_fields = ValuesOutput.get_value_fields(self)
@@ -573,19 +615,21 @@ class ValuesQuery(SelectQuery[Any]):
         aliasless_context = namespaced_context.copy(with_alias=False)
         selects = inner_query._mutable("_selects")
         alias_by_sql: dict[str, str] = {}
+        # Each column of the derived table goes by a name of hare's, the outer query selects it under the
+        # query's own alias - two aliases a database takes for one name (``a``, ``A`` where names ignore the
+        # letter case) never meet.
+        column_by_alias: dict[str, str] = {}
         for position, select_term in enumerate(selects):
-            if not select_term.alias:
-                select_term = copy(select_term).as_(f"{WINDOW_FILTER_COLUMN_ALIAS_PREFIX}{position}")
-                selects[position] = select_term
-            alias_by_sql.setdefault(
-                WindowFilterWrapping.get_aliasless_sql(select_term, aliasless_context), cast("str", select_term.alias)
-            )
-        selected_aliases = {cast("str", select_term.alias) for select_term in selects}
+            column = f"{WINDOW_FILTER_COLUMN_ALIAS_PREFIX}{position}"
+            if select_term.alias:
+                column_by_alias.setdefault(select_term.alias, column)
+            alias_by_sql.setdefault(WindowFilterWrapping.get_aliasless_sql(select_term, aliasless_context), column)
+            selects[position] = copy(select_term).as_(column)
         grouped_sql = {QueryGrouping.get_group_by_sql(term, namespaced_context) for term in inner_query._groupbys}
 
         def get_column(term: Term) -> Field:
-            if isinstance(term, Field) and term.table is None and term.name in selected_aliases:
-                return cast("Field", inner_query[term.name])
+            if isinstance(term, Field) and term.table is None and term.name in column_by_alias:
+                return cast("Field", inner_query[column_by_alias[term.name]])
             term_sql = WindowFilterWrapping.get_aliasless_sql(term, aliasless_context)
             alias = alias_by_sql.get(term_sql)
             if alias is None:
@@ -607,18 +651,18 @@ class ValuesQuery(SelectQuery[Any]):
         )
         order_columns = [(get_column(term), order) for term, order in inner_query._orderbys]
         distinct_on_columns = [get_column(term) for term in inner_query._distinct_on]
-        output_aliases = list(ValuesOutput.get_output_aliases(self))
+        output_columns = {alias: column_by_alias.get(alias, alias) for alias in ValuesOutput.get_output_aliases(self)}
         outer_query = self._connection.query_class.from_(inner_query).select(
-            *(cast("Field", inner_query[alias]).as_(alias) for alias in output_aliases)
+            *(cast("Field", inner_query[column]).as_(alias) for alias, column in output_columns.items())
         )
         outer_query = outer_query.where(outer_criterion)
         if inner_query._distinct:
             outer_query._distinct = True
-            outer_aliases = set(output_aliases)
+            selected_columns = set(output_columns.values())
             for order_column, _order in order_columns:
                 # SELECT DISTINCT must select what it orders by, as the inner query did.
-                if order_column.name not in outer_aliases:
-                    outer_aliases.add(order_column.name)
+                if order_column.name not in selected_columns:
+                    selected_columns.add(order_column.name)
                     outer_query = outer_query.select(order_column)
             inner_query._distinct = False
         if distinct_on_columns:

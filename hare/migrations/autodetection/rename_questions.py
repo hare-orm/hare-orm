@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+
+from hare.exceptions import ConfigurationError
+from hare.migrations.operations import RenameField, RenameModel
 
 
 class RenameQuestions:
@@ -87,20 +90,44 @@ class RenameQuestions:
             self.asked_answers[renamed, renamed_to] = self.ask(question)
         return self.asked_answers[renamed, renamed_to]
 
-    def get_unapplied_rename_warnings(self) -> list[str]:
-        """A warning of each answer given beforehand that renamed nothing - a misspelt name, or a rename
-        no candidate stands for: a model renamed while its fields change, two names swapped.
+    def note_renames(self, app_label: str, operations: Iterable[object]) -> None:
+        """Counts an answer given beforehand as applied when an operation of an app renames what it names
+        though nothing asked - a relation renamed with its key column is recognized without a question.
 
-        Returns:
-            The warnings.
+        Args:
+            app_label: The app of the operations.
+            operations: The operations.
         """
-        return [
-            f"The rename {renamed}={renamed_to} renamed nothing - no removed field or model and added one "
-            "declared alike match it. A model renamed while its fields change is renamed in one run and "
-            "changed in the next."
+
+        for operation in operations:
+            if isinstance(operation, RenameField):
+                renamed = f"{app_label}.{operation.model_name}.{operation.old_name}"
+            elif isinstance(operation, RenameModel):
+                renamed = f"{app_label}.{operation.old_name}"
+            else:
+                continue
+            if self.renames.get(renamed) == operation.new_name:
+                self.applied_renames.add(renamed)
+
+    def raise_if_renames_unapplied(self) -> None:
+        """Refuses the run when an answer given beforehand renamed nothing - a misspelt name, or a rename no
+        candidate stands for (a model renamed while its fields change, two names swapped): the field or model
+        it meant would be removed and added, its rows dropped.
+
+        Raises:
+            ConfigurationError: An answer renamed nothing - naming each.
+        """
+        unapplied = [
+            f"{renamed}={renamed_to}"
             for renamed, renamed_to in self.renames.items()
             if renamed not in self.applied_renames
         ]
+        if unapplied:
+            raise ConfigurationError(
+                f"The rename {', '.join(unapplied)} renamed nothing - no removed field or model and added one "
+                "declared alike match it, and nothing was written. A model renamed while its fields change is "
+                "renamed in one run and changed in the next."
+            )
 
     def ask(self, question: str) -> bool:
         """The answer to a question no answer was given beforehand for - no.

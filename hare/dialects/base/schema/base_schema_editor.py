@@ -137,7 +137,7 @@ class BaseSchemaEditor:
     #: An ``ADD_CONSTRAINT_TEMPLATE`` statement ({statement}) doing nothing when the constraint
     #: exists; None for a database with no such statement - the constraint is added as it is.
     SAFE_ADD_CONSTRAINT_TEMPLATE: str | None = None
-    # DROP INDEX/ALTER INDEX name no table: {name}/{old_name} are passed schema-qualified,
+    # Dropping and renaming an index name no table: {name}/{old_name} are passed schema-qualified,
     # {new_name} as a plain quoted name. DROP INDEX is also given the index's {table} - for a
     # database whose index belongs to its table.
     DROP_INDEX_TEMPLATE = "DROP INDEX {name}"

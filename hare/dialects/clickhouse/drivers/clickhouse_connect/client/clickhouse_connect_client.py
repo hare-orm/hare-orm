@@ -44,6 +44,7 @@ from hare.dialects.clickhouse.drivers.clickhouse_connect.constants import (
     CLICKHOUSE_CONNECT_COMMAND_SETTINGS,
     CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE,
     CLICKHOUSE_CONNECT_MOMENT_COLUMN_TYPES,
+    CLICKHOUSE_CONNECT_REPEATED_QUERY_ERROR_CODE,
     CLICKHOUSE_CONNECT_SCHEMA_CHANGE_PATTERN,
     CLICKHOUSE_CONNECT_UNREADABLE_SERVER_ERROR_MARK,
 )
@@ -51,6 +52,7 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_CONNECT_DRIVER_NAME,
     CLICKHOUSE_MOMENT_EPOCH,
 )
+from hare.exceptions import DBConnectionError
 from hare.native.native_modules import NativeModules
 
 
@@ -81,6 +83,8 @@ class ClickhouseConnectClient(ClickhouseClient):
         # connection - the connection is fine, the statement failed.
         if CLICKHOUSE_CONNECT_UNREADABLE_SERVER_ERROR_MARK in str(error):
             return self._get_operational_error(error, sql=sql, parameters=parameters)
+        if self.get_error_code(error) == CLICKHOUSE_CONNECT_REPEATED_QUERY_ERROR_CODE:
+            return DBConnectionError(error, sql=sql, parameters=parameters)
         return super().get_hare_error(error, sql, parameters)
 
     async def create_connection(self, with_db: bool) -> None:

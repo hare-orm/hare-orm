@@ -107,14 +107,22 @@ class TenantSchemas:
             client: A client of a connection with ``tenant_schema_template``.
 
         Returns:
-            The schema of the scope's tenant; None with no scope, or a scope of several tenants,
-            every tenant, or tenants given model by model.
+            The schema of the scope's tenant - of a scope given model by model, of the one tenant it gives
+            the connection's ``Meta.tenant_schema`` models; None with no scope, a scope of several
+            tenants or every tenant, or a scope given model by model naming none of those models.
 
         Raises:
             ValidationError: The scope's tenant can't name a schema.
+            QueryError: A scope given model by model gives the connection's ``Meta.tenant_schema``
+                models different tenants.
         """
         scope = RowVisibility.active_tenant.get()
-        if scope is None or type(scope) in {TenantValues, AllTenants, ModelTenants}:
+        scope_class = type(scope)
+        if scope_class is ModelTenants:
+            scope = cast("ModelTenants", scope).get_schema_tenant(client.connection_alias)
+        elif scope_class is TenantValues or scope_class is AllTenants:
+            return None
+        if scope is None:
             return None
         return cls.get_schema_name(client, scope)
 

@@ -24,8 +24,8 @@ class NamedJoin(Expression, abstract=True):
     plannable: ClassVar[bool] = False
 
     #: Its JOIN repeats the rows it is joined to - kept even when nothing reads its name, since the
-    #: rows are what it declares.
-    repeats_rows: ClassVar[bool] = False
+    #: rows are what it declares; an iterator pages them by ``OFFSET``.
+    repeats_rows: bool = False
 
     #: The name it is joined under - set by ``with_name()``.
     name: str | None = None
@@ -158,7 +158,9 @@ class NamedJoin(Expression, abstract=True):
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
                 table=joined_table,
-                annotations=expression_context.annotations,
+                # The key names the joined model's fields - the query's annotations are the filtered model's,
+                # which an expression value was resolved against already.
+                annotations={},
                 visibility=expression_context.visibility,
                 value_wrapper_references=expression_context.value_wrapper_references,
             )

@@ -51,8 +51,9 @@ class ReverseRelationPrefetch:
         related_field_names = tuple(to_field.model_field_name for to_field in related_field.to_field_instances)
         PrefetchChecks.reject_unloaded_relation_keys(objs, related_field_names, field)
         relation_fields = related_field.relation_fields
+        sliced = SlicedPrefetch.is_sliced(related_query)
         if (
-            SlicedPrefetch.is_sliced(related_query)
+            sliced
             and len(relation_fields) > 1
             and related_query.model._meta.connection.features.max_expression_depth is not None
         ):
@@ -67,7 +68,17 @@ class ReverseRelationPrefetch:
                         (to_attribute, related_query),
                     )
                 return objs
-        if SlicedPrefetch.is_sliced(related_query):
+        # The slice of each parent's rows, when they are read whole.
+        owner_slice: slice | None = None
+        if sliced and (
+            not related_query.model._meta.has_primary_key or SlicedPrefetch.repeats_rows_of_a_key(related_query)
+        ):
+            # Rows of no key, or rows a to-many filter repeats, can't be picked by their keys - each parent's
+            # rows are read and sliced here, as the queryset's own slice would take them.
+            offset = related_query._offset or 0
+            owner_slice = slice(offset, None if related_query._limit is None else offset + related_query._limit)
+            related_query = SlicedPrefetch.get_unsliced(related_query)
+        elif sliced:
             # The rows of each parent's slice, picked by their keys in one subquery.
             parent_condition = RelatedRowsFetch.get_parent_keys_condition(objs, related_field_names, relation_fields)
             unsliced = SlicedPrefetch.get_unsliced(related_query)
@@ -92,7 +103,7 @@ class ReverseRelationPrefetch:
             )
 
             native_rows = HydrateAccelerator.module
-            if native_rows is not None and not to_attribute:
+            if native_rows is not None and not to_attribute and owner_slice is None:
                 # The rows grouped by their key and handed to each instance's relation in one call
                 # each - the loops below.
                 native_rows.set_prefetched_rows(
@@ -109,9 +120,9 @@ class ReverseRelationPrefetch:
                 related_object_map.setdefault(object_id, []).append(entry)
             for instance in objs:
                 relation_container = RelationAccessors.get_relation(instance, field)
+                instance_rows = related_object_map.get(getattr(instance, related_field_name), [])
                 relation_container._set_result_for_query(
-                    related_object_map.get(getattr(instance, related_field_name), []),
-                    to_attribute,
+                    instance_rows if owner_slice is None else instance_rows[owner_slice], to_attribute
                 )
             return objs
 
@@ -125,7 +136,10 @@ class ReverseRelationPrefetch:
         for instance in objs:
             relation_container = RelationAccessors.get_relation(instance, field)
             row = tuple(getattr(instance, name) for name in related_field_names)
-            relation_container._set_result_for_query(related_object_map.get(row, []), to_attribute)
+            instance_rows = related_object_map.get(row, [])
+            relation_container._set_result_for_query(
+                instance_rows if owner_slice is None else instance_rows[owner_slice], to_attribute
+            )
         return objs
 
     @staticmethod

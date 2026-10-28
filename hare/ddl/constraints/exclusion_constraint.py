@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ExclusionConstraint:
-    """``EXCLUDE USING <using> (...)`` - rejects a row whose values overlap an existing row's
+    """An exclusion constraint - rejects a row whose values overlap an existing row's
     under the given operators: ``ExclusionConstraint(name=..., expressions=(("resource", "="),
     ("during", "&&")), using="gist")`` rejects two bookings of one resource with overlapping ranges.
     Where the dialect writes exclusion constraints - the others refuse it. Not tenant-aware: add the tenant column to

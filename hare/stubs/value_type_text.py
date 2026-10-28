@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import typing
+from enum import Enum
+from types import NoneType
 from typing import Any
 
 from hare.query.enums import LookupValueShape
@@ -71,20 +73,49 @@ class ValueTypeText:
         """The annotation of a runtime class - a tuple of classes for a composite key's values, a
         parametrized type (``list[str]``, ``int | None``) for a container field's value; ``Any`` for
         a class no module holds (made at run time)."""
+        if isinstance(cls, type):
+            if cls is NoneType:
+                return "None"
+            if cls is object or not self.is_importable(cls):
+                return self.imports.add("typing", "Any")
+            return self.imports.add_class(cls)
         if isinstance(cls, tuple):
             return f"tuple[{', '.join(self.get_class_text(item) for item in cls)}]"
         origin = typing.get_origin(cls)
         if origin is not None:
+            if origin is typing.Annotated:
+                return self.get_class_text(typing.get_args(cls)[0])
+            if origin is typing.Literal:
+                return self.get_literal_text(typing.get_args(cls))
             argument_texts = [
-                "..." if argument is Ellipsis else "None" if argument is type(None) else self.get_class_text(argument)
+                "..."
+                if argument is Ellipsis
+                else "None"
+                if argument is None or argument is NoneType
+                else self.get_class_text(argument)
                 for argument in typing.get_args(cls)
             ]
             if origin in UNION_ORIGINS:
                 return self.get_union(argument_texts)
             return f"{self.get_class_text(origin)}[{', '.join(argument_texts)}]"
-        if not isinstance(cls, type) or cls is object or not self.is_importable(cls):
-            return self.imports.add("typing", "Any")
-        return self.imports.add_class(cls)
+        return self.imports.add("typing", "Any")
+
+    def get_literal_text(self, values: tuple[Any, ...]) -> str:
+        """Writes literal values, importing an enum's class instead of its runtime repr."""
+        items = []
+        for value in values:
+            if isinstance(value, Enum):
+                enum_class = type(value)
+                if (
+                    value.name is None
+                    or not self.is_importable(enum_class)
+                    or getattr(enum_class, value.name, None) is not value
+                ):
+                    return self.imports.add("typing", "Any")
+                items.append(f"{self.imports.add_class(enum_class)}.{value.name}")
+            else:
+                items.append(repr(value))
+        return f"{self.imports.add('typing', 'Literal')}[{', '.join(items)}]"
 
     @staticmethod
     def is_importable(checked_class: type) -> bool:

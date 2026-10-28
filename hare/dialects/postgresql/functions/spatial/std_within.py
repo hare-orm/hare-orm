@@ -10,6 +10,7 @@ from hare.query.expressions import (
     ExpressionResult,
     F,
 )
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -39,6 +40,7 @@ class STDWithin(Expression):
         self.radius_m = radius_m
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         field_result = F(self.field).get_result(expression_context)
         point_term = STDistance.get_point_term(self, field_result.output_field, expression_context)
         radius_result = ExpressionArguments.get_result(self, "radius_m", self.radius_m, expression_context)

@@ -43,6 +43,7 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_JOINED_CORRELATED_COLUMN_MESSAGE,
     CLICKHOUSE_KEEPER_CONNECTIONS_SQL,
     CLICKHOUSE_KEY_SERIES_GAP_SQL,
+    CLICKHOUSE_KEY_SERIES_NEXT_SQL,
     CLICKHOUSE_KEY_SERIES_SKIP_SQL,
     CLICKHOUSE_KEY_SERIES_TAKE_SQL,
     CLICKHOUSE_KILL_MUTATIONS_TEMPLATE,
@@ -419,7 +420,16 @@ class ClickhouseClient(DatabaseClient):
             while self._connection is None:
                 if self.discarded:
                     raise DBConnectionError(CLICKHOUSE_DISCARDED_CLIENT_MESSAGE.format(alias=self.connection_alias))
-                if await self.open_across_closes():
+                try:
+                    reopened = await self.open_across_closes()
+                except Exception as error:
+                    # Opened outside a statement too (generate_schemas()) - a missing database, a refused
+                    # login are hare's errors there as well.
+                    hare_error = ClickhouseClient.translate_driver_error(self, error, None, None, (), False)
+                    if hare_error is error:
+                        raise
+                    raise hare_error from error
+                if reopened:
                     # A close ran while it opened - one that found nothing to close yet leaves it here.
                     connection, self._connection = cast("Any", self._connection), None
                     if connection is not None:
@@ -490,6 +500,13 @@ class ClickhouseClient(DatabaseClient):
             rows_by_position=True,
         )
         return [row[0] for row in rows.rows]
+
+    async def get_generated_key_sql(self, model: type[Model]) -> str | None:
+        """``generateSerialID`` of the model's series - moved past the greatest key of its table first."""
+        await self.synchronize_key_series(model)
+        return CLICKHOUSE_KEY_SERIES_NEXT_SQL.format(
+            series=self.dialect.literals.get_string_literal_sql(self.get_key_series_name(model))
+        )
 
     def get_key_series_name(self, model: type[Model]) -> str:
         """The name of the series of a model's keys - the Keeper keeps one series per name for every

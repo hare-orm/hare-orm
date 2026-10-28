@@ -85,6 +85,7 @@ class Migration(migrations.Migration):
 | Код | Базы | Что находит |
 | --- | --- | --- |
 | `add_field_backfills_rows` | все | Поле NOT NULL только со значением по умолчанию на стороне Python в большой таблице |
+| `add_field_without_default` | все | Поле NOT NULL вовсе без значения по умолчанию в таблице, где могут быть строки |
 | `add_field_volatile_default` | PostgreSQL | Поле с изменчивым значением по умолчанию в базе в большой таблице |
 | `alter_field_rewrites_table` | все | Изменение поля, которое переписывает большую таблицу |
 | `add_index_without_concurrently` | PostgreSQL | Индекс строится на большой таблице, пока запись в неё ждёт |
@@ -107,6 +108,15 @@ NULL — всё внутри миграции, держа таблицу. **Бе
 [`BackfillColumn`](#backfillcolumn-and-altercolumnnotnullsafe) в миграции с `atomic = False`, затем
 сделайте NOT NULL через `AlterColumnNotNullSafe` ([приём 1](#adding-a-required-column)) — или дайте
 постоянный `db_default`: база запомнит его один раз, не трогая строки.
+
+### <a id="add-field-without-default"></a>`add_field_without_default`
+
+`AddField` поля NOT NULL без `default=` (или `auto_now`) и без `db_default`: у базы нет значения для
+строк, которые уже есть в таблице, и миграция падает на любой непустой таблице. Риск показывается для
+каждой таблицы, которую миграция не создаёт, — в `makemigrations` и в `checkmigrations` без
+подключения, а при чтении базы — для таблицы со строками. **Безопасно:** дайте полю `default=` или
+`db_default` или добавьте его с `null=True`, заполните, затем сделайте NOT NULL
+([приём 1](#adding-a-required-column)).
 
 ### <a id="add-field-volatile-default"></a>`add_field_volatile_default`
 

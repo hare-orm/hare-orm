@@ -15,3 +15,6 @@ DEFAULT_LIMIT_PARAMETER = "limit"
 DEFAULT_OFFSET_PARAMETER = "offset"
 
 DEFAULT_CURSOR_PARAMETER = "cursor"
+
+#: Built-in cursor types whose adapters hold no application classes and can be shared safely.
+CURSOR_SCALAR_TYPES = (int, str, float, bool, bytes)

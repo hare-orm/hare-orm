@@ -261,6 +261,16 @@ async def test_timedelta_scaled_by_a_number_is_a_timedelta(zone):
     assert await TemporalRecord.objects.values_list("duration", flat=True) == [timedelta(seconds=12)]
 
 
+@pytest.mark.postgresql_models
+@pytest.mark.asyncio
+async def test_a_moment_shifted_by_a_scaled_timedelta(zone):
+    duration = timedelta(hours=23, microseconds=1)
+    await make_record(duration=duration)
+    assert (
+        await evaluate(F("started_at") + (F("duration") * 1.5) / 3) == moment(2024, 1, 31, 12) + (duration * 1.5) / 3
+    )
+
+
 # -- NULL ---------------------------------------------------------------------
 
 

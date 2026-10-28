@@ -99,6 +99,26 @@ async def test_a_model_queryset_a_union_and_differently_named_columns(db):
     )
     assert written == 2
     assert {sku: count for sku, (count, _version) in (await get_stock()).items()} == {"a": 4, "e": 5, "f": 6}
+    # A union of model querysets is read as values() too - its columns were found none of: "it has []".
+    model_union = MergeDelivery.objects.filter(sku="e").union(MergeDelivery.objects.filter(sku="f"))
+    written = await (
+        MergeStock.objects.merge(model_union, on="sku")
+        .when_matched(update={"count": F("count") + F("merge_source__delivered")})
+        .when_not_matched(insert={"sku": F("merge_source__sku"), "count": F("merge_source__delivered")})
+    )
+    assert written == 2
+    assert {sku: count for sku, (count, _version) in (await get_stock()).items()} == {"a": 4, "e": 10, "f": 12}
+
+
+@requires_features(supports_merge=True)
+@pytest.mark.asyncio
+async def test_a_union_of_values_list_querysets_is_refused_as_one_is(db):
+    """A union of values_list() rows went to the database - its columns "0", "1" read as "sku", "delivered"."""
+    branches = [MergeDelivery.objects.filter(sku=sku).values_list("sku", "delivered") for sku in ("a", "b")]
+    async with capture_queries() as queries:
+        with pytest.raises(QueryError, match="give a values\\(\\) queryset"):
+            await upsert(MergeStock.objects.merge(branches[0].union(branches[1]), on="sku"))
+    assert queries.count == 0
 
 
 @requires_features(supports_merge=True)

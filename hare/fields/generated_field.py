@@ -146,6 +146,10 @@ class GeneratedField(Field[Any]):
     def get_value_annotation(self) -> Any:
         return self.output_field.get_value_annotation()
 
+    def get_json_value(self, value: Any) -> Any:
+        """The output field's JSON form, including its range, container or other custom encoding."""
+        return self.output_field.get_json_value(value)
+
     def get_column_type(self, dialect: Dialect) -> str:
         return self.output_field.get_column_type(dialect)
 

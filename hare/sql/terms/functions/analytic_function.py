@@ -20,6 +20,12 @@ class AnalyticFunction(AggregateFunction):
 
     is_aggregate = False
     is_analytic = True
+    #: Whether the column type of the value it reads holds NULL - a dialect making the value nullable to
+    #: give NULL past the partition's edge leaves one that doesn't as it is.
+    value_holds_null = True
+    #: The field of the value it reads, None for a value of no field - a dialect reads how its type holds
+    #: NULL off it.
+    value_field: Any = None
 
     def __init__(self, name: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(name, *args, **kwargs)

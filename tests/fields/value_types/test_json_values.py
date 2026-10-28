@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from hare import fields
+from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.fields.json_values import JsonValues
 
 pytestmark = pytest.mark.database_independent
@@ -49,23 +50,58 @@ def test_a_value_without_a_json_form_raises(value):
 
 
 @pytest.mark.parametrize(
-    "element_fields",
+    ("named", "mapping"),
     [
-        [fields.FloatField(), fields.UUIDField()],
-        {"ratio": fields.FloatField(), "key": fields.UUIDField()},
+        (False, False),
+        (True, False),
+        (True, True),
     ],
-    ids=["positional", "named"],
+    ids=["positional", "named_sequence", "named_mapping"],
 )
-def test_a_tuple_has_each_element_in_the_json_form_of_its_field(element_fields):
+@pytest.mark.parametrize("generated", [False, True])
+def test_a_tuple_has_each_element_in_the_json_form_of_its_field(named, mapping, generated):
     key = uuid.UUID(int=1)
+    element_fields = (
+        {"ratio": fields.FloatField(), "key": fields.UUIDField()}
+        if named
+        else [fields.FloatField(), fields.UUIDField()]
+    )
+    field = fields.TupleField(element_fields)
+    if generated:
+        field = fields.GeneratedField(RawSQLTerm("source"), output_field=field)
+    value = {"key": key, "ratio": float("nan")} if mapping else (float("nan"), key)
+    assert field.get_json_value(value) == ["NaN", str(key)]
 
-    assert fields.TupleField(element_fields).get_json_value((float("nan"), key)) == ["NaN", str(key)]
 
-
-def test_a_decimal_has_the_json_form_of_the_value_its_column_holds():
+@pytest.mark.parametrize("generated", [False, True])
+def test_a_decimal_has_the_json_form_of_the_value_its_column_holds(generated):
     field = fields.DecimalField(max_digits=6, decimal_places=2)
+    array = fields.ArrayField(field)
+    if generated:
+        field = fields.GeneratedField(RawSQLTerm("source"), output_field=field)
+        array = fields.GeneratedField(RawSQLTerm("source"), output_field=array)
 
     assert field.get_json_value(decimal.Decimal("1.5")) == "1.50"
     assert field.get_json_value(decimal.Decimal("1.005")) == "1.01"
-    assert fields.ArrayField(field).get_json_value([decimal.Decimal("2")]) == ["2.00"]
+    assert array.get_json_value([decimal.Decimal("2")]) == ["2.00"]
     assert field.get_json_value(None) is None
+
+
+@pytest.mark.parametrize("generated", [False, True])
+def test_named_tuple_json_recurses_into_held_fields(generated):
+    field = fields.ArrayField(fields.TupleField({"token": fields.UUIDField(), "data": fields.BinaryField()}))
+    if generated:
+        field = fields.GeneratedField(RawSQLTerm("source"), output_field=field)
+    assert field.get_json_value([{"data": b"\x80\xff", "token": uuid.UUID(int=7)}]) == [
+        [str(uuid.UUID(int=7)), "gP8="]
+    ]
+
+
+@pytest.mark.parametrize("generated", [False, True])
+@pytest.mark.parametrize("value", [(1,), (1, 2, 3)])
+def test_tuple_json_refuses_a_different_number_of_elements(value, generated):
+    field = fields.TupleField([fields.IntField(), fields.IntField()])
+    if generated:
+        field = fields.GeneratedField(RawSQLTerm("source"), output_field=field)
+    with pytest.raises(ValueError):
+        field.get_json_value(value)

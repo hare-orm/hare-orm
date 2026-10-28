@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
+from hare.fields.enums import ValueComputation
 from hare.query.expressions.compatibility.constants import UNSUMMED_VALUE_TYPES
 from hare.query.functions.aggregates.statistic_result_aggregate import StatisticResultAggregate
 
@@ -12,3 +15,4 @@ class Avg(StatisticResultAggregate):
 
     function_name = "AVG"
     refused_argument_value_types = UNSUMMED_VALUE_TYPES
+    computation: ClassVar[ValueComputation] = ValueComputation.AVERAGE

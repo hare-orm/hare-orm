@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable
-from itertools import repeat
+from collections.abc import Awaitable, Callable, Generator, Iterable
+from itertools import groupby, repeat
 from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -89,6 +89,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         "_returning_explicitly_requested",
         "_use_copy",
         "_conflict_update_tenants",
+        "_read_before_write",
     )
 
     def __init__(
@@ -193,6 +194,9 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         #: The objects a RETURNING row was matched to - those inserted, where ``ignore_conflicts`` may
         #: skip some; None otherwise.
         self._inserted_objects: list[TModel] | None = None
+        #: What the report reads before the rows are written - once the objects carry the values the
+        #: insert writes (their tenant, async defaults, blind indexes); None for nothing.
+        self._read_before_write: Callable[[], Awaitable[None]] | None = None
 
     async def _prepare_objects(self) -> None:
         """Gets the objects ready to be written: scoped to the active tenant, their async defaults
@@ -613,36 +617,27 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         effective_columns_all: list[str],
         omit_fields: set[str],
     ) -> None:
-        # Two groups, each with its own column list: objects carrying a primary key write it.
-        custom_pk_instances = [instance for instance in self._objects if instance._custom_generated_pk]
-        regular_instances = [instance for instance in self._objects if not instance._custom_generated_pk]
-
-        if effective_columns_all:
-            await self._execute_parameterized_inserts(
-                self._filter_columns(omit_fields, include_generated=True),
-                effective_columns_all,
-                custom_pk_instances,
-                omit_fields,
-                populate_returned_fields=self._returning,
-            )
-        elif custom_pk_instances:
-            # When all columns are omitted, there's no VALUES row to parameterize at all.
-            await DefaultRowsInsert.insert_default_rows(self, insert_sql_all, custom_pk_instances, omit_fields, False)
-
-        if effective_columns:
-            await self._execute_parameterized_inserts(
-                self._filter_columns(omit_fields),
-                effective_columns,
-                regular_instances,
-                omit_fields,
-                populate_returned_fields=self._returning,
-            )
-        elif regular_instances:
-            # All columns omitted (every non-generated column relies on its DB default) - no
-            # VALUES row to parameterize at all.
-            await DefaultRowsInsert.insert_default_rows(
-                self, insert_sql, regular_instances, omit_fields, self._returning
-            )
+        # Consecutive objects of one sort share an INSERT without changing their write order.
+        for custom_generated_pk, grouped_instances in groupby(self._objects, key=attrgetter("_custom_generated_pk")):
+            instances = list(grouped_instances)
+            columns = effective_columns_all if custom_generated_pk else effective_columns
+            if columns:
+                await self._execute_parameterized_inserts(
+                    self._filter_columns(omit_fields, include_generated=custom_generated_pk),
+                    columns,
+                    instances,
+                    omit_fields,
+                    populate_returned_fields=self._returning,
+                )
+            else:
+                # When all columns are omitted, there's no VALUES row to parameterize at all.
+                await DefaultRowsInsert.insert_default_rows(
+                    self,
+                    insert_sql_all if custom_generated_pk else insert_sql,
+                    instances,
+                    omit_fields,
+                    self._returning and not custom_generated_pk,
+                )
 
     def _runs_multiple_statements(
         self, effective_columns: list[str], effective_columns_all: list[str], omit_fields: set[str]
@@ -660,15 +655,23 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             True if more than one statement will run.
         """
         objects = list(self._objects)
-        custom_pk_count = sum(map(attrgetter("_custom_generated_pk"), objects))
         uses_multi_row_statements = not self._use_copy and (
             self._connection.features.execute_many_scales_poorly or self._returning
         )
+        groups: tuple[tuple[int, list[str]], ...]
+        if self._use_copy:
+            custom_pk_count = sum(map(attrgetter("_custom_generated_pk"), objects))
+            groups = (
+                (custom_pk_count, effective_columns_all),
+                (len(objects) - custom_pk_count, effective_columns),
+            )
+        else:
+            groups = tuple(
+                (len(list(instances)), effective_columns_all if custom_generated_pk else effective_columns)
+                for custom_generated_pk, instances in groupby(objects, key=attrgetter("_custom_generated_pk"))
+            )
         statement_count = 0
-        for group_size, columns in (
-            (custom_pk_count, effective_columns_all),
-            (len(objects) - custom_pk_count, effective_columns),
-        ):
+        for group_size, columns in groups:
             if not group_size:
                 continue
             if not columns:
@@ -698,7 +701,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         effective_columns_all: list[str],
         omit_fields: set[str],
     ) -> None:
-        """Runs every INSERT/COPY statement for ``self._objects`` through whichever strategy
+        """Runs every INSERT or bulk load for ``self._objects`` through whichever strategy
         ``use_copy`` selects.
 
         Args:
@@ -816,6 +819,8 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             self._objects, stamped_values
         )
         pre_write_states = self._get_pre_write_states()
+        if self._read_before_write is not None:
+            await self._read_before_write()
 
         omit_fields = self._analyze_db_default_fields(self._writer.regular_columns)
         # Fields a RETURNING row sets on an object while later statements of this call can still fail.

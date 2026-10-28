@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 
 class AsofJoin(NamedJoin):
-    """A model's rows joined ``ASOF`` under the name ``alias()``/``annotate()`` gives it - each row
+    """A model's rows joined as of under the name ``alias()``/``annotate()`` gives it - each row
     with the one row of the model closest to it by an inequality, among the rows equal to it by the
     other conditions::
 
@@ -39,7 +39,7 @@ class AsofJoin(NamedJoin):
         ).values("symbol", "traded_at", "quote__price")
 
     ``<name>__<field>`` reads a field of the joined row in filters, expressions, ``values()`` and
-    ``order_by()``; a row without one still comes, its values NULL - an ``ASOF LEFT JOIN``. It is
+    ``order_by()``; a row without one still comes, its values NULL - a left as-of join. It is
     never selected itself. ``on`` compares fields of the joined model with ``OuterReference()`` fields of the
     queried row: at least one equality (``symbol=OuterReference("symbol")``) and one inequality (``__lt``,
     ``__lte``, ``__gt``, ``__gte``) of the field the closest row is found by. A queryset in place of
@@ -157,7 +157,7 @@ class AsofJoin(NamedJoin):
         Raises:
             QueryError: It is used before ``alias()``/``annotate()`` named it, or its name alone reads
                 a composite primary key.
-            UnSupportedError: The database joins nothing ``ASOF``.
+            UnSupportedError: The database joins nothing as of (``Features.supports_asof_join``).
         """
         return self.get_field_result(path or self.get_primary_key_name(self.model), expression_context)
 
@@ -177,7 +177,7 @@ class AsofJoin(NamedJoin):
 
         Raises:
             QueryError: It is used before ``alias()``/``annotate()`` named it.
-            UnSupportedError: The database joins nothing ``ASOF``.
+            UnSupportedError: The database joins nothing as of (``Features.supports_asof_join``).
         """
         if self.name is None:
             raise QueryError("An AsofJoin is used through the name alias()/annotate() gives it")
@@ -266,5 +266,5 @@ class AsofJoin(NamedJoin):
         return self.get_path_result("", expression_context)
 
     def is_multi_valued(self, model: Any) -> bool:
-        """An ``ASOF`` JOIN joins at most one row to each row - it repeats none."""
+        """An as-of join joins at most one row to each row - it repeats none."""
         return False

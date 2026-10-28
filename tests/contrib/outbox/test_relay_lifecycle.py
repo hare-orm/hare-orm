@@ -181,3 +181,59 @@ async def test_a_signal_of_another_thread_calls_the_relay_on_the_event_loop_it_s
         await wakeup.unsubscribe(callback)
 
     assert calls == [(threading.get_ident(), frozenset({"widget.created"}))]
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("debug", (False, True))
+async def test_the_last_subscriber_can_stop_a_wakeup_from_another_event_loop(monkeypatch, debug):
+    wakeup = InProcessWakeup()
+    owner_loop = asyncio.get_running_loop()
+    previous_debug = owner_loop.get_debug()
+    owner_loop.set_debug(debug)
+    closed_on = []
+
+    async def close_transport():
+        closed_on.append(asyncio.get_running_loop())
+
+    monkeypatch.setattr(wakeup, "close", close_transport)
+
+    def first_callback(_topics):
+        pass
+
+    def second_callback(_topics):
+        pass
+
+    await wakeup.subscribe(first_callback, "models")
+    listener = wakeup.listen_task
+    subscribed, released = threading.Event(), threading.Event()
+    errors = []
+
+    async def second_subscriber():
+        try:
+            await wakeup.subscribe(second_callback, "models")
+            subscribed.set()
+            await asyncio.to_thread(released.wait, WAIT_DEADLINE_SECONDS)
+            await wakeup.unsubscribe(second_callback)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=lambda: asyncio.run(second_subscriber()))
+    thread.start()
+    try:
+        assert await asyncio.to_thread(subscribed.wait, WAIT_DEADLINE_SECONDS)
+        await wakeup.unsubscribe(first_callback)
+        released.set()
+        await asyncio.to_thread(thread.join, WAIT_DEADLINE_SECONDS)
+        assert not thread.is_alive()
+        assert errors == []
+        assert listener.done()
+        assert closed_on == [owner_loop]
+    finally:
+        owner_loop.set_debug(previous_debug)
+        released.set()
+        await asyncio.to_thread(thread.join, WAIT_DEADLINE_SECONDS)
+        if listener is not None and not listener.done():
+            listener.cancel()
+        if listener is not None:
+            await asyncio.gather(listener, return_exceptions=True)

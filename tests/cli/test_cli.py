@@ -3359,7 +3359,7 @@ async def test_distributed_recover_reports_then_resolves_a_committed_decision(di
     """Simulates a crash right after Transactions.distributed()'s coordinator commit but before
     the participant's own COMMIT PREPARED landed - `hare distributed-recover` must find it
     (report-only), then actually finish delivering it with --finish."""
-    xid = f"hare_dtx_{uuid.uuid4().hex}"
+    xid = DistributedCoordinator._make_xid("coordinator")
     gid = DistributedCoordinator._participant_gid(xid, "participant")
     coordinator = Connections.get("coordinator")
     participant = Connections.get("participant")
@@ -3367,7 +3367,7 @@ async def test_distributed_recover_reports_then_resolves_a_committed_decision(di
     await DistributedCoordinator._ensure_distributed_decisions_table(coordinator)
     await coordinator.execute(
         "INSERT INTO hare_distributed_decisions (xid, coordinator_alias, participant_aliases) VALUES ($1, $2, $3)",
-        [xid, "coordinator", "participant"],
+        [xid, "coordinator", '["participant"]'],
     )
     participant_tx = participant._in_transaction()
     participant_client = await participant_tx.__aenter__()
@@ -3505,7 +3505,7 @@ def test_xid_belongs_only_to_its_exact_coordinator() -> None:
 async def test_distributed_recover_older_than_filters_out_recent_entries(distributed_recover_setup) -> None:
     """A decision/prepared transaction younger than --older-than may still be mid-flight - left
     alone by default rather than resolved prematurely."""
-    xid = f"hare_dtx_{uuid.uuid4().hex}"
+    xid = DistributedCoordinator._make_xid("coordinator")
     gid = DistributedCoordinator._participant_gid(xid, "participant")
     participant = Connections.get("participant")
 
@@ -3549,7 +3549,7 @@ async def test_distributed_recover_handles_a_participant_alias_no_longer_configu
     directly, which would also break the CLI's own eager connection setup for every OTHER
     command reading this same config (HareCLI.hare_cli_context() validates every configured
     alias at startup, not just the ones distributed-recover itself touches)."""
-    xid = f"hare_dtx_{uuid.uuid4().hex}"
+    xid = DistributedCoordinator._make_xid("coordinator")
     gid = DistributedCoordinator._participant_gid(xid, "participant")
     coordinator = Connections.get("coordinator")
     participant = Connections.get("participant")
@@ -3557,7 +3557,7 @@ async def test_distributed_recover_handles_a_participant_alias_no_longer_configu
     await DistributedCoordinator._ensure_distributed_decisions_table(coordinator)
     await coordinator.execute(
         "INSERT INTO hare_distributed_decisions (xid, coordinator_alias, participant_aliases) VALUES ($1, $2, $3)",
-        [xid, "coordinator", "participant"],
+        [xid, "coordinator", '["participant"]'],
     )
     participant_tx = participant._in_transaction()
     participant_client = await participant_tx.__aenter__()
@@ -3691,7 +3691,7 @@ async def test_distributed_recover_partial_resolve_does_not_mark_whole_xid_resol
     LATER run misclassify participant_b as an orphan with no decision row (presumed abort) and
     wrongly ROLLBACK PREPARED a write that already durably committed on the coordinator."""
     setup = distributed_recover_multi_participant_setup
-    xid = f"hare_dtx_{uuid.uuid4().hex}"
+    xid = DistributedCoordinator._make_xid("coordinator")
     gid_a = DistributedCoordinator._participant_gid(xid, "participant_a")
     gid_b = DistributedCoordinator._participant_gid(xid, "participant_b")
     coordinator = Connections.get("coordinator")
@@ -3701,7 +3701,7 @@ async def test_distributed_recover_partial_resolve_does_not_mark_whole_xid_resol
     await DistributedCoordinator._ensure_distributed_decisions_table(coordinator)
     await coordinator.execute(
         "INSERT INTO hare_distributed_decisions (xid, coordinator_alias, participant_aliases) VALUES ($1, $2, $3)",
-        [xid, "coordinator", "participant_a,participant_b"],
+        [xid, "coordinator", '["participant_a", "participant_b"]'],
     )
     for connection, gid in ((participant_a, gid_a), (participant_b, gid_b)):
         tx = connection._in_transaction()

@@ -4,6 +4,7 @@ from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
+from hare.query.key_columns import KeyColumns
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.rows.native.enums import FieldBucket
 from hare.query.rows.values_rows.value_field import ValueField
@@ -24,7 +25,9 @@ class ValuesOutput:
     returned one."""
 
     @staticmethod
-    def get_composite_key_components(model: type[Model], name: str, annotations: dict[str, Any]) -> tuple[str, ...]:
+    def get_composite_key_components(
+        model: type[Model], name: str, annotations: dict[str, Any], alias_keys: Collection[str] = ()
+    ) -> tuple[str, ...]:
         """The field paths of a selected name reading a composite key - ``pk`` of a composite
         primary key, or a relation to one (``target``, ``target__pk``, ``tags``).
 
@@ -32,10 +35,15 @@ class ValuesOutput:
             model: The queried model.
             name: The selected name.
             annotations: The query's annotations.
+            alias_keys: Names used as aliases rather than scalar annotations.
 
         Returns:
             The key's field paths in key order, empty when the name reads one column.
         """
+        if annotations:
+            expanded = KeyColumns.get_primary_key_name(model, annotations, name)
+            if name not in annotations or name in alias_keys or expanded == "pk":
+                name = expanded
         if name in annotations:
             return ()
         field_paths = ConcreteFieldPaths.get_paths(model, name)
@@ -157,13 +165,17 @@ class ValuesOutput:
         raise FieldError(f"Unknown field {field!r} for model {query.model.__name__!r}")
 
     @staticmethod
-    def get_selected_value_field(query: ValuesQuery, model: type[TModel], field: str) -> ValueField:
+    def get_selected_value_field(
+        query: ValuesQuery, model: type[TModel], field: str, *, is_root: bool = True
+    ) -> ValueField:
         """What a selected name's value is read as.
 
         Args:
             query: The values query.
             model: The model the name is a path from.
             field: The name.
+            is_root: Whether the name is the selected one, not its rest past a relation - only the selected
+                name can be one of the query's annotations.
 
         Returns:
             The model and name of a model field (the model None for an annotation), with the field
@@ -172,7 +184,7 @@ class ValuesOutput:
         Raises:
             FieldError: The name is neither a field nor an annotation.
         """
-        if model is query.model:
+        if is_root and model is query.model:
             field = ValuesOutput.get_concrete_field_path(query, field)
 
         if field in model._meta.fetch_fields:
@@ -183,7 +195,7 @@ class ValuesOutput:
         if layout_entry is not None and layout_entry[2] == FieldBucket.NATIVE:
             return ValueField(model, field, layout_entry[1], is_native=True)
 
-        if field in query._annotations:
+        if is_root and field in query._annotations:
             # Read from this build's own dict - the annotation expression is shared between queries.
             field_object = query._annotation_output_fields.get(field)
             return ValueField(None, field, field_object or None, is_native=not field_object)
@@ -194,7 +206,7 @@ class ValuesOutput:
         field_, __, forwarded_fields = field.partition("__")
         if field_ in model._meta.fetch_fields:
             new_model = model._meta.fields_map[field_].related_model  # type: ignore[attr-defined]
-            return ValuesOutput.get_selected_value_field(query, new_model, forwarded_fields)
+            return ValuesOutput.get_selected_value_field(query, new_model, forwarded_fields, is_root=False)
 
         raise FieldError(f"Unknown field {field!r} for model {model.__name__!r}")
 

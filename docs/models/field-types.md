@@ -192,7 +192,7 @@ to it.
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
 | `JSONField[T]` | `dict` / `list` (or a Pydantic model class) | `encoder`, `decoder`, `field_type` (for OpenAPI docs) | `JSON` (PostgreSQL: `JSONB`); no btree index (`unique=True`/`db_index=True`/`Index(fields=...)`), but a non-btree `Meta.indexes` entry such as `GinIndex(fields=[...])` is accepted |
 | `JSONTextField` | `dict` / `list` / any JSON value | as `JSONField` | `JSONField`'s column, but a `String` of the JSON text on ClickHouse, whose `JSON` type drops a key's null and a list at the top: every value reads back as written (the outbox's `payload` and `headers`) |
-| `UUIDField` | `uuid.UUID` | — (`primary_key=True` without an explicit `default` auto-sets `default=uuid4`) | `CHAR(36)` (PostgreSQL: `UUID`); read back as a plain `uuid.UUID` on every driver |
+| `UUIDField` | `uuid.UUID` | `version` (a UUID of another version of RFC 9562 is refused wherever hare passes it to the database — in a write, a filter, the key of an existing row and a reference to it, `ValidationError` — a value the database computes itself, such as `F(...)` or `db_default`, isn't checked; `primary_key=True` without an explicit `default` auto-sets `default=uuid4`, `Uuid7.new` with `version=7`) | `CHAR(36)` (PostgreSQL: `UUID`); read back as a plain `uuid.UUID` on every driver |
 | `BinaryField` | `bytes` (`bytearray`, `memoryview` too; anything else raises `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); filters by equality, `__in`, `__isnull` and the comparisons (byte order) — a text lookup (`__contains`, ...) raises `FieldError` — set by `update()`, takes `unique=True`/`db_index=True` (a B-tree index — on PostgreSQL a value over about 2.7 KB can't be indexed) |
 
 ```python
@@ -288,6 +288,9 @@ moments they are on every database — on PostgreSQL too (asyncpg and rust_pg al
 work on them. A PostgreSQL `infinity`/`-infinity` written by other means is read as the same Python
 extremes: `date.max`/`date.min`, `datetime.max`/`datetime.min`. Under a time zone east of UTC
 `datetime.max` (UTC) is past the datetime range once shown in it and is refused with `ValidationError`.
+Under `use_timezone=False` a naive `datetime.min`/`datetime.max` is that moment in UTC, as an aware one
+is, and reads back as the naive extreme — not a local wall clock, which east or west of UTC would fall
+past the range.
 
 ### <a id="json-values"></a>JSON values
 
@@ -361,6 +364,9 @@ class Book(Model):
   is refused by the database where it refuses the change under a generated column.
 - `output_field` — a field giving the column's type and how its value is read, compared, filtered and
   described in a schema.
+  Its JSON form and ordering rules apply too, including JSON value ordering and the refusal to order
+  ClickHouse `DynamicField` and `VariantField` columns. Ordering an `F()` annotation of the column
+  follows the same rules as ordering the column directly.
 - `stored=True` computes the value on write; `stored=False` — a `VIRTUAL` column, computed on read —
   works on SQLite and PostgreSQL 18, and an older PostgreSQL server raises `UnSupportedError`
   (`Features.supports_virtual_generated_columns`).

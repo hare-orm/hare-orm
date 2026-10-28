@@ -47,8 +47,8 @@ SHORTENED_IDENTIFIER_CACHE_SIZE = 1024
 
 #: The names a query filtered and sorted outside a derived table selects its conditions and sort keys
 #: under - followed by their position.
-CORRELATED_CONDITION_PREFIX = "hare_condition_"
-CORRELATED_SORT_KEY_PREFIX = "hare_sort_key_"
+CORRELATED_CONDITION_PREFIX = "hare condition "
+CORRELATED_SORT_KEY_PREFIX = "hare sort key "
 
 #: What an INSERT-only builder method raises on a query that inserts nothing.
 QUERY_WITHOUT_INSERT_MESSAGE = "'Query' object has no attribute 'insert'"

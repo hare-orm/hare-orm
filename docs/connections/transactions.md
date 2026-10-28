@@ -147,6 +147,14 @@ bounds it. On `asyncpg`, a task cancelled while the pool opens a new connection 
 cancellation at once; the connect itself runs to its end (bounded by the connection's `timeout`) and the
 connection is closed — asyncpg interrupted in its TLS negotiation would leave an error no one reads.
 
+### <a id="objects-after-a-rollback"></a>Objects after a rollback
+
+A rollback reverts the rows, and hare puts back on the objects what the rolled-back writes changed on them:
+whether an object counts as saved, its primary key, its version, `auto_now` stamps, the values the
+database gave the row (a computed column, a `db_default`, a generated key) and the keys a reverse
+relation's `add()`/`set()` wrote into the related objects. A level that rolls back puts back what its own
+writes changed. A value the code assigned itself stays as assigned — a later `save()` writes it.
+
 ### <a id="read-only-and-statement-timeouts"></a>Read-only transactions and statement timeouts
 
 ```python
@@ -182,6 +190,11 @@ hare then treats the transaction as aborted, like PostgreSQL does after an error
 `TransactionManagementError` ("current transaction is aborted"), leaving the block without an exception
 raises the same error instead of committing, and nothing is committed. The same applies to any other
 statement SQLite answers by ending the transaction, such as a trigger's `RAISE(ROLLBACK, ...)`.
+
+If a cancelled `BEGIN` outlives the bounded cancellation wait, its transaction cannot commit or
+accept more statements. SQLite keeps the shared connection locked until that `BEGIN` finishes and
+is rolled back, restoring its busy timeout before another caller uses it. asyncpg discards the
+physical connection instead of returning it to the pool for reuse.
 
 Nesting rules:
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from hare.exceptions import ValidationError
+from hare.fields.data.constants import UUID_VERSION_DEFAULTS
 from hare.fields.field import Field
+from hare.fields.validators.formats.uuid_version_validator import UUIDVersionValidator
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -14,27 +16,40 @@ TUuid = TypeVar("TUuid", UUID, UUID | None)
 
 class UUIDField(Field[TUuid]):
     """A UUID - a ``CHAR(36)`` column, or the database's own UUID type. As a primary key without a
-    ``default`` or ``db_default`` it defaults to ``uuid4()``."""
+    ``default`` or ``db_default`` it defaults to ``uuid4()`` - to ``Uuid7.new()`` with ``version=7``.
+
+    Args:
+        version: The version of RFC 9562 every value is of - another one is refused on every write and in
+            a filter (``ValidationError``); any version when None.
+    """
 
     field_type = UUID
 
     SQL_TYPE = "CHAR(36)"
 
     @overload
-    def __init__(self: UUIDField[UUID], *, null: Literal[False] = False, **kwargs: Any) -> None: ...
+    def __init__(
+        self: UUIDField[UUID], *, null: Literal[False] = False, version: int | None = None, **kwargs: Any
+    ) -> None: ...
 
     @overload
-    def __init__(self: UUIDField[UUID | None], *, null: Literal[True], **kwargs: Any) -> None: ...
+    def __init__(
+        self: UUIDField[UUID | None], *, null: Literal[True], version: int | None = None, **kwargs: Any
+    ) -> None: ...
 
-    def __init__(self, **kwargs: Any) -> None:
-        # A uuid4 default only when neither default nor db_default is given.
+    def __init__(self, *, version: int | None = None, **kwargs: Any) -> None:
+        # A default only when neither default nor db_default is given - of the field's version.
         if (
             (kwargs.get("primary_key") or kwargs.get("pk", False))
             and "default" not in kwargs
             and "db_default" not in kwargs
+            and version in UUID_VERSION_DEFAULTS
         ):
-            kwargs["default"] = uuid4
+            kwargs["default"] = UUID_VERSION_DEFAULTS[version]
         super().__init__(**kwargs)
+        self.version = version
+        if version is not None:
+            self.validators = [*self.validators, UUIDVersionValidator(version)]
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> str | None:
         if value is not None and not isinstance(value, UUID):

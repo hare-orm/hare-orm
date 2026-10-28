@@ -26,7 +26,7 @@
 `Q(Exists(...))`, всё остальное даёт `TypeError`; `Avg("x", distinct=True)` усредняет различные
 значения). `_filter` — это `FILTER (WHERE ...)` агрегата: строка, не прошедшая его, не участвует в
 агрегате (группа без подходящих строк даёт `0` для `Count` и `None` для остальных; `Sum` в ClickHouse
-даёт собственный `0`). `Count` колонки
+даёт собственный `0` для поля без `null=True`). `Count` колонки
 запрашиваемой модели, в которой нет NULL (`Count("id")`, `Count("pk")`), считает строки: PostgreSQL и
 ClickHouse пишут его как `COUNT(*)` и не читают колонку; колонка, допускающая NULL, `distinct=True` и
 колонка через связь считаются как есть. `_filter`, читающий агрегатное вычисляемое значение
@@ -116,9 +116,12 @@ ClickHouse). hare этого не проверяет.
 `Round`, `StdDev`/`Variance` и `+ - * / % **` принимают числа (арифметика — ещё даты, моменты и интервалы
 — см. [Арифметика с датой и временем](expressions.ru.md#date-time-arithmetic)), текстовые функции
 (`Upper`, `Length`, `Trim` и т. д.) — текст, `Sum`/`Avg` — числа и интервалы (`Abs("name")`,
-`Length("price")`, `Sum("in_print")` дают ошибку). `Max`/`Min` принимают любое поле: тип, для которого у
-базы нет `min()`/`max()` (`jsonb`, диапазоны, `macaddr` и т. д. в PostgreSQL), отклоняет сама база, а SQLite
-берёт наименьший и наибольший сохранённый текст JSON. ClickHouse сравнивал бы текст JSON-значения (`9` больше
+`Length("price")`, `Sum("in_print")` дают ошибку). `Max`/`Min` принимают любое поле, которое база
+упорядочивает: тип, для которого у неё нет `min()`/`max()` (`boolean`, `uuid`, `jsonb`, `macaddr`,
+диапазоны и мультидиапазоны, `hstore`, `ltree`, `tsvector`, геометрии и `vector` в PostgreSQL), и поле, по
+которому запрос не сортирует (`DynamicField`, `VariantField` в ClickHouse), дают `UnSupportedError` до
+отправки SQL, а SQLite берёт наименьший и наибольший сохранённый текст JSON. ClickHouse сравнивал бы текст
+JSON-значения (`9` больше
 `100`) — `Max`/`Min` JSON-поля или JSON-ключа дают там `FieldError`. Где преобразование
 задумано, его делает `Cast()`: `Sum(Cast("in_print", IntField()))` считает истинные значения. Диапазон
 PostgreSQL тоже не текст: `Upper("span")` даёт ошибку, а не выполняет `upper()` диапазона PostgreSQL — его
@@ -126,6 +129,9 @@ PostgreSQL тоже не текст: `Upper("span")` даёт ошибку, а �
 число: каждая база прочитала бы сохранённый JSON по-своему — SQLite текст ключа вместе с кавычками, — поэтому
 `Upper("data__title")` даёт ошибку, а `Upper(Cast("data__title", CharField(max_length=200)))` берёт значение
 ключа как текст. Поле другого типа (двоичное, массив и т. п.) не проверяется.
+
+Для этих проверок типов и правил сравнения `GeneratedField` использует свой `output_field`. В ClickHouse
+вычисляемый JSON соблюдает те же ограничения `Min`/`Max` и `Greatest`/`Least`, что и обычный JSON.
 
 ```python
 await Book.objects.annotate(rounded=Ceil(F("price") / 10) * 10)
@@ -184,6 +190,9 @@ ClickHouse отказывает при числе повторов `Repeat` ил
 | `Greatest(*values)`, `Least(*values)` | наибольшее/наименьшее из двух и более значений; `NULL` среди них PostgreSQL и ClickHouse пропускают, а SQLite даёт `NULL` |
 | `NullIf(expression, other)` | `NULL`, если значение равно `other`, иначе само значение |
 | `Collate(expression, collation)` | текст, который сравнивается и сортируется по правилу сравнения (collation) базы |
+
+`Coalesce()` проверяет `GeneratedField` через его `output_field`: дробное значение по умолчанию рядом
+с вычисляемым целым сохраняет дробную часть, как и рядом с обычной целочисленной колонкой.
 
 `Cast` — собственное преобразование базы: `CAST` PostgreSQL и SQLite, функции преобразования ClickHouse;
 типов дат в SQLite нет, поэтому дату или время hare читает из хранимого текста в UTC. Приведение к целому

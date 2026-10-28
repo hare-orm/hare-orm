@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 @asynccontextmanager
 async def capture_queries(using: str | DatabaseClient | None = None) -> AsyncGenerator[QueryCounter]:
     """Counts every query hare sends to ``using`` from the block and the tasks it starts - every
-    ``QueryExecuted`` of the connection, COPY included.
+    ``QueryExecuted`` of the connection, bulk loads included.
 
     Args:
         using: A connection alias or client - the current context's default connection by default.

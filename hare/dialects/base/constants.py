@@ -43,10 +43,10 @@ QUERY_EXECUTING_METHOD_NAMES = frozenset(
 
 #: Client methods ``DatabaseClient.translate_exceptions`` reports to the observers
 #: (``QueryExecuted``) and runs the query wrappers around - every query-executing method and the
-#: bulk COPY load.
+#: bulk load.
 OBSERVED_METHOD_NAMES = QUERY_EXECUTING_METHOD_NAMES | {"copy"}
 
-#: The client methods ``command_timeout`` bounds: the query-executing ones and COPY. Not
+#: The client methods ``command_timeout`` bounds: the query-executing ones and the bulk load. Not
 #: begin/commit/rollback/savepoint - cancelling one leaves the transaction state unknown - nor
 #: stream.
 COMMAND_TIMEOUT_METHOD_NAMES = QUERY_EXECUTING_METHOD_NAMES | {"copy"}

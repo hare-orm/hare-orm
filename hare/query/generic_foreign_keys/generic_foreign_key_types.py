@@ -45,22 +45,48 @@ class GenericForeignKeyTypes:
 
         Args:
             queryset: The queryset.
-            names: Field names or orderings.
+            names: Field names, orderings (``"-target__type"``, ``F("target__type").asc()``) or ``F()``.
 
         Returns:
             Name to its expression.
         """
-        for name in names:
+        field_names = GenericForeignKeyTypes.get_named_fields(names)
+        for name in field_names:
             # A type is read as <field>__type - checked here first, most names read none.
-            if isinstance(name, str) and name.endswith(GENERIC_FOREIGN_KEY_TYPE_SUFFIX):
+            if name.endswith(GENERIC_FOREIGN_KEY_TYPE_SUFFIX):
                 break
         else:
             return {}
         return {
             name: expression
-            for name, expression in GenericForeignKeyTypes.get_type_aliases(queryset.model, names).items()
+            for name, expression in GenericForeignKeyTypes.get_type_aliases(queryset.model, field_names).items()
             if name not in queryset._annotations
         }
+
+    @staticmethod
+    def get_named_fields(names: tuple[Any, ...]) -> tuple[str, ...]:
+        """The field names among names, orderings and references - a string, the name of an ``F()``, the
+        field an ``Ordering`` orders by; anything else left out.
+
+        Args:
+            names: Field names, orderings or references.
+
+        Returns:
+            The names.
+        """
+        # Local import: the expressions import this module.
+        from hare.query.expressions.f import F
+        from hare.query.expressions.ordering import Ordering
+
+        field_names: list[str] = []
+        for name in names:
+            if isinstance(name, Ordering):
+                name = name.target
+            if isinstance(name, F):
+                name = name.name
+            if isinstance(name, str):
+                field_names.append(name)
+        return tuple(field_names)
 
     @staticmethod
     def get_type_aliases(model: type[Model], names: tuple[Any, ...]) -> dict[str, Case]:

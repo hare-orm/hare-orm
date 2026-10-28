@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.exceptions import QueryError
+from hare.exceptions import QueryError, UnSupportedError
 from hare.query.expressions import Expression
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.expression_result import ExpressionResult
@@ -54,9 +54,22 @@ class OffsetWindowFunction(WindowFunction):
         )
         offset = ExpressionArguments.get_result(self, "offset", self.offset, expression_context)
         default = ExpressionArguments.get_result(
-            self, "default", self.default, expression_context, encoder=default_encoder
+            self, "default", self.default, expression_context, encoder=default_encoder, typed_by_encoder=True
         )
-        term = self.get_analytic_term(field_result.term, offset.term, default.term)
+        value_holds_null = output_field is None or expression_context.dialect.types.holds_null(output_field)
+        default_term = default.term
+        if not value_holds_null and self.default is None:
+            if not (type(self.offset) is int and self.offset == 0):
+                raise UnSupportedError(
+                    f"{type(self).__name__}({self.field!r}) is NULL past the partition's edge, which a column of "
+                    f"{type(output_field).__name__} on {expression_context.dialect.name} doesn't hold - give it a "
+                    "default of the field's type"
+                )
+            # The current row is never past the edge - its value stands in for a NULL the type lacks.
+            default_term = field_result.term
+        term = self.get_analytic_term(field_result.term, offset.term, default_term)
+        term.value_holds_null = value_holds_null
+        term.value_field = output_field
         joins = ExpressionResult.dedup_joins(field_result.joins, offset.joins, default.joins)
         return term, joins, output_field
 
@@ -82,4 +95,5 @@ class OffsetWindowFunction(WindowFunction):
                 f"{type(self).__name__}({self.field!r}) default {default!r} doesn't fit the field's own type "
                 f"{type(output_field).__name__} - the result would lose it when decoded"
             )
-        return dialect.types.get_db_value(output_field, default, output_field.model)
+        # Bound as the column reads where it is compared - the value the window reads.
+        return dialect.types.get_read_column_value(output_field, default, output_field.model)

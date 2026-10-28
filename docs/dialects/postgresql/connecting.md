@@ -162,6 +162,8 @@ raises `ConfigurationError`.
 drivers (asyncpg with a TLS mode — an `ssl=` `SSLContext` holds its certificates itself, and the two
 together raise `ConfigurationError`). A file that can't be read or holds no certificate raises
 `ConfigurationError` before a connection is opened.
+`rust_pg` also reports TLS setup failures as `ConfigurationError`, including verification requested
+on a system with no usable root certificates; these failures are not retried as network errors.
 
 With `rust_pg` (`postgresql://`) every query parameter must be one the driver understands:
 `min_size`/`max_size`, `max_inactive_connection_lifetime`, `statement_cache_size`, `ssl_root_cert`,
@@ -185,7 +187,9 @@ retries. A pool that fails to open closes the connections it has opened. With
 `user`/`password`/`host`/`database` left unset, both drivers fall back to libpq's `PGUSER`/
 `PGPASSWORD`/`PGHOST`/`PGDATABASE` environment variables (then the OS user and `localhost`).
 
-The password may contain `@`, `/`, `?`, `#`, `[` and `]` literally (percent-encoding works too), a query
+The password may contain `@`, `/`, `?`, `#`, `[` and `]` literally (percent-encoding works too) — except
+an `@` followed by `?name=value` with no further `?` (`p@s?a=b`), which reads as a host and a query:
+percent-encode such a password (`p%40s%3Fa%3Db`). A query
 value may contain `@`, a percent-encoded database name is decoded (`/my%20db` → `my db`), and a
 unix-socket directory can be given as `?host=/var/run/postgresql` with an empty host part or
 percent-encoded as the host itself (`postgresql://user@%2Fvar%2Frun%2Fpostgresql/db`). An IPv6 zone id is

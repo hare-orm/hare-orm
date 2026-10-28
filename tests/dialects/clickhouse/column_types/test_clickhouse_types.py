@@ -622,3 +622,16 @@ async def test_a_scaled_duration_shares_a_type_with_a_duration_beside_it(clickho
         datetime.timedelta(seconds=5, microseconds=2),
         long_duration,
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_after_an_enum_label_compares_the_label(clickhouse_db):
+    """The boundary of a cursor past a CharEnumField was bound as the number the enum type writes it as,
+    compared with the label the column is ordered by - ClickHouse found no common type."""
+    for device_id, status in ((1, DeviceStatus.ONLINE), (2, DeviceStatus.OFFLINE), (3, DeviceStatus.ONLINE)):
+        await make_device(device_id, status=status).save()
+    query = Device.objects.order_by("status", "id")
+    for _ in range(2):
+        # The second time the boundary is bound again into the plan kept by the first.
+        rows = await query.after_cursor(DeviceStatus.OFFLINE, 2).values_list("id", flat=True)
+        assert rows == [1, 3]

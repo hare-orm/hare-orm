@@ -8,7 +8,6 @@ from hare.dialects.postgresql.transactions.constants import (
     POSTGRESQL_PREPARED_TRANSACTIONS_LIMIT_REACHED_MESSAGE,
 )
 from hare.exceptions import ConfigurationError
-from hare.transactions.constants import DISTRIBUTED_DECISIONS_TABLE_NAME
 
 if TYPE_CHECKING:
     from hare.exceptions import OperationalError
@@ -40,9 +39,9 @@ class PostgresqlTwoPhaseCommit(TwoPhaseCommit):
             sql += " AND prepared < now() - make_interval(secs => $2)"
         return sql
 
-    def get_decisions_table_sql(self) -> str:
+    def get_decisions_table_sql(self, table: str) -> str:
         return (
-            f"CREATE TABLE IF NOT EXISTS {DISTRIBUTED_DECISIONS_TABLE_NAME} ("
+            f"CREATE TABLE IF NOT EXISTS {table} ("
             "xid TEXT PRIMARY KEY, "
             "coordinator_alias TEXT NOT NULL, "
             "participant_aliases TEXT NOT NULL, "
@@ -50,18 +49,18 @@ class PostgresqlTwoPhaseCommit(TwoPhaseCommit):
             "resolved_at TIMESTAMPTZ)"
         )
 
-    def get_decision_insert_sql(self) -> str:
+    def get_decision_insert_sql(self, table: str) -> str:
         return (
-            f"INSERT INTO {DISTRIBUTED_DECISIONS_TABLE_NAME} "  # nosec B608 - a constant table name
+            f"INSERT INTO {table} "  # nosec B608 - a constant table name
             "(xid, coordinator_alias, participant_aliases) VALUES ($1, $2, $3)"
         )
 
-    def get_finish_decision_sql(self) -> str:
-        return f"UPDATE {DISTRIBUTED_DECISIONS_TABLE_NAME} SET resolved_at = now() WHERE xid = $1"  # nosec B608
+    def get_finish_decision_sql(self, table: str) -> str:
+        return f"UPDATE {table} SET resolved_at = now() WHERE xid = $1"  # nosec B608
 
-    def get_pending_decisions_sql(self, with_age_limit: bool) -> str:
+    def get_pending_decisions_sql(self, table: str, with_age_limit: bool) -> str:
         sql = (
-            f"SELECT xid, participant_aliases FROM {DISTRIBUTED_DECISIONS_TABLE_NAME} "  # nosec B608
+            f"SELECT xid, participant_aliases FROM {table} "  # nosec B608
             "WHERE resolved_at IS NULL"
         )
         if with_age_limit:

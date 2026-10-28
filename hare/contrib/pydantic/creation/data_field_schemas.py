@@ -5,7 +5,7 @@ from copy import copy
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
-from pydantic import SerializerFunctionWrapHandler, field_validator, model_serializer
+from pydantic import SerializationInfo, SerializerFunctionWrapHandler, field_validator, model_serializer
 
 from hare import (
     ForeignKeyFieldInstance,
@@ -132,13 +132,14 @@ class DataFieldSchemas:
         ]
 
     @staticmethod
-    def get_unset_value_dropping_serializer(field_names: frozenset[str]) -> Any:
+    def get_unset_value_dropping_serializer(field_names: frozenset[str], *, uses_aliases: bool = False) -> Any:
         """The serializer leaving out of a dump the fields the database or the ORM fills while they
         hold None - a ``db_default``, a generated value, an ``auto_now`` stamp, the tenant - so
         ``Model.objects.create(**schema.model_dump())`` writes no NULL into a column refusing it.
 
         Args:
             field_names: The fields.
+            uses_aliases: The schema can serialize these fields under aliases.
 
         Returns:
             The ``model_serializer`` of the schema.
@@ -152,7 +153,28 @@ class DataFieldSchemas:
                         del data[field_name]
             return data
 
-        return model_serializer(mode="wrap")(drop_unset_values)
+        if not uses_aliases:
+            return model_serializer(mode="wrap")(drop_unset_values)
+
+        def drop_aliased_unset_values(
+            self: PydanticModel, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+        ) -> Any:
+            data = handler(self)
+            if isinstance(data, dict):
+                by_alias = cast("bool | None", info.by_alias)
+                if by_alias is None:
+                    by_alias = self.model_config.get("serialize_by_alias", False)
+                for field_name in field_names:
+                    output_name = (
+                        type(self).model_fields[field_name].serialization_alias or field_name
+                        if by_alias
+                        else field_name
+                    )
+                    if data.get(output_name) is None:
+                        data.pop(output_name, None)
+            return data
+
+        return model_serializer(mode="wrap")(drop_aliased_unset_values)
 
     @staticmethod
     def build_orm_field_validators(creator: PydanticModelCreator) -> dict[str, Any]:

@@ -8,7 +8,8 @@ POSTGRES_SET_LOCAL_LOCK_TIMEOUT_SQL = "SET LOCAL lock_timeout = {milliseconds}"
 POSTGRES_SET_SESSION_LOCK_TIMEOUT_SQL = "SET lock_timeout = {milliseconds}"
 #: The setting holding the tenants of a transaction on a connection with
 #: ``tenant_row_level_security`` - a JSON array of the tenant values as text, or
-#: ``POSTGRESQL_ALL_TENANTS_SETTING_VALUE``; unset (NULL or '') - no tenant.
+#: ``POSTGRESQL_ALL_TENANTS_SETTING_VALUE``; under a scope given model by model a JSON object of each
+#: table's (the array, or the value as a JSON string); unset (NULL or '') - no tenant.
 POSTGRESQL_TENANT_SETTING_NAME = "hare.tenant"
 POSTGRESQL_ALL_TENANTS_SETTING_VALUE = "*"
 #: Sets the tenants of the transaction - ``value`` is a string literal.

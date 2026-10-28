@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 class QueryClauses:
     """How a dialect writes the clauses of a statement whose SQL differs between databases -
-    ``DISTINCT ON``, row locks, ``LIMIT``/``OFFSET``, ``RETURNING``, ``ON CONFLICT``, ``UPDATE ...
+    the distinct rows by fields, row locks, ``LIMIT``/``OFFSET``, ``RETURNING``, ``ON CONFLICT``, ``UPDATE ...
     FROM`` - and the statements hare writes as text (``EXPLAIN``, an ``UPDATE`` from a ``VALUES``
     table). This base writes ISO SQL; a clause ISO SQL has no form for raises ``UnSupportedError``
     when a statement needs it.

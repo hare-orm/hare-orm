@@ -164,3 +164,22 @@ async def test_a_tenant_schema_without_the_tables_is_passed_over():
             assert (await client.delete_preview()).soft_deleted
             await client.delete()
         assert await get_live_bill_ids("beta") == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_shared_row_deleted_in_a_scope_given_model_by_model_cascades_in_every_tenant_schema():
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    async with tenant_context():
+        await create_tenants_with_bills()
+        with Tenancy.scope({TenantBill: "acme"}):
+            client = await SharedClient.objects.get(id=1)
+            preview = await client.delete_preview()
+            assert preview
+            await client.delete()
+        assert await get_live_bill_ids("acme") == [2]
+        assert await get_live_bill_ids("beta") == [2]
+        with Tenancy.scope({TenantBill: "beta"}):
+            await (await SharedClient.objects.include_deleted().get(id=1)).restore(cascade=True)
+        assert await get_live_bill_ids("acme") == [1, 2]
+        assert await get_live_bill_ids("beta") == [1, 2]

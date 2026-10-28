@@ -21,6 +21,7 @@ from hare.contrib.pydantic.constants import (
 )
 from hare.contrib.pydantic.creation.computed_field_schemas import ComputedFieldSchemas
 from hare.contrib.pydantic.creation.data_field_schemas import DataFieldSchemas
+from hare.contrib.pydantic.creation.extra_field_schemas import ExtraFieldSchemas
 from hare.contrib.pydantic.creation.field_descriptions import FieldDescriptions
 from hare.contrib.pydantic.creation.field_map import FieldMap
 from hare.contrib.pydantic.creation.model_annotations import ModelAnnotations
@@ -54,7 +55,7 @@ class PydanticModelCreator:
 
     #: (model, index key) -> the Pydantic model generated from the model. Dropped with the model: a
     #: re-registered class for the same table would otherwise get the old class's schema, whose
-    #: ``orig_model`` still points at the unregistered class. The key is a hash of what shapes the
+    #: ``source_model`` still points at the unregistered class. The key is a hash of what shapes the
     #: schema - the model's schema and table (two classes a factory builds share their qualified name),
     #: its qualified name, its fields and computed fields, the relational fields with the names of
     #: their schemas, ``optional``, ``allow_cycles``, ``exclude_read_only``, the model config, the
@@ -74,6 +75,8 @@ class PydanticModelCreator:
         exclude: tuple[str, ...] | None = None,
         include: tuple[str, ...] | None = None,
         computed: tuple[str, ...] | None = None,
+        extra_fields: dict[str, Any] | None = None,
+        related_values: dict[str, str] | None = None,
         optional: tuple[str, ...] | None = None,
         allow_cycles: bool | None = None,
         sort_alphabetically: bool | None = None,
@@ -94,6 +97,8 @@ class PydanticModelCreator:
             exclude is None
             and include is None
             and computed is None
+            and extra_fields is None
+            and related_values is None
             and optional is None
             and sort_alphabetically is None
             and allow_cycles is None
@@ -126,13 +131,24 @@ class PydanticModelCreator:
             exclude=exclude,
             include=include,
             computed=computed,
+            extra_fields=extra_fields,
+            related_values=related_values,
             allow_cycles=allow_cycles,
             sort_alphabetically=sort_alphabetically,
             max_recursion=_max_recursion,
             model_config=model_config,
         )
         PydanticModelCreator.raise_if_unknown_names(
-            model, {"include": include, "exclude": exclude, "optional": optional}, computed, self.meta.model_computed
+            model,
+            {"include": include, "exclude": exclude, "optional": optional},
+            computed,
+            {*self.meta.model_computed, *self.meta.model_extra_fields, *self.meta.model_related_values},
+        )
+        ExtraFieldSchemas.raise_if_wrong(
+            model,
+            self.meta.extra_fields,
+            self.meta.related_values,
+            {*model._meta.fields_map, *model._meta.generic_foreign_key_fields, *self.meta.model_computed},
         )
 
         self._exclude_read_only: bool = exclude_readonly
@@ -199,6 +215,11 @@ class PydanticModelCreator:
                 hashval += ";exclude_sensitive"
             if self._relations_as_ids:
                 hashval += ";relations_as_ids"
+            if self.meta.extra_fields:
+                extra_fields = sorted((name, repr(annotation)) for name, annotation in self.meta.extra_fields.items())
+                hashval += f";extra_fields={extra_fields}"
+            if self.meta.related_values:
+                hashval += f";related_values={sorted(self.meta.related_values.items())}"
             self.__hash = b32encode(sha3_224(hashval.encode("utf-8")).digest()).decode("utf-8").lower()[:HASH_LENGTH]
         return self.__hash
 
@@ -207,7 +228,7 @@ class PydanticModelCreator:
         model: type[Model],
         names_by_argument: dict[str, tuple[str, ...]],
         computed: tuple[str, ...],
-        computed_names: tuple[str, ...],
+        declared_names: set[str],
     ) -> None:
         """Refuses a name given to the creator that names nothing of the model - a misspelt ``exclude``
         would leave the field it means in the schema. A path into a relation is checked by the
@@ -217,14 +238,14 @@ class PydanticModelCreator:
             model: The model.
             names_by_argument: The names and paths given as ``include``/``exclude``/``optional``.
             computed: The names and paths given as ``computed``.
-            computed_names: Every computed field of the model itself.
+            declared_names: The computed fields, extra fields and related values declared on this schema.
 
         Raises:
             ConfigurationError: A name is neither a field, a relation nor a computed field of the
                 model, or a computed name isn't a method or property of it.
         """
         meta = model._meta
-        known_names = {*meta.fields_map, *meta.generic_foreign_key_fields, *computed_names}
+        known_names = {*meta.fields_map, *meta.generic_foreign_key_fields, *declared_names}
         for argument_name, names in names_by_argument.items():
             for name in names:
                 if name.split(".", 1)[0] not in known_names:
@@ -310,6 +331,7 @@ class PydanticModelCreator:
                 continue
             self._process_field(field_name, field)
         RelationFieldSchemas.add_generic_foreign_keys(self)
+        ExtraFieldSchemas.add_to_schema(self)
 
         self._name, self._title = self.get_name()
 
@@ -330,7 +352,9 @@ class PydanticModelCreator:
         base_namespace: dict[str, Any] = {"model_config": self._pconfig, **computed_fields}
         if self._unset_when_none:
             base_namespace["drop_unset_values"] = DataFieldSchemas.get_unset_value_dropping_serializer(
-                frozenset(self._unset_when_none)
+                frozenset(self._unset_when_none),
+                uses_aliases=bool(self._pconfig.get("alias_generator"))
+                or any(getattr(common_fields[name][1], "serialization_alias", None) for name in self._unset_when_none),
             )
         base_model = type("BasePydanticModel", (PydanticModel,), base_namespace)
         model: type[PydanticModel] = create_model(
@@ -345,7 +369,11 @@ class PydanticModelCreator:
             **common_fields,
         )
         model.__doc__ = FieldDescriptions.get_clean_docstring(self._model_class)
-        model.model_config["orig_model"] = self._model_class  # type: ignore[typeddict-unknown-key]
+        model.source_model = self._model_class
+        # The relations a related value reads through - from_hare_orm()/from_queryset() fetch them.
+        model.related_value_paths = (
+            () if self._exclude_read_only else tuple(ExtraFieldSchemas.get_shown_related_values(self).values())
+        )
         PydanticModelCreator.MODEL_INDEX[model_index_key] = model
         return model
 

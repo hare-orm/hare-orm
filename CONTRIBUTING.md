@@ -292,7 +292,15 @@ and a row without its expected result fails a completeness test instead of being
 
 | Matrix | Rows × columns | Where |
 | --- | --- | --- |
-| Field × place of its value | every concrete field class (`field_samples.py`) × migration, change event (strict JSON), pydantic schema, request query, factory, inspectdb | `test_field_*.py` |
+| Field × place of its value | every concrete field class (`field_samples.py`) × migration, change event (strict JSON), pydantic schema, request query and its cursor, factory, inspectdb | `test_field_*.py` |
+| Field × its `GeneratedField` copy | every sample × change event, `JSONObject`, `values()`, `F()` annotation, ordering by the field and by its annotation, filter, `distinct()`, `Min`/`Max` (an empty set too), `Greatest`/`Least`, a fractional `Coalesce` and `Lag` default (`GENERATED_FIELD_OPERATIONS`) — the copy gives what the field gives | `test_generated_field_contract.py` |
+| Field × native codec | every sample and its `GeneratedField` copy × reading the driver's values and writing the sample's, in every time zone setting — `rust.native`'s codec and the field's own conversion agree | `test_field_native_codecs.py` |
+| Field × query path | representative `FIELD_SAMPLES` with composite keys × model/dict/flat results, iteration, cursor boundaries, windows and returning; expected values come from the input samples | `test_field_query_paths.py` |
+| Keyless rows × operation | repeated rows × slices, iteration, count, existence, aggregation and returning, including refusals before SQL | `test_keyless_query_paths.py` |
+| Prefetch slice × query shape | composite many-to-many relations × masks, windows, distinct, repeated rows and separate connections | `test_prefetch_query_shapes.py` |
+| Query columns × identifier | letter case and byte length × set operations, windows, recursion and old values returned by updates | `test_query_column_names.py` |
+| Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations | `test_query_shape_interactions.py` |
+| JSON aggregate × element type | binary and interval `FIELD_SAMPLES` × scalar/nested arrays/generated outputs; refusal before SQL and exact `ArrayAgg` values | `test_json_aggregate_inputs.py` |
 | Write path × observer | every method writing rows (`writes/write_methods.py`) × `ChangeCapture`, `RowsChanged`, validators, `auto_now`, optimistic lock, tenant scope, encryption, `GeneratedField` | `writes/` |
 | Extra × entry point | every module importable in the environment, the dialect registry, the CLI, a URL of a driver without its package | `entry_points/` |
 | Contrib model × migrations | outbox, versioned, tenant, encrypted, gis, vector, generic and composite key, many-to-many models | `contrib_models/` |

@@ -40,7 +40,7 @@ class StubImports:
         return name
 
     def add(self, module_name: str, name: str) -> str:
-        """Imports a name - nothing for a builtin or a name of the stub's own module. A name the stub
+        """Imports a name - nothing for an unshadowed builtin or a name of the stub's own module. A name the stub
         already has (a class of its own of that name, another module's of that name imported before)
         is imported under an alias.
 
@@ -51,7 +51,7 @@ class StubImports:
         Returns:
             How the stub writes the name.
         """
-        if module_name == self.module_name or module_name == builtins.__name__:
+        if module_name == self.module_name:
             return name
         written_name = self.written_names.get((module_name, name))
         if written_name is not None:
@@ -64,10 +64,18 @@ class StubImports:
             or (name in self.module_names and (module is None or stub_binding is not vars(module).get(name)))
         )
         written_name = f"{module_name.replace('.', '_')}_{name}" if taken else name
+        if taken:
+            while (
+                written_name in self.module_names
+                or written_name in self.declared_names
+                or written_name in self.written_names.values()
+            ):
+                written_name += "_"
         self.written_names[(module_name, name)] = written_name
-        self.names_by_module.setdefault(module_name, set()).add(
-            name if written_name == name else f"{name} as {written_name}"
-        )
+        if module_name != builtins.__name__ or written_name != name:
+            self.names_by_module.setdefault(module_name, set()).add(
+                name if written_name == name else f"{name} as {written_name}"
+            )
         return written_name
 
     def add_class(self, imported_class: Any) -> str:

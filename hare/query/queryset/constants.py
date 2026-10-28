@@ -31,7 +31,7 @@ LATEST_WITHOUT_FIELDS_MESSAGE = (
 )
 
 #: The alias of the truncated value ``dates()``/``datetimes()`` read.
-DATES_VALUE_ALIAS = "hare_dates_value"
+DATES_VALUE_ALIAS = "hare dates value"
 
 #: The units ``dates()`` truncates to, and those ``datetimes()`` does.
 DATES_TRUNC_TYPES = ("year", "quarter", "month", "week", "day")
@@ -58,10 +58,10 @@ MAX_TABLE_SAMPLE_SEED = 2_147_483_647
 RANDOM_ORDERING = "?"
 
 #: The alias of the random number ``order_by("?")`` orders by - never selected.
-RANDOM_ORDERING_ALIAS = "hare_random_ordering"
+RANDOM_ORDERING_ALIAS = "hare random ordering"
 #: The start of the alias an expression ``order_by()`` orders by is selected under - never selected,
 #: followed by its place among the orderings.
-EXPRESSION_ORDERING_ALIAS_PREFIX = "hare_expression_ordering_"
+EXPRESSION_ORDERING_ALIAS_PREFIX = "hare expression ordering "
 
 #: How many parsed ``order_by()`` calls of plain field names are kept per model.
 PLAIN_ORDERINGS_CACHE_SIZE = 256

@@ -8,10 +8,13 @@ from hare.exceptions import FieldError
 from hare.query.expressions import F
 from hare.query.functions import Count
 from tests.shared_models.testmodels import (
+    Author,
+    Book,
     CompositePkThing,
     Employee,
     Event,
     IntFields,
+    JSONFields,
     SoftDeleteStandalone,
     Tournament,
 )
@@ -79,6 +82,16 @@ async def test_after_cursor_reaches_end_with_no_gaps_or_duplicates(db, intfields
         cursor = (page[-1].intnum,)
 
     assert collected == full
+
+
+@pytest.mark.asyncio
+async def test_after_cursor_uses_the_json_ordering_key(db):
+    await JSONFields.objects.create(id=1, data=9)
+    await JSONFields.objects.create(id=2, data=10)
+    base = JSONFields.objects.all().order_by("data", "id")
+
+    assert [row.id for row in await base] == [1, 2]
+    assert [row.id for row in await base.after_cursor(9, 1)] == [2]
 
 
 @pytest.mark.asyncio
@@ -507,3 +520,22 @@ async def test_after_cursor_explicit_null_placement_related_field_from_left_join
         manager_name = "Boss" if page[0].name.startswith("Worker") else None
         cursor = (manager_name, page[0].name)
     assert collected == full
+
+
+@pytest.mark.asyncio
+async def test_a_values_iterator_reads_each_row_a_to_many_filter_repeats(db):
+    """values().iterator() paged by WHERE id > the last author's - the further rows of an author a filter
+    through its books repeated were skipped, as model instances aren't."""
+    tolkien = await Author.objects.create(id=1, name="Tolkien")
+    pratchett = await Author.objects.create(id=2, name="Pratchett")
+    for book_id, author in ((1, tolkien), (2, tolkien), (3, tolkien), (4, pratchett), (5, pratchett)):
+        await Book.objects.create(id=book_id, author=author, name=f"b{book_id}", rating=4.0)
+    query = Author.objects.filter(books__rating__gt=0).order_by("id")
+    expected = [1, 1, 1, 2, 2]
+    assert await query.values_list("id", flat=True) == expected
+    assert [row["id"] async for row in query.values("id", "name").iterator(chunk_size=1)] == expected
+    assert [row[0] async for row in query.values_list("id", "name").iterator(chunk_size=2)] == expected
+    assert [author_id async for author_id in query.distinct().values_list("id", flat=True).iterator(chunk_size=1)] == [
+        1,
+        2,
+    ]

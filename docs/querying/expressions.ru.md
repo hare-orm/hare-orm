@@ -365,12 +365,19 @@ await Author.objects.annotate(
 ```
 
 `OuterReference` определяет своё имя так же, как это сделал бы `F` во внешнем запросе: поле самой модели,
-`pk`, путь `related__field`, имя прямой связи (`OuterReference("author")` — это колонка `author_id`;
-связь с составным ключом даёт `FieldError`) или вычисляемое значение внешнего запроса:
+`pk`, путь `related__field`, имя прямой связи (`OuterReference("author")` — это колонка `author_id`),
+путь внутри значения JSON или часть даты
+(`OuterReference("data__k")`, `OuterReference("created__year")`), поле именованного JOIN
+(`FilteredRelation`) или вычисляемое значение внешнего запроса — всегда с именем внешней таблицы. Поле,
+сравниваемое с путём JSON внешнего запроса, сравнивается как значение JSON, как и с `F()`:
 
 ```python
 Author.objects.annotate(n=Length("name")).annotate(x=Exists(Book.objects.filter(rating__lt=OuterReference("n"))))
 ```
+
+При сравнении с составным ключом или связью на него `OuterReference("relation")` обозначает все
+ключевые колонки связи. В отдельном скалярном выражении такая составная ссылка даёт `FieldError`;
+там указывайте отдельную колонку ключа.
 
 `OuterReference("pk")` модели с составным первичным ключом сравнивается сразу со всеми его полями: с `pk`
 той же модели или со связью с ней (`Child.objects.filter(parent=OuterReference("pk"))`), — а сравнение с

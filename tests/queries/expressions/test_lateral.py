@@ -98,6 +98,20 @@ async def test_several_rows_for_each_row(db):
 
 @requires_features(supports_lateral=True)
 @pytest.mark.asyncio
+async def test_an_iterator_reads_each_row_a_lateral_of_several_rows_repeats(db):
+    """The iterator paged by WHERE id > the last author's - the second row of an author a Lateral repeated
+    was skipped; a Lateral sliced to one row repeats none and keeps paging by keyset."""
+    await create_library()
+    repeated = Author.objects.alias(top=best_book(2)).filter(top__rating__gt=0).order_by("id")
+    expected = [author.id for author in await repeated]
+    assert expected == [1, 1, 2, 2]
+    assert [author.id async for author in repeated.iterator(chunk_size=1)] == expected
+    single = Author.objects.alias(top=best_book(1)).filter(top__rating__gt=0).order_by("id")
+    assert [author.id async for author in single.iterator(chunk_size=1)] == [1, 2]
+
+
+@requires_features(supports_lateral=True)
+@pytest.mark.asyncio
 async def test_an_aggregate_in_the_subquery_and_a_second_lateral(db):
     await create_library()
     stats = Lateral(

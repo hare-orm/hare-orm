@@ -25,6 +25,8 @@ from hare.sql.terms.parameters.query_parameters import QueryParameters
 TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.relations.fields.relational_field import RelationalField
@@ -43,7 +45,7 @@ class ThroughRowInserting:
         instances: tuple[Any, ...],
         through_defaults: dict[str, Any] | None,
         using: str | DatabaseClient | None,
-    ) -> tuple[list[Any], bool]:
+    ) -> tuple[list[Any] | None, bool]:
         """Everything ``add()`` does but reporting the change.
 
         Args:
@@ -53,7 +55,8 @@ class ThroughRowInserting:
             using: See ``add()``.
 
         Returns:
-            The related instances linked - none when every pair was linked already - and whether through rows
+            The related instances linked, each once - none when every pair was linked already, None when
+            some were and the database doesn't tell which - and whether through rows
             were inserted: a soft-deleted link restored is an update of its row, reported by the restore.
         """
         ManyToManyMembers.validate_owner_saved(relation)
@@ -115,7 +118,7 @@ class ThroughRowInserting:
                     cached_sql, ThroughRows.hide_values(relation, [*single_forward_key_value, *backward_key_values])
                 )
                 # The pair linked already adds no link.
-                return (list(instances), True) if inserted_count else ([], False)
+                return ([instances[0]], True) if inserted_count else ([], False)
             rows = [(*forward_key_value, *backward_key_values) for forward_key_value in unique_forward_key_values]
             inserted_count = await ThroughRowInserting.insert_through_rows(
                 connection,
@@ -125,8 +128,13 @@ class ThroughRowInserting:
                 conflict_target_columns=[*backward_columns, *forward_columns],
                 hides_values=ThroughRows.holds_sensitive_keys(relation),
             )
-            # Which of the pairs were linked already isn't returned - none added, none linked.
-            return (list(instances), True) if inserted_count else ([], False)
+            # Which of the pairs were linked already isn't returned - all of them or none added names them,
+            # some added names none.
+            if not inserted_count:
+                return [], False
+            if inserted_count == len(rows):
+                return ThroughRowInserting.get_distinct_instances(instances), True
+            return None, True
 
         select_query = connection.query_class.from_(through_table).where(
             KeyColumns.row_equality(backward_columns, backward_key_values)
@@ -221,7 +229,22 @@ class ThroughRowInserting:
             for instance, forward_key_value in zip(instances, forward_key_values, strict=True)
             if forward_key_value in linked_forward_key_values
         ]
-        return linked, bool(forward_key_values_to_insert)
+        return ThroughRowInserting.get_distinct_instances(linked), bool(forward_key_values_to_insert)
+
+    @staticmethod
+    def get_distinct_instances(instances: Iterable[Any]) -> list[Any]:
+        """The first of the instances of each related row - an instance given twice links one row.
+
+        Args:
+            instances: The related instances.
+
+        Returns:
+            The instances, each row once.
+        """
+        distinct_instances: dict[Any, Any] = {}
+        for instance in instances:
+            distinct_instances.setdefault(instance.pk, instance)
+        return list(distinct_instances.values())
 
     @staticmethod
     async def insert_through_rows(

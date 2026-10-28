@@ -216,11 +216,14 @@ async def test_pooled_transaction_context_exit_releases_normally_when_not_abando
 
 
 @pytest.mark.asyncio
-async def test_an_error_after_the_cancellation_is_not_logged_as_one_of_a_shielded_future():
+@pytest.mark.parametrize("times_out", (False, True))
+async def test_an_error_after_the_cancellation_is_not_logged_as_one_of_a_shielded_future(monkeypatch, times_out):
     """asyncio.shield() reported the error a COMMIT ended with after its task was cancelled - a
     COMMIT of an aborted transaction - to the loop's exception handler as "exception in shielded
     future"; the cancellation goes through and the error is read."""
     reported_contexts: list[dict] = []
+    if times_out:
+        monkeypatch.setattr(client_module, "SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS", 0)
     loop = asyncio.get_running_loop()
     previous_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: reported_contexts.append(context))
@@ -240,9 +243,14 @@ async def test_an_error_after_the_cancellation_is_not_logged_as_one_of_a_shielde
         task = asyncio.ensure_future(run_it())
         await started.wait()
         task.cancel()
-        released.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        if times_out:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            released.set()
+        else:
+            released.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         # The callbacks of the finished operation get every chance to report the error.
         for _ in range(10):
             await asyncio.sleep(0)

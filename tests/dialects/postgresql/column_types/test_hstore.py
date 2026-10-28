@@ -13,7 +13,7 @@ from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.dialects.postgresql.fields.hstore.h_store_text import HStoreText
 from hare.exceptions import ValidationError
 from hare.query.expressions import F, Q
-from tests.dialects.postgresql.column_types.models_hstore import Item, Shelf, UniqueAttributes
+from tests.dialects.postgresql.column_types.models_hstore import GeneratedAttributes, Item, Shelf, UniqueAttributes
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 
 
@@ -137,3 +137,30 @@ async def test_an_empty_hstore_in_an_array_is_read_back(items):
     )
     assert rows[0]["values"] == [HStoreText.encode({"color": "blue", 'we"ird\\': "x=>y, z"}), ""]
     assert await matching(attributes={}) == [3]
+
+
+@pytest.mark.parametrize("ordering", ["attributes", "-attributes"])
+@pytest.mark.asyncio
+async def test_an_iterator_ordered_by_an_hstore_reads_the_rows_of_the_queryset(items, ordering):
+    """The iterator paged by WHERE attributes > ... - PostgreSQL compares no hstore by < or >, and the next
+    page raised."""
+    query = Item.objects.order_by(ordering, "id")
+    assert [obj.id async for obj in query.iterator(chunk_size=1)] == [obj.id for obj in await query]
+
+
+@pytest.mark.parametrize("ordering", ["attributes", "-attributes", "attributes_copy", "-attributes_copy"])
+@pytest.mark.asyncio
+async def test_an_iterator_ordered_by_an_hstore_or_its_generated_copy_pages_by_offset(hstore_context, ordering):
+    """A generated hstore took the wrapper's comparisons for its own - the iterator paged by a > its output
+    field has none of; values().iterator() checked no comparison at all, a plain hstore failed too."""
+    for item_id, label in ((1, "b"), (2, "a"), (3, "b"), (4, "a")):
+        await GeneratedAttributes.objects.create(id=item_id, attributes={"key": label})
+    try:
+        query = GeneratedAttributes.objects.order_by(ordering, "id")
+        expected = [obj.id for obj in await query]
+        assert [obj.id async for obj in query.iterator(chunk_size=1)] == expected
+        # The ordering field selected - the values' keyset would read it off each row.
+        values = query.values_list("id", ordering.lstrip("-"))
+        assert [row[0] async for row in values.iterator(chunk_size=1)] == expected
+    finally:
+        await truncate_all_models()

@@ -166,8 +166,11 @@ class RelationFilters:
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
                 table=required_joins[-1][0],
-                annotations=expression_context.annotations,
+                # The rest of the path names the related model's fields - the query's annotations are the
+                # filtered model's, and the value was resolved against them already.
+                annotations={},
                 value_wrapper_references=nested_references,
+                filter_value_is_built=True,
                 # Passed on, so a further hop matches an extra_condition registered under the full
                 # path.
                 select_related_extra_conditions=expression_context.select_related_extra_conditions,

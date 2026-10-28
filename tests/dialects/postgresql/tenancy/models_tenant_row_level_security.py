@@ -25,3 +25,11 @@ class RlsLabel(Model):
         tenant_field = "company_code"
         row_level_security = RowLevelSecurity.FORCED
         policies = [Policy(name="rls_label_tenant", using=TenantCondition())]
+
+
+class RlsMention(Model):
+    id = fields.IntField(primary_key=True)
+    note = fields.ForeignKeyField("models.RlsNote", related_name="mentions")
+
+    class Meta:
+        table = "rls_mention"

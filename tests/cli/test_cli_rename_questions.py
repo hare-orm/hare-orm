@@ -134,13 +134,16 @@ async def test_input_ended_in_the_terminal_is_no_answer(project_factory, monkeyp
         pytest.param(TITLE_MODEL, "app.Nope=Other", id="nothing_changed"),
     ],
 )
-async def test_a_rename_answer_that_renames_nothing_is_warned_about(project_factory, models: str, answer: str) -> None:  # noqa: F811
-    """The answer was dropped silently - a field it meant was removed and added, its data lost."""
+async def test_a_rename_answer_that_renames_nothing_is_refused(project_factory, models: str, answer: str) -> None:  # noqa: F811
+    """The answer was only warned about - a field it meant was removed and added, its data lost."""
     project = await project_factory()
     project.write_models(TITLE_MODEL)
     await project.cli_ok("makemigrations")
+    migrations_before = project.migration_files()
     project.write_models(models)
 
-    output = await project.cli_ok("makemigrations", "--no-input", "--rename", answer)
+    result = await project.cli("makemigrations", "--no-input", "--rename", answer)
 
-    assert f"The rename {answer} renamed nothing" in output
+    assert f"The rename {answer} renamed nothing" in result.output
+    assert result.exit_code not in (0, None)
+    assert project.migration_files() == migrations_before

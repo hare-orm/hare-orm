@@ -524,7 +524,8 @@ The keys work through relations (`Like.objects.filter(comment__target__type="aut
 — a target hidden by its default scope (soft-deleted, another tenant's) still counts as set.
 
 - `values("target__type")`, `values_list(...)`, `order_by("target__type")` and `F("target__type")` read
-  the name of the branch set (`NULL` for none) as a `CASE` over the branches.
+  the name of the branch set (`NULL` for none) as a `CASE` over the branches — in `F("target__type").desc()`,
+  `values(branch="target__type")`, `latest()`/`earliest()` and `group_by()` too.
 - `select_related("target")` joins every branch (`LEFT JOIN`), `prefetch_related("target")` loads each
   branch with a query of its own. A `Prefetch` with a queryset reads one model, so it names a branch
   (`Prefetch("book", queryset=...)`); naming the field raises `FieldError`, and so does the field in
@@ -719,6 +720,8 @@ await prefetch_related_objects([book], "author", "tags")   # one instance
 
 - `objs` can be instances of several models, each lookup then starting from a relation of every one of
   them (`[book, profile]` with `"author"`); an empty collection does nothing.
+- Forward relations to the same model share their query, including different `to_field` targets.
+  Relations to different models and reverse relations of different source models use separate queries.
 - The queries run on the connection the first instance came from, unless `using=` names another.
 - A lookup naming no relation of an instance's model raises `FieldError`.
 

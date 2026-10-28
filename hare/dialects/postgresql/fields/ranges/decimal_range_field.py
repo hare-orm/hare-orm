@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Annotated, Any
 
 from hare.dialects.postgresql.enums import RangeBoundType
+from hare.dialects.postgresql.fields.ranges.range import Range
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
 from hare.fields import Field
@@ -20,6 +21,13 @@ class DecimalRangeField(RangeField):
         from hare.query.expressions.numeric.numeric_typing import NumericTyping
 
         return NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD
+
+    def get_value_annotation(self) -> Any:
+        """A range of decimals - an infinite bound too, as the column holds it and a schema writes it."""
+        # Imported here: only a schema reads the annotation, and pydantic is an extra.
+        from pydantic import AllowInfNan
+
+        return Range[Annotated[Decimal, AllowInfNan(True)]]
 
     def parse_bound_text(self, text: str) -> Any:
         return Decimal(text)

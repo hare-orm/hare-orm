@@ -95,6 +95,12 @@ any JSON value) is a `ConfigurationError` — declare its parameter by hand. A p
 makes that the class declares itself, or that an option adds, is a `ConfigurationError` too: aliases,
 filter methods and special types stay declared by hand, next to `Meta.filters`.
 
+For an array whose element field has `null=True`, list-valued lookups also accept NULL elements:
+their item type is `T | None`. An explicit `list[None]` or `list[Literal[None]]` parameter is a valid
+narrower declaration. Setting the entire optional parameter to `None` still leaves its filter out.
+A parametrized type takes the value of its class: `dict[str, str] | None` for a filter taking a `dict`
+(`HStoreField`'s `contains`).
+
 The parameters are added once the models are bound — by `Hare.bind_models()`, which needs no connection,
 or `Hare.init()` — when a framework adapter reads the parameters for the handlers' signatures
 (`HarePlugin` binds the models itself), when the query is first built, or on `prepare_parameters()`. A
@@ -214,7 +220,7 @@ ordering, fields, include, deleted rows, pagination) — in the model's fields a
 | Option | Meaning |
 |---|---|
 | `queryset` | The rows the query starts from: `Book.objects.all().select_related("author")`. A class without one only serves as a base. |
-| `filters` | A tuple of `FilterField` — the fields a request may filter by and each one's lookups — see [`Meta.filters`](#meta-filters). |
+| `filters` | An iterable of `FilterField` — the fields a request may filter by and each one's lookups — see [`Meta.filters`](#meta-filters). |
 | `search` | A `SearchConfig`, None for no search. |
 | `ordering` | An `OrderingConfig`, None when a request can't choose the ordering. |
 | `pagination` | An `OffsetPagination`, a `ScrollPagination` or a `CursorPagination`, None for none. `OffsetPagination()` by default. |
@@ -223,7 +229,7 @@ ordering, fields, include, deleted rows, pagination) — in the model's fields a
 | `include` | An `IncludeConfig`, None when a request can't ask for relations. |
 | `deleted` | A `DeletedConfig`, None when a request can't see soft-deleted rows. |
 | `versions` | `LatestVersions()` to keep only the latest version of each record of a `VersionedModel`, None for every version. |
-| `api_getter` | A tuple of `ApiSource` — HTTP APIs of other services the rows are filled from — and `ApiValueMapping` — values of the row copied to other attributes; see [`Meta.api_getter`](#api-getter). |
+| `api_getter` | An iterable of `ApiSource` — HTTP APIs of other services the rows are filled from — and `ApiValueMapping` — values of the row copied to other attributes; see [`Meta.api_getter`](#api-getter). |
 
 A subclass inherits each option it doesn't set from the nearest base that does.
 
@@ -300,6 +306,12 @@ of a cursor pagination may not use an annotation or a path inside a field's valu
 JSON field): the cursor reads field values off the row; fields through forward relations are loaded with the
 rows (`select_related()`), since the cursor reads them off the last row. A model without a primary key
 can't have a cursor pagination: rows equal in the ordering would be skipped.
+`BinaryField` ordering values are preserved as URL-safe Base64 inside the cursor, including bytes
+that are not UTF-8 text.
+An untyped `JSONField` keeps its JSON values in the cursor, including scalars; the same applies to
+a `GeneratedField` with that output field. The boundary is compared in the field's JSON ordering.
+Container boundaries retain their element types, including UUIDs and binary data, and named
+`TupleField` values retain their named elements when the cursor is read.
 
 Page sizes are checked when the option is created: `1 <= default_limit <= max_limit <= 100000`.
 
@@ -586,17 +598,23 @@ container lookups, and lookups registered for PostgreSQL only. A lookup that nee
 in the current `HareContext`, and raises one `ConfigurationError` listing every wrong one: a parameter
 naming no filter of the model, a filter a dialect doesn't run, an annotation that doesn't take the
 filter's value, a search field that doesn't take text, an ordering the model lacks or that crosses a
-relation to many rows, a cursor ordering by an annotation or a path inside a field, a `Meta` option of
-the wrong type. A class of a model the context doesn't have belongs to another application and is
-skipped. Every framework adapter ([Litestar](litestar.md), [FastAPI](fastapi.md), [Robyn](robyn.md))
+relation to many rows, a cursor ordering by an annotation or a path inside a field, a `Meta` option
+missing a required method or attribute. A class of a model the context doesn't have belongs to another
+application and is skipped. Every framework adapter ([Litestar](litestar.md), [FastAPI](fastapi.md), [Robyn](robyn.md))
 calls it at startup; without one, a class is checked on its first use (`get_declaration()`). The
 declaration holds the ORM's descriptions of the class's filters and orderings — an ordering the class
 meets later (the queryset's own, a handler's `order_by()`) is described the first time — so a request
 reads none of them again.
 
+Options are checked by the structure their consumers use: a compatible object need not inherit the
+built-in option class. `filters` and `api_getter` accept lists and other iterables as well as tuples;
+their items are checked as the declaration is built. Use a reusable iterable when declarations may be
+rebuilt after model registration changes. The checks do not call option methods to guess their results.
+
 ## <a id="live-models"></a>Models registered while the application runs
 
-A model registered with `Hare.register_live_models()` — a content type's table, a table opened in a
+A model registered with `Hare.register_live_models()` — a table whose columns the application's users
+configure, a table opened in a
 database browser — gets its request queries the same way. `RequestQuery.for_model()` builds a class for
 it, checked at once:
 

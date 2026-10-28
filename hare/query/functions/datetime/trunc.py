@@ -73,7 +73,7 @@ class Trunc(Function):
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.truncation, self.zone_name)
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> DateTrunc:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> DateTrunc:
         return DateTrunc(self.truncation, term, DateTruncSource.DATETIME)  # type: ignore[arg-type]
 
     def _raise_if_type_unsupported(self, source: DateTruncSource) -> None:

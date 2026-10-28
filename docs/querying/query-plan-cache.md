@@ -42,6 +42,10 @@ await base.limit(20).offset(20)    # same shape, cache hit
 await base.limit(20).offset(40)    # same shape, cache hit
 ```
 
+Keyset boundaries on JSON fields also bind fresh values into the saved plan, using the same JSON
+ordering as `order_by()`. This applies to `after_cursor()` and `before_cursor()`, including their
+`values()`, `count()` and `exists()` queries.
+
 ## <a id="shape-key"></a>What's part of the shape (the cache key)
 
 The model class, the dialect, the connection alias, the query builder the model is bound to, which
@@ -337,6 +341,8 @@ for values that hold no SQL (a generated pydantic model, a description of a filt
 entries then stay whichever query builder the model is bound to, and for a model not bound yet.
 `keyed_by_model=False` is for keys that never hold a model class — they are not searched for one.
 `depends_on_other_models=True` drops every entry when any model changes, as a `ModelCache` does.
+For model-keyed caches, iteration and `len(cache)` exclude SQL entries from a different query builder,
+just as a lookup treats them as misses.
 `model_attribute` names an attribute of a model's `_meta` its plain bucket (below) is kept in as well,
 `owner_attribute` the attribute an owner keeps its one value in, and `dropped_with=<another cache>` drops
 every entry of this cache whenever that cache drops any.

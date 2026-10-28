@@ -20,6 +20,8 @@ def pydantic_model_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
@@ -38,6 +40,8 @@ def pydantic_model_creator(
 | `name` | Явное имя модели вместо автоматического. |
 | `exclude` / `include` | Какие поля дополнительно убрать или оставить, поверх того, что уже задаёт `PydanticMeta`. Путь через связь (`"author.name"`) указывает на поле схемы связанной модели; в `include` он ещё и оставляет саму связь — только с перечисленными полями. |
 | `computed` | Имена `@property` или методов модели, которые нужно показать как вычисляемые поля; путь через связь (`"books.title_length"`) добавляет такое поле в схему связанной модели. |
+| `extra_fields` | Значения, которые читаются со строки по имени, — аннотация запроса, атрибут, положенный на строку, — с типом; см. [Дополнительные поля и значения связей](#extra-fields). |
+| `related_values` | Поля связанных строк в плоском виде — имя к пути поля связанной строки; см. [Дополнительные поля и значения связей](#extra-fields). |
 | `optional` | Поля, которые в схеме становятся необязательными, хотя в модели они не допускают `NULL`. |
 | `allow_cycles` | Разрешить связям модели с самой собой и циклическим связям уходить в рекурсию (по умолчанию `False` — циклы обрываются). |
 | `sort_alphabetically` | Упорядочить поля по алфавиту, а не в порядке объявления. |
@@ -69,10 +73,11 @@ def pydantic_model_creator(
 ### <a id="exclude-sensitive"></a>`exclude_sensitive`
 
 Убрать каждое поле с `sensitive=True` (`Model._meta.sensitive_fields` — см. [Чувствительные
-поля](../models/encrypted-and-sensitive-fields.ru.md#sensitive-fields)), включая вложенные схемы связей.
-Полезно для открытой схемы или схемы выгрузки. Схемы, построенные с ним и без него, сохраняются отдельно
-и никогда не смешиваются. Поле `<name>_blind_index` зашифрованного поля с `blind_index=True` не попадает
-ни в какую схему, с ним или без него: hare записывает его вместе с полем, а его HMAC — не данные.
+поля](../models/encrypted-and-sensitive-fields.ru.md#sensitive-fields)), включая вложенные схемы связей и
+значение связи (`related_values`) такого поля. Полезно для открытой схемы или схемы выгрузки. Схемы,
+построенные с ним и без него, сохраняются отдельно и никогда не смешиваются. Поле `<name>_blind_index`
+зашифрованного поля с `blind_index=True` не попадает ни в какую схему, с ним или без него: hare
+записывает его вместе с полем, а его HMAC — не данные.
 
 Созданные модели сохраняются и используются повторно для одинаковых сочетаний `(model, options)`: два
 вызова `pydantic_model_creator(Author)` возвращают один и тот же класс.
@@ -91,7 +96,8 @@ def pydantic_model_creator(
 неизменными; чтобы изменить это, передайте свои `ser_json_bytes`/`val_json_bytes` в `model_config`.
 Число с плавающей точкой, для которого в JSON нет числа, — NaN или бесконечность у `FloatField`, в том числе
 внутри `ArrayField`, — пишется текстом (`"NaN"`, `"Infinity"`, как в событии outbox) и читается схемой
-обратно (`ser_json_inf_nan`).
+обратно (`ser_json_inf_nan`); так же — бесконечная граница диапазона `DecimalRangeField` или
+`DecimalMultiRangeField`.
 `JSONField` с объявленным `field_type` получает в схеме этот тип (без него — `Any`).
 `IntEnumField`/`CharEnumField` — это `$ref` только на перечисление, без числового диапазона или
 ограничения длины колонки.
@@ -110,6 +116,8 @@ def pydantic_model_creator(
 отметка `auto_now`/`auto_now_add`, арендатор), и не допускающее `NULL` в модели, не попадает в
 `model_dump()`, пока в нём `None`: `Model.objects.create(**schema.model_dump())` оставляет его им, а не
 пишет `NULL`, который колонка отвергнет.
+Это работает и с алиасами сериализации, включая `model_dump(by_alias=True)` и
+`model_config["serialize_by_alias"]`; поля модели, допускающие `NULL`, сохраняют явный `None`.
 
 Модель с [`CompositePrimaryKey`](../models/field-types.ru.md#compositeprimarykey) обрабатывается так же,
 как модель с ключом из одной колонки: каждая часть составного ключа становится отдельным полем созданной
@@ -200,6 +208,8 @@ class Author(Model):
 |---|---|---|
 | `include` / `exclude` | `()` / `("Meta",)` | Какие поля оставить / убрать. |
 | `computed` | `()` | Дополнительные вычисляемые поля. |
+| `extra_fields` | `{}` | Значения, которые читаются со строки по имени, с типом. |
+| `related_values` | `{}` | Поля связанных строк в плоском виде. |
 | `backward_relations` | `True` | Включать ли обратные связи (внешний ключ, «один-к-одному») даже без явной аннотации типа, которая их запрашивает. Не рекомендуется: так можно бесконтрольно загрузить очень много данных. |
 | `max_recursion` | `3` | На сколько уровней вглубь идёт обход связей. |
 | `allow_cycles` | `False` | Разрешить рекурсию через связь модели с самой собой. |
@@ -225,6 +235,36 @@ AuthorSchema = pydantic_model_creator(Author, computed=("full_name",))
 становится типом поля в схеме. Вычисляемое поле, которое обращается к незагруженной связи, даёт
 `NoValuesFetched` с подсказкой: либо укажите связь в аннотации, чтобы она загружалась заранее, либо сами
 сначала загрузите её через `prefetch_related_objects()`.
+
+## <a id="extra-fields"></a>Дополнительные поля и значения связей
+
+```python
+BookSchema = pydantic_model_creator(
+    Book,
+    extra_fields={"reviews_count": int, "author.books_count": int},
+    related_values={"author_name": "author.name"},
+)
+
+book = await Book.objects.select_related("author").annotate(reviews_count=Count("reviews")).get(id=1)
+BookSchema.model_validate(book)
+```
+
+`extra_fields` — значения, которые читаются со строки по имени, — аннотация запроса, атрибут, положенный на
+строку после чтения (их кладёт и `api_getter` запроса из параметров), — с типом: их строит запрос, и модель
+о них не знает. `related_values` ставят поле связанной строки рядом с полями самой строки, через связи с
+одной строкой; при проверке словаря значение берётся и по своему имени. Оба равны `None`, где у строки
+значения нет: запрос его не посчитал, связь не загружена. Имя, записанное путём через связи
+(`"author.books_count"`), добавляет поле в схему связанной модели. Имя, которое в схеме уже есть, имя,
+объявленное дважды, путь через то, что не связь, и значение связи через связь со многими строками или с
+путём, оканчивающимся связью, дают `ConfigurationError`. Оба объявляются и в `PydanticMeta`. Схема для
+записи (`exclude_readonly=True`) их не получает — строку с ними не пишут; `sort_alphabetically` сортирует
+их вместе с остальными полями. `from_hare_orm()`/`from_queryset()` загружают связи, через которые читается
+значение связи, даже если схема саму связь исключает или показывает идентификатором
+(`relations_as_ids=True`).
+
+`include` и `exclude` выбирают эти поля по объявленным именам в схеме, как поля модели и вычисляемые
+поля. Пути выбирают дополнительные поля вложенных схем (`"author.books_count"`). Исключённое значение
+связи не требует её загрузки. Эти правила действуют и при объявлении в `PydanticMeta`.
 
 ## <a id="building-instances"></a>Создание объектов схемы: `PydanticModel` / `PydanticListModel`
 
@@ -294,6 +334,8 @@ def pydantic_queryset_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,

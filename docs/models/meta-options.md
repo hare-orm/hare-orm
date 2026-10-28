@@ -194,7 +194,10 @@ across relations too — `values()`, `aggregate()`, `annotate()`, `group_by()`, 
 (`book.readings.all()`, `Book.objects.filter(readings__reader=...)`, `Count("readings")`,
 `readings__isnull=True`, `prefetch_related("readings")`). A condition through a relation in `exclude()`,
 `update()` or `delete()` matches the written row by every column, NULLs matching NULLs — rows equal in
-every column are indistinguishable anyway.
+every column are indistinguishable anyway. `update().returning()` and `delete().returning()` build the
+instances from the rows `RETURNING` gives, every column of each — there is no key to read them back by —
+and a soft delete (`Meta.soft_delete_field`) writes and returns the rows the same way, `include_deleted()`
+included.
 
 What needs a primary key raises `ConfigurationError` naming the model: `save()` of a fetched row (an
 `UPDATE`), `delete()`/`restore()`/`refresh_from_db()` of one instance, a `ForeignKeyField`/`OneToOneField`
@@ -202,7 +205,10 @@ to the model without `to_field=`, and a
 `ManyToManyField` on it or to it. `pk` in a filter or an ordering is a `FieldError`; `instance.pk` is
 `None`, and an instance is equal only to itself. Across the relation from the other model, only
 `isnull`/`not_isnull` compare the related rows as a whole (`readings__isnull=True`); `readings=`,
-`readings__in=` name a row by its key and raise `FieldError`.
+`readings__in=` name a row by its key and raise `FieldError`. `count()` of model rows made `.distinct()`
+raises `QueryError` before any SQL — a row's identity is its key; `values()`/`values_list()` rows count
+distinct. `iterator()` pages with `OFFSET` where the ordering can tie, so rows equal in it all come, and a
+sliced `Prefetch` of such rows reads each parent's rows whole and takes its slice of them.
 
 Migrations create and alter the table like any other (the state keeps `primary_key: None`); giving the
 model a primary key or taking it away, like any change of a primary key, needs a hand-written migration.

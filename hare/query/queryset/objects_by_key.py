@@ -9,6 +9,7 @@ from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.queryset.arguments.values_arguments import ValuesArguments
 from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
 
 if TYPE_CHECKING:
     from hare.query.queryset.queryset import QuerySet
@@ -39,7 +40,10 @@ class ObjectsByKey:
         QuerySetCombination.raise_if_combined(queryset, "in_bulk")
         if queryset._limit is not None or queryset._offset:
             raise QueryError("in_bulk() can't be used on a sliced queryset (after .limit()/.offset()).")
-        read_key = attrgetter(*ObjectsByKey.get_key_attribute_names(queryset, field_name))
+        key_attribute_names = ObjectsByKey.get_key_attribute_names(queryset, field_name)
+        read_key = attrgetter(*key_attribute_names)
+        # The key is read off each object - loaded beside the fields only()/defer() choose.
+        queryset = PrefetchChecks.ensure_only_includes_fields(queryset, *key_attribute_names)
         if id_list is not None:
             values = CollectionArguments.get_list(id_list, "in_bulk()")
             if not values:
@@ -74,6 +78,23 @@ class ObjectsByKey:
             uniqueness.attribute_names == attribute_names and uniqueness.condition is None
             for uniqueness in DeclaredUniqueness.get_declared(model)
         )
-        if not is_unique and list(queryset._distinct_on) != [field_name]:
+        if not is_unique and ObjectsByKey.get_distinct_attribute_names(queryset) != attribute_names:
             raise QueryError(f"in_bulk()'s field_name must be a unique field, but {field_name!r} isn't.")
         return attribute_names
+
+    @staticmethod
+    def get_distinct_attribute_names(queryset: QuerySet[Any, Any]) -> tuple[str, ...] | None:
+        """The attributes of the fields of ``distinct(<fields>)`` - a relation's key ones, however the
+        relation is named (``author``, ``author_id``).
+
+        Args:
+            queryset: The queryset.
+
+        Returns:
+            The attribute names; None without fields of the model's own.
+        """
+        model = queryset.model
+        distinct_on = tuple(queryset._distinct_on)
+        if not distinct_on or not all(name in model._meta.fields_map for name in distinct_on):
+            return None
+        return tuple(DeclaredUniqueness.get_attribute_names(model, distinct_on))

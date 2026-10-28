@@ -5,6 +5,9 @@ import re
 from hare.dialects.postgresql.enums import PostgresqlLookup
 from hare.query.enums import Lookup
 
+#: The public path of ``Range`` - a range default written into a migration.
+RANGE_PUBLIC_PATH = "hare.dialects.postgresql.fields.Range"
+
 #: The name a ``NativeEnumField``'s ``ENUM`` type may take - a lowercase identifier written without
 #: quotes.
 NATIVE_ENUM_TYPE_NAME_PATTERN = re.compile(r"[a-z_][a-z0-9_]*")

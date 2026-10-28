@@ -44,10 +44,10 @@ class TableInfo:
     triggers: list[Trigger] = dataclass_field(default_factory=list)
     #: (name, definition) of each trigger that couldn't be parsed - written as a comment.
     unparsed_triggers: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    #: EXCLUDE USING ... constraints, successfully parsed back into a reconstructable
+    #: Exclusion constraints, successfully parsed back into a reconstructable
     #: ExclusionConstraint(...) - see Meta.constraints.
     exclusion_constraints: list[ExclusionConstraint] = dataclass_field(default_factory=list)
-    #: (name, raw definition text) for an EXCLUDE constraint whose definition didn't fit the shape the
+    #: (name, raw definition text) for an exclusion constraint whose definition didn't fit the shape the
     #: dialect's parsing reconstructs - written as a comment, as unparsed_triggers.
     unparsed_exclusion_constraints: list[tuple[str, str]] = dataclass_field(default_factory=list)
     #: Composite (2+ column) foreign keys successfully reconstructed as a single
@@ -87,7 +87,7 @@ class TableInfo:
     #: the shape the dialect's parsing can reconstruct - same surfaced-as-a-comment
     #: pattern as unparsed_exclusion_constraints.
     unparsed_check_constraints: list[tuple[str, str]] = dataclass_field(default_factory=list)
-    #: The CHECK constraints added NOT VALID and not validated since - the existing rows may break
+    #: The CHECK constraints added unchecked and not validated since - the existing rows may break
     #: them.
     not_valid_constraint_names: list[str] = dataclass_field(default_factory=list)
     #: The table's storage options as its dialect's ``TableOptions`` (``Dialect.table_options_class``),

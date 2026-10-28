@@ -33,14 +33,16 @@ class ClickhouseCastRenderers:
 
     @staticmethod
     def render_cast(function: functions.Cast, sql_context: SqlContext) -> str:
-        """The conversion function of the type, a decimal literal as it is - it is written as a
-        decimal of its own scale."""
+        """The conversion function of the type, a decimal or integer literal as it is - it is written as a
+        decimal of its own scale, an integer of its own width (a decimal of 38 places would cut a wide one)."""
         as_type = function.as_type
         type_name = as_type.name if type(as_type) is SqlType else str(as_type).upper()
         argument = function.args[0]
         argument_sql = function.get_arg_sql(argument, sql_context)
         if type_name == CLICKHOUSE_NUMERIC_TYPE_NAME:
-            if isinstance(argument, ValueWrapper) and isinstance(argument.value, Decimal):
+            if isinstance(argument, ValueWrapper) and (
+                isinstance(argument.value, Decimal) or type(argument.value) is int
+            ):
                 return argument_sql
             return CLICKHOUSE_NUMERIC_CAST_TYPE.format(argument_sql)
         conversion_function = CLICKHOUSE_CAST_FUNCTIONS.get(type_name)

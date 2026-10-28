@@ -189,6 +189,8 @@ CLICKHOUSE_SERIES_KEEPER_PATH_SQL = (
 )
 #: The next keys of a series.
 CLICKHOUSE_KEY_SERIES_TAKE_SQL = "SELECT generateSerialID({series}) FROM numbers({count})"
+#: The next key of a series for each row of a statement.
+CLICKHOUSE_KEY_SERIES_NEXT_SQL = "generateSerialID({series})"
 #: How many keys a series lags behind the greatest key of its table - its next key taken, and the ones
 #: up to the greatest key still to be.
 CLICKHOUSE_KEY_SERIES_GAP_SQL = "SELECT (SELECT max({key}) FROM {table}) - generateSerialID({series}) AS gap"

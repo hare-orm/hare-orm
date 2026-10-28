@@ -305,14 +305,25 @@ class DeclarationBuilder:
 
         Returns:
             The sources and the mappings.
+
+        Raises:
+            ConfigurationError: An item is neither an API source nor a value mapping.
         """
         api_getter = self.request_query_class.get_meta_option("api_getter")
         if api_getter is None:
             return (), ()
-        return (
-            tuple(item for item in api_getter if isinstance(item, ApiSource)),
-            tuple(item for item in api_getter if isinstance(item, ApiValueMapping)),
-        )
+        sources: list[ApiSource] = []
+        mappings: list[ApiValueMapping] = []
+        for item in api_getter:
+            if isinstance(item, ApiSource):
+                sources.append(item)
+            elif isinstance(item, ApiValueMapping):
+                mappings.append(item)
+            else:
+                raise ConfigurationError(
+                    f"{self.class_name}.Meta.api_getter items must be ApiSource or ApiValueMapping"
+                )
+        return tuple(sources), tuple(mappings)
 
     @staticmethod
     def get_api_target_fields(

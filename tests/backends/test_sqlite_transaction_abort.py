@@ -8,9 +8,12 @@ import time
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.dialects.base.client.transaction_lifecycle import transaction_ending
+from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_transaction_client import AiosqliteTransactionClient
 from hare.exceptions import IntegrityError, OperationalError, TransactionManagementError
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
+from tests.utils.waiting import WAIT_DEADLINE_SECONDS
 
 ENDLESS_COUNT_SQL = (
     "WITH RECURSIVE counter(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM counter) SELECT count(*) FROM counter"
@@ -21,6 +24,67 @@ LONG_COUNT_SQL = (
     "WITH RECURSIVE counter(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM counter WHERE value < 1000000000) "
     "SELECT count(*) FROM counter"
 )
+
+
+@requires_features(dialect="sqlite")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", (False, True))
+@pytest.mark.parametrize("catches_cancellation", (False, True))
+@pytest.mark.parametrize("read_only", (False, True))
+async def test_cancelled_deferred_begin_cannot_outlive_its_transaction(
+    db_truncate, monkeypatch, nested, catches_cancellation, read_only
+):
+    monkeypatch.setattr(transaction_ending, "SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS", 0)
+    started, released, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_begin = AiosqliteTransactionClient._driver_send_begin
+    connection = Tournament.get_connection(for_write=True)
+    _, original_busy_timeout = await connection.execute("PRAGMA busy_timeout")
+
+    async def delayed_begin(client):
+        started.set()
+        try:
+            await released.wait()
+            await original_begin(client)
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(AiosqliteTransactionClient, "_driver_send_begin", delayed_begin)
+
+    async def write():
+        async with Transactions.atomic(read_only=read_only, lock_timeout=0.2):
+            try:
+                if nested:
+                    async with Transactions.atomic():
+                        await Tournament.objects.create(name="cancelled")
+                else:
+                    await Tournament.objects.create(name="cancelled")
+            except asyncio.CancelledError:
+                if not catches_cancellation:
+                    raise
+
+    task = asyncio.create_task(write())
+    try:
+        await asyncio.wait_for(started.wait(), WAIT_DEADLINE_SECONDS)
+        task.cancel()
+        expected_error = (
+            TransactionManagementError if catches_cancellation and not read_only else asyncio.CancelledError
+        )
+        with pytest.raises(expected_error):
+            await asyncio.wait_for(task, WAIT_DEADLINE_SECONDS)
+        released.set()
+        await asyncio.wait_for(completed.wait(), WAIT_DEADLINE_SECONDS)
+        await Tournament.objects.create(name="after cancellation")
+        assert not connection._connection.in_transaction
+        assert await Tournament.objects.filter(name="cancelled").count() == 0
+        _, busy_timeout = await connection.execute("PRAGMA busy_timeout")
+        assert busy_timeout == original_busy_timeout
+    finally:
+        released.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.wait_for(completed.wait(), WAIT_DEADLINE_SECONDS)
+        await connection._connection.rollback()
 
 
 @pytest.mark.timing

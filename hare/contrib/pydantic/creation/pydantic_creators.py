@@ -23,6 +23,8 @@ def pydantic_model_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
@@ -43,6 +45,12 @@ def pydantic_model_creator(
         exclude: Extra fields to exclude from the provided model.
         include: Extra fields to include from the provided model.
         computed: Extra computed fields to include from the provided model.
+        extra_fields: Values read from a row by name - a query's annotation, an attribute set on the row
+            after it was read - with their types; None where a row has none. A path through the
+            relations (``"author.books_count"``) adds one to the related schema.
+        related_values: Values of related rows, flattened - a name to the path of the related field
+            through relations to one row (``{"author_name": "author.name"}``); None where a relation
+            wasn't loaded.
         optional: Extra optional fields for the provided model.
         allow_cycles: Whether to allow cycles in the generated model - only useful for
             recursive/self-referential models. ``False`` (the default) prevents any backtracking.
@@ -69,6 +77,8 @@ def pydantic_model_creator(
         exclude=exclude,
         include=include,
         computed=computed,
+        extra_fields=extra_fields,
+        related_values=related_values,
         optional=optional,
         allow_cycles=allow_cycles,
         sort_alphabetically=sort_alphabetically,
@@ -90,6 +100,8 @@ def pydantic_queryset_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
@@ -111,6 +123,12 @@ def pydantic_queryset_creator(
         exclude: Extra fields to exclude from the provided model.
         include: Extra fields to include from the provided model.
         computed: Extra computed fields to include from the provided model.
+        extra_fields: Values read from a row by name - a query's annotation, an attribute set on the row
+            after it was read - with their types; None where a row has none. A path through the
+            relations (``"author.books_count"``) adds one to the related schema.
+        related_values: Values of related rows, flattened - a name to the path of the related field
+            through relations to one row (``{"author_name": "author.name"}``); None where a relation
+            wasn't loaded.
         optional: Extra optional fields of the item model.
         allow_cycles: Whether to allow cycles in the generated model - only useful for
             recursive/self-referential models. ``False`` (the default) prevents any backtracking.
@@ -133,6 +151,8 @@ def pydantic_queryset_creator(
         exclude=exclude,
         include=include,
         computed=computed,
+        extra_fields=extra_fields,
+        related_values=related_values,
         optional=optional,
         allow_cycles=allow_cycles,
         sort_alphabetically=sort_alphabetically,

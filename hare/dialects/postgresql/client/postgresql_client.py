@@ -682,6 +682,14 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         """
         await self.execute_dicts(POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL, [previous_schemas])
 
+    def get_shared_table_name(self, table: str) -> str:
+        """The table in the connection's own schema - a tenant schema's client finds it after the tenant's
+        schema on its search path, and an unqualified name created it there."""
+        if self.tenant_schema is None:
+            return table
+        shared_schema = (self.schema or "").removeprefix(f"{self.tenant_schema},") or POSTGRESQL_DEFAULT_SCHEMA
+        return f"{self.dialect.literals.quote_identifier(shared_schema)}.{table}"
+
     def get_tenant_client_settings(self, schema_name: str) -> dict[str, Any]:
         """A search path of the tenant's schema, then the connection's own schema (``public``)."""
         return {
