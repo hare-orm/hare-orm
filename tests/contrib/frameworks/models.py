@@ -13,6 +13,13 @@ class Writer(Model):
     name = fields.CharField(max_length=50, unique=True)
     tags = fields.ManyToManyField("models.Tag", related_name="writers")
 
+    @property
+    def initial(self) -> str:
+        return self.name[:1].upper()
+
+    def shouted_name(self) -> str:
+        return self.name.upper()
+
 
 class Chapter(Model):
     volume = fields.IntField()

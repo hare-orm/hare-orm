@@ -598,6 +598,22 @@ async def test_a_range_given_as_its_schema_writes_it(db_ranges):
         schema(span={"lower": "a", "upper": "b"})
 
 
+@pytest.mark.requires("pydantic")
+@test.requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_schema_reads_back_the_infinite_bound_of_a_decimal_range_it_wrote(db_ranges):
+    """The schema wrote Range(1, Decimal("Infinity")) as "Infinity" and refused it on reading - a finite number
+    was asked for."""
+    from hare.contrib.pydantic import pydantic_model_creator
+
+    schema = pydantic_model_creator(DecimalRangeThing)
+    for span in (Range(Decimal(1), Decimal("Infinity")), Range(Decimal("-Infinity"), Decimal(0))):
+        obj = await DecimalRangeThing.objects.create(span=span)
+        written = schema.model_validate(obj, from_attributes=True)
+        assert schema.model_validate_json(written.model_dump_json()).span == span
+        assert schema.model_validate(written.model_dump(mode="json")).span == span
+
+
 @test.requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_a_bound_past_the_range_element_is_refused_before_the_query(db_ranges):

@@ -30,7 +30,7 @@ class UniqueConstraint:
         condition: Makes it a partial unique index - a ``Q`` over the model's fields or a
             ``RawSQLTerm`` predicate.
         nulls_distinct: Needs ``Features.supports_nulls_distinct`` - False makes rows with NULLs
-            collide (``NULLS NOT DISTINCT``), True states the default, None leaves it to the
+            collide (NULLs compared as equal), True states the default, None leaves it to the
             database.
         without_overlaps: The last field is a range two rows may not overlap in while the other
             fields are equal (``WITHOUT OVERLAPS``) - needs ``Features.supports_without_overlaps``.

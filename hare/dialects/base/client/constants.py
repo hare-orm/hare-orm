@@ -20,6 +20,8 @@ PING_SQL = "SELECT 1"
 
 #: The error of a statement or an ending on a transaction that ended already.
 TRANSACTION_FINALISED_MESSAGE = "Transaction already finalised"
+#: The error of a statement or a commit of a transaction whose BEGIN outlived the wait after a cancellation.
+TRANSACTION_BEGIN_ABANDONED_MESSAGE = "The transaction's BEGIN exceeded the cancellation wait"
 
 #: What Python's codecs say of a text holding half of a surrogate pair - no database stores one.
 UNENCODABLE_SURROGATE_REASON = "surrogates not allowed"

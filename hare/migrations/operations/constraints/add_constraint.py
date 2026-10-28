@@ -23,7 +23,7 @@ class AddConstraint(AddSchemaObject):
     Args:
         model_name: The model.
         constraint: The constraint.
-        not_valid: For a check constraint: the existing rows needn't pass it yet (``NOT VALID``, where
+        not_valid: For a check constraint: the existing rows needn't pass it yet (where
             ``Features.supports_not_valid_constraints``) - only new and updated rows are checked, so adding
             it doesn't scan and lock the table; a later ``ValidateConstraint`` checks the rest. Another
             database adds it the plain way.

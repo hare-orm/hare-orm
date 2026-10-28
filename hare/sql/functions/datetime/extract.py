@@ -49,7 +49,7 @@ class Extract(Function):
             alias: Optional alias for the term.
             as_integer: Cast the result to an integer - ``EXTRACT`` may return a numeric.
             zone_as_literal: Render ``zone_name`` as a literal rather than a parameter - an
-                extraction selected, grouped, ordered and made ``DISTINCT ON`` renders the same
+                extraction selected, grouped, ordered and made distinct by renders the same
                 expression in each clause, which a database compares by text (two parameters
                 are two expressions). The zone is a validated IANA name.
             is_time_of_day: The term is a time of day - on a database storing one as text, the text

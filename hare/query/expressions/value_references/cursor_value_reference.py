@@ -35,7 +35,7 @@ class CursorValueReference:
         Returns:
             The parameters.
         """
-        db_value = dialect.types.get_db_value(self.field, value, model)
+        db_value = dialect.types.get_read_column_value(self.field, value, model)
         if self.equality_wrapper is None:
             return [(id(self.comparison_wrapper), db_value, False)]
         return [(id(self.comparison_wrapper), db_value, False), (id(self.equality_wrapper), db_value, False)]

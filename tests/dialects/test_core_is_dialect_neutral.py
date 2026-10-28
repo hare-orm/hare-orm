@@ -41,6 +41,18 @@ DIALECT_ONLY_SQL = re.compile(
 #: The names of the built-in databases, their extensions and drivers - a comment or a docstring of hare's
 #: core names what a database does by the feature, not by the database.
 DATABASE_NAMES = re.compile(r"\b(?:PostgreSQL|Postgres|SQLite|ClickHouse|SpatiaLite|PgBouncer|pgvector|rust_pg)\b")
+#: The catalogs, types, extensions, statements and clauses only one of the built-in databases has - a comment or
+#: a docstring of hare's core says what they do instead of writing them.
+DATABASE_ONLY_WORDS = re.compile(
+    r"\bpg_[a-z_]+|\bjsonb\b|\bhstore\b|\bunaccent\b|\bctid\b|\bcitext\b|\bpostgis\b|\btsvector\b|\bltree\b|"
+    r"\bbytea\b|\bsearch_path\b|\bbtree_gist\b|\bbloom\b|\bspgist\b|"
+    r"\bCREATE TYPE\b|\b(?:COMMIT|ROLLBACK) PREPARED\b|\bPREPARE TRANSACTION\b|\bLISTEN\b|\bNOTIFY\b|\bCOPY\b|"
+    r"\bFROM STDIN\b|\bCONCURRENTLY\b|\bNOT VALID\b|\bVALIDATE CONSTRAINT\b|\bEXCLUDE USING\b|\bSET SCHEMA\b|"
+    r"\bNULLS NOT DISTINCT\b|\bDISTINCT ON\b|\bILIKE\b|\bNO KEY UPDATE\b|\bCONSTRAINT TRIGGER\b|\bALTER INDEX\b|"
+    r"\bDATE_TRUNC\b|\bunnest\(|\bANY\(|\bPRAGMA\b|\bsqlite_[a-z_]+|\bWITHOUT ROWID\b|"
+    r"\bMergeTree\b|\bLowCardinality\b|\bNullable\(|\bASOF\b|\bARRAY JOIN\b|\bPREWHERE\b|\bON CLUSTER\b|"
+    r"\bRENAME TABLE\b"
+)
 #: The modules naming hare's own dialects and drivers, to load them by name.
 DATABASE_NAMING_MODULES = frozenset({"hare/dialects/constants.py", "hare/dialects/dialect_registry.py"})
 #: The parts of a SQL statement a core module doesn't write itself - outside the SQL builder, SQL text is
@@ -183,6 +195,12 @@ def get_violations_of(path: Path, root: Path) -> Iterator[str]:
             and DATABASE_NAMES.search(node.value)
         ):
             yield f"{location}:{node.lineno} names a database in a docstring"
+        if (
+            isinstance(node, ast.Constant)
+            and id(node) in docstring_node_ids
+            and DATABASE_ONLY_WORDS.search(node.value)
+        ):
+            yield f"{location}:{node.lineno} writes what one database has in a docstring"
         if isinstance(node, ast.JoinedStr) and not writes_sql(location):
             text = "".join(part.value for part in node.values if isinstance(part, ast.Constant))
             if CORE_SQL_TEXT.search(text):
@@ -200,10 +218,13 @@ def get_violations_of(path: Path, root: Path) -> Iterator[str]:
             for operand in (node.left, *node.comparators)
         ):
             yield f"{location}:{node.lineno} tells a field by its value type's message"
-    if location not in DATABASE_NAMING_MODULES:
-        for token in tokenize.generate_tokens(io.StringIO(path.read_text(encoding="utf-8")).readline):
-            if token.type == tokenize.COMMENT and DATABASE_NAMES.search(token.string):
-                yield f"{location}:{token.start[0]} names a database in a comment"
+    for token in tokenize.generate_tokens(io.StringIO(path.read_text(encoding="utf-8")).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        if location not in DATABASE_NAMING_MODULES and DATABASE_NAMES.search(token.string):
+            yield f"{location}:{token.start[0]} names a database in a comment"
+        if DATABASE_ONLY_WORDS.search(token.string):
+            yield f"{location}:{token.start[0]} writes what one database has in a comment"
 
 
 def writes_sql(location: str) -> bool:
@@ -242,8 +263,9 @@ def test_each_type_of_violation_is_found(tmp_path):
         "    return 'hare.dialects.postgresql.fields.array_field.ArrayField'\n"
         "from hare.dialects.clickhouse.fields import FixedStringField\n"
         "def g(field, text, table):\n"
-        '    """Works on PostgreSQL only."""\n'
+        '    """Works on PostgreSQL only, reading an hstore."""\n'
         "    # SQLite reads it as text.\n"
+        "    # Finished with COMMIT PREPARED.\n"
         "    if field.argument_value_type == INTERVAL_VALUE_TYPE:\n"
         "        return 'SELECT * EXCEPT (hidden) FROM t'\n"
         "    return f'SELECT a FROM {table}', text.replace(\"'\", \"''\")\n",
@@ -269,6 +291,8 @@ def test_each_type_of_violation_is_found(tmp_path):
             "imports hare.dialects.clickhouse.fields",
             "names a database in a docstring",
             "names a database in a comment",
+            "writes what one database has in a docstring",
+            "writes what one database has in a comment",
             "tells a field by its value type's message",
             "writes a dialect's SQL",
             "writes SQL text",

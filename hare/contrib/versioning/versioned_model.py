@@ -34,7 +34,7 @@ class VersionedModel(Model):
                 new_version_excluded_fields = ("single_use_token",)
     """
 
-    id = fields.UUIDField(default=Uuid7.new, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True, version=7)
     version = fields.PositiveSmallIntField(default=1)
 
     pk = CompositePrimaryKey("id", "version")

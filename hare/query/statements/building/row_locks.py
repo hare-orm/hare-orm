@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 
 class RowLocks:
-    """The row locks of a query - FOR UPDATE / NO KEY UPDATE / SHARE / KEY SHARE, NOWAIT, SKIP LOCKED
-    and OF - as the dialect writes them."""
+    """The row locks of a query - their strength (update, no-key update, share, key share), NOWAIT, SKIP
+    LOCKED and OF - as the dialect writes them."""
 
     @staticmethod
     def apply_select_for_update(query: AwaitableQuery[Any]) -> None:
@@ -197,7 +197,7 @@ class RowLocks:
             query: The query.
 
         Returns:
-            The strength; ``no_key=True`` on a database without ``FOR NO KEY UPDATE`` is
+            The strength; ``no_key=True`` on a database without the no-key update lock is
             ``FOR UPDATE``, the stronger lock.
 
         Raises:

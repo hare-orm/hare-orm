@@ -75,7 +75,7 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
         if rows_query._is_none:
             return
         query = rows_query._get_iterated_query()
-        page_template = copy(query)
+        page_template = query._get_execution_query(query._select_for_update)
         page_template._single = False
         page_template._raise_does_not_exist = False
         keyset_readers = page_template._prepare_paging()

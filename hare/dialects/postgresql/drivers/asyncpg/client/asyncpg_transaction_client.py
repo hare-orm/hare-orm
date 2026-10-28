@@ -38,6 +38,8 @@ class AsyncpgTransactionClient(PostgresqlTransactionClient, AsyncpgClient):
     still be rolled back to.
     """
 
+    begins_without_suspending = True
+
     #: The client the transaction is opened on - the outer transaction's for a savepoint.
     _parent: AsyncpgClient
 

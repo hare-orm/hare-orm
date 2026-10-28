@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from hare.contrib.test import hare_test_context
 from hare.core.connections.connections import Connections
 from hare.exceptions import ConfigurationError, DBConnectionError, QueryError, UnSupportedError, ValidationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.migrations.api.migrate import migrate
 from hare.migrations.autodetection.diffs.state_model_diff import StateModelDiff
 from hare.migrations.exceptions import TenantMigrationError
 from hare.migrations.execution.executor.migration_executor import MigrationExecutor
@@ -290,7 +292,8 @@ async def get_journal(schema: str) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target_container", [list, iter])
+async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_path, monkeypatch, target_container):
     skip_if_not_postgres()
     await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -303,7 +306,7 @@ async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_pat
         def get_executor() -> MigrationExecutor:
             return MigrationExecutor(Connections.get("models"), apps_config)
 
-        await get_executor().migrate([MigrationTarget(app_label="models", name="0001_initial")])
+        await get_executor().migrate(target_container([MigrationTarget(app_label="models", name="0001_initial")]))
         assert {"tenant_company", "shared_marker", "hare_migrations"} <= await get_tables("public")
         assert not {"tenant_note", "tenant_marker"} & await get_tables("public")
         for schema in ("tenant_acme", "tenant_beta"):
@@ -336,6 +339,31 @@ async def test_migrate_runs_in_the_shared_schema_and_every_tenant_schema(tmp_pat
         assert await get_journal("tenant_acme") == ["0001_initial"]
         assert await get_journal("tenant_beta") == ["0001_initial"]
         assert await get_journal("tenant_gamma") == ["0001_initial", "0002_add_size"]
+        assert await get_journal("public") == ["0001_initial", "0002_add_size"]
+
+        # Inside a scope given model by model only the schema of the tenant it gives the Meta.tenant_schema
+        # models is, including when the public API reloads the model registry inside that scope.
+        await get_executor().migrate()
+        model_module = sys.modules[MODULE]
+        spec = importlib.util.spec_from_file_location(MODULE, model_module.__file__)
+        assert spec is not None and spec.loader is not None
+        reloaded_module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, MODULE, reloaded_module)
+        spec.loader.exec_module(reloaded_module)
+        config = {
+            "connections": Connections.current().db_config,
+            "apps": {
+                "models": {
+                    "models": [MODULE],
+                    "default_connection": "models",
+                    "migrations": migrations_module,
+                }
+            },
+        }
+        with Tenancy.scope({TenantNote: "beta"}):
+            await migrate(config=config, target="models.0001_initial")
+        assert await get_journal("tenant_beta") == ["0001_initial"]
+        assert await get_journal("tenant_acme") == ["0001_initial", "0002_add_size"]
         assert await get_journal("public") == ["0001_initial", "0002_add_size"]
 
         await get_executor().migrate([MigrationTarget(app_label="models", name="zero")])
@@ -452,3 +480,20 @@ async def test_a_tenant_query_on_a_closed_and_dropped_connection_is_refused():
         with Tenancy.scope("acme"), pytest.raises(DBConnectionError, match="closed and dropped"):
             dropped.get_schema_client("tenant_acme")
         assert dropped.tenant_clients == {}
+
+
+@pytest.mark.asyncio
+async def test_a_bookkeeping_table_is_reached_in_the_shared_schema_from_a_tenant_s_client():
+    """The decision log of Transactions.distributed() was created in the tenant's schema - first on the
+    search path of its client - and its last statement then missed it."""
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    async with tenant_context():
+        await TenantSchemas.create("acme", "models")
+        assert Connections.get("models").get_shared_table_name("hare_log") == "hare_log"
+        with Tenancy.scope("acme"):
+            tenant_client = Connections.get("models")
+            assert tenant_client.tenant_schema == "tenant_acme"
+            assert tenant_client.get_shared_table_name("hare_log") == '"public".hare_log'
+            async with Transactions.atomic("models") as connection:
+                assert connection.get_shared_table_name("hare_log") == '"public".hare_log'

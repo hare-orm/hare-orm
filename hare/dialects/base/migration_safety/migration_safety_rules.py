@@ -4,6 +4,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from hare.dialects.base.migration_safety.add_field_backfill_rule import AddFieldBackfillRule
+from hare.dialects.base.migration_safety.add_field_without_default_rule import AddFieldWithoutDefaultRule
 from hare.dialects.base.migration_safety.alter_field_rewrite_rule import AlterFieldRewriteRule
 from hare.dialects.base.migration_safety.delete_model_rule import DeleteModelRule
 from hare.dialects.base.migration_safety.remove_field_rule import RemoveFieldRule
@@ -45,6 +46,7 @@ class MigrationSafetyRules:
         """
         return [
             AddFieldBackfillRule(),
+            AddFieldWithoutDefaultRule(),
             AlterFieldRewriteRule(),
             RenameFieldRule(),
             RemoveFieldRule(),

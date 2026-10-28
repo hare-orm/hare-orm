@@ -4,6 +4,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, ClassVar, cast
 
+from hare.dialects.enums import ParameterPosition
 from hare.exceptions import FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.numeric.decimal_field import DecimalField
@@ -11,6 +12,7 @@ from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.fields.enums import ValueComputation
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
@@ -39,6 +41,7 @@ from hare.sql.terms.functions.decimal_mod import DecimalMod
 from hare.sql.terms.functions.float_mod import FloatMod
 from hare.sql.terms.functions.mod import Mod
 from hare.sql.terms.term import Term
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class CombinedExpression(CombinableExpression):
@@ -214,7 +217,12 @@ class CombinedExpression(CombinableExpression):
         fields = [field for field in (right_output_field, left_output_field) if field is not None]
         value_types = {numeric_type.type for numeric_type in numeric_types}
         if NumericValueType.FLOAT in value_types:
-            return NumericTyping.get_common_output_field(numeric_types, fields)
+            common_field = NumericTyping.get_common_output_field(numeric_types, fields)
+            return (
+                None
+                if common_field is None
+                else NumericTyping.get_computed_field(common_field, ValueComputation.ARITHMETIC)
+            )
         if NumericValueType.DECIMAL in value_types:
             decimal_scales = NumericTyping.get_decimal_scales(numeric_types)
             if self.connector is ArithmeticOperator.DIV or None in decimal_scales:
@@ -568,6 +576,14 @@ class CombinedExpression(CombinableExpression):
         self._raise_if_not_a_number(self.right, right_output_field)
         left_term = self._literal_term(self.left, left.term)
         right_term = self._literal_term(self.right, right.term)
+        if isinstance(left_term, ValueWrapper) and isinstance(right_term, ValueWrapper):
+            # Two parameters - an annotation of a literal read by F() beside another - type neither, where a
+            # database types a parameter only from what's around it.
+            dialect = expression_context.dialect
+            left_term = Value.get_typed_term(left_term, left_term.value, ParameterPosition.FUNCTION_ARGUMENT, dialect)
+            right_term = Value.get_typed_term(
+                right_term, right_term.value, ParameterPosition.FUNCTION_ARGUMENT, dialect
+            )
         if NumericTyping.is_enum_field(left_output_field):
             left_term = expression_context.dialect.renderers.get_enum_number_term(left_term)
         if NumericTyping.is_enum_field(right_output_field):

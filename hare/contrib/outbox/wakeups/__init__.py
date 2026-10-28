@@ -1,5 +1,5 @@
 """What wakes the outbox relays once events are written - in the same process, through the
-database's LISTEN/NOTIFY, Redis, Kafka or RabbitMQ."""
+database's notification channels, Redis, Kafka or RabbitMQ."""
 
 from __future__ import annotations
 

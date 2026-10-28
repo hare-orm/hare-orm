@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.dialects.base.schema.runtime_statements.tenant_conditions import TenantConditions
-from hare.dialects.postgresql.schema.constants import POSTGRESQL_TENANT_CONDITION_TEMPLATE
+from hare.dialects.postgresql.schema.constants import (
+    POSTGRESQL_TENANT_CONDITION_TABLE_TENANTS_TEMPLATE,
+    POSTGRESQL_TENANT_CONDITION_TEMPLATE,
+)
 from hare.dialects.postgresql.transactions.constants import (
     POSTGRESQL_ALL_TENANTS_SETTING_VALUE,
     POSTGRESQL_TENANT_SETTING_NAME,
@@ -21,12 +24,16 @@ class PostgresqlTenantConditions(TenantConditions):
     editor: PostgresqlSchemaEditor
 
     @classmethod
-    def get_tenant_condition_sql(cls, quoted_column: str, column_type: str) -> str:
+    def get_tenant_condition_sql(cls, quoted_column: str, column_type: str, table_key_literal: str) -> str:
+        tenants_sql = POSTGRESQL_TENANT_CONDITION_TABLE_TENANTS_TEMPLATE.format(
+            table=table_key_literal, setting=POSTGRESQL_TENANT_SETTING_NAME
+        )
         return POSTGRESQL_TENANT_CONDITION_TEMPLATE.format(
             column=quoted_column,
             column_type=column_type,
             setting=POSTGRESQL_TENANT_SETTING_NAME,
             all_tenants=POSTGRESQL_ALL_TENANTS_SETTING_VALUE,
+            tenants=tenants_sql,
         )
 
     @classmethod

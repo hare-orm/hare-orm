@@ -41,7 +41,8 @@ It checks every app on connection `connection_alias`: an app from `apps_config` 
 check to those apps. A `Meta.managed = False` model (including a live-registered one) is never diffed,
 but its table counts as known, so it is not reported as untracked; the shadow holds its table alone, for
 the relations pointing at it — not its triggers, views or other objects (an `INSTEAD OF` trigger of a
-model over a view would fail on a table). A model without `Meta.schema` is
+model over a view would fail on a table). A non-primary-key identity column is kept as an ordinary
+column in that shadow table, so a `to_field` relation can still target it. A model without `Meta.schema` is
 always looked up in the connection's default schema (PostgreSQL `current_schema()`, i.e. the first
 existing schema on the `search_path`) — where `migrate` creates its table; a model with `Meta.schema` is
 looked up there — in its attached database on SQLite, its database of the server on ClickHouse.

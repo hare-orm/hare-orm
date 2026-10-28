@@ -2,6 +2,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.exceptions import OperationalError
+from hare.query.expressions import F, Value
 from tests.shared_models.testmodels import Employee, Event, Tournament
 
 
@@ -39,3 +40,39 @@ async def test_a_query_joining_too_many_tables_raises_an_operational_error_namin
         await Employee.objects.all().order_by(too_long_manager_path)
 
     assert "at most 64 tables in a join" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_an_annotation_named_like_a_relation_path_orders_by_itself(db):
+    """An annotation of a relation's path name was ordered by the relation's key - its JOIN and column."""
+    boss = await Employee.objects.create(name="boss")
+    middle = await Employee.objects.create(name="middle", manager=boss)
+    first = await Employee.objects.create(name="first", manager=middle)
+    second = await Employee.objects.create(name="second", manager=boss)
+    annotated = Employee.objects.annotate(manager__manager=Value(0) - F("id")).filter(manager__isnull=False)
+    assert await annotated.order_by("manager__manager").values_list("id", flat=True) == [
+        second.id,
+        first.id,
+        middle.id,
+    ]
+    assert await annotated.order_by("-manager__manager").values_list("id", flat=True) == [
+        middle.id,
+        first.id,
+        second.id,
+    ]
+
+
+@requires_features(supports_distinct_on=True)
+@pytest.mark.asyncio
+async def test_distinct_by_an_annotation_named_like_a_relation_path(db):
+    """distinct() by it was compared with the relation's key - "distinct() fields must start the ordering"."""
+    boss = await Employee.objects.create(name="boss")
+    await Employee.objects.create(name="a", manager=boss)
+    await Employee.objects.create(name="b", manager=boss)
+    rows = (
+        Employee.objects.annotate(manager__manager=F("manager_id"))
+        .filter(manager__isnull=False)
+        .order_by("manager__manager", "name")
+        .distinct("manager__manager")
+    )
+    assert await rows.values_list("name", flat=True) == ["a"]

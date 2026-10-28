@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.fields.generated_field import GeneratedField
 from hare.query.queryset.combination.combination import Combination
 from hare.sql.enums import SetOperation
 
 if TYPE_CHECKING:
+    from hare.models import Model
     from hare.query.queryset.queryset import QuerySet
     from hare.query.statements.select.combined_query import CombinedQuery
 
@@ -52,10 +56,10 @@ class QuerySetCombination:
         if selects_values and set_operation is not SetOperation.UNION_ALL:
             for branch in (queryset, *other_querysets):
                 QuerySetCombination.raise_if_encrypted_values_compared(branch, set_operation)
-        combined_rows_are_one_branch = selects_values and bool(
+        combination = queryset._combination
+        combined_rows_are_one_branch = combination is not None and bool(
             queryset._orderings or queryset._limit is not None or queryset._offset or queryset._is_none
         )
-        combination = queryset._combination
         if combination is not None and not combined_rows_are_one_branch:
             clone = queryset._clone()
             clone._combination = combination.with_branches(other_querysets, set_operation)
@@ -68,7 +72,17 @@ class QuerySetCombination:
         combined_queryset._router_fallback_connection = queryset._router_fallback_connection
         combined_queryset._instance_connection_alias = queryset._instance_connection_alias
         combined_queryset._visibility = queryset._visibility
-        combined_queryset._combination = Combination.of((queryset, *other_querysets), set_operation)
+        first_branch = queryset
+        if combination is not None and combination.prefetched_relations:
+            # A prefetch of the result stays on the new result, outside its nested SQL branch.
+            first_branch = queryset._clone()
+            first_branch._combination = replace(combination, prefetched_relations=())
+        new_combination = Combination.of((first_branch, *other_querysets), set_operation)
+        combined_queryset._combination = (
+            replace(new_combination, prefetched_relations=combination.prefetched_relations)
+            if combination is not None and combination.prefetched_relations
+            else new_combination
+        )
         return combined_queryset
 
     @staticmethod
@@ -102,13 +116,33 @@ class QuerySetCombination:
                 QuerySetCombination.raise_if_encrypted_values_compared(branch, set_operation)
             return
         selection = queryset._selection
-        if selection is None or selection.selects_every_field:
+        if selection is None:
             return
-        for field_name in (*selection.field_names, *(name for _key, name in selection.renamed_fields)):
+        field_names: list[str] | tuple[str, ...]
+        if selection.selects_every_field:
+            for field in QuerySetCombination.get_encrypted_fields(queryset.model):
+                EncryptedFieldBase.raise_if_encrypted(field, set_operation.value)
+            if not queryset._annotations:
+                return
+            field_names = [name for name in queryset._annotations if name not in queryset._alias_keys]
+        else:
+            field_names = (*selection.field_names, *(name for _key, name in selection.renamed_fields))
+        for field_name in field_names:
             EncryptedFieldBase.raise_if_encrypted(
                 QueryAnnotations.get_field_object_by_path(queryset, field_name),  # type: ignore[arg-type]
                 set_operation.value,
             )
+
+    @staticmethod
+    @ModelCache.fact()
+    def get_encrypted_fields(model: type[Model]) -> tuple[EncryptedFieldBase, ...]:
+        """The stored encrypted fields an implicit values selection reads, kept with the model."""
+        return tuple(
+            effective_field
+            for name, field in model._meta.fields_map.items()
+            if name in model._meta.fields_db_projection
+            and isinstance(effective_field := GeneratedField.get_effective_field(field), EncryptedFieldBase)
+        )
 
     @staticmethod
     def selects_values(queryset: QuerySet[Any, Any]) -> bool:

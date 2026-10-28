@@ -16,10 +16,12 @@ from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.queryset.specification_copying import SpecificationCopying
+from hare.query.statements.building.keyset_bounds import KeysetBounds
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import ITERATOR_CURSOR_ANNOTATION_PREFIX
@@ -162,7 +164,7 @@ class ModelRowsQuery(SelectQuery[TModel]):
         query = super()._get_iterated_query()
         if not self._distinct_on:
             return query
-        # A page boundary has to apply to the rows DISTINCT ON picks, not to the rows it picks from.
+        # A page boundary has to apply to the rows the distinct by fields picks, not to the rows it picks from.
         queryset = self._source_queryset._clone()
         queryset._orderings = list(query._orderings)
         return type(self)(SingleRow.with_distinct_on_rows_as_subquery(queryset))
@@ -173,12 +175,14 @@ class ModelRowsQuery(SelectQuery[TModel]):
 
         Returns:
             Readers of each ordering value off an instance, or None to page by ``OFFSET`` - a
-            primary key can repeat, or see ``_get_keyset_readers()``.
+            primary key can repeat, the ordering can tie on a model without one, or see
+            ``_get_keyset_readers()``.
         """
         rows_repeat = RowMultiplication.rows_repeat_per_primary_key(self)
         orderings = list(self._orderings)
         ordering_field_names = {field_name for field_name, _order in orderings}
-        if not self._ordering_field_names_are_unique(ordering_field_names):
+        ordering_is_unique = self._ordering_field_names_are_unique(ordering_field_names)
+        if not ordering_is_unique:
             orderings += [
                 (primary_key_attribute_name, Order.ASC)
                 for primary_key_attribute_name in self.model._meta.primary_key_attribute_names
@@ -192,7 +196,9 @@ class ModelRowsQuery(SelectQuery[TModel]):
                 if annotation_name not in ordering_field_names
             ]
         self._orderings = orderings
-        return None if rows_repeat else self._get_keyset_readers()
+        if rows_repeat or (not ordering_is_unique and not self.model._meta.has_primary_key):
+            return None
+        return self._get_keyset_readers()
 
     def _get_keyset_readers(self) -> list[Callable[[Any], Any]] | None:
         """Readers of each ordering value off an instance, when every ordering field is a column
@@ -201,14 +207,21 @@ class ModelRowsQuery(SelectQuery[TModel]):
 
         Returns:
             The readers, or None for ``OFFSET`` paging - an ordering across a relation or by an
-            annotation, or a window function (a keyset condition would change the rows it is
-            computed over).
+            annotation, by a field whose values aren't compared by ``<``/``>`` (an ``HStoreField``), a
+            window function or an extension call changing which rows come (``limit_by()``): a keyset
+            condition would change the rows they pick from.
         """
         direct_fields = self.model._meta.direct_fields
-        if not all(field_name in direct_fields for field_name, _order in self._orderings) or (
-            RowMultiplication.reads_window_function(self)
+        if (
+            not all(field_name in direct_fields for field_name, _order in self._orderings)
+            or RowMultiplication.reads_window_function(self)
+            or (self._extension_calls and QuerySetExtensions.changes_rows(self))
         ):
             return None
+        fields_map = self.model._meta.fields_map
+        for field_name, _order in self._orderings:
+            if not KeysetBounds.compares_by_order(fields_map[field_name]):
+                return None
         loaded_field_names = set(OnlyDeferFields.get_effective_fields_for_select(self))
         readers: list[Callable[[Any], Any]] = []
         for index, (field_name, _order) in enumerate(self._orderings):

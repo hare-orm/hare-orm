@@ -60,12 +60,16 @@ of `hare.query.functions`; they work on every database — see
 ## <a id="aggregates"></a>Aggregating into arrays and JSON
 
 `ArrayAgg`/`JSONBAgg` decode each element through the aggregated field (a `JSONField` element is parsed,
-a `DatetimeField` element is in hare's time zone, a `TimeDeltaField` element is a `timedelta`).
+of its declared `field_type` when it has one; a `DatetimeField` element is in hare's time zone, a
+`TimeDeltaField` element is a `timedelta`). A non-finite float, which jsonb holds as its text (`"NaN"`,
+`"Infinity"`), is a float again in `JSONBAgg` of a `FloatField` and of an array of floats.
 `JSONBAgg` of a `DecimalField` gives a `Decimal` quantized to the field's `decimal_places` — JSON itself
 carries the number with float precision, so use `ArrayAgg` when exact digits matter. `JSONBAgg` of a
 range field gives `Range` values (an empty range, an unbounded side and inclusive/exclusive bounds
 included). `JSONBAgg` of an `IntervalField` or a `BinaryField` raises `FieldError` — JSON holds no such
 value, only text of the server's `IntervalStyle`/`bytea_output`; `ArrayAgg` gives them exactly.
+The refusal applies before SQL to arrays of these fields at any depth and to generated fields with
+these output types as well.
 `ArrayAgg` of an `ArrayField` builds one multi-dimensional array, whose rows PostgreSQL
 requires of one length: arrays of different lengths, or an empty one among others, raise
 `OperationalError` (`cannot accumulate arrays of different dimensionality`). `JSONBAgg` aggregates them

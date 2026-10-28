@@ -1,8 +1,11 @@
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 
+from hare import fields
 from hare.contrib.test import requires_features
+from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.exceptions import (
     FieldError,
     IncompleteInstanceError,
@@ -11,14 +14,17 @@ from hare.exceptions import (
     UnSupportedError,
 )
 from hare.fields.database_default import DatabaseDefault
-from hare.instrumentation.declarations import QueryExecuted
+from hare.instrumentation.declarations import QueryExecuted, RowsChanged
 from hare.instrumentation.observers.observers import Observers
 from hare.query.expressions import F, Value
+from hare.query.statements.write.bulk.bulk_update_checks import BulkUpdateChecks
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from hare.sql.terms import LiteralValue
 from hare.transactions.transactions import Transactions
+from tests.fields.value_types.models_text_formats import ContactAccount
 from tests.shared_models.testmodels import (
     CallableDefault,
+    CompositePkAsyncDefault,
     CompositePkThing,
     DirtyTrackedThing,
     Event,
@@ -75,6 +81,46 @@ async def test_bulk_create_update_fields(db_truncate):
     )
     all_ = await UniqueName.objects.all().values("name", "optional")
     assert all_ == [{"name": "name", "optional": "optional"}]
+
+
+@requires_features(supports_unique_constraints=True)
+@pytest.mark.asyncio
+async def test_upsert_preserves_order_between_generated_and_explicit_primary_keys(db_truncate):
+    first = UniqueName(name="shared", optional="first")
+    last = UniqueName(id=100000, name="shared", optional="last")
+
+    await UniqueName.objects.bulk_create([first, last], update_fields=["optional"], on_conflict=["name"])
+
+    assert (await UniqueName.objects.get(name="shared")).optional == "last"
+
+
+@pytest.mark.database_independent
+def test_bulk_update_rejects_primary_keys_equal_after_field_normalization():
+    objects = [
+        ContactAccount(email="ann@EXAMPLE.com", name="a", version=0),
+        ContactAccount(email="ann@example.COM", name="b", version=0),
+    ]
+
+    with pytest.raises(QueryError, match="multiple objects"):
+        BulkUpdateChecks.raise_if_row_written_twice(ContactAccount, objects, SQLITE_DIALECT.types)
+
+
+@pytest.mark.database_independent
+def test_bulk_update_accepts_an_unhashable_json_primary_key():
+    model = SimpleNamespace(
+        __name__="Document",
+        _meta=SimpleNamespace(
+            primary_key_attribute="data",
+            primary_key_attribute_names=["data"],
+            has_composite_primary_key=False,
+            fields_map={"data": fields.JSONField(primary_key=True)},
+            optimistic_lock_field=None,
+        ),
+    )
+
+    BulkUpdateChecks.raise_if_row_written_twice(
+        model, [SimpleNamespace(data={"a": 1}, pk={"a": 1})], SQLITE_DIALECT.types
+    )
 
 
 @requires_features(supports_unique_constraints=True, supports_returning=True)
@@ -1382,3 +1428,25 @@ async def test_bulk_create_upsert_bumps_auto_now_of_a_conflicting_row(db_truncat
     assert upserted.name == "b"
     assert upserted.version == existing.version + 1
     assert upserted.updated_at > original_updated_at
+
+
+@requires_features(supports_insert_conflicts=True)
+@pytest.mark.asyncio
+async def test_an_upsert_by_a_key_with_an_async_default_reports_the_row_it_updates(db_truncate):
+    """The rows an upsert finds were read before the async default was computed - NoValuesFetched."""
+    await CompositePkAsyncDefault.objects.create(id=1, name="old")
+    changes: list[RowsChanged] = []
+    with Observers.observing(RowsChanged, changes.append):
+        await CompositePkAsyncDefault.objects.bulk_create(
+            [CompositePkAsyncDefault(id=1, name="new"), CompositePkAsyncDefault(id=2, name="other")],
+            update_fields=["name"],
+            on_conflict=["id", "version"],
+        )
+    assert sorted((change.operation.value, sorted(change.pks or ())) for change in changes) == [
+        ("insert", [(2, 7)]),
+        ("update", [(1, 7)]),
+    ]
+    assert await CompositePkAsyncDefault.objects.order_by("id").values_list("id", "version", "name") == [
+        (1, 7, "new"),
+        (2, 7, "other"),
+    ]

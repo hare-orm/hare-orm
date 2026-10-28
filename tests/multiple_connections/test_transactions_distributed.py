@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from collections.abc import AsyncGenerator
@@ -28,6 +29,8 @@ from hare.exceptions import (
 from hare.instrumentation.declarations import TransactionEvent
 from hare.instrumentation.observers.observers import Observers
 from hare.models import Model
+from hare.transactions.atomic.atomic import Atomic
+from hare.transactions.distributed.declarations import OpenDistributedTransaction
 from hare.transactions.distributed.distributed_coordinator import DistributedCoordinator
 from hare.transactions.enums import DistributedTransactionResolution, TransactionEventType
 from hare.transactions.transactions import Transactions
@@ -1152,6 +1155,100 @@ async def test_roll_back_distributed_transaction_survives_dead_coordinator_too()
     coordinator_context.__aexit__.assert_awaited_once()
 
 
+def _fake_open_distributed_transaction() -> OpenDistributedTransaction:
+    first_client, first_context = _fake_participant()
+    second_client, second_context = _fake_participant()
+    coordinator_client, coordinator_context = _fake_participant()
+    return OpenDistributedTransaction(
+        coordinator=COORDINATOR,
+        participants=[PARTICIPANT_A, PARTICIPANT_B],
+        xid="xid-123",
+        coordinator_context=coordinator_context,
+        coordinator_client=coordinator_client,
+        participant_contexts={PARTICIPANT_A: first_context, PARTICIPANT_B: second_context},
+        participant_clients={PARTICIPANT_A: first_client, PARTICIPANT_B: second_client},
+    )
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_recovery_ignores_a_decision_of_another_coordinator(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = MagicMock()
+    coordinator.features.supports_two_phase_commit = True
+    coordinator.get_shared_table_name.return_value = "hare_distributed_decisions"
+    coordinator.execute = AsyncMock(
+        return_value=(
+            None,
+            [
+                {
+                    "xid": DistributedCoordinator._make_xid("coordinator_b"),
+                    "participant_aliases": PARTICIPANT_A,
+                }
+            ],
+        )
+    )
+    two_phase = MagicMock()
+    two_phase.get_decisions_table_sql.return_value = "CREATE TABLE"
+    two_phase.get_pending_decisions_sql.return_value = "SELECT decisions"
+    coordinator.dialect.two_phase_commit = two_phase
+    monkeypatch.setattr(Atomic, "get_connection", lambda alias: coordinator)
+    monkeypatch.setattr(Connections, "aliases", lambda: [])
+    xid_is_prepared = AsyncMock(return_value=True)
+    monkeypatch.setattr(DistributedCoordinator, "_xid_is_prepared", xid_is_prepared)
+
+    stale = await DistributedCoordinator.detect_stale_prepared_transactions("coordinator_a", 0)
+
+    assert stale == []
+    xid_is_prepared.assert_not_awaited()
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_finish_exits_every_context_when_recording_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transaction = _fake_open_distributed_transaction()
+    followup = MagicMock()
+    followup.close = AsyncMock()
+    handler = MagicMock()
+    handler.create_independent.return_value = followup
+    monkeypatch.setattr(Connections, "current", lambda: handler)
+    monkeypatch.setattr(
+        DistributedCoordinator,
+        "mark_decision_resolved",
+        AsyncMock(side_effect=RuntimeError("update failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        await DistributedCoordinator._finish(transaction, [], None, [])
+
+    for context in transaction.participant_contexts.values():
+        context.__aexit__.assert_awaited_once()
+    transaction.coordinator_context.__aexit__.assert_awaited_once()
+    followup.close.assert_awaited_once()
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_ambiguous_commit_cleanup_survives_a_participant_exit_failure() -> None:
+    transaction = _fake_open_distributed_transaction()
+    coordinator_client = transaction.coordinator_client
+    coordinator_client.commit = AsyncMock(side_effect=ConnectionError("commit lost"))
+    coordinator_client._commit_landed = False
+    coordinator_client._commit_outcome_unknown = True
+    coordinator_client.execute = AsyncMock()
+    coordinator_client.dialect.transactions.get_rollback_sql.return_value = "ROLLBACK"
+    transaction.participant_contexts[PARTICIPANT_B].__aexit__.side_effect = RuntimeError("exit failed")
+
+    with pytest.raises(DistributedTransactionCommitAmbiguousError):
+        await DistributedCoordinator._commit_coordinator(transaction, [])
+
+    for context in transaction.participant_contexts.values():
+        context.__aexit__.assert_awaited_once()
+    coordinator_client.execute.assert_awaited_once_with("ROLLBACK")
+    transaction.coordinator_context.__aexit__.assert_awaited_once()
+
+
 async def _prepared_gids_for(xid: str) -> list[str]:
     _, rows = await Connections.get(COORDINATOR).execute(
         "SELECT gid FROM pg_catalog.pg_prepared_xacts WHERE gid LIKE $1", [f"{xid}:%"]
@@ -1324,3 +1421,65 @@ async def test_a_coordinator_commit_lost_in_flight_leaves_the_participants_prepa
         (PARTICIPANT_A, DistributedTransactionResolution.ROLLBACK)
     ]
     await DistributedCoordinator.rollback_prepared(Connections.get(PARTICIPANT_A), PARTICIPANT_A, xid)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_participant_alias_with_a_comma_survives_decision_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alias = "participant,a"
+    base = _fake_open_distributed_transaction()
+    transaction = OpenDistributedTransaction(
+        coordinator=base.coordinator,
+        participants=[alias],
+        xid=DistributedCoordinator._make_xid(COORDINATOR),
+        coordinator_context=base.coordinator_context,
+        coordinator_client=base.coordinator_client,
+        participant_contexts={alias: base.participant_contexts[PARTICIPANT_A]},
+        participant_clients={alias: base.participant_clients[PARTICIPANT_A]},
+    )
+    monkeypatch.setattr(DistributedCoordinator, "_prepare_participant", AsyncMock())
+    monkeypatch.setattr(DistributedCoordinator, "_ensure_distributed_decisions_table", AsyncMock())
+    transaction.coordinator_client.execute = AsyncMock()
+    transaction.coordinator_client.get_shared_table_name.return_value = "hare_distributed_decisions"
+    transaction.coordinator_client.dialect.two_phase_commit.get_decision_insert_sql.return_value = "INSERT decision"
+
+    await DistributedCoordinator._prepare_and_record_decision(transaction)
+
+    recorded_aliases = transaction.coordinator_client.execute.await_args.args[1][2]
+    assert recorded_aliases == json.dumps([alias])
+    recovery_coordinator = MagicMock()
+    recovery_coordinator.features.supports_two_phase_commit = True
+    recovery_coordinator.get_shared_table_name.return_value = "hare_distributed_decisions"
+    recovery_coordinator.execute = AsyncMock(
+        return_value=(None, [{"xid": transaction.xid, "participant_aliases": recorded_aliases}])
+    )
+    two_phase = MagicMock()
+    two_phase.get_pending_decisions_sql.return_value = "SELECT decisions"
+    recovery_coordinator.dialect.two_phase_commit = two_phase
+    monkeypatch.setattr(Atomic, "get_connection", lambda connection_alias: recovery_coordinator)
+    monkeypatch.setattr(Connections, "aliases", lambda: [])
+    monkeypatch.setattr(DistributedCoordinator, "_xid_is_prepared", AsyncMock(return_value=True))
+
+    stale = await DistributedCoordinator.detect_stale_prepared_transactions(COORDINATOR, 0)
+
+    assert [(entry.participant_alias, entry.resolution) for entry in stale] == [
+        (alias, DistributedTransactionResolution.COMMIT)
+    ]
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_partial_commit_preserves_on_commit_callback_errors() -> None:
+    transaction = _fake_open_distributed_transaction()
+    callback_error = RuntimeError("callback failed")
+
+    with pytest.raises(BaseExceptionGroup) as raised:
+        await DistributedCoordinator._finish(transaction, [PARTICIPANT_A], None, [callback_error])
+
+    assert callback_error in raised.value.exceptions
+    assert any(isinstance(error, DistributedTransactionPartiallyCommittedError) for error in raised.value.exceptions)
+    for context in transaction.participant_contexts.values():
+        context.__aexit__.assert_awaited_once()
+    transaction.coordinator_context.__aexit__.assert_awaited_once()

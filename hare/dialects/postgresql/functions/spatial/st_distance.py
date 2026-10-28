@@ -10,6 +10,7 @@ from hare.query.expressions import (
     ExpressionResult,
     F,
 )
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -57,6 +58,7 @@ class STDistance(Expression):
         return Function("ST_GEOGFROMTEXT", point_result.term) if isinstance(point, tuple) else point_result.term
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         field_result = F(self.field).get_result(expression_context)
         point_term = self.get_point_term(self, field_result.output_field, expression_context)
         term = Function("ST_DISTANCE", field_result.term, point_term)

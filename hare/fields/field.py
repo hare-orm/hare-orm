@@ -22,7 +22,7 @@ from hare.fields.constants import (
     UNWRITTEN_FIELD_CONSTRUCTOR_PARAMETERS,
 )
 from hare.fields.db_default_not_set import DbDefaultNotSet
-from hare.fields.enums import NativeWriteCheck, RelationType
+from hare.fields.enums import NativeWriteCheck, RelationType, ValueComputation
 from hare.fields.json_values import JsonValues
 from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.fields.registrations.registered_transform import RegisteredTransform
@@ -902,7 +902,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         required_extension: str | None = None,
     ) -> None:
         """Adds a path segment reading inside the value of this field class and its subclasses -
-        how a dialect gives field classes it doesn't define one (``unaccent``).
+        how a dialect gives field classes it doesn't define one (a text transform of its database).
 
         Args:
             segment: The path segment.
@@ -1160,6 +1160,28 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             A ``(field, term) -> term`` cast, or None.
         """
         return dialect.types.get_function_cast(self)
+
+    def get_column_type_options(self) -> tuple[Any, ...]:
+        """The options of the field its column type is made of besides its class - a statement converting a
+        value to the field's type keeps a plan per each (``Cast``). None by default; a field class whose
+        column type takes options of its own gives them.
+
+        Returns:
+            The options.
+        """
+        return ()
+
+    def get_computed_field(self, computation: ValueComputation) -> Field[Any]:
+        """The field a value the database computes from this field's values is decoded through - the field
+        itself, unless the database computes such a value in a wider type than the column keeps.
+
+        Args:
+            computation: What is computed.
+
+        Returns:
+            The field.
+        """
+        return self
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
         """What the stored values must fit when an ``AlterField`` turns ``old_field`` into this field -

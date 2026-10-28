@@ -368,9 +368,21 @@ class Cache(MutableMapping[tuple[Any, ...], TCacheValue]):
             yield key
 
     def __len__(self) -> int:
-        return len(self.bucket_without_model) + sum(
-            len(bucket) for model in list(self.models) if (bucket := self._get_bucket(model)) is not None
-        )
+        """Counts live mapping entries; plain model buckets keep their own entry count."""
+        count = len(self.bucket_without_model)
+        for model in list(self.models):
+            bucket = self._get_bucket(model)
+            if bucket is None:
+                continue
+            if not self.keyed_by_model or not self.holds_sql:
+                count += len(bucket)
+            else:
+                builder_class = model._meta.query_class
+                count += sum(
+                    stored_builder_class is builder_class or stored_builder_class is None
+                    for stored_builder_class, _value in bucket.values()
+                )
+        return count
 
     def values(self) -> Iterator[TCacheValue]:  # type: ignore[override]
         for _, value in self._live_items():

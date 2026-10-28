@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from hare.ddl.conditions.constraint_condition import ConstraintCondition
+from hare.ddl.constraints.check_constraint import CheckConstraint
+from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
+from hare.ddl.indexes.partial_index import PartialIndex
 from hare.exceptions import ConfigurationError, UnSupportedError
+from hare.fields.generated_field import GeneratedField
 from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
+from hare.query.expressions import Expression, Q
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -48,6 +54,7 @@ class ModelConnectionChecks:
         if features.supports_unique_constraints:
             ModelConnectionChecks.raise_if_unique_constraint_options_unsupported(model)
         ModelConnectionChecks.raise_if_index_key_orders_unsupported(model)
+        ModelConnectionChecks.raise_if_ddl_expressions_unsupported(model)
         if meta.soft_delete_field is not None and not features.supports_row_updates:
             raise ConfigurationError(
                 f"{meta.full_name!r} is soft-deleted (Meta.soft_delete_field), but the {meta.connection.dialect.name} "
@@ -169,6 +176,104 @@ class ModelConnectionChecks:
                 raise ConfigurationError(
                     f"{meta.full_name!r} declares the index {index.name or ', '.join(index.fields)}: {error}"
                 ) from error
+
+    @staticmethod
+    def raise_if_names_differ_only_in_case(models: list[type[Model]]) -> None:
+        """Refuses names a database ignoring the case of letters (``Features.names_ignore_letter_case``)
+        takes for one: two tables of one connection and schema, two columns of one model, two named
+        constraints or indexes - the second table or column would be the first one, the second index
+        silently not created.
+
+        Args:
+            models: The registered models, bound to their connections.
+
+        Raises:
+            ConfigurationError: Two names differ only in the case of their letters.
+        """
+        seen_names: dict[tuple[Any, ...], tuple[str, str]] = {}
+        for model in models:
+            meta = model._meta
+            if not meta.connection.features.names_ignore_letter_case:
+                continue
+            key = (meta.connection.dialect, meta.default_connection, meta.schema)
+            owner = repr(meta.full_name)
+            ModelConnectionChecks.note_name(seen_names, (*key, "table"), meta.db_table, owner, "tables")
+            for field_name, column_name in meta.fields_db_projection.items():
+                ModelConnectionChecks.note_name(
+                    seen_names,
+                    (*key, "column", meta.db_table),
+                    column_name,
+                    f"{meta.full_name}.{field_name}",
+                    "columns",
+                )
+            for declaration in (*meta.constraints, *meta.indexes):
+                name = getattr(declaration, "name", None)
+                if name and not isinstance(declaration, CheckConstraint):
+                    ModelConnectionChecks.note_name(seen_names, (*key, "index"), name, owner, "constraints or indexes")
+
+    @staticmethod
+    def note_name(
+        seen_names: dict[tuple[Any, ...], tuple[str, str]], key: tuple[Any, ...], name: str, owner: str, what: str
+    ) -> None:
+        """Records a name by the dialect's identifier key, refusing a conflicting spelling.
+
+        Args:
+            seen_names: The names seen - the name and its owner, by the namespace and identifier key.
+            key: The database, the connection and the schema, what the name is of, and its table for a column.
+            name: The name.
+            owner: What declares it, for the error.
+            what: What the names are of, for the error - ``"tables"``.
+
+        Raises:
+            ConfigurationError: Another spelling of the name was seen.
+        """
+        identifier_key = key[0].literals.get_identifier_key(name)
+        seen_name, seen_owner = seen_names.setdefault((*key, identifier_key), (name, owner))
+        if seen_name != name:
+            raise ConfigurationError(
+                f"{seen_owner} and {owner} declare the {what} {seen_name!r} and {name!r} - the {key[0]} database "
+                f"of connection {key[1]!r} takes names differing only in the case of their letters for one name: "
+                "rename one of them"
+            )
+
+    @staticmethod
+    def raise_if_ddl_expressions_unsupported(model: type[Model]) -> None:
+        """Refuses an expression of an index key, of a constraint's or a partial index's condition and of a
+        generated column that the database can't keep in its DDL - a function it only has on hare's own
+        connections - before a migration of it is written, which no migrate
+        could apply.
+
+        Args:
+            model: The model, bound to its connection.
+
+        Raises:
+            UnSupportedError: A declaration of the model holds such an expression.
+        """
+        meta = model._meta
+        client = meta.connection
+        dialect = client.dialect
+        conditions: list[Any] = []
+        for constraint in meta.constraints:
+            if isinstance(constraint, (UniqueConstraint, ExclusionConstraint)):
+                conditions.append(constraint.condition)
+            elif isinstance(constraint, CheckConstraint):
+                conditions.append(constraint.check)
+        conditions.extend(index.condition for index in meta.indexes if isinstance(index, PartialIndex))
+        try:
+            for index in meta.indexes:
+                if isinstance(index, Index) and index.expressions:
+                    index.get_key_sqls(model, dialect)
+            for condition in conditions:
+                if isinstance(condition, Q):
+                    ConstraintCondition.get_sql(condition, model, client)
+            for field in meta.fields_map.values():
+                if isinstance(field, GeneratedField) and isinstance(field.expression, Expression):
+                    field.get_generated_sql(dialect)
+        except UnSupportedError as error:
+            raise UnSupportedError(
+                f"{meta.full_name!r} can't be kept by the {dialect.name} database of connection "
+                f"{meta.default_connection!r}: {error}"
+            ) from error
 
     @staticmethod
     def raise_if_unique_constraint_options_unsupported(model: type[Model]) -> None:

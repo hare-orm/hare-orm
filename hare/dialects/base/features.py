@@ -32,6 +32,8 @@ class Features:
         supports_recursive_union_distinct: A recursive ``WITH`` query adds its rows by ``UNION`` - each
             row once, so a cycle ends; without, a cascade down a tree of rows of one model is walked
             level by level.
+        names_ignore_letter_case: The database takes names of tables, columns, indexes and constraints
+            differing only in the case of their letters for one name - quoted names too.
         table_alias_hides_name: A table read under an alias answers to the alias alone; without, its
             own name names it too, and a subquery over the table its enclosing query reads takes its
             rows from a derived table - the name is the enclosing query's then.
@@ -64,7 +66,8 @@ class Features:
             before any SQL is sent.
         can_rollback_ddl: DDL runs inside a transaction and rolls back with it.
         supports_select_for_update: ``SELECT ... FOR UPDATE``.
-        supports_select_for_no_key_update: ``SELECT ... FOR NO KEY UPDATE``.
+        supports_select_for_no_key_update: ``SELECT ... FOR UPDATE`` that still lets other transactions
+            write rows referencing the locked ones - a no-key update lock.
         supports_select_for_share: ``SELECT ... FOR SHARE``.
         supports_select_for_key_share: ``SELECT ... FOR KEY SHARE``.
         supports_update_limit_order_by: ``UPDATE``/``DELETE`` with ``ORDER BY`` and ``LIMIT``.
@@ -72,8 +75,10 @@ class Features:
         cuts_like_pattern_at_null_byte: ``LIKE`` reads a pattern up to its first null byte - a pattern
             holding one is refused, as it would match what it doesn't hold.
         supports_returning: ``INSERT ... RETURNING``.
-        supports_two_phase_commit: ``PREPARE TRANSACTION``/``COMMIT PREPARED``.
-        supports_listen_notify: ``LISTEN``/``NOTIFY``.
+        supports_two_phase_commit: A transaction prepared, then committed or rolled back later from any
+            connection.
+        supports_listen_notify: A connection listens on a channel for the notifications other
+            connections send, delivered once their transactions commit.
         inline_comments: Table and column comments go inside ``CREATE TABLE``.
         supports_positional_rows: The rows of ``execute(rows_by_position=True)`` read by position,
             their column names in ``StatementResult.column_names`` - a reader by position asks for
@@ -101,16 +106,15 @@ class Features:
             written as it is and has to exist.
         references_other_schemas: A foreign key references a table of another schema - without, only one of
             its own.
-        supports_distinct_on: ``SELECT DISTINCT ON (...)``.
+        supports_distinct_on: One row kept of each combination of given expressions - ``distinct(*fields)``.
         supports_grouping_sets: ``GROUP BY`` takes ``ROLLUP``, ``CUBE`` and ``GROUPING SETS``, and ``GROUPING()``
             tells their groups apart.
         supports_lateral: A subquery in ``FROM`` joined ``LATERAL`` reads the columns of the tables
             before it.
         supports_table_sample: A table in ``FROM`` is read in a sample - ``TABLESAMPLE``.
-        supports_asof_join: A table is joined ``ASOF`` - each row with the row of the other table
+        supports_asof_join: A table is joined as of - each row with the row of the other table
             closest to it by an inequality (``AsofJoin``).
-        supports_array_join: Each row is repeated with each element of an array of it - ``ARRAY JOIN``
-            (``ArrayJoin``).
+        supports_array_join: Each row is repeated with each element of an array of it (``ArrayJoin``).
         orders_json_values_in_aggregates: ``MAX``/``MIN`` of a JSON value compare it as the database orders
             it - without, the database orders a typed JSON value but takes none in an aggregate.
         reads_trailing_comment_of_insert: A comment ending an ``INSERT ... VALUES`` statement is a
@@ -124,8 +128,11 @@ class Features:
         supports_returning_old_new: ``RETURNING`` reads a row as it was before (``OLD``) and after (``NEW``)
             a write.
         supports_json_table: ``JSON_TABLE`` - rows read out of a JSON document.
-        supports_enum_types: ``CREATE TYPE ... AS ENUM`` - a column of a type of labels.
+        supports_enum_types: Column types of declared labels, each created as a type of its own.
         sorts_nulls_first: NULL sorts before every value in ascending order by default.
+        compares_nan_as_ordered: ``<`` and ``>`` put a float NaN where ``ORDER BY`` does; without, every
+            comparison with NaN is false while ``ORDER BY`` puts NaN between the numbers and the NULLs, on
+            the side the NULLs go to - a cursor's boundary of a float column reads NaN as ``x != x``.
         divides_integers_exactly: ``/`` of two integers gives their exact quotient, a fraction - the result
             is read as a float; without, the database truncates it to an integer.
         computes_integer_statistics_exactly: The average, standard deviation and variance of integers are
@@ -147,8 +154,7 @@ class Features:
         supports_conflict_where: An ``ON CONFLICT`` target takes a ``WHERE``.
         guarantees_returning_order: A multi-row ``INSERT ... RETURNING`` returns its rows in the
             order they were written.
-        supports_copy: The bulk ``COPY`` protocol, or another bulk load of rows the client runs
-            through ``copy()``.
+        supports_copy: A bulk load of rows the client runs through ``copy()``.
         copies_bulk_inserts: ``bulk_create()`` loads its rows through ``copy()`` without being
             asked to (``use_copy=True``) - whenever it handles no conflict and reads no row back.
         supports_pool_status: The client reports what its pool of connections holds and has done
@@ -193,7 +199,7 @@ class Features:
             nullability. Without, the indexes covering it are dropped around the change and created
             again.
         binds_array_parameters: A list is bound as one array parameter (a ``RawSQL`` parameter
-            such as ``= ANY(%s)``).
+            compared with each element of an array).
         supports_foreign_keys: The database enforces foreign keys. Without, a model's relations are
             declared ``db_constraint=False`` - a model declaring one of ``db_constraint=True``, a
             many-to-many relation's automatic through table included, is refused when bound - and hare
@@ -232,6 +238,7 @@ class Features:
     supports_savepoints: bool = True
     supports_generated_keys: bool = True
     takes_keys_before_insert: bool = False
+    names_ignore_letter_case: bool = False
     table_alias_hides_name: bool = True
     supports_recursive_queries: bool = True
     supports_recursive_union_distinct: bool = True
@@ -284,6 +291,7 @@ class Features:
     supports_json_table: bool = False
     supports_enum_types: bool = False
     sorts_nulls_first: bool = False
+    compares_nan_as_ordered: bool = True
     divides_integers_exactly: bool = False
     computes_integer_statistics_exactly: bool = False
     computes_decimal_statistics_exactly: bool = True

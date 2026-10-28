@@ -55,7 +55,7 @@ class Round(Function):
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.precision,)
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> functions.Round:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> functions.Round:
         return functions.Round(term, self.precision)
 
     def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:

@@ -123,7 +123,9 @@ await Book.objects.all().order_by("-rating").distinct().values_list("subject", f
 (`Tag.objects.filter(id__in=Book.objects.filter(...).values("tags"))`). Составной первичный ключ (или
 связь с ним) читается как кортеж частей — `values("pk")`, `values_list("shelf", flat=True)` дают
 `(1, 2)`, а `None`, если все части `NULL`; `group_by()`, `order_by()` (`"pk"`/`"-pk"` и `Meta.ordering`
-тоже) и `distinct(<fields>)` используют все части. `Count("shelf")` считает строки с ключом,
+тоже) и `distinct(<fields>)` используют все части. Переименованный (`values(key="pk")`), это тот же ключ
+под новым именем: `filter(key=(1, 2))`, `filter(key__in=[...])`, `order_by("-key")` и `values("key")`
+читают его части так же, как `pk`. `Count("shelf")` считает строки с ключом,
 `Count("shelf", distinct=True)` — различные ключи, никогда не считая `NULL`. `F()` такой связи даёт
 `QueryError` с перечислением её частей.
 

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.core.registries import Registries
+from hare.dialects.base.types.constants import NATIVE_KEY_VALUE_TYPES
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -32,13 +33,18 @@ class TypeRegistry:
     found_db_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
     found_lookup_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
     found_python_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    #: The native key type each registry found for a field class and its value type.
+    found_native_key_types: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
 
     def __init__(self) -> None:
         from hare.fields.generated_field import GeneratedField
 
+        self.generated_field_class = GeneratedField
         #: The buckets of the caches this registry reads (``Cache.get_owner_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
         self.mappings: dict[type, TypeMapping] = {}
+        #: The registries of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
+        self.mirrors: list[TypeRegistry] = []
         self.mappings_by_field_class: dict[type, tuple[TypeMapping, ...]] = (
             TypeRegistry.found_mappings.get_owner_bucket(self)
         )
@@ -51,6 +57,9 @@ class TypeRegistry:
         )
         self.python_converters: dict[type, PythonConverter | None] = (
             TypeRegistry.found_python_converters.get_owner_bucket(self)
+        )
+        self.native_key_types: dict[tuple[type, Any], type | None] = (
+            TypeRegistry.found_native_key_types.get_owner_bucket(self)
         )
         #: Whether a dialect reads its fields through this registry - until then nothing has
         #: cached what it maps, so a mapping registered while it is built drops no cache.
@@ -87,6 +96,9 @@ class TypeRegistry:
         TypeRegistry.found_db_converters.forget_owner(self)
         TypeRegistry.found_lookup_converters.forget_owner(self)
         TypeRegistry.found_python_converters.forget_owner(self)
+        TypeRegistry.found_native_key_types.forget_owner(self)
+        for mirror in self.mirrors:
+            mirror.register(field_class, mapping)
         if self.in_use:
             Registries.changed()
 
@@ -181,6 +193,7 @@ class TypeRegistry:
         Returns:
             The dialect's ``ordering_key`` of it, else the column itself.
         """
+        field = self.get_value_field(field)
         for mapping in self.get_mappings(type(field)):
             if mapping.ordering_key is not None:
                 ordering_key = mapping.ordering_key(field, term)
@@ -196,7 +209,21 @@ class TypeRegistry:
         Returns:
             Whether it does.
         """
+        field = self.get_value_field(field)
         return any(mapping.ordering_key is not None for mapping in self.get_mappings(type(field)))
+
+    def get_value_field(self, field: Field[Any]) -> Field[Any]:
+        """The field whose mappings a value of ``field`` follows - a ``GeneratedField``'s output field.
+
+        Args:
+            field: The field.
+
+        Returns:
+            The output field of a generated field, else the field itself.
+        """
+        if field.generated and isinstance(field, self.generated_field_class):
+            return field.output_field
+        return field
 
     def holds_null(self, field: Field[Any]) -> bool:
         """Whether the dialect's column type of ``field`` holds NULL.
@@ -207,6 +234,7 @@ class TypeRegistry:
         Returns:
             The nearest mapping's ``holds_null`` - True by default.
         """
+        field = self.get_value_field(field)
         for mapping in self.get_mappings(type(field)):
             if mapping.holds_null is not None:
                 return mapping.holds_null
@@ -222,6 +250,7 @@ class TypeRegistry:
         Returns:
             The dialect's ``json_term`` of it, None when the value goes in as it is.
         """
+        field = self.get_value_field(field)
         for mapping in self.get_mappings(type(field)):
             if mapping.json_term is not None:
                 return mapping.json_term(field, term)
@@ -243,6 +272,38 @@ class TypeRegistry:
             if mapping.to_db is not None:
                 return mapping.to_db_refuses_only
         return False
+
+    def get_native_key_type(self, field: Field[Any]) -> type | None:
+        """The type of values unchanged by both writing and reading the field. A value of exactly that
+        type is its own stored and decoded key: the field writes it unchanged (possibly with native
+        checks), keeps native read values, and the dialect registers no conversion changing either form.
+
+        Args:
+            field: The field.
+
+        Returns:
+            The type, None for a field whose values are converted.
+        """
+        field_class = type(field)
+        key = (field_class, field.field_type)
+        try:
+            return self.native_key_types[key]
+        except KeyError:
+            pass
+        # Local import: fields import the dialects' registries during their setup.
+        from hare.fields.field import Field
+
+        native_type = (
+            field.field_type
+            if field.field_type in NATIVE_KEY_VALUE_TYPES
+            and field.keeps_native_db_values
+            and (field_class.to_db_value is Field.to_db_value or field.get_native_write_check() is not None)
+            and (self.get_db_converter(field_class) is None or self.is_refusing_db_converter(field_class))
+            and self.get_python_converter(field_class) is None
+            else None
+        )
+        self.native_key_types[key] = native_type
+        return native_type
 
     def get_lookup_converter(self, field_class: type) -> DbConverter | None:
         """The ``to_lookup`` the dialect registers for ``field_class``, or None when the field's own
@@ -317,6 +378,34 @@ class TypeRegistry:
         if converter is None:
             return field.to_lookup_value(value, instance)
         return converter(field, value, instance)
+
+    def get_read_column_value(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
+        """A value of ``field`` as the column reads where it is compared - a value that stands with the
+        column's own (a window's default, a cursor's boundary): a filter's value (a float32 as a float32,
+        an enum by its label), a JSON value as the column stores it.
+
+        Args:
+            field: The field.
+            value: The Python value, not None.
+            instance: The model (class) the query is built for.
+
+        Returns:
+            The value to bind.
+        """
+        # Local import: the fields import the dialects' types.
+        from hare.fields.data.json.json_field import JSONField
+
+        value_field = (
+            self.get_value_field(field) if field.generated and isinstance(field, self.generated_field_class) else field
+        )
+        if isinstance(value_field, JSONField):
+            return self.get_db_value(field, value, instance)
+        field_class = type(field)
+        try:
+            converter = self.lookup_converters[field_class]
+        except KeyError:
+            converter = self.get_lookup_converter(field_class)
+        return field.to_lookup_value(value, instance) if converter is None else converter(field, value, instance)
 
     def get_lookup_values(
         self, field: Field[Any], values: list[Any], instance: type[Model] | Model | None

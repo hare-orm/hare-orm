@@ -80,39 +80,53 @@ class TwoPhaseCommit(abc.ABC):
         """
 
     @abc.abstractmethod
-    def get_decisions_table_sql(self) -> str:
+    def get_decisions_table_sql(self, table: str) -> str:
         """Returns the statement creating the decision log table unless it exists: ``xid`` text
         primary key, ``coordinator_alias`` and ``participant_aliases`` (comma-joined) text,
         ``created_at`` defaulting to the current time, and a nullable ``resolved_at``.
 
+        Args:
+            table: The decision log table - in the connection's shared schema
+                (``DatabaseClient.get_shared_table_name()``).
+
         Returns:
             The statement.
         """
 
     @abc.abstractmethod
-    def get_decision_insert_sql(self) -> str:
+    def get_decision_insert_sql(self, table: str) -> str:
         """Returns the statement recording a decision to commit: the xid, the coordinator alias and
         the comma-joined participant aliases, bound in that order.
 
+        Args:
+            table: The decision log table - in the connection's shared schema
+                (``DatabaseClient.get_shared_table_name()``).
+
         Returns:
             The statement.
         """
 
     @abc.abstractmethod
-    def get_finish_decision_sql(self) -> str:
+    def get_finish_decision_sql(self, table: str) -> str:
         """Returns the statement marking a decision resolved at the current time - every
         participant committed. The xid is bound as its one parameter.
 
+        Args:
+            table: The decision log table - in the connection's shared schema
+                (``DatabaseClient.get_shared_table_name()``).
+
         Returns:
             The statement.
         """
 
     @abc.abstractmethod
-    def get_pending_decisions_sql(self, with_age_limit: bool) -> str:
+    def get_pending_decisions_sql(self, table: str, with_age_limit: bool) -> str:
         """Returns the query listing the unresolved decisions: columns ``xid`` and
         ``participant_aliases``.
 
         Args:
+            table: The decision log table - in the connection's shared schema
+                (``DatabaseClient.get_shared_table_name()``).
             with_age_limit: Whether only decisions recorded more than a number of seconds ago,
                 bound as the one parameter, are listed.
 

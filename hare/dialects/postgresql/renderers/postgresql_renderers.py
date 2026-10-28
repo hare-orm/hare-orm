@@ -48,6 +48,13 @@ class PostgresqlRenderers(CheckedTermRenderers):
         """``ARRAY(SELECT ...)``."""
         return f"ARRAY({subquery.get_subquery_sql(sql_context)})"
 
+    def get_scaled_duration(self, term: Term) -> Term:
+        # A double precision converted to a bigint is rounded to the nearest, a half to the even one; a
+        # numeric product goes through it too. Local import: hare.sql's terms render through the dialect.
+        from hare.sql.functions.cast import Cast
+
+        return Cast(Cast(term, "DOUBLE PRECISION"), "BIGINT")
+
     def get_never_null_column_count_argument(self, term: Term, *, is_filtered: bool) -> Term:
         # Local import: hare.sql renders through the dialect. COUNT(*) reads no column.
         from hare.sql.terms.star import Star

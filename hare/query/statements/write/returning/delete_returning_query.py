@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Generator, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.exceptions import UnSupportedError
 from hare.instrumentation.change_events import ChangeEvents
+from hare.models.deletion.cascade.cascade_deletion import CascadeDeletion
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.models.deletion.cascade.protect_constraint_deferral import ProtectConstraintDeferral
+from hare.models.write.rules.enums import WriteType
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.statements.write.delete_query import DeleteQuery
@@ -79,10 +81,11 @@ class DeleteReturningQuery(DeleteQuery):
 
     def _returns_from_statement(self) -> bool:
         """Whether the rows come from one ``DELETE ... RETURNING`` - a hard delete the database
-        carries out alone, without an overridden delete, returning named fields."""
+        carries out alone, without an overridden delete, returning named fields or the instances of a
+        model without a primary key."""
         return (
             self._connection.features.supports_returning
-            and not self.returned_rows.returns_instances
+            and (not self.returned_rows.returns_instances or self.returned_rows.builds_instances_from_rows)
             and not self._deletes_softly()
             and not DeletionGraph.needs_python_cascade(self.model)
             and not self._has_overridden_delete()
@@ -103,8 +106,12 @@ class DeleteReturningQuery(DeleteQuery):
             with ChangeEvents.reporting_as_a_whole():
                 count, raw_rows = await self._run_statement_returning()
             await self._report_deleted_rows(count)
+            if self.returned_rows.builds_instances_from_rows:
+                return await self.returned_rows.get_instances(self._connection, raw_rows)
             return self.returned_rows.get_rows(self._connection.dialect.types, raw_rows)
         soft_deletes = self._deletes_softly()
+        if soft_deletes and not self.model._meta.has_primary_key:
+            return await self._soft_delete_returning()
         async with self._connection._in_transaction() as transaction_connection:
             deleting_query = self._get_deleting_query(transaction_connection)
             # Without include_deleted() the default scope already leaves the deleted rows out.
@@ -116,6 +123,31 @@ class DeleteReturningQuery(DeleteQuery):
             await deleting_query
             if soft_deletes:
                 rows = await self.returned_rows.read(transaction_connection, self._visibility, keys)
+        return rows
+
+    async def _soft_delete_returning(self) -> list[Any]:
+        """Runs the soft delete of a model without a primary key - its ``UPDATE ... RETURNING`` returning
+        the rows, as there is no key to read them back by.
+
+        Returns:
+            The rows, as they are after the delete.
+        """
+        from hare.query.statements.write.returning.update_returning_query import UpdateReturningQuery
+
+        soft_delete_field = cast("str", self.model._meta.soft_delete_field)
+        async with self._connection._in_transaction() as transaction_connection:
+            deleting_query = self._get_deleting_query(transaction_connection)
+            soft_deleting_query = UpdateReturningQuery(
+                deleting_query._get_live_rows() if self._visibility.include_deleted else deleting_query,
+                {soft_delete_field: CascadeDeletion.get_deleted_at()},
+                self.returned_rows,
+                WriteType.SOFT_DELETE,
+            )
+            soft_deleting_query._apply_connection(transaction_connection)
+            soft_deleting_query._connection_explicitly_chosen = True
+            with ChangeEvents.reporting_as_a_whole():
+                rows = await soft_deleting_query
+            await deleting_query._report_deleted_rows(len(rows))
         return rows
 
     def _get_deleting_query(self, connection: DatabaseClient) -> DeleteQuery:

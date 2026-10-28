@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING, Any
 
 from hare.fields.relations.relation_accessors import RelationAccessors
 from hare.query.expressions import Expression, F, Ordering, Q, Window
-from hare.query.functions.window import RowNumber
+from hare.query.functions.window import DenseRank, RowNumber
+from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.relation_loading.constants import PREFETCH_ROW_NUMBER_ANNOTATION
 from hare.sql.order import Order
+from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -73,6 +75,8 @@ class SlicedPrefetch:
         seen_ids.add(id(value))
         if isinstance(value, Window):
             return True
+        if isinstance(value, Term):
+            return RowMultiplication.term_reads_window_function(value)
         if isinstance(value, F):
             referenced = annotations.get(value.name)
             return referenced is not None and SlicedPrefetch.contains_window(referenced, annotations, seen_ids)
@@ -117,6 +121,19 @@ class SlicedPrefetch:
                 relation_rows.related_objects = relation_rows.related_objects[row_slice]
 
     @staticmethod
+    def repeats_rows_of_a_key(related_queryset: QuerySet[Any]) -> bool:
+        """Whether a sliced queryset's rows can repeat one key - a to-many filter or annotation joined without
+        ``distinct()``: a key picks every repeat of its row, not the ones its slice takes.
+
+        Args:
+            related_queryset: The sliced queryset.
+
+        Returns:
+            True when they can.
+        """
+        return not related_queryset._distinct and RowMultiplication.rows_repeat_per_primary_key(related_queryset)
+
+    @staticmethod
     def get_numbered_rows(
         related_queryset: QuerySet[Any], partition_paths: Sequence[str], parent_condition: Q
     ) -> QuerySet[Any]:
@@ -144,20 +161,34 @@ class SlicedPrefetch:
             Ordering(unsliced.model._meta.ordering_expressions.get(name, name), order)
             for name, order in orderings
         ]
+        number_function: Any = RowNumber()
+        if unsliced._distinct and not unsliced._distinct_on:
+            # The rows a to-many filter repeats are one row of distinct() - numbered alike, a row of its own
+            # ordering values and key, so the slice counts each once.
+            ordering_names = {name for name, _order in orderings}
+            window_orderings += [
+                Ordering(name, Order.ASC)
+                for name in unsliced.model._meta.primary_key_attribute_names
+                if name not in ordering_names
+            ]
+            number_function = DenseRank()
         # The numbered rows are read as keys - what the queryset loads with each row is loaded
-        # with the rows of the slice.
+        # with the rows of the slice, the fields only()/defer() choose too.
+        unsliced._fields_for_select = ()
+        unsliced._deferred_fields = ()
         unsliced._prefetch_map = {}
         unsliced._prefetch_queries = {}
         unsliced._select_related = set()
+        unsliced._explicitly_select_related = frozenset()
         row_filter: dict[str, int] = {f"{PREFETCH_ROW_NUMBER_ANNOTATION}__gt": offset}
         if limit is not None:
             row_filter[f"{PREFETCH_ROW_NUMBER_ANNOTATION}__lte"] = offset + limit
         return (
             unsliced.filter(parent_condition)
-            .annotate(
-                **{
+            ._annotate(
+                {
                     PREFETCH_ROW_NUMBER_ANNOTATION: Window(
-                        RowNumber(), partition_by=list(partition_paths), order_by=window_orderings
+                        number_function, partition_by=list(partition_paths), order_by=window_orderings
                     )
                 }
             )

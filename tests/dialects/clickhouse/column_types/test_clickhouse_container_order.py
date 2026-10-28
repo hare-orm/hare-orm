@@ -1,6 +1,6 @@
-"""Containers of CharEnumField labels order element by element by the labels - ClickHouse stores an
-enum by a number; Min/Max of a container are no raw error of a Nullable container; a map keyed by an
-enum reads a key path."""
+"""Containers of CharEnumField labels order element by element by the labels - an array, and a map by its
+key and value pairs; ClickHouse stores an enum by a number; Min/Max of a container are no raw error of a
+Nullable container; a map keyed by an enum reads a key path."""
 
 import uuid
 
@@ -27,7 +27,7 @@ async def holdings(clickhouse_db):
 
 @pytest.mark.asyncio
 async def test_containers_order_by_their_values_order(holdings):
-    for name in ("statuses", "statuses__0"):
+    for name in ("statuses", "statuses__0", "counts"):
         assert await Holding.objects.order_by(name).values_list("id", flat=True) == [2, 1], name
         assert await Holding.objects.order_by(f"-{name}").values_list("id", flat=True) == [1, 2], name
     assert await Holding.objects.filter(statuses__0__gt=STATUSES[0]).values_list("id", flat=True) == [1]
@@ -37,6 +37,7 @@ async def test_containers_order_by_their_values_order(holdings):
 async def test_min_and_max_of_containers(holdings):
     assert await Holding.objects.aggregate(low_statuses=Min("statuses")) == {"low_statuses": [STATUSES[0]]}
     assert await Holding.objects.aggregate(high_status=Max("statuses__0")) == {"high_status": STATUSES[-1]}
+    assert await Holding.objects.aggregate(high_counts=Max("counts")) == {"high_counts": {STATUSES[-1]: 1}}
     # A container holds no NULL on ClickHouse - over no rows its empty value.
     assert await Holding.objects.filter(id=0).aggregate(low_keys=Min("keys"), high_counts=Max("counts")) == {
         "low_keys": [],

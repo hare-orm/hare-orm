@@ -10,6 +10,7 @@ from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_UP_TO_PEERS_FRAME,
     CLICKHOUSE_WHOLE_PARTITION_FRAME,
 )
+from hare.dialects.clickhouse.types.clickhouse_nullable_types import ClickhouseNullableTypes
 from hare.sql.enums import AnalyticFunctionName
 from hare.sql.terms.functions.analytic_function import AnalyticFunction
 from hare.sql.terms.functions.function import Function
@@ -45,15 +46,40 @@ class ClickhouseWindowRenderers:
     @staticmethod
     def render_offset_function(function: Function, sql_context: SqlContext) -> str:
         """The value of the row ``offset`` rows away in the partition, the default (NULL without one)
-        past its edge - cast to the value's type, which ClickHouse requires of it."""
+        past its edge - cast to the value's type, which ClickHouse requires of it; a value of a type that is
+        never ``Nullable`` (a container, a ``Dynamic``) is read as it is."""
         window_function = cast("AnalyticFunction", function)
         value_sql, offset_sql, default_sql = (window_function.get_arg_sql(arg, sql_context) for arg in function.args)
-        nullable_value_sql = f"toNullable({value_sql})"
+        nullable_value_sql = (
+            f"toNullable({value_sql})"
+            if ClickhouseWindowRenderers.takes_nullable(window_function, sql_context)
+            else value_sql
+        )
         return (
             f"{CLICKHOUSE_OFFSET_FUNCTION_NAMES[function.name]}({nullable_value_sql}, {offset_sql}, "
             f"CAST({default_sql}, toTypeName({nullable_value_sql}))) "
             f"OVER({window_function.get_partition_sql(sql_context)} {CLICKHOUSE_WHOLE_PARTITION_FRAME})"
         )
+
+    @staticmethod
+    def takes_nullable(window_function: AnalyticFunction, sql_context: SqlContext) -> bool:
+        """Whether the value a window function reads is made ``Nullable`` to hold NULL past the partition -
+        not a container, which holds none, nor a ``Dynamic``/``Variant``, which holds it itself.
+
+        Args:
+            window_function: The window function.
+            sql_context: The context it renders in.
+
+        Returns:
+            True to wrap the value in ``toNullable()``.
+        """
+        if not window_function.value_holds_null:
+            return False
+        field = window_function.value_field
+        if field is None:
+            return True
+        column_type = sql_context.dialect.types.get_value_field(field).get_column_type(sql_context.dialect)
+        return ClickhouseNullableTypes.get_nullable_type(column_type) != column_type
 
     @staticmethod
     def render_cumulative_distribution(function: Function, sql_context: SqlContext) -> str:
@@ -83,7 +109,9 @@ class ClickhouseWindowRenderers:
     @staticmethod
     def render_nth_value(function: Function, sql_context: SqlContext) -> str:
         """``NTH_VALUE`` of the value made nullable - past the partition's rows ClickHouse gives the
-        value type's default (0), not NULL."""
+        value type's default (0), not NULL; a type holding NULL itself (a ``Dynamic``) as it is."""
+        if not ClickhouseWindowRenderers.takes_nullable(cast("AnalyticFunction", function), sql_context):
+            return function.get_function_sql(sql_context)
         nullable_function = copy(function)
         nullable_function.args = [Function("toNullable", function.args[0]), *function.args[1:]]
         return nullable_function.get_function_sql(sql_context)

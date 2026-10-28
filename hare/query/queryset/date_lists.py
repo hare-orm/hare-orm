@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from hare.exceptions import FieldError
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression
 from hare.query.queryset.constants import DATES_ORDERS, DATES_VALUE_ALIAS
 
@@ -27,7 +28,8 @@ class DateLists:
         trunc_type: str,
         order: str,
     ) -> Field[Any]:
-        """The field ``dates()``/``datetimes()`` reads, its arguments checked.
+        """The field ``dates()``/``datetimes()`` reads - a GeneratedField's output field - its arguments
+        checked.
 
         Args:
             queryset: The queryset.
@@ -42,6 +44,8 @@ class DateLists:
             FieldError: See ``dates()``.
         """
         field = queryset.model._meta.fields_map.get(field_name)
+        if field is not None:
+            field = GeneratedField.get_effective_field(field)
         if not isinstance(field, field_classes):
             expected = " or ".join(field_class.__name__ for field_class in field_classes)
             raise FieldError(f"{method}() takes a {expected} of {queryset.model.__name__}, got {field_name!r}")
@@ -66,7 +70,7 @@ class DateLists:
         ordering = DATES_VALUE_ALIAS if order == "ASC" else f"-{DATES_VALUE_ALIAS}"
         return cast(
             "SameQuerySet",
-            queryset.alias(**{DATES_VALUE_ALIAS: truncated})
+            queryset._alias({DATES_VALUE_ALIAS: truncated})
             .filter(**{f"{DATES_VALUE_ALIAS}__isnull": False})
             .order_by(ordering)
             .values_list(DATES_VALUE_ALIAS, flat=True)

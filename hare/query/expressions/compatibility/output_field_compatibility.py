@@ -59,7 +59,8 @@ class OutputFieldCompatibility:
             False when the branch's value can't be represented by the field's own type.
         """
         value = branch.value
-        value_field = branch.field
+        output_field = GeneratedField.get_effective_field(output_field)
+        value_field = GeneratedField.get_effective_field(branch.field) if branch.field is not None else None
         for numeric_field_class, literal_types in COALESCE_NUMERIC_FIELD_LITERAL_TYPES.items():
             if not isinstance(output_field, numeric_field_class):
                 continue

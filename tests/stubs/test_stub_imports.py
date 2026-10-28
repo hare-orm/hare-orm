@@ -46,3 +46,36 @@ def test_a_declaration_named_like_a_class_of_the_module_takes_a_free_name(monkey
     assert imports.declare("BookQuerySet") == "BookQuerySet"
     # An import named like a declaration is imported under an alias.
     assert imports.add("somewhere", "BookQuerySet") == "somewhere_BookQuerySet"
+
+
+@pytest.mark.parametrize("occupied_by", ("module", "declaration", "import"))
+def test_an_import_alias_itself_takes_a_free_name(monkeypatch, occupied_by):
+    module = types.ModuleType("stub_target")
+    module.Item = type("Item", (), {"__module__": module.__name__})
+    if occupied_by == "module":
+        module.stub_source_Item = type("stub_source_Item", (), {"__module__": module.__name__})
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    imports = StubImports(module.__name__)
+    if occupied_by == "declaration":
+        imports.declare("stub_source_Item")
+    elif occupied_by == "import":
+        imports.add("another_module", "stub_source_Item")
+    assert imports.add("stub_source", "Item") == "stub_source_Item_"
+    assert imports.add("stub_source", "Item") == "stub_source_Item_"
+
+
+def test_a_model_named_like_a_builtin_does_not_shadow_the_builtin_annotation(monkeypatch):
+    module = types.ModuleType("stub_builtin")
+    module.str = type("str", (), {"__module__": module.__name__})
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    imports = StubImports(module.__name__)
+    assert imports.add("builtins", "str") == "builtins_str"
+    assert imports.add_class(module.str) == "str"
+    assert imports.render() == ["from builtins import str as builtins_str"]
+
+
+def test_a_builtin_annotation_reserves_its_name_before_another_import():
+    imports = StubImports("stub_builtin_references")
+    assert imports.add("builtins", "str") == "str"
+    assert imports.add("another_module", "str") == "another_module_str"
+    assert imports.render() == ["from another_module import str as another_module_str"]

@@ -29,8 +29,8 @@ class ExistsQuery(RowsSummaryQuery):
     #: below, which only adds a WHERE criterion on top of the same read-only query.
     is_read_only: ClassVar[bool] = True
 
-    #: Only bool(result) is read, never an aggregate's value - two aggregated to-many relations in
-    #: one query are fine here.
+    #: Only bool(result) is read. Aggregates unused by HAVING need no fan-out check; an aggregate
+    #: deciding whether a group survives is still checked by QueryConditions.
     aggregate_value_is_unused: ClassVar[bool] = True
 
     # Built into Exists(...) with its values among the enclosing query's (get_plan_description()).

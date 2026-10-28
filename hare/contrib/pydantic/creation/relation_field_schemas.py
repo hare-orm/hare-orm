@@ -188,6 +188,8 @@ class RelationFieldSchemas:
         exclude: tuple[str, ...] = (),
         include: tuple[str, ...] = (),
         computed: tuple[str, ...] = (),
+        extra_fields: dict[str, Any] | None = None,
+        related_values: dict[str, str] | None = None,
         name: str | None = None,
         allow_cycles: bool = False,
         sort_alphabetically: bool | None = None,
@@ -213,6 +215,8 @@ class RelationFieldSchemas:
             exclude=exclude,
             include=include,
             computed=computed,
+            extra_fields=extra_fields or None,
+            related_values=related_values or None,
             name=name,
             _stack=stack,
             allow_cycles=allow_cycles,
@@ -253,6 +257,16 @@ class RelationFieldSchemas:
                 exclude=get_fields_to_carry_on(creator.meta.exclude),
                 include=get_fields_to_carry_on(creator.meta.include),
                 computed=get_fields_to_carry_on(creator.meta.computed),
+                extra_fields={
+                    path[prefix_length:]: annotation
+                    for path, annotation in creator.meta.extra_fields.items()
+                    if path.startswith(field_name + ".")
+                },
+                related_values={
+                    path[prefix_length:]: value_path
+                    for path, value_path in creator.meta.related_values.items()
+                    if path.startswith(field_name + ".")
+                },
                 stack=new_stack,
                 allow_cycles=creator.meta.allow_cycles,
                 sort_alphabetically=creator.meta.sort_alphabetically,

@@ -757,9 +757,10 @@ class HareContext:
                 model._meta.managed = model_managed
                 model._meta.default_connection = default_connection
             raise
-        # The targets just gained backward relations - anything cached for them before is stale.
+        # The targets gained backward relations; caches of the registered model set are stale too,
+        # including when a newly registered model has no relations.
         Caches.forget_model_caches(
-            {target for model in models for target in RelationLinking.get_relation_targets(model)}
+            set(new_models) | {target for model in models for target in RelationLinking.get_relation_targets(model)}
         )
 
     def unregister_live_models(self, models: Iterable[ModelReference]) -> None:

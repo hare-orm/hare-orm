@@ -42,6 +42,8 @@ class SqliteDialect(Dialect):
     otel_system_name = "sqlite"
     features = SqliteFeatures(
         inline_comments=True,
+        # "Note" and "note" name one table, "Name" and "name" one column.
+        names_ignore_letter_case=True,
         supports_ordered_aggregates=True,
         supports_select_for_update=False,
         supports_update_limit_order_by=False,

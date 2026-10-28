@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class CreateExtension(HareOperation):
-    """Creates a database extension (``citext``, ``postgis``) before the tables that need it - the
+    """Creates a database extension before the tables that need it - the
     state records it, so a model needing it again later creates it no second time.
     """
 

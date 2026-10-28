@@ -4,6 +4,7 @@ from typing import Any, ClassVar
 
 from hare.fields.data.uuid_field import UUIDField
 from hare.query.expressions.declarations import ConstantExpression
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.sql.terms.functions.function import Function
@@ -21,6 +22,7 @@ class RandomUUID(ConstantExpression):
     populate_field_object = True
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         return ExpressionResult(term=Function("gen_random_uuid"), output_field=self.OUTPUT_FIELD)
 
     value_field = OUTPUT_FIELD

@@ -193,15 +193,23 @@ def assert_reads_match(
                     assert_same_outcome(run(codec.read, raw), run(reader, raw), label)
 
 
-def bind(value: Any, types: Any) -> Any:
-    """The value a driver binds - SQLite's parameter adapters applied."""
-    adapter = SQLITE_ADAPTERS.get(type(value)) if types is SQLITE_TYPES else None
-    return adapter(value) if adapter is not None else value
+def bind(value: Any, types: Any, decode_through: Any = None) -> Any:
+    """The bound value, optionally decoded for comparison of randomized ciphertexts."""
+    adapter = SQLITE_ADAPTERS.get(type(value)) if type(value) in types.bound_as_text else None
+    bound = adapter(value) if adapter is not None else value
+    return types.get_python_value(decode_through, bound) if decode_through is not None else bound
 
 
-def assert_writes_match(field: Any, values: list[Any], instance: Any = None) -> None:
+def assert_writes_match(
+    field: Any,
+    values: list[Any],
+    instance: Any = None,
+    connections: list[tuple[str, Any, Any]] = CONNECTIONS,
+    *,
+    compare_decoded: bool = False,
+) -> None:
     """Writes every value with the codec and with the field, on every connection and zone."""
-    for connection_alias, types, _native_types in CONNECTIONS:
+    for connection_alias, types, _native_types in connections:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 codec_type, options = FieldCodecs.get_write_specification(field, types, Timezone.get_aware_zone_name())
@@ -212,8 +220,18 @@ def assert_writes_match(field: Any, values: list[Any], instance: Any = None) -> 
                         f"use_timezone={use_timezone}"
                     )
                     assert_same_outcome(
-                        run(lambda value: bind(codec.write(value, instance), types), value),
-                        run(lambda value: bind(types.get_db_value(field, value, instance), types), value),
+                        run(
+                            lambda value: bind(
+                                codec.write(value, instance), types, field if compare_decoded else None
+                            ),
+                            value,
+                        ),
+                        run(
+                            lambda value: bind(
+                                types.get_db_value(field, value, instance), types, field if compare_decoded else None
+                            ),
+                            value,
+                        ),
                         label,
                     )
 

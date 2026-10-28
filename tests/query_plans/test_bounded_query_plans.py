@@ -5,7 +5,7 @@ full."""
 
 import pytest
 
-from tests.shared_models.testmodels import Tournament
+from tests.shared_models.testmodels import JSONFields, Tournament
 from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
@@ -54,6 +54,24 @@ SHAPES = [
 async def test_a_later_query_of_the_structure_runs_on_its_plan(db, name, build, values):
     await create_tournaments()
     await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(build, values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor_method", ("after_cursor", "before_cursor"))
+@pytest.mark.parametrize("result_type", ("models", "values", "count", "exists"))
+async def test_json_cursor_boundaries_rebind_on_a_kept_plan(db, cursor_method, result_type):
+    for row_id, value in enumerate((9, 9, 10, 11), 1):
+        await JSONFields.objects.create(id=row_id, data=value)
+
+    def build(boundary):
+        queryset = getattr(JSONFields.objects.order_by("data", "id"), cursor_method)(*boundary)
+        if result_type == "values":
+            return queryset.values_list("id", flat=True)
+        if result_type == "models":
+            return queryset
+        return getattr(queryset, result_type)()
+
+    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(build, ((9, 1), (11, 4)))
 
 
 @pytest.mark.asyncio

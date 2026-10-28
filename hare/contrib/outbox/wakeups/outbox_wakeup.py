@@ -151,10 +151,20 @@ class OutboxWakeup:
                 break
         if not self.subscriptions and self.listen_task is not None:
             listen_task, self.listen_task = self.listen_task, None
-            listen_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await listen_task
-            await self.close()
+            listening_loop = listen_task.get_loop()
+            if listening_loop is asyncio.get_running_loop() or not listening_loop.is_running():
+                await self._stop_listening(listen_task)
+            else:
+                # The listener and its transport belong to the loop that opened them.
+                stopped = asyncio.run_coroutine_threadsafe(self._stop_listening(listen_task), listening_loop)
+                await asyncio.wrap_future(stopped)
+
+    async def _stop_listening(self, listen_task: asyncio.Task[None]) -> None:
+        """Stops the listener and closes its transport on the listener's event loop."""
+        listen_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await listen_task
+        await self.close()
 
     def dispatch(self, topics: frozenset[str]) -> None:
         """Gives a received signal to every subscribed relay - on the event loop of its subscription, also

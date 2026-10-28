@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.core.caching.cache import Cache
+from hare.fields.data.json.json_field import JSONField
+from hare.fields.data.numeric.float_field import FloatField
+from hare.fields.generated_field import GeneratedField
+from hare.query.enums import Lookup
 from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.filters.resolution.filter_kwargs import FilterKwargs
@@ -10,18 +16,80 @@ from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
+from hare.query.statements.constants import KEYSET_FIELD_ORDER_CACHE_SIZE
 from hare.sql import Order
+from hare.sql.functions.json.json_sort_key import JsonSortKey
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
+    from hare.fields.field import Field
     from hare.query.statements.awaitable_query import AwaitableQuery
+    from hare.sql.terms.term import Term
 
 
 class KeysetBounds:
     """The keyset boundaries of a query - the rows after or before a cursor's values in the query's
     ordering, a NULL compared as the dialect sorts it."""
+
+    #: A bounded cache of field comparison support, cleared with model and lookup registrations.
+    ordered_fields: ClassVar[Cache[bool]] = Cache(
+        max_size=KEYSET_FIELD_ORDER_CACHE_SIZE,
+        holds_sql=False,
+        keyed_by_model=False,
+        depends_on_other_models=True,
+    )
+
+    @staticmethod
+    def get_float_bound(
+        term: Term, value: float, bound: Any, order: Order, nulls_first: bool
+    ) -> tuple[Criterion, Criterion]:
+        """The boundary of a float column on a database whose comparisons with NaN are all false while its
+        ORDER BY puts NaN between the numbers and the NULLs, on the side the NULLs go to in either direction -
+        NaN read as ``x != x``, true for NaN alone.
+
+        Args:
+            term: The column.
+            value: The boundary value.
+            bound: The converted boundary value - a float, or a term casting it as the column holds it.
+            order: The column's direction.
+            nulls_first: Whether NULL sorts before the values in that direction.
+
+        Returns:
+            The comparison reading the rows after the boundary, and the equality of the rows tying with it.
+        """
+        is_nan = term != term  # noqa: PLR0124
+        if math.isnan(value):
+            # NULLs first, NaN comes before every number - each follows it; NULLs last, only NULLs do.
+            ordinary: Criterion = term == term if nulls_first else BasicCriterion.always_false()  # noqa: PLR0124
+            equality: Criterion = is_nan
+        else:
+            beyond_value = term > bound if order.is_ascending else term < bound
+            # NULLs last, NaN comes after every number.
+            ordinary = beyond_value if nulls_first else beyond_value | is_nan
+            equality = term == bound
+        return (ordinary if nulls_first else ordinary | term.isnull()), equality
+
+    @staticmethod
+    def compares_by_order(field: Field[Any]) -> bool:
+        """Whether the values of a field are compared by ``<`` and ``>`` - a keyset boundary can follow it, a
+        field without (an ``HStoreField``) is paged by ``OFFSET``. A ``GeneratedField`` compares as its
+        output field.
+
+        Args:
+            field: The field ordered by.
+
+        Returns:
+            True when both comparisons exist.
+        """
+        key = (field,)
+        ordered = KeysetBounds.ordered_fields.get(key)
+        if ordered is None:
+            lookups = GeneratedField.get_effective_field(field).get_lookups()
+            ordered = Lookup.GT in lookups and Lookup.LT in lookups
+            KeysetBounds.ordered_fields[key] = ordered
+        return ordered
 
     @staticmethod
     def get_cursor_criterion(
@@ -119,7 +187,7 @@ class KeysetBounds:
             # A None boundary is not converted: it may come from a LEFT JOIN miss, and the target
             # field's validation would reject it.
             db_value = (
-                query.dialect.types.get_db_value(field, value, query.model)
+                query.dialect.types.get_read_column_value(field, value, query.model)
                 if field is not None and value is not None
                 else value
             )
@@ -137,8 +205,25 @@ class KeysetBounds:
                 else:
                     comparison = BasicCriterion.always_false()
                 # `term = NULL` is never true - a row tying with a NULL boundary needs IS NULL.
-                equality = term.isnull()
+                equality: Criterion = term.isnull()
+            elif (
+                field is not None
+                and not query.dialect.features.compares_nan_as_ordered
+                and isinstance(GeneratedField.get_effective_field(field), FloatField)
+            ):
+                comparison, equality = KeysetBounds.get_float_bound(term, value, db_value, order, nulls_first)
+                if field.sensitive:
+                    FilterKwargs.hide_sensitive_values(comparison)
+                    FilterKwargs.hide_sensitive_values(equality)
+                if value_wrapper_references is not None:
+                    # Whether the boundary is NaN shapes the SQL - its value isn't bound again into a plan.
+                    value_wrapper_references.append(
+                        (PlanOrigins.get_value_origin(query, cursor_attribute, index), None)
+                    )
             else:
+                if field is not None and isinstance(GeneratedField.get_effective_field(field), JSONField):
+                    term = JsonSortKey(term)
+                    db_value = JsonSortKey(ValueWrapper(db_value))
                 if field is not None and query.dialect.types.has_ordering_key(field):
                     # Compared as the rows are ordered - by the dialect's key of the value.
                     ordered_term = query.dialect.types.get_ordering_key(field, term)
@@ -147,7 +232,8 @@ class KeysetBounds:
                 else:
                     ordinary = term > db_value if order.is_ascending else term < db_value
                 comparison = ordinary if nulls_first else (ordinary | term.isnull())
-                equality = term == db_value
+                value_equality = term == db_value
+                equality = value_equality
                 if field is not None and field.sensitive:
                     # The boundary is the field's value - no log, event or error shows it.
                     FilterKwargs.hide_sensitive_values(comparison)
@@ -157,7 +243,11 @@ class KeysetBounds:
                     # both are referenced. A raw ordering column has no field to convert a new value
                     # by. The last field's equality is in no AND-chain.
                     comparison_wrapper = ordinary.right
-                    equality_wrapper = equality.right if index != last_index else None
+                    equality_wrapper = value_equality.right if index != last_index else None
+                    if isinstance(comparison_wrapper, JsonSortKey):
+                        comparison_wrapper = comparison_wrapper.args[0]
+                    if isinstance(equality_wrapper, JsonSortKey):
+                        equality_wrapper = equality_wrapper.args[0]
                     if (
                         field is not None
                         and isinstance(comparison_wrapper, ValueWrapper)

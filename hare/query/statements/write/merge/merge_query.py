@@ -33,6 +33,7 @@ from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.joins.merge_source_row import MergeSourceRow
 from hare.query.expressions.subqueries.subquery import Subquery
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.query_connection import QueryConnection
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.statements.constants import (
@@ -115,11 +116,13 @@ class MergeQuery:
         from hare.query.queryset.queryset import QuerySet
 
         if isinstance(source, QuerySet):
-            if source._combination is not None:
-                return source
-            if source._selection is None:
+            # The rows of a union() take the shape of its first queryset's.
+            first_queryset = source
+            while first_queryset._combination is not None:
+                first_queryset = first_queryset._combination.branches[0]
+            if first_queryset._selection is None:
                 return source.values()
-            if source._selection.shape is not RowShape.DICT:
+            if first_queryset._selection.shape is not RowShape.DICT:
                 raise QueryError("merge() reads its source columns by name - give a values() queryset")
             return source
         if isinstance(source, (list, tuple)) and all(isinstance(row, Mapping) for row in source):
@@ -361,6 +364,18 @@ class MergeQuery:
                 "delete()"
             )
 
+    def get_action_column(self) -> str:
+        """The column the action of each written row comes under - free of the model's columns and of the old
+        values a capture returns next to them.
+
+        Returns:
+            The column's name.
+        """
+        model = self.target.model
+        return HareColumnNames.get_free_name(
+            MERGE_ACTION_ALIAS, (model,), HareColumnNames.get_old_value_names(model).values()
+        )
+
     async def _execute(self) -> Any:
         """Builds and runs the ``MERGE``, and reports it.
 
@@ -368,6 +383,7 @@ class MergeQuery:
             The number of rows written, or the returned rows.
         """
         model = self.target.model
+        action_column = self.get_action_column()
         meta = model._meta
         execution_query = self.target._get_execution_query(for_write=True)
         WrittenTargetChecks.raise_if_refused_calls(execution_query)
@@ -436,7 +452,7 @@ class MergeQuery:
             on_sql=on_sql,
             whens=whens_sql,
             returned=returned,
-            action_alias_sql=sql_context.quote(MERGE_ACTION_ALIAS),
+            action_alias_sql=sql_context.quote(action_column),
         )
         parameters = cast("Parameterizer", sql_context.parameterizer).values
         if capture_needs is not None:
@@ -448,7 +464,7 @@ class MergeQuery:
             count, raw_rows = await connection.execute(sql, parameters, returns_rows=True)
             result = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
             for row, raw_row in zip(result, raw_rows, strict=True):
-                row[MERGE_ACTION_KEY] = str(dict(raw_row)[MERGE_ACTION_ALIAS]).lower()
+                row[MERGE_ACTION_KEY] = str(dict(raw_row)[action_column]).lower()
         if count:
             for operation in dict.fromkeys(
                 ROW_OPERATION_BY_MERGE_ACTION[when.action]
@@ -501,6 +517,7 @@ class MergeQuery:
             The number of rows written, or the returned rows.
         """
         model = self.target.model
+        action_column = self.get_action_column()
         captured = CapturedWrite(
             model, capture_needs, connection, RowOperation.UPDATE, changed=self.get_updated_field_names()
         )
@@ -508,7 +525,7 @@ class MergeQuery:
             count, raw_rows = await transaction_connection.execute(sql, parameters, returns_rows=True)
             rows_by_operation: dict[RowOperation, list[Any]] = {}
             for raw_row in raw_rows:
-                operation = RowOperation(str(dict(raw_row)[MERGE_ACTION_ALIAS]).lower())
+                operation = RowOperation(str(dict(raw_row)[action_column]).lower())
                 rows_by_operation.setdefault(operation, []).append(raw_row)
             changes = [
                 change
@@ -532,7 +549,7 @@ class MergeQuery:
             return count
         result = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
         for row, raw_row in zip(result, raw_rows, strict=True):
-            row[MERGE_ACTION_KEY] = str(dict(raw_row)[MERGE_ACTION_ALIAS]).lower()
+            row[MERGE_ACTION_KEY] = str(dict(raw_row)[action_column]).lower()
         return result
 
     def get_source_sql(

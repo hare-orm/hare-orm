@@ -37,3 +37,25 @@ async def test_a_change_captured_into_a_tenant_schema_outbox_needs_a_tenant_scop
         with pytest.raises(QueryError, match="Meta.tenant_schema"):
             await SharedCapturedRow.objects.create(id=2)
         assert await SharedCapturedRow.objects.values_list("id", flat=True) == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_scope_given_model_by_model_writes_the_change_into_the_schema_it_gives_the_outbox():
+    skip_if_not_postgres()
+    await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
+    db_url = os.environ["HARE_TEST_DB"]
+    async with hare_test_context(
+        modules=["tests.dialects.postgresql.tenancy.models_tenant_schema_outbox"],
+        db_url=f"{db_url}{'&' if '?' in db_url else '?'}tenant_schema_template=tenant_%7Btenant%7D",
+        app_label="models",
+        connection_label="models",
+        reuse_databases=False,
+    ):
+        await TenantSchemas.create("acme", "models")
+        await TenantSchemas.create("beta", "models")
+        with Tenancy.scope({TenantSchemaEvent: "beta"}):
+            await SharedCapturedRow.objects.create(id=1)
+        with Tenancy.scope("beta"):
+            assert await TenantSchemaEvent.objects.count() == 1
+        with Tenancy.scope("acme"):
+            assert await TenantSchemaEvent.objects.count() == 0

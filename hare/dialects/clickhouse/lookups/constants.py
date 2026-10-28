@@ -65,3 +65,5 @@ CLICKHOUSE_ARRAY_ELEMENT_VARIABLE = "hare_element_{depth}"
 CLICKHOUSE_TUPLE_ELEMENT_FUNCTION_NAME = "tupleElement"
 #: The function building a tuple.
 CLICKHOUSE_TUPLE_FUNCTION_NAME = "tuple"
+#: The function pairing the elements of arrays into an array of tuples - a map's keys with its values.
+CLICKHOUSE_ARRAY_ZIP_FUNCTION_NAME = "arrayZip"

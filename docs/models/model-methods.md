@@ -23,7 +23,10 @@ class Model:
         changed_only: bool = False,
     ) -> None: ...
 ```
-Creates the row if it has no pk / hasn't been saved yet, otherwise updates it. `update_fields` restricts
+Creates the row if it has no pk / hasn't been saved yet, otherwise updates it. An update matches the
+instance's current primary key: changing it on a saved instance targets the row of the new key, which
+can overwrite an existing row, and leaves the old row untouched. `changed_only=True` refuses such a
+primary-key change, as described below. `update_fields` restricts
 the `UPDATE` to those columns (a forward relation's name stands for its key column(s):
 `update_fields=["author"]` writes `author_id`); passing it on an instance that already has a pk always
 issues an `UPDATE` by primary key — even for an instance never loaded or saved
@@ -255,7 +258,8 @@ isn't set.
 A `db_default` placeholder not yet replaced by a real value, and an expression assigned for the next
 write (`counter = F("counter") + 1`), are compared by identity: they aren't dirty against themselves, and
 after `save()` the expression stays on the instance as clean until `refresh_from_db()` reads the written
-value. The same holds for `snapshot()`/`diff_against()`. When a transaction containing
+value. A NaN (of a `FloatField`, a `DecimalField`) is no change against a NaN, though it equals no
+value in Python. The same holds for `snapshot()`/`diff_against()`. When a transaction containing
 `save()`/`delete()`/`restore()` rolls back, the dirty baseline goes back to what it was before the write.
 
 This is the mechanism to reach for instead of a manual "fetch a fresh copy and diff `to_dict()` against

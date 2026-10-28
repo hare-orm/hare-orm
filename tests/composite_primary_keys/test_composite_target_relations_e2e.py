@@ -5,8 +5,6 @@ real DB-level orphan-reference rejection, and cascade delete together on one rea
 VersionedModel-derived scenario, rather than each in isolation as the component-level tests
 elsewhere already do."""
 
-import uuid
-
 import pytest
 
 from hare.exceptions import (
@@ -14,6 +12,7 @@ from hare.exceptions import (
     IntegrityError,
     QueryError,
 )
+from hare.fields.uuid7 import Uuid7
 from hare.query.expressions import Q
 from tests.shared_models.testmodels import DocumentRevisionNote, VersionedArticle, VersionedDocument, VersionedTag
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -27,7 +26,7 @@ async def test_composite_target_fk_partially_set_raises(db):
     `.document` to None on access - indistinguishable from a genuinely unset (both columns None)
     relation. Neither is a valid reference nor a valid "no relation", so this must raise instead
     of returning a wrong result a caller can't tell apart from "not related"."""
-    note = DocumentRevisionNote(note="orphaned half-reference", document_id=uuid.uuid4())
+    note = DocumentRevisionNote(note="orphaned half-reference", document_id=Uuid7.new())
     with pytest.raises(IncompleteInstanceError):
         await note.document
 
@@ -36,7 +35,7 @@ async def test_composite_target_fk_partially_set_raises(db):
 async def test_composite_target_fk_with_unset_target_component_raises(db):
     """A target row marked saved but missing part of its composite key can't be referenced -
     the FK columns would silently be stored as NULL."""
-    half_known_document = VersionedDocument.construct(id=uuid.uuid4(), version=None, title="x", _saved_in_db=True)
+    half_known_document = VersionedDocument.construct(id=Uuid7.new(), version=None, title="x", _saved_in_db=True)
     with pytest.raises(QueryError, match="its 'version' is None"):
         DocumentRevisionNote(document=half_known_document, note="n")
 
@@ -121,7 +120,7 @@ async def test_composite_target_fk_prefetch_over_many_parents(db):
     """prefetch_related() in both directions of a composite-target FK over more rows than one
     OR-of-ANDs filter can hold (it used to raise RecursionError)."""
     row_count = 1500
-    documents = [VersionedDocument(id=uuid.uuid4(), version=1, title=f"d{index}") for index in range(row_count)]
+    documents = [VersionedDocument(id=Uuid7.new(), version=1, title=f"d{index}") for index in range(row_count)]
     await VersionedDocument.objects.bulk_create(documents)
     await DocumentRevisionNote.objects.bulk_create(
         [
@@ -147,7 +146,7 @@ async def test_composite_m2m_prefetch_over_many_rows(db):
     OR-of-ANDs filter."""
     row_count = 1500
     article = await VersionedArticle.objects.create(title="article")
-    tags = [VersionedTag(id=uuid.uuid4(), version=1, name=f"t{index}") for index in range(row_count)]
+    tags = [VersionedTag(id=Uuid7.new(), version=1, name=f"t{index}") for index in range(row_count)]
     await VersionedTag.objects.bulk_create(tags)
     await article.tags.add(*tags)
 

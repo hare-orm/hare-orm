@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.dialects.clickhouse.constants import CLICKHOUSE_DATETIME_COLUMN_TYPE
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_ADDRESS_TEXT_SQL
 from hare.dialects.clickhouse.renderers.clickhouse_temporal_renderers import ClickhouseTemporalRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_value_casts import ClickhouseValueCasts
@@ -105,8 +104,7 @@ class ClickhouseTextRenderers:
                 term_sql = CLICKHOUSE_TIME_OF_TEXT_TEMPLATE.format(f"toString({term_sql})")
             time_zone_sql = zone_sql if function.source == CastType.DATETIME else CLICKHOUSE_UTC_ZONE_SQL
             return ClickhouseTemporalRenderers.get_time_text_sql(term_sql, time_zone_sql)
-        if function.target == CastType.DATETIME:
-            return ClickhouseValueCasts.get_cast_sql(term_sql, function, CLICKHOUSE_DATETIME_COLUMN_TYPE, zone_sql)
+        # A moment too - a ClickhouseDatetimeField's own precision and zone.
         return ClickhouseValueCasts.get_cast_sql(
             term_sql, function, function.target_field.get_column_type(sql_context.dialect), zone_sql
         )

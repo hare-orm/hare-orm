@@ -6,6 +6,7 @@ import weakref
 from typing import Any, ClassVar
 
 from hare.dialects.base.client.constants import (
+    TRANSACTION_BEGIN_ABANDONED_MESSAGE,
     TRANSACTION_FINALISED_MESSAGE,
     TRANSACTION_ON_ANOTHER_EVENT_LOOP_MESSAGE,
 )
@@ -33,13 +34,15 @@ class TransactionClient(DatabaseClient, abc.ABC):
     """An interface of the DB client that supports transactions."""
 
     is_transaction_client: ClassVar[bool] = True
+    #: The driver only initializes deferred state in _driver_begin(), without suspending.
+    begins_without_suspending: ClassVar[bool] = False
     _finalized: bool = False
     #: True once this top-level transaction's COMMIT landed - `_finalized` is set by a rejected COMMIT
     #: and a lost connection too.
     _commit_landed: bool = False
     #: True when the connection broke while the COMMIT was in flight - it may have landed.
     _commit_outcome_unknown: bool = False
-    #: True between a successful PREPARE TRANSACTION and the release of the connection to the pool -
+    #: True between a successful prepare of a two-phase commit and the release of the connection to the pool -
     #: `_finalized` alone doesn't tell that the release is still due.
     _prepared_without_release: bool = False
     #: Set when a shielded COMMIT/ROLLBACK or savepoint statement hit its wait bound with its task
@@ -48,6 +51,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: The abandoned task of a savepoint's RELEASE/ROLLBACK TO - the nested context releases its
     #: span only once it finishes. Reset to None by the context that picks it up.
     _shielded_savepoint_abandoned_task: asyncio.Future[Any] | None = None
+    #: A BEGIN still running after cancellation; the connection stays unavailable until it ends.
+    _shielded_begin_abandoned_task: asyncio.Future[Any] | None = None
     #: The client this transaction was opened on - the outer transaction's client for a savepoint.
     _parent: DatabaseClient
     #: Set on the top-level wrapper once any statement of the transaction (savepoints included)
@@ -163,6 +168,11 @@ class TransactionClient(DatabaseClient, abc.ABC):
         while client.is_transaction_client:
             client = client._parent
         return client
+
+    def get_shared_table_name(self, table: str) -> str:
+        """The name the transaction's statements reach a table of hare's own bookkeeping by - the one of the
+        client it was opened on."""
+        return self.get_non_transactional_client().get_shared_table_name(table)
 
     def get_pool_status(self) -> PoolStatus | None:
         """The status of the pool the transaction took its connection from."""
@@ -303,8 +313,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: and inherited by every nested one.
     _transaction_options: TransactionOptions = TransactionOptions.DEFAULT
     #: With ``tenant_row_level_security``: the tenant scope the transaction began in, and whether it
-    #: set its tenants for the ``TenantCondition`` policies - not under no scope or a scope given
-    #: model by model. A nested transaction takes its outer one's.
+    #: set its tenants for the ``TenantCondition`` policies - not under no scope. A nested transaction
+    #: takes its outer one's.
     tenant_scope: Any = None
     sets_tenants: bool = False
 
@@ -479,6 +489,12 @@ class TransactionClient(DatabaseClient, abc.ABC):
     def _mark_top_level_operation_abandoned(self, task: asyncio.Future[Any]) -> None:
         self._shielded_operation_abandoned = True
 
+    def _mark_begin_operation_abandoned(self, task: asyncio.Future[Any]) -> None:
+        self._shielded_operation_abandoned = True
+        self._shielded_begin_abandoned_task = task
+        self._ending = True
+        self._commit_refusal = TRANSACTION_BEGIN_ABANDONED_MESSAGE
+
     @staticmethod
     def _do_nothing() -> None:
         """``on_landed`` of a shielded call that has nothing to record."""
@@ -489,9 +505,14 @@ class TransactionClient(DatabaseClient, abc.ABC):
         """
         if self.connections_bound_to_event_loop:
             self._event_loop = asyncio.get_running_loop()
+        if self.begins_without_suspending:
+            await self._driver_begin()
+            return
         # Shielded: the BEGIN can land after the awaiting task was cancelled, and the connection
         # would then go back to the pool mid-transaction.
-        await TransactionEnding.run_shielded_from_cancellation(self._driver_begin(), on_landed=self._do_nothing)
+        await TransactionEnding.run_shielded_from_cancellation(
+            self._driver_begin(), on_landed=self._do_nothing, on_timeout=self._mark_begin_operation_abandoned
+        )
 
     async def savepoint(self) -> None:
         self._check_savepoint_allowed()
@@ -572,6 +593,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
                 savepoints raised (the transaction is rolled back), or the commit is refused.
         """
         if self._commit_refusal is not None and self._savepoint_name is None:
+            if self._shielded_begin_abandoned_task is not None:
+                await self.rollback()
             raise TransactionManagementError(self._commit_refusal)
         rollback_only_error = self._get_top_level_transaction()._rollback_only_error
         if rollback_only_error is not None and self._savepoint_name is None:
@@ -605,8 +628,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
             self._check_statement_allowed()
 
     async def _prepare_transaction(self, xid: str) -> None:
-        """Ends the transaction's local block with ``PREPARE TRANSACTION`` - for
-        ``Transactions.distributed()``. The writes become permanent once ``COMMIT PREPARED`` runs,
+        """Ends the transaction's local block by preparing it - the first phase of a two-phase commit, for
+        ``Transactions.distributed()``. The writes become permanent once the prepared transaction is committed,
         from any connection. No callback runs and no event is reported here: the outcome isn't known
         yet.
 

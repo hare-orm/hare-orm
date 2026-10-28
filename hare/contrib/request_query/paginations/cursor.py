@@ -7,12 +7,14 @@ import base64
 import binascii
 import dataclasses
 import json
-from typing import Any
+from typing import Any, ClassVar, get_origin, is_typeddict
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 from pydantic_core import to_jsonable_python
 
 from hare.contrib.request_query.enums import CursorDirection
+from hare.contrib.request_query.paginations.constants import CURSOR_SCALAR_TYPES
+from hare.core.caching.cache import Cache
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -29,6 +31,10 @@ class Cursor:
     ordering: tuple[str, ...]
     values: tuple[Any, ...]
 
+    scalar_adapters: ClassVar[Cache[TypeAdapter[Any]]] = Cache(
+        len(CURSOR_SCALAR_TYPES), holds_sql=False, keyed_by_model=False
+    )
+
     def encode(self) -> str:
         """The cursor as URL-safe text.
 
@@ -38,7 +44,7 @@ class Cursor:
         payload = {
             "direction": self.direction.value,
             "ordering": list(self.ordering),
-            "values": to_jsonable_python(list(self.values)),
+            "values": to_jsonable_python(list(self.values), bytes_mode="base64"),
         }
         text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return base64.urlsafe_b64encode(text).rstrip(b"=").decode("ascii")
@@ -77,7 +83,28 @@ class Cursor:
                 values.append(raw_value)
                 continue
             try:
-                values.append(TypeAdapter(value_type).validate_python(raw_value))
+                adapter: TypeAdapter[Any]
+                if any(value_type is scalar_type for scalar_type in CURSOR_SCALAR_TYPES):
+                    cached_adapter = cls.scalar_adapters.get((value_type,))
+                    if cached_adapter is None:
+                        cached_adapter = (
+                            TypeAdapter(bytes, config=ConfigDict(val_json_bytes="base64"))
+                            if value_type is bytes
+                            else TypeAdapter(value_type)
+                        )
+                        cls.scalar_adapters[(value_type,)] = cached_adapter
+                    values.append(cached_adapter.validate_python(raw_value))
+                    continue
+                if get_origin(value_type) in (list, dict, tuple) or is_typeddict(value_type):
+                    # A wrapper carries the byte encoding into containers, including a named
+                    # tuple's TypedDict, which can't take TypeAdapter's config directly.
+                    adapter = TypeAdapter(
+                        list.__class_getitem__(value_type), config=ConfigDict(val_json_bytes="base64")
+                    )
+                    values.append(adapter.validate_python([raw_value])[0])
+                    continue
+                adapter = TypeAdapter(value_type)
+                values.append(adapter.validate_python(raw_value))
             except ValidationError as error:
                 raise ValueError("not a cursor of this query") from error
         return cls(direction=direction, ordering=ordering, values=tuple(values))

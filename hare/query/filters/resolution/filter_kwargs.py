@@ -45,6 +45,7 @@ from hare.query.filters.resolution.lookup_support import LookupSupport
 from hare.query.filters.resolution.relation_filters import RelationFilters
 from hare.query.filters.resolution.sensitive_filter_keys import SensitiveFilterKeys
 from hare.query.filters.resolution.to_many_filters import ToManyFilters
+from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.filter_plan_descriptions import FilterPlanDescriptions
 from hare.query.plans.description.plannable import Plannable
@@ -100,18 +101,26 @@ class FilterKwargs:
         for filter_key, filter_value in condition.filters.items():
             relation_alias = node_expression_context.annotations.get(filter_key.partition("__")[0])
             if isinstance(relation_alias, NamedJoin):
-                modifier = condition._combine_modifier(
-                    modifier,
-                    relation_alias.get_path_filter(
-                        node_expression_context,
-                        filter_key.partition("__")[2],
-                        filter_value,
-                        condition._filter_call_generation,
-                        None
-                        if node_expression_context.value_wrapper_references is None
-                        else PlanOrigins.get_value_origin(condition, filter_key),
-                    ),
+                path_value = filter_value
+                path_value_joins: list[Any] = []
+                if isinstance(filter_value, Expression):
+                    # An expression value reads the filtered model, as a filter through a relation's does -
+                    # resolved here, its term compared on the joined row.
+                    path_value, path_value_joins, _value_field = FilterValues.get_filter_value(
+                        node_expression_context, filter_key, filter_value
+                    )
+                path_modifier = relation_alias.get_path_filter(
+                    node_expression_context,
+                    filter_key.partition("__")[2],
+                    path_value,
+                    condition._filter_call_generation,
+                    None
+                    if node_expression_context.value_wrapper_references is None or isinstance(filter_value, Expression)
+                    else PlanOrigins.get_value_origin(condition, filter_key),
                 )
+                if path_value_joins:
+                    path_modifier = QueryModifier(joins=path_value_joins) & path_modifier
+                modifier = condition._combine_modifier(modifier, path_modifier)
                 continue
             LookupSupport.raise_if_lookup_unsupported(node_expression_context, filter_key)
             # A constant filter's value is part of the plan key - nothing is recorded for it.
@@ -120,11 +129,15 @@ class FilterKwargs:
                 if FilterPlanDescriptions.is_constant_filter(filter_key, filter_value)
                 else node_expression_context.value_wrapper_references
             )
-            raw_key, raw_value = JsonPathFilters.get_json_path_mirrored_kwarg(
+            raw_key, raw_value, kwarg_expression_context = JsonPathFilters.get_json_path_mirrored_kwarg(
                 node_expression_context, filter_key, filter_value
             )
+            if kwarg_expression_context.annotations:
+                raw_key = KeyColumns.get_primary_key_name(
+                    kwarg_expression_context.model, kwarg_expression_context.annotations, raw_key
+                )
             expression_context, annotation_name = JsonPathFilters.get_json_path_expression_context(
-                node_expression_context, raw_key
+                kwarg_expression_context, raw_key
             )
             if annotation_name is not None:
                 value, value_joins, value_field = FilterValues.get_filter_value(expression_context, raw_key, raw_value)

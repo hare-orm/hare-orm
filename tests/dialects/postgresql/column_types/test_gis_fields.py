@@ -263,7 +263,11 @@ async def test_aggregates(db_gis):
     assert set(result["points"].members) == {Point(1, 1), Point(4, 2)}
     assert result["points"].srid == 4326
     assert result["extent"] == (0.0, 0.0, 4.0, 4.0)
-    assert result["merged"] == Polygon([(0, 4), (4, 4), (4, 0), (0, 0), (0, 4)], srid=4326)
+    merged = result["merged"]
+    # The vertex the ring starts at is the choice of the database's GEOS version - the ring itself is compared.
+    ring, expected_ring = merged.exterior[:-1], ((0, 4), (4, 4), (4, 0), (0, 0))
+    assert merged.srid == 4326 and not merged.holes and merged.exterior[0] == merged.exterior[-1]
+    assert any(ring[start:] + ring[:start] == expected_ring for start in range(len(ring)))
     assert result["line"] == LineString([(4, 2), (1, 1)], srid=4326)
     distinct = await GisPlace.objects.aggregate(points=Collect("location", distinct=True))
     assert len(distinct["points"].members) == 3

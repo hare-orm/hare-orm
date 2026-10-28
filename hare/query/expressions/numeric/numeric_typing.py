@@ -11,6 +11,7 @@ from hare.fields.data.numeric.decimal_field import DecimalField
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.data.temporal.time_delta_field import TimeDeltaField
+from hare.fields.enums import ValueComputation
 from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.constants import DECIMAL_OUTPUT_FIELD_MAX_DIGITS
@@ -41,15 +42,19 @@ class NumericTyping:
     )
 
     @classmethod
-    def get_quotient_output_field(cls, field: Field[Any] | None, dialect: Dialect) -> Field[Any] | None:
+    def get_quotient_output_field(
+        cls, field: Field[Any] | None, dialect: Dialect, computation: ValueComputation = ValueComputation.STATISTIC
+    ) -> Field[Any] | None:
         """The field an average or a statistic (a standard deviation, a variance) of a field's
         values is decoded through: of integers the exact Decimal the database computes
         (``Features.computes_integer_statistics_exactly``), elsewhere a float, of Decimals a Decimal
-        not rounded to the field's scale, of anything else the field itself.
+        not rounded to the field's scale, of anything else the field the database computes it as
+        (``Field.get_computed_field()``).
 
         Args:
             field: The field of the values, a generated one included - None when unknown.
             dialect: The dialect of the database the query runs on.
+            computation: What is computed - an average or another statistic.
 
         Returns:
             The field of the result.
@@ -63,10 +68,28 @@ class NumericTyping:
         effective_field = GeneratedField.get_effective_field(field)
         if isinstance(effective_field, DecimalField):
             return cls.DECIMAL_QUOTIENT_OUTPUT_FIELD
-        return field
+        return cls.get_computed_field(field, computation)
+
+    @staticmethod
+    def get_computed_field(field: Field[Any], computation: ValueComputation) -> Field[Any]:
+        """The field a value computed from a field's values is decoded through - the field itself, a generated
+        one included, unless the database computes the value in a wider type (``Field.get_computed_field()``).
+
+        Args:
+            field: The field of the values.
+            computation: What is computed.
+
+        Returns:
+            The field of the result.
+        """
+        effective_field = GeneratedField.get_effective_field(field)
+        computed_field = effective_field.get_computed_field(computation)
+        return field if computed_field is effective_field else computed_field
 
     @classmethod
-    def get_statistic_output_field(cls, field: Field[Any] | None, dialect: Dialect) -> Field[Any] | None:
+    def get_statistic_output_field(
+        cls, field: Field[Any] | None, dialect: Dialect, computation: ValueComputation = ValueComputation.STATISTIC
+    ) -> Field[Any] | None:
         """The field an average or a statistic of a field's values is decoded through - a float where
         the database computes it as one (``is_statistic_a_float()``), elsewhere as
         ``get_quotient_output_field()`` gives it.
@@ -74,13 +97,14 @@ class NumericTyping:
         Args:
             field: The field of the values, a generated one included - None when unknown.
             dialect: The dialect of the database the query runs on.
+            computation: What is computed - an average or another statistic.
 
         Returns:
             The field of the result.
         """
         if cls.is_statistic_a_float(field, dialect):
             return cls.FLOAT_OUTPUT_FIELD
-        return cls.get_quotient_output_field(field, dialect)
+        return cls.get_quotient_output_field(field, dialect, computation)
 
     @classmethod
     def is_statistic_a_float(cls, field: Field[Any] | None, dialect: Dialect) -> bool:
@@ -115,7 +139,7 @@ class NumericTyping:
     @classmethod
     def get_sum_output_field(cls, field: Field[Any]) -> Field[Any]:
         """The field a sum of a field's values is decoded through: of an enum field's an integer - a
-        sum is no member of the enum - of anything else the field itself.
+        sum is no member of the enum - of anything else the field the database computes it as.
 
         Args:
             field: The field of the values.
@@ -123,7 +147,11 @@ class NumericTyping:
         Returns:
             The field of the result.
         """
-        return cls.INTEGER_OUTPUT_FIELD if cls.is_enum_field(field) else field
+        return (
+            cls.INTEGER_OUTPUT_FIELD
+            if cls.is_enum_field(field)
+            else cls.get_computed_field(field, ValueComputation.SUM)
+        )
 
     @staticmethod
     def is_model_field(field: Field[Any]) -> bool:

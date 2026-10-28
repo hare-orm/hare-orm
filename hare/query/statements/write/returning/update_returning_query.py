@@ -104,6 +104,10 @@ class UpdateReturningQuery(UpdateQuery):
                 )
                 count, raw_rows = await query._run_captured(captured)
             rows = self.returned_rows.get_rows(self._connection.dialect.types, raw_rows)
+        elif self.returned_rows.builds_instances_from_rows:
+            self._make_query_to_run()
+            count, raw_rows = await self._run_statement(returns_rows=True)
+            rows = await self.returned_rows.get_instances(self._connection, raw_rows)
         else:
             async with self._connection._in_transaction() as transaction_connection:
                 query = self._get_query_on(transaction_connection)

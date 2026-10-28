@@ -29,8 +29,7 @@ class IndexInfo:
     #: can be matched/removed by name (RemoveIndex requires a name or field list; an unnamed,
     #: expression-based reconstruction has neither) instead of only ever comparing by shape.
     name: str = ""
-    #: The index's access method, lowercase ("gin", "gist", "hash", "brin", "spgist", "bloom") - "" for
-    #: the default one.
+    #: The index's access method, lowercase - "" for the default one.
     index_type: str = ""
     #: Every column's opclass, set once any is non-default - Index.opclasses takes one per field.
     opclasses: list[str] = dataclass_field(default_factory=list)
@@ -53,7 +52,7 @@ class IndexInfo:
     #: The index's non-key (``INCLUDE``) columns - None where the database has no such columns, so a
     #: declared ``include`` can't be checked there.
     include: list[str] | None = None
-    #: The unique index treats NULLs as equal (``NULLS NOT DISTINCT``).
+    #: The unique index treats NULLs as equal.
     nulls_not_distinct: bool = False
     #: The unique constraint backed by this index holds its last key ``WITHOUT OVERLAPS`` - the index's
     #: access method and opclasses are the constraint's own, not declared.

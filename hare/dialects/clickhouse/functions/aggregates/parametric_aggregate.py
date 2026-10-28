@@ -34,7 +34,7 @@ class ParametricAggregate(Aggregate, abstract=True):
         """
         return str(self.function_name)
 
-    def _get_function_field(self, field: Any, *default_values: Any) -> ParametricAggregateFunction:
+    def get_function_term(self, field: Any, *default_values: Any) -> ParametricAggregateFunction:
         function = ParametricAggregateFunction(self.get_function_name(), self.get_parameters(), field, *default_values)
         return function.distinct() if self.distinct else function
 

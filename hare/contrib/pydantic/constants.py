@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from hare.fields.enums import RelationType
+
 #: Environment variable overriding MODEL_INDEX's entry limit - a user-facing knob against a cache
 #: that would otherwise grow one entry per distinct pydantic_model_creator() configuration ever
 #: called, forever, for the life of the process.
@@ -39,3 +41,6 @@ PYDANTIC_MODELS_MODULE = "hare.contrib.pydantic"
 
 #: The attribute a schema class keeps the checks of its fields in - read on every validated instance.
 FETCHED_FIELD_CHECKS_ATTRIBUTE = "_hare_fetched_field_checks"
+
+#: The relations holding many rows for one row - a related value goes through relations to one row only.
+TO_MANY_RELATION_TYPES = frozenset({RelationType.MANY_TO_MANY, RelationType.BACKWARD_FOREIGN_KEY})

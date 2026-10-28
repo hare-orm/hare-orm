@@ -23,6 +23,9 @@ async def database():
     async with hare_test_context(
         ["tests.query_plans.plan_cache_shapes_models"], db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     ) as context:
+        # The first ordering can build these lazily; their registration drops all cached plans.
+        # Measure plan reuse after the dialect's renderers are registered.
+        _ = context.get_connection().dialect.renderers
         yield context
 
 

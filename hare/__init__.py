@@ -18,7 +18,7 @@ from hare.query.queryset import QuerySet
 from hare.query.relation_loading import Prefetch, Select, prefetch_related_objects
 from hare.transactions.transactions import Transactions
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "BackwardForeignKeyRelation",

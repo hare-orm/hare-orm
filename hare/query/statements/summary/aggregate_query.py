@@ -22,6 +22,7 @@ from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.queryset.annotation_access_tracker import AnnotationAccessTracker
+from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.statements.awaitable_query import AwaitableQuery
@@ -553,7 +554,12 @@ class AggregateQuery(RowsSummaryQuery):
             for key in (*aggregate_keys, *grouped_annotation_names):
                 grouped_subquery_columns[key] = (key, self._get_annotation_value_field(annotations[key], annotations))
             group_by_terms = QueryGrouping.get_group_bys(self, *self._group_bys)
-            for index, (field_name, group_by_term) in enumerate(zip(self._group_bys, group_by_terms, strict=True)):
+            grouped_field_names = [
+                path
+                for name in self._group_bys
+                for path in ((name,) if name in annotations else ConcreteFieldPaths.get_paths(self.model, name))
+            ]
+            for index, (field_name, group_by_term) in enumerate(zip(grouped_field_names, group_by_terms, strict=True)):
                 if field_name in annotations:
                     continue
                 column_alias = f"{AGGREGATE_SUBQUERY_GROUP_BY_ALIAS_PREFIX}{index}"

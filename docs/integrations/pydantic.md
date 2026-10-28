@@ -20,6 +20,8 @@ def pydantic_model_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
@@ -38,6 +40,8 @@ def pydantic_model_creator(
 | `name` | Explicit model name, instead of an auto-generated one. |
 | `exclude` / `include` | Extra fields to drop/keep, on top of whatever `PydanticMeta` already says. A path through a relation (`"author.name"`) reaches a field of the related schema; in `include` it also keeps the relation itself, with only the listed fields. |
 | `computed` | Names of `@property`/methods on the model to expose as computed fields; a path through a relation (`"books.title_length"`) adds one to the related schema. |
+| `extra_fields` | Values read from the row by name — a query's annotation, an attribute set on the row — with their types; see [Extra fields and related values](#extra-fields). |
+| `related_values` | Fields of related rows, flattened — a name to the path of the related field; see [Extra fields and related values](#extra-fields). |
 | `optional` | Fields to make optional in the schema even though they aren't nullable on the model. |
 | `allow_cycles` | Allow self-referential/cyclic relations to recurse (default `False` — cycles are cut off). |
 | `sort_alphabetically` | Sort fields alphabetically instead of declaration order. |
@@ -69,9 +73,10 @@ field with `relations_as_ids=True`).
 
 Drop every `sensitive=True` field (`Model._meta.sensitive_fields` — see [Sensitive
 fields](../models/encrypted-and-sensitive-fields.md#sensitive-fields)) — nested relation schemas
-included. Useful for a public/export schema. Schemas built with and without it are cached separately and
-never mixed. The `<name>_blind_index` field of an encrypted field with `blind_index=True` is in no
-schema, with or without it: hare writes it with the field, and its HMAC is no data.
+included, and a related value (`related_values`) of such a field. Useful for a public/export schema.
+Schemas built with and without it are cached separately and never mixed. The `<name>_blind_index` field
+of an encrypted field with `blind_index=True` is in no schema, with or without it: hare writes it with
+the field, and its HMAC is no data.
 
 Generated models are cached and reused for identical `(model, options)` combinations — calling
 `pydantic_model_creator(Author)` twice returns the same class.
@@ -89,7 +94,8 @@ Value types: a `BinaryField` is carried in JSON as base64 (`model_dump_json()` e
 `model_validate_json()` decodes it, the schema says `format: base64url`), so arbitrary bytes round-trip;
 pass your own `ser_json_bytes`/`val_json_bytes` in `model_config` to change that. A float JSON has no number
 for — NaN or infinity of a `FloatField`, inside an `ArrayField` too — is written as its text (`"NaN"`,
-`"Infinity"`, as an outbox event holds it) and read back by the schema (`ser_json_inf_nan`). A `JSONField`
+`"Infinity"`, as an outbox event holds it) and read back by the schema (`ser_json_inf_nan`); so is the
+infinite bound of a `DecimalRangeField` or `DecimalMultiRangeField` range. A `JSONField`
 with a
 declared `field_type` gets that type in the schema (`Any` without one). An `IntEnumField`/`CharEnumField`
 is a `$ref` to the enum alone, without the column's numeric range or length constraints.
@@ -108,6 +114,8 @@ A field optional only because the database or the ORM fills it — a `db_default
 `auto_now`/`auto_now_add` stamp, the tenant — and refusing NULL on the model is left out of
 `model_dump()` while it holds `None`, so `Model.objects.create(**schema.model_dump())` leaves it to them
 instead of writing a NULL the column refuses.
+This also applies when fields use serialization aliases, including `model_dump(by_alias=True)` and
+`model_config["serialize_by_alias"]`; nullable model fields still keep their explicit `None`.
 
 A model with a [`CompositePrimaryKey`](../models/field-types.md#compositeprimarykey) works the same way
 as one with a single-column pk — every component of the composite key becomes its own field in the
@@ -193,6 +201,8 @@ class Author(Model):
 |---|---|---|
 | `include` / `exclude` | `()` / `("Meta",)` | Field allow/deny list. |
 | `computed` | `()` | Extra computed fields. |
+| `extra_fields` | `{}` | Values read from the row by name, with their types. |
+| `related_values` | `{}` | Fields of related rows, flattened. |
 | `backward_relations` | `True` | Whether reverse FK/O2O relations are included even without an explicit type annotation requesting them. Not recommended: it can pull in a large amount of data unchecked. |
 | `max_recursion` | `3` | How many levels deep relation traversal goes before stopping. |
 | `allow_cycles` | `False` | Allow self-referential recursion. |
@@ -218,6 +228,35 @@ A plain method, a `@property` or a `functools.cached_property` works. The functi
 annotation becomes the field's type in the schema. A computed field that touches an unfetched relation
 raises `NoValuesFetched` with a message telling you to either annotate the relation so it gets
 auto-prefetched, or load it yourself first with `prefetch_related_objects()`.
+
+## <a id="extra-fields"></a>Extra fields and related values
+
+```python
+BookSchema = pydantic_model_creator(
+    Book,
+    extra_fields={"reviews_count": int, "author.books_count": int},
+    related_values={"author_name": "author.name"},
+)
+
+book = await Book.objects.select_related("author").annotate(reviews_count=Count("reviews")).get(id=1)
+BookSchema.model_validate(book)
+```
+
+`extra_fields` are values read from the row by name — a query's annotation, an attribute set on the row
+after it was read (a request query's `api_getter` sets them too) — with their types: a query builds them, so
+the model can't tell them. `related_values` put a field of a related row next to the row's own, through
+relations to one row; validated from a mapping, the value is taken by its own name too. Both are `None` where
+the row has no value — a query that didn't annotate it, a relation not loaded. A name written as a path
+through the relations (`"author.books_count"`) adds the field to the related schema. A name the schema has
+already, one declared twice, a path through what is no relation and a related value through a relation to
+many rows or ending at a relation raise `ConfigurationError`. `PydanticMeta` declares both as well. A write
+schema (`exclude_readonly=True`) gets neither — a row is never written with them; `sort_alphabetically`
+sorts them with the other fields. `from_hare_orm()`/`from_queryset()` load the relations a related value
+reads through, even when the schema excludes the relation or shows it as an id (`relations_as_ids=True`).
+
+`include` and `exclude` select these fields by their declared schema names, just like model and computed
+fields. Paths select extra fields on nested schemas too (`"author.books_count"`). An excluded related
+value adds no relation-loading requirement. The same selection applies when declared in `PydanticMeta`.
 
 ## <a id="building-instances"></a>Building instances: `PydanticModel` / `PydanticListModel`
 
@@ -288,6 +327,8 @@ def pydantic_queryset_creator(
     exclude: tuple[str, ...] | None = None,
     include: tuple[str, ...] | None = None,
     computed: tuple[str, ...] | None = None,
+    extra_fields: dict[str, Any] | None = None,
+    related_values: dict[str, str] | None = None,
     optional: tuple[str, ...] | None = None,
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,

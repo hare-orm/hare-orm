@@ -177,7 +177,11 @@ class RustPgClient(PostgresqlClient):
             raise connect_error from None
 
     async def create_pool(self, **kwargs: Any) -> pg.Client:
-        return await pg.connect(**kwargs)
+        try:
+            return await pg.connect(**kwargs)
+        except ValueError as error:
+            # Native Config errors (including TLS setup) precede any connection attempt.
+            raise ConfigurationError(str(error)) from None
 
     async def _pool_acquire(self) -> Any:
         """Takes a connection from the pool. The acquire timeout is part of the pool itself; a timeout

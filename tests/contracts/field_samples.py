@@ -133,6 +133,14 @@ FIELD_SAMPLES = (
         request_filter_refused=True,
     ),
     FieldSample(
+        "json_scalars",
+        lambda: {"value": fields.JSONField(null=True)},
+        (10, 2, "text", [1], {"a": 1}),
+        (10, 2, "text", [1], {"a": 1}),
+        value_dialects=("sqlite", "postgresql"),
+        request_filter_refused=True,
+    ),
+    FieldSample(
         "json_list",
         lambda: {"value": fields.JSONField(null=True)},
         ([1, {"b": True}],),
@@ -160,6 +168,24 @@ FIELD_SAMPLES = (
     ),
     FieldSample("array", lambda: {"value": fields.ArrayField(fields.IntField(), null=True)}, ([1, 2],), ([1, 2],)),
     FieldSample(
+        "array_of_uuids",
+        lambda: {"value": fields.ArrayField(fields.UUIDField())},
+        ([SAMPLE_UUID], []),
+        ([str(SAMPLE_UUID)], []),
+    ),
+    FieldSample(
+        "array_of_bytes",
+        lambda: {"value": fields.ArrayField(fields.BinaryField())},
+        ([b"\x80\xff"], []),
+        (["gP8="], []),
+    ),
+    FieldSample(
+        "array_non_nullable",
+        lambda: {"value": fields.ArrayField(fields.IntField(null=True))},
+        ([1, None, 2], []),
+        ([1, None, 2], []),
+    ),
+    FieldSample(
         "array_of_floats",
         lambda: {"value": fields.ArrayField(fields.FloatField(), null=True)},
         ([1.5, float("nan"), float("inf")],),
@@ -178,7 +204,13 @@ FIELD_SAMPLES = (
             "value": fields.TupleField({"longitude": fields.FloatField(), "latitude": fields.FloatField()}),
         },
         ({"longitude": 2.5, "latitude": 48.5},),
-        ({"longitude": 2.5, "latitude": 48.5},),
+        ([2.5, 48.5],),
+    ),
+    FieldSample(
+        "tuple_named_binary",
+        lambda: {"value": fields.TupleField({"key": fields.UUIDField(), "payload": fields.BinaryField()})},
+        ({"key": SAMPLE_UUID, "payload": b"\x80\xff"},),
+        ([str(SAMPLE_UUID), "gP8="],),
     ),
     FieldSample(
         "map",

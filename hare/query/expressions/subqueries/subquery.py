@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.exceptions import (
@@ -14,6 +15,7 @@ from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import SqlContext
 from hare.sql.terms.term import Term
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -245,6 +247,28 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         """The query builder the subquery was built into, None before it is built."""
         built_query = self._built_query
         return None if built_query is None else built_query.query
+
+    def get_null_rows_criterion(self) -> Term:
+        """Whether the built single-column subquery returns a NULL value.
+
+        Tests the selected rows in a derived table, preserving slices, grouping and set
+        operations. The same bound value terms are shared with the membership subquery.
+        """
+        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+        from hare.sql.terms.subqueries.exists_term import ExistsTerm
+
+        self._build_if_needed()
+        query = cast("QueryBuilder | SetOperationQuery", cast("AwaitableQuery[Any]", self._built_query).query)
+        selection = query.base_query if isinstance(query, SetOperationQuery) else query
+        column = selection._selects[0]
+        derived = copy(query)
+        derived.alias = None
+        null_rows = (
+            selection.query_class.from_(derived)
+            .select(ValueWrapper(1, allow_parametrize=False))
+            .where(derived[column.alias or column.name].isnull())
+        )
+        return ExistsTerm(null_rows)
 
     def get_sql(self, sql_context: SqlContext) -> str:
         self._build_if_needed()

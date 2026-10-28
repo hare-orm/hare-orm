@@ -4,7 +4,7 @@ import abc
 import asyncio
 import time
 from itertools import count
-from typing import cast
+from typing import Any, ClassVar, cast
 
 from hare.dialects.base.client.constants import DISCARDED_CLIENT_MESSAGE, TRANSACTION_FINALISED_MESSAGE
 from hare.dialects.base.client.transaction_client import TransactionClient
@@ -23,10 +23,15 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
     on its own, a read-only transaction and the savepoint names. A driver's transaction client
     sends the statements."""
 
+    begins_without_suspending = True
+
     #: One counter for the savepoint names of every connection.
     _savepoint_name_counter = count()
     #: The client the transaction is opened on - the outer transaction's for a savepoint.
     _parent: SqliteClient
+
+    #: The releases of connections waiting for a BEGIN that outlived its transaction - kept until they end.
+    abandoned_begin_releases: ClassVar[set[asyncio.Future[None]]] = set()
 
     def __init__(self, connection: SqliteClient, savepoint_lock: NestedSavepointLock | None = None) -> None:
         TransactionClient.__init__(self, connection, savepoint_lock)
@@ -78,6 +83,13 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
             raise
 
     async def _give_back_transaction_resources(self) -> None:
+        abandoned_begin = self._shielded_begin_abandoned_task
+        if abandoned_begin is not None:
+            self._shielded_begin_abandoned_task = None
+            release = asyncio.ensure_future(self._release_after_abandoned_begin(abandoned_begin))
+            self.abandoned_begin_releases.add(release)
+            release.add_done_callback(self.abandoned_begin_releases.discard)
+            return
         parent = self._parent
         try:
             if self._previous_busy_timeout is not None:
@@ -86,6 +98,25 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         finally:
             parent._transaction_task = None
             parent._lock.release()
+
+    async def _release_after_abandoned_begin(self, task: asyncio.Future[Any]) -> None:
+        """Keeps the shared connection locked until a late BEGIN is undone."""
+        try:
+            try:
+                await task
+            except BaseException:
+                pass
+            try:
+                await self._driver_rollback()
+            except Exception:
+                self.log.exception("Failed to roll back a BEGIN that outlived its transaction")
+                self._previous_busy_timeout = None
+                await self._parent._close_unlocked()
+        finally:
+            try:
+                await self._give_back_transaction_resources()
+            except Exception:
+                self.log.exception("Failed to release the connection after an abandoned BEGIN")
 
     def _mark_transaction_aborted(self) -> None:
         cast("SqliteTransactionClient", self._get_top_level_transaction())._transaction_aborted = True

@@ -9,6 +9,8 @@ class MigrationRiskCode(StrEnum):
 
     #: A NOT NULL field with only a Python default: every existing row is updated in the migration.
     ADD_FIELD_BACKFILLS_ROWS = "add_field_backfills_rows"
+    #: A NOT NULL field with no default at all: the migration fails on a table holding rows.
+    ADD_FIELD_WITHOUT_DEFAULT = "add_field_without_default"
     #: A field whose database default is a volatile expression: the table is rewritten.
     ADD_FIELD_VOLATILE_DEFAULT = "add_field_volatile_default"
     #: A field change the database makes by rewriting the table.

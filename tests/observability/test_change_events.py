@@ -127,6 +127,28 @@ async def test_many_to_many_links(db_isolated, changes):
 
 
 @pytest.mark.asyncio
+async def test_many_to_many_add_names_each_row_linked_once(db_isolated, changes):
+    """add() named an instance given twice twice, and the rows linked already as changed."""
+    tournament = await Tournament.objects.create(id=1, name="Spring")
+    event = await Event.objects.create(event_id=1, name="Final", tournament=tournament)
+    hares = await Team.objects.create(id=1, name="Hares")
+    foxes = await Team.objects.create(id=2, name="Foxes")
+    changes.clear()
+
+    await event.participants.add(hares, hares)
+    await event.participants.add(hares)
+    await event.participants.add(hares, foxes, foxes)
+    # ON CONFLICT DO NOTHING doesn't tell which pairs it skipped - some added names no row.
+    skips_conflicts = Event._meta.connection.features.supports_unique_constraints
+    assert described(changes) == [
+        ("Event", "update", (1,), {"participants"}),
+        ("Team", "update", (1,), {"events"}),
+        ("Event", "update", (1,), {"participants"}),
+        ("Team", "update", None if skips_conflicts else (2,), {"events"}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_soft_delete_and_restore(db_isolated, changes):
     parent = await SoftDeleteParent.objects.create(name="parent")
     await SoftDeleteChildCascadeSoft.objects.create(name="child", parent=parent)

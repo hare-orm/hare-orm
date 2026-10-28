@@ -213,6 +213,25 @@ async def test_refused_credentials_and_a_missing_database_are_configuration_erro
             await client.close()
 
 
+@pytest.mark.asyncio
+async def test_a_connection_opened_outside_a_statement_refuses_a_missing_database_too(clickhouse_db):
+    """generate_schemas() opens the connection before any statement - it raised the driver's own error."""
+    base = Connections.get("models")
+    client = type(base)(
+        connection_alias="refused",
+        host=base.host,
+        port=base.port,
+        user=base.user,
+        password=base.password,
+        database="hare_missing_database",
+    )
+    try:
+        with pytest.raises(ConfigurationError, match="Can't use database hare_missing_database"):
+            await client.open_connection()
+    finally:
+        await client.close()
+
+
 @pytest.mark.database_independent
 def test_the_keeper_addresses_are_read():
     assert ClickhouseMigrationLock.get_addresses("keeper-1:9181, keeper-2") == (("keeper-1", 9181), ("keeper-2", 9181))

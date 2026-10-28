@@ -4,14 +4,18 @@ what it refuses."""
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hare import Model, fields
 from hare.contrib.test import requires_features
+from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
 from hare.exceptions import ConfigurationError, FieldError, IntegrityError, QueryError, ValidationError
 from hare.fields.encrypted import BlindIndexField, EncryptedTextField
 from hare.fields.encrypted.field_encryption import FieldEncryption
+from hare.instrumentation import Observers, RowsChanged
 from hare.query.expressions import F
 from hare.transactions import Transactions
 from tests.fields.encryption.models_blind_index import BlindIndexedCustomer
@@ -127,6 +131,34 @@ async def test_uniqueness_and_upsert_through_the_index(db_blind_index):
     assert await BlindIndexedCustomer.objects.filter(email="ann@example.com").values_list("id", "name") == [
         (1, "Ann again")
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_upsert_through_the_index_reports_the_row_it_updates():
+    """The rows an upsert finds were read by the index of the index - an updated row was reported inserted."""
+    async with hare_test_context(
+        modules=["tests.fields.encryption.models_blind_index"],
+        db_url=os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"),
+        app_label="models",
+        connection_label="models",
+    ):
+        if not Connections.get("models").features.supports_unique_constraints:
+            pytest.skip("the database keeps no unique index to upsert by")
+        await create_customers()
+        changes: list[RowsChanged] = []
+        with Observers.observing(RowsChanged, changes.append):
+            await BlindIndexedCustomer.objects.bulk_create(
+                [
+                    BlindIndexedCustomer(id=10, email="ann@example.com", name="Ann again"),
+                    BlindIndexedCustomer(id=11, email="dan@example.com", name="Dan"),
+                ],
+                on_conflict=["email"],
+                update_fields=["name"],
+            )
+        assert sorted((change.operation.value, change.pks) for change in changes) == [
+            ("insert", (11,)),
+            ("update", (1,)),
+        ]
 
 
 @pytest.mark.asyncio

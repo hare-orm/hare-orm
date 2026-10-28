@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.renderers.checked_term_renderers import CheckedTermRenderers
+from hare.dialects.clickhouse.constants import CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES
 from hare.dialects.clickhouse.fields.constants import UINT64_RANGE
 from hare.dialects.clickhouse.renderers.clickhouse_aggregate_renderers import ClickhouseAggregateRenderers
 from hare.dialects.clickhouse.renderers.clickhouse_assigned_enum_number import ClickhouseAssignedEnumNumber
@@ -24,6 +25,7 @@ from hare.dialects.clickhouse.renderers.constants import (
 from hare.dialects.clickhouse.spatial.clickhouse_spatial_renderers import ClickhouseSpatialRenderers
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_JSON_COLUMN_TYPE
+from hare.exceptions import UnSupportedError
 from hare.fields.data.constants import INT64_MIN
 from hare.sql import functions
 from hare.sql.order import Order
@@ -54,6 +56,27 @@ class ClickhouseRenderers(CheckedTermRenderers):
 
     def get_order_sql(self, order: Order) -> str:
         return CLICKHOUSE_ORDER_SQLS.get(order, order.value)
+
+    def get_null_if_result(self, term: Term, field: Field[Any] | None) -> Term:
+        """Checks that the NULLIF result can use the database's nullable representation.
+
+        Args:
+            term: The NULLIF call.
+            field: The first argument's field, None when its type is unknown.
+
+        Returns:
+            The unchanged call for a supported or unknown argument type.
+
+        Raises:
+            UnSupportedError: The argument's column type cannot be wrapped in Nullable,
+                including the intrinsically nullable Dynamic and Variant types.
+        """
+        if field is not None:
+            value_field = self.dialect.types.get_value_field(field)
+            column_type = value_field.get_column_type(self.dialect)
+            if column_type.startswith(CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES):
+                raise UnSupportedError(f"NullIf() cannot return Nullable({column_type}) on clickhouse")
+        return term
 
     def get_window_ordering_sql(self, function: AnalyticFunction, term_sql: str, order: Order | None) -> str:
         # Local import: hare.sql's terms render through the dialect.

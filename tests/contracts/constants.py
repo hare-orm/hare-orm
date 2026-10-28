@@ -2,6 +2,11 @@ import re
 
 from tests.matrix.constants import REPOSITORY_DIRECTORY
 
+#: Server versions observed to refuse correlated IN/NOT IN with NOT_IMPLEMENTED.
+CLICKHOUSE_VERSIONS_WITHOUT_CORRELATED_MEMBERSHIP = frozenset(
+    {(25, 8), (25, 10), (25, 12), (26, 3), (26, 7), (26, 8), (26, 9)}
+)
+
 #: The Meta options no sample of the Meta option matrix covers - each with why.
 META_OPTIONS_NOT_SAMPLED = {
     "abstract": "never inherited, so nothing to compare - every sample asserts the concrete model isn't abstract",
@@ -147,3 +152,21 @@ APPLICATION_TEST_NAMES = (
 )
 #: A test's outcome as ``pytest -v`` prints it: the module, the test, the outcome.
 PRINTED_TEST_OUTCOME_PATTERN = re.compile(r"^(\w+)\.py::(\w+) (PASSED|FAILED|ERROR|SKIPPED)", re.MULTILINE)
+
+#: The identity-generated copy of a sampled field and the operations compared with its source.
+GENERATED_VALUE_FIELD_NAME = "generated_value"
+GENERATED_FIELD_OPERATIONS = (
+    "json_object",
+    "json",
+    "values",
+    "annotation",
+    "ordering",
+    "annotation_ordering",
+    "filter",
+    "distinct",
+    "aggregate",
+    "aggregate_empty",
+    "greatest_least",
+    "coalesce_fractional",
+    "lag_fractional",
+)

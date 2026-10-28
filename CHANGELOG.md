@@ -22,6 +22,58 @@ renames that section to its version and date.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `VersionedModel.id` and `OutboxEvent.id` require UUID7, including values passed through filters and
+  relations. Generate these identifiers with `Uuid7.new`; put `VersionedModel` first when combining it
+  with a base model declaring an `id` field.
+- `makemigrations --rename` refuses an answer that renames nothing instead of writing a migration
+  that removes and recreates the object. Correct the names before generating the migration.
+
+### Added
+
+- `UUIDField(version=...)` restricts UUID values to the declared version.
+- `HareDTO` supports `extra_fields`, `computed` and `related_values`; `pydantic_model_creator()` supports
+  `extra_fields` and `related_values`, including declarations on nested related models.
+- Model-specific `Tenancy.scope(...)` works with tenant schemas and row-level security policies.
+- Migration safety checks report a required field added without a Python or database default.
+
+### Fixed
+
+- Subquery membership handles NULL values and wrapped model keys consistently. Filters through
+  relations bind each subquery's current slice when reusing a plan. Count, existence and set operations
+  preserve joins and distinct columns introduced by ordering; grouped summaries expand composite keys.
+  Recursive queries declared before initialization are validated when their calls are replayed.
+- Composite relation aliases retain key operations, and their null lookups require boolean values.
+  Existence checks reject inflated aggregates used by HAVING. Explicit bulk update returning is
+  refused before SQL on databases without RETURNING.
+- Iterators and cursors preserve duplicate rows, keyless queries, unordered distinct values and
+  database-specific annotations. Bounds use the stored field representation, including Float32,
+  enum labels, JSON and explicit NULL ordering around NaN.
+- Sliced prefetches preserve partial field masks, composite keys, joins, duplicate rows and connection
+  routing. Nested prefetches keep the required keys on intermediate models selected by `only()` and
+  report missing keys on partial instances with `QueryError`.
+- Query annotations remain distinct from similarly named relation paths and internal columns,
+  including case differences and long identifiers. Grouping, set operations, generic relation types,
+  negated relation filters, `latest()`/`earliest()` and `in_bulk()` retain their query semantics.
+- `RETURNING` reads keyless models and converted keys correctly; old values retain their aliases.
+  Bulk conflict reporting accounts for prepared defaults, tenant values and encrypted lookup keys.
+- Generated fields retain their output field's conversion and comparison rules. Window defaults,
+  duration expressions and literals in write expressions retain their declared field semantics.
+  Functions unavailable on the selected dialect and JSON aggregates of unsupported nested field types
+  are refused before SQL.
+- Tenant scope caches follow live model changes and stay isolated between application contexts.
+- Pydantic extra fields and related values respect `include` and `exclude`, including nested schemas.
+  Request query declarations accept structurally compatible Meta options without requiring exact types.
+- Migration serialization preserves import aliases in copied functions, decorators, defaults and
+  annotations, including lambda scopes. Schema checks preserve distinct Unicode names on SQLite;
+  tenant migrations retain one-shot target iterables.
+- Rollback restores write-generated instance state; a cancelled `BEGIN` cannot leave a reusable
+  connection in an unfinished transaction. Removing an outbox wakeup's last subscription closes its
+  listener on the loop that opened it.
+- Connection setup translates configuration failures; schema drift checks preserve non-PK identity
+  targets, and generated typing stubs preserve shadowed imports and nested literal types.
+
 ## [0.11.0] - 2026-10-27
 
 ### Breaking changes

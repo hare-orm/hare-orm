@@ -6,7 +6,7 @@
 
 ```python
 class VersionedModel(Model):
-    id = fields.UUIDField(default=Uuid7.new, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True, version=7)
     version = fields.PositiveSmallIntField(default=1)
     pk = CompositePrimaryKey("id", "version")
 
@@ -28,7 +28,9 @@ class VersionedModel(Model):
 
 `id` новой записи — UUID версии 7 (`hare.fields.uuid7.Uuid7.new`): упорядочен по времени и в пределах
 процесса растёт даже внутри одной миллисекунды — индекс по id растёт с конца. На Python 3.14 и новее это
-собственный `uuid.uuid7`, на 3.12 и 3.13 — та же раскладка, которую делает hare.
+собственный `uuid.uuid7`, на 3.12 и 3.13 — та же раскладка, которую делает hare. Поле — это
+`UUIDField(version=7)`: `id` другой версии отклоняется (`ValidationError`) везде, где hare передаёт его
+в базу, — в записи, в фильтре, в ключе существующей строки и в ссылке на неё.
 
 `id` и `version` вместе — настоящий первичный ключ таблицы, а не искусственный ключ с добавленным сбоку
 ограничением уникальности. Поэтому внешний ключ может ссылаться на конкретную версию настоящим,
@@ -95,13 +97,18 @@ ClickHouse](../dialects/clickhouse/models.ru.md#uniqueness-and-relations)). Та
 
 ## <a id="base-model"></a>Вместе с базовой моделью проекта
 
-Объединяйте `VersionedModel` с базовой моделью своего проекта через множественное наследование:
+Объединяйте `VersionedModel` с базовой моделью своего проекта через множественное наследование,
+`VersionedModel` — первым:
 
 ```python
-class AppVersionedModel(YourBaseModel, VersionedModel):
+class AppVersionedModel(VersionedModel, YourBaseModel):
     class Meta(YourBaseModel.Meta, VersionedModel.Meta):
-        pass
+        abstract = True
 ```
+
+Поля, объявленные в обоих классах, берутся из первого: `id` — тогда поле `VersionedModel`, часть ключа
+`id` + `version`. Базовая модель со своим первичным ключом `id` (`UUIDField(primary_key=True)`), стоящая
+первой, даёт `ConfigurationError`: поле составного ключа не может само быть первичным ключом.
 
 ## <a id="unique-fields"></a>Уникальные поля
 

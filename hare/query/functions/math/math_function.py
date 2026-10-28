@@ -8,6 +8,7 @@ from hare.exceptions import QueryError
 from hare.fields.field import Field
 from hare.query.expressions import Expression, F, Function
 from hare.query.expressions.compatibility.constants import NON_NUMBER_VALUE_TYPES
+from hare.query.expressions.constants import BIG_INTEGER_LITERAL_RANGE
 from hare.query.expressions.enums import NumericValueType
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
@@ -88,8 +89,13 @@ class MathFunction(Function):
         default_results: list[ExpressionResult],
         expression_context: ExpressionContext,
     ) -> Term:
-        """A result of the argument's type as the dialect keeps it."""
-        if self.output is MathResultType.SAME:
+        """A result of the argument's type as the dialect keeps it - an integer literal past 64 bits keeps the
+        type the database reads it as, which the literal's shared integer field doesn't name."""
+        if self.output is MathResultType.SAME and not (
+            isinstance(self.field, Value)
+            and type(self.field.value) is int
+            and not BIG_INTEGER_LITERAL_RANGE[0] <= self.field.value <= BIG_INTEGER_LITERAL_RANGE[1]
+        ):
             return expression_context.dialect.renderers.get_same_type_math_result(term, function_arg.output_field)
         return term
 

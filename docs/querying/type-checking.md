@@ -313,7 +313,10 @@ titles = await Book.objects.values_list("title", flat=True)  # list[str]
 | `pk` of an instance | The key's type, a tuple for a composite key; an assignment also takes None. |
 
 A declaration whose name the module holds already (a model named `BookFilters` beside `Book`) gets an
-underscore after it: `BookFilters_`. Run `hare stubs` again after changing the models; `--check` in CI
+underscore after it: `BookFilters_`. Imported names, including builtins, are aliased when shadowed;
+the alias also takes a free name. Runtime field types retain nested `Literal` values (including enum
+members) and `None`; `Annotated` contributes its underlying type.
+Run `hare stubs` again after changing the models; `--check` in CI
 catches a stub left behind. The mypy plugin checks more than a stub can say: the rows of `values()` and
 of `values_list()` with several names, annotations, names of `order_by()`/`only()`, the expressions in a
 write. A model declared generic in the class (`JSONField[MyDict]`) gets the value type of its field class

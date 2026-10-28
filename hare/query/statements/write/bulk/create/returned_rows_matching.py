@@ -98,6 +98,9 @@ class ReturnedRowsMatching:
             QueryError: Rows were skipped and there is no conflict target to match the rest by.
         """
         types = bulk_create.dialect.types
+        if len(objects_item) == 1 and len(returned_rows) == 1:
+            ReturnedRowsMatching.apply_returning_row(bulk_create, objects_item[0], returned_rows[0], applied_columns)
+            return
         matches: Iterable[tuple[TModel, Any]]
         if bulk_create._ignore_conflicts and written_field_names:
             # Of objects sharing a conflict key the first is written; the values compared as stored - a field
@@ -164,6 +167,8 @@ class ReturnedRowsMatching:
         if bulk_create._inserted_objects is not None:
             bulk_create._inserted_objects.append(obj)
         WrittenInstances.mark_saved((obj,), bulk_create._connection)
-        ReturnedValues.apply_row(bulk_create.model, bulk_create.dialect.types, obj, row, columns)
+        ReturnedValues.apply_row(
+            bulk_create.model, bulk_create.dialect.types, obj, row, columns, connection=bulk_create._connection
+        )
         # Assigning the pk on a saved instance clears the flag - a caller-supplied pk stays marked so.
         object.__setattr__(obj, "_custom_generated_pk", custom_generated_pk)

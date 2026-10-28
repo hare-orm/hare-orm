@@ -82,6 +82,38 @@ async def test_exists(tournaments):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("values", [False, True])
+async def test_a_sliced_or_empty_combination_is_one_branch_of_a_new_set_operation(tournaments, values):
+    branches = [Tournament.objects.filter(id=index) for index in (1, 2, 3)]
+    if values:
+        branches = [branch.values_list("id", flat=True) for branch in branches]
+    first, second, third = branches
+    combined = first.union(second).order_by("id")[:1]
+    assert [row if values else row.id for row in await combined] == [1]
+    joined = await combined.union(third)
+    assert sorted(row if values else row.id for row in joined) == [1, 3]
+    assert await combined.difference(first) == []
+    emptied = await first.union(second).none().union(third)
+    assert [row if values else row.id for row in emptied] == [3]
+    reordered = await combined.union(third).order_by("-id")
+    assert [row if values else row.id for row in reordered] == [3, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_new_combination_keeps_the_prefetch_of_the_combined_models(tournaments):
+    await Event.objects.create(name="first event", tournament_id=1)
+    await Event.objects.create(name="third event", tournament_id=3)
+    combined = (
+        Tournament.objects.filter(id=1)
+        .union(Tournament.objects.filter(id=2))
+        .order_by("id")[:1]
+        .prefetch_related("events")
+    )
+    rows = await combined.union(Tournament.objects.filter(id=3)).order_by("id")
+    assert [[event.name for event in row.events] for row in rows] == [["first event"], ["third event"]]
+
+
+@pytest.mark.asyncio
 async def test_iterator(tournaments):
     union = first_two().order_by("-name")
     assert [tournament.name async for tournament in union.iterator(chunk_size=1)] == ["c", "b", "a"]

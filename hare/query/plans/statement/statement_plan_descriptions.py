@@ -39,7 +39,7 @@ class StatementPlanDescriptions:
     ROWS_SLOTS: ClassVar[DeclaredPlanSlots]
     #: The slot of the keyset boundaries.
     CURSOR_SLOTS: ClassVar[DeclaredPlanSlots]
-    #: The slot of the annotations a GROUP BY/ORDER BY/DISTINCT ON resolves again - of a type binding
+    #: The slot of the annotations a GROUP BY/ORDER BY/distinct by fields resolves again - of a type binding
     #: their values (``binds_expression_term_values``).
     EXPRESSION_TERMS_SLOTS: ClassVar[DeclaredPlanSlots]
 
@@ -81,7 +81,7 @@ class StatementPlanDescriptions:
         annotations = query._annotations
         if not annotations:
             return True
-        # A GROUP BY/ORDER BY of an annotation that isn't SELECTed, and a DISTINCT ON of one,
+        # A GROUP BY/ORDER BY of an annotation that isn't SELECTed, and a distinct by one,
         # renders the annotation's full expression - a type that doesn't bind its values
         # (binds_expression_term_values) would keep the first query's values there.
         if not query.binds_expression_term_values:
@@ -367,7 +367,7 @@ class StatementPlanDescriptions:
 
     @staticmethod
     def get_options_structure(query: AwaitableQuery[Any]) -> tuple[Any, ...]:
-        """The part of a plan key the settings written into the SQL text make - DISTINCT ON, the
+        """The part of a plan key the settings written into the SQL text make - the distinct fields, the
         grouping, the row locks, ...
 
         Args:
@@ -413,7 +413,7 @@ class StatementPlanDescriptions:
 
     @staticmethod
     def get_expression_terms_plan_description(query: AwaitableQuery[Any]) -> PlanDescription | None:
-        """Describes the annotations a GROUP BY, ORDER BY or DISTINCT ON names, for a type that
+        """Describes the annotations a GROUP BY, ORDER BY or distinct by fields names, for a type that
         binds their expressions' values (``binds_expression_term_values``) - by their names: their
         values are bound where the annotations are described.
 

@@ -34,21 +34,37 @@ await book.save()
 await Book.objects.filter(pk=book.pk).update(metadata=JsonSet(F("metadata"), "$.edition", 3))
 ```
 
-A `Function` subclass needs nothing more for [statement plans](../querying/query-plan-cache.md): it
-inherits how a function describes its plan — its class, its field, the type of each literal argument (the
-values themselves are bound per query) and `get_plan_options()`. Override `get_plan_options()` when an
-option of your function is written into its SQL text rather than bound, so two calls with different
-options never share a plan:
+A `Function` subclass inherits how a function describes its [statement plan](../querying/query-plan-cache.md):
+its class, its field and the type of each literal argument (the values themselves are bound per query).
+An attribute of your own that is written into the SQL text rather than bound is declared in `plan_parts`
+after the inherited parts — as a `PlanPartType.KEY`, so two calls with different values of it never share a
+plan. An attribute left out of `plan_parts` is left out of the key: two calls differing only in it would
+share one plan, and with it one SQL text.
 
 ```python
-class RoundTo(Function):
-    def __init__(self, field: str, precision: int = 0) -> None:
-        super().__init__(field)
-        self.precision = precision
+from typing import ClassVar
 
-    def get_plan_options(self) -> tuple[Any, ...]:
-        return (self.precision,)
+from hare.query.expressions import Function
+from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
+from hare.query.plans.enums import PlanPartType
+from hare.sql.terms import Function as SqlFunction, LiteralValue
+
+
+class Prefix(Function):
+    plan_parts: ClassVar[DeclaredPlanParts] = (*Function.plan_parts, ("length", PlanPartType.KEY))
+
+    def __init__(self, field: str, length: int) -> None:
+        super().__init__(field)
+        self.length = int(length)
+
+    def get_function_term(self, term, *default_values):
+        return SqlFunction("SUBSTR", term, LiteralValue("1"), LiteralValue(str(self.length)))
 ```
+
+`get_function_term(term, *default_values)` builds the SQL term of the call from the terms of the
+arguments — override it, as here, when the function writes its SQL itself. A `Function` subclass setting
+neither `function_name` nor `database_function`, nor overriding `get_function_term()`, names no SQL
+function: a query with it raises `ConfigurationError` before any SQL.
 
 ## <a id="writing-a-custom-expression"></a>Writing a custom expression
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import collections.abc
 import datetime
+import importlib.util
 import math
+import sys
 import typing
 from enum import IntFlag
 
@@ -10,6 +12,7 @@ import pytest
 
 from hare.exceptions import ConfigurationError
 from hare.migrations.writer import ImportManager, MigrationWriter
+from tests.health.test_health_criteria import make_check
 
 pytestmark = pytest.mark.database_independent
 
@@ -142,3 +145,53 @@ def test_a_parameterized_type_renders_to_source_that_rebuilds_it(value: object) 
 def test_a_type_a_migration_cant_import_is_refused(value: object) -> None:
     with pytest.raises(ConfigurationError):
         MigrationWriter.render_value(value, ImportManager())
+
+
+def test_copied_function_imports_default_values_before_its_declaration() -> None:
+    imports = ImportManager()
+    name = MigrationWriter.declare_function(make_check, imports)
+    namespace: dict[str, object] = {}
+    exec("\n".join([*imports.render(), *imports.function_declarations]), namespace)  # noqa: S102
+    assert namespace[name]() == make_check()
+
+
+@pytest.mark.parametrize(
+    "declaration", ["annotations-and-defaults", "decorator", "lambda-local", "comprehension-local"]
+)
+def test_copied_function_rebinds_import_aliases_at_expression_roots(tmp_path, monkeypatch, declaration):
+    if declaration == "decorator":
+        source = "from contextlib import contextmanager as manage\n@manage\ndef copied():\n    yield 7\n"
+    elif declaration in ("lambda-local", "comprehension-local"):
+        expression = (
+            "(lambda circle: circle)(2)" if declaration == "lambda-local" else "[circle * 2 for circle in (1, 2)]"
+        )
+        source = f"from math import pi as circle\ndef copied(value={expression}):\n    return value\n"
+    else:
+        source = (
+            "from datetime import date as calendar_date\n"
+            "from math import pi as circle\n"
+            "def copied(value: calendar_date = calendar_date(2026, 1, 1), *, scale=circle) -> calendar_date:\n"
+            "    return value, scale\n"
+        )
+    path = tmp_path / "copied_function.py"
+    path.write_text("date = pi = contextmanager = None\n" + source, encoding="utf-8")
+    specification = importlib.util.spec_from_file_location("copied_function_for_migration", path)
+    module = importlib.util.module_from_spec(specification)
+    monkeypatch.setitem(sys.modules, specification.name, module)
+    specification.loader.exec_module(module)
+    imports = ImportManager()
+    # Force a second spelling of each imported name, as another declaration may already use it.
+    for imported_name in ("date", "pi", "contextmanager"):
+        imports.add_from(specification.name, imported_name)
+    name = MigrationWriter.declare_function(module.copied, imports)
+    namespace = {}
+    exec("\n".join([*imports.render(), *imports.function_declarations]), namespace)  # noqa: S102
+    copied = namespace[name]
+    if declaration == "decorator":
+        with copied() as value:
+            assert value == 7
+    elif declaration in ("lambda-local", "comprehension-local"):
+        assert copied() == module.copied()
+    else:
+        assert copied() == (datetime.date(2026, 1, 1), math.pi)
+        assert typing.get_type_hints(copied) == {"value": datetime.date, "return": datetime.date}

@@ -30,7 +30,8 @@ from hare.query.functions import (
     Variance,
 )
 from hare.query.functions.window import NthValue, RowNumber
-from tests.dialects.clickhouse.models import Player, Revision, RevisionComment, Skill, Team
+from hare.time import Timezone
+from tests.dialects.clickhouse.models import GeneratedMoment, Player, Revision, RevisionComment, Skill, Team
 
 JOINED = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456, tzinfo=datetime.UTC)
 
@@ -656,3 +657,32 @@ async def test_the_columns_of_an_empty_result_are_described(clickhouse_db):
     described = await connection.execute_described('SELECT "id", "name" FROM "player" WHERE "id" < 0')
     assert described.columns == ("id", "name")
     assert described.rows == ()
+
+
+@pytest.mark.asyncio
+async def test_dates_and_datetimes_of_generated_date_columns(clickhouse_db):
+    """A GeneratedField with a date or datetime output field is read like the column it copies."""
+    for row_id, moment in (
+        (1, datetime.datetime(2024, 1, 15, 23, 30, tzinfo=datetime.UTC)),
+        (2, datetime.datetime(2024, 3, 2, 10, 0, tzinfo=datetime.UTC)),
+        (3, None),
+    ):
+        await GeneratedMoment.objects.create(id=row_id, moment=moment, day=moment and moment.date())
+    months = [datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)]
+    for field_name in ("day", "generated_day"):
+        assert await GeneratedMoment.objects.dates(field_name, "month") == months
+        assert await GeneratedMoment.objects.dates(field_name, "month", order="DESC") == months[::-1]
+    for zone, days in (
+        ("UTC", [datetime.date(2024, 1, 15), datetime.date(2024, 3, 2)]),
+        ("Europe/Berlin", [datetime.date(2024, 1, 16), datetime.date(2024, 3, 2)]),
+    ):
+        with Timezone.override(zone):
+            for field_name in ("moment", "generated_moment"):
+                assert await GeneratedMoment.objects.dates(field_name, "day") == days
+    for zone, midnights in (
+        ("UTC", [datetime.datetime(2024, 1, 15), datetime.datetime(2024, 3, 2)]),
+        ("Europe/Berlin", [datetime.datetime(2024, 1, 15, 23), datetime.datetime(2024, 3, 1, 23)]),
+    ):
+        for field_name in ("moment", "generated_moment"):
+            values = await GeneratedMoment.objects.datetimes(field_name, "day", tzinfo=zone)
+            assert [Timezone.make_naive(value, datetime.UTC) for value in values] == midnights

@@ -10,11 +10,11 @@ from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.constants import CHUNK_SIZE
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import QueryError
-from hare.query.constants import COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
 from hare.query.expressions import Value
 from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 from hare.query.rows.model_rows.model_rows import ModelRows
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
+from hare.query.statements.select.combined.combined_branches import CombinedBranches
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql import Order
 
@@ -39,6 +39,8 @@ class CombinedModelRows:
         self.model = model
         self.models = models
         self.prefetched_relations = prefetched_relations
+        #: The names of the two columns naming each row's model - its app and its class.
+        self.app_column, self.model_column = CombinedBranches.get_model_column_names(models)
         #: The combined columns in the first branch's order, the model columns among them.
         self.column_names: list[str] = []
         #: The combined columns but the two naming the model.
@@ -92,7 +94,7 @@ class CombinedModelRows:
         Raises:
             QueryError: The branch selects other columns.
         """
-        model_columns = (COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN)
+        model_columns = (self.app_column, self.model_column)
         column_names = self.get_branch_aliases(branch)
         selects = [name for name in column_names if name not in model_columns]
         is_first_branch = not self.column_names
@@ -186,19 +188,13 @@ class CombinedModelRows:
         if HydrateAccelerator.module is not None and connection.features.supports_positional_rows:
             return HydrateAccelerator.run_or_fall_back(
                 lambda: model_rows.read_combined_with_accelerator(
-                    rows, column_names, self.models, COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
+                    rows, column_names, self.models, self.app_column, self.model_column
                 ),
                 lambda: list(
-                    model_rows.read_combined(
-                        rows, column_names, self.models, COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
-                    )
+                    model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column)
                 ),
             )
-        return list(
-            model_rows.read_combined(
-                rows, column_names, self.models, COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
-            )
-        )
+        return list(model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column))
 
     async def read(self, query: CombinedQuery, sql: str, parameters: list[Any]) -> list[Any]:
         """Runs the statement, makes each row an instance of the model its model columns name,
@@ -218,8 +214,8 @@ class CombinedModelRows:
                 result.rows,
                 result.column_names,
                 self.models,
-                COMBINED_QUERY_APP_COLUMN,
-                COMBINED_QUERY_MODEL_COLUMN,
+                self.app_column,
+                self.model_column,
             )
             while chunk := list(itertools.islice(reader, CHUNK_SIZE)):
                 instances.extend(chunk)

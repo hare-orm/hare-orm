@@ -7,8 +7,8 @@ from hare.transactions.enums import DistributedTransactionResolution
 
 @dataclass
 class StalePreparedTransaction:
-    """A prepared transaction recovery found unresolved: one to ``COMMIT PREPARED`` (the coordinator's
-    decision landed) or to ``ROLLBACK PREPARED`` (no decision was recorded).
+    """A prepared transaction recovery found unresolved: one to commit (the coordinator's decision
+    landed) or to roll back (no decision was recorded).
 
     Args:
         xid: The GID.

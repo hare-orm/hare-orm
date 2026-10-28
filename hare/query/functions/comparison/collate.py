@@ -41,5 +41,5 @@ class Collate(Function):
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.collation,)
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> CollateTerm:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> CollateTerm:
         return CollateTerm(term, self.collation, names_collation=True)

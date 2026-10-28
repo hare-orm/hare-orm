@@ -19,7 +19,7 @@ from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.rows.model_rows.combined_model_rows import CombinedModelRows
 from hare.query.rows.values_rows.combined_values_rows import CombinedValuesRows
-from hare.query.statements.constants import VALUES_SET_OPERATION_ALIAS
+from hare.query.statements.constants import VALUES_SET_OPERATION_ALIAS, VALUES_SET_OPERATION_COLUMN_PREFIX
 from hare.query.statements.select.combined.combined_branches import CombinedBranches
 from hare.query.statements.select.combined.combined_derived_queries import CombinedDerivedQueries
 from hare.query.statements.select.combined.combined_plan_descriptions import CombinedPlanDescriptions
@@ -148,11 +148,16 @@ class CombinedQuery(RowsQuery[Any]):
                 combined_query = CombinedBranches.combine(self, combined_query, branch_query, branch_index)
         derived_table = cast("QueryBuilder | SetOperationQuery", combined_query).as_(VALUES_SET_OPERATION_ALIAS)
         rows = self._rows
+        output_aliases = rows.get_output_aliases()
+        column_names = {
+            alias: f"{VALUES_SET_OPERATION_COLUMN_PREFIX}{position}" if self._combines_values else alias
+            for position, alias in enumerate(output_aliases)
+        }
         query = self._connection.query_class.from_(derived_table).select(
-            *(derived_table.field(alias).as_(alias) for alias in rows.get_output_aliases())
+            *(derived_table.field(column_names[alias]).as_(alias) for alias in output_aliases)
         )
         for field_name, order in self._orderings:
-            query = query.orderby(derived_table.field(rows.get_ordering_alias(field_name)), order=order)
+            query = query.orderby(derived_table.field(column_names[rows.get_ordering_alias(field_name)]), order=order)
         if self._limit is not None:
             query._limit = query._wrapper_class(self._limit)
         if self._offset:

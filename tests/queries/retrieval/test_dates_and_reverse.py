@@ -11,7 +11,7 @@ import pytest
 from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import F
 from hare.time import Timezone
-from tests.shared_models.testmodels import DateFields, DatetimeFields, IntFields, Team
+from tests.shared_models.testmodels import DateFields, DatetimeFields, GeneratedDates, IntFields, JSONFields, Team
 
 
 async def create_dates() -> None:
@@ -86,6 +86,38 @@ async def test_dates_and_datetimes_of_a_datetime_field(db):
     assert await DatetimeFields.objects.datetimes("datetime_null", "day") == []
 
 
+@pytest.mark.asyncio
+async def test_dates_and_datetimes_of_generated_date_columns(db):
+    """A GeneratedField with a date or datetime output field is read like the column it copies."""
+    for a, b, moment in (
+        (1, 1, datetime.datetime(2024, 1, 15, 23, 30, tzinfo=datetime.UTC)),
+        (1, 2, datetime.datetime(2024, 3, 2, 10, 0, tzinfo=datetime.UTC)),
+        (2, 1, None),
+    ):
+        await GeneratedDates.objects.create(a=a, b=b, moment=moment, day=moment and moment.date())
+    months = [datetime.date(2024, 1, 1), datetime.date(2024, 3, 1)]
+    for field_name in ("day", "generated_day"):
+        assert await GeneratedDates.objects.dates(field_name, "month") == months
+        assert await GeneratedDates.objects.dates(field_name, "month", order="DESC") == months[::-1]
+    for zone, days in (
+        ("UTC", [datetime.date(2024, 1, 15), datetime.date(2024, 3, 2)]),
+        ("Europe/Berlin", [datetime.date(2024, 1, 16), datetime.date(2024, 3, 2)]),
+    ):
+        with Timezone.override(zone):
+            for field_name in ("moment", "generated_moment"):
+                assert await GeneratedDates.objects.dates(field_name, "day") == days
+    for zone, midnights in (
+        ("UTC", [datetime.datetime(2024, 1, 15), datetime.datetime(2024, 3, 2)]),
+        ("Europe/Berlin", [datetime.datetime(2024, 1, 15, 23), datetime.datetime(2024, 3, 1, 23)]),
+    ):
+        for field_name in ("moment", "generated_moment"):
+            for order, expected in (("ASC", midnights), ("DESC", midnights[::-1])):
+                values = await GeneratedDates.objects.datetimes(field_name, "day", order=order, tzinfo=zone)
+                assert [Timezone.make_naive(value, datetime.UTC) for value in values] == expected
+    with pytest.raises(FieldError, match="datetimes\\(\\) takes a DatetimeField"):
+        GeneratedDates.objects.datetimes("generated_day", "day")
+
+
 @pytest.mark.parametrize(
     ("call", "message"),
     [
@@ -141,3 +173,18 @@ async def test_latest_and_earliest_take_meta_get_latest_by(db):
     assert (await DateFields.objects.latest("date_null")).id == 4
     with pytest.raises(FieldError, match="latest\\(\\) needs the fields to order by"):
         await IntFields.objects.latest()
+
+
+@pytest.mark.asyncio
+async def test_latest_and_earliest_order_by_a_path_inside_a_value(db):
+    """A path into a JSON value or a date was taken by the ordering but given no alias of its own -
+    "Unknown field data__score for ordering"."""
+    await JSONFields.objects.create(id=1, data={"score": 10})
+    await JSONFields.objects.create(id=2, data={"score": 50})
+    assert (await JSONFields.objects.latest("data__score")).id == 2
+    assert (await JSONFields.objects.earliest("data__score")).id == 1
+    # An Ordering is turned around exactly.
+    assert (await JSONFields.objects.latest(F("data__score").desc())).id == 1
+    await create_dates()
+    assert (await DateFields.objects.latest("date__year", "id")).id == 4
+    assert (await DateFields.objects.earliest("date__month", "-id")).id == 2

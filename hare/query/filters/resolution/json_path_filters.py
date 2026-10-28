@@ -10,13 +10,17 @@ from hare.fields.field import Field
 from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.constants import (
     MIRRORED_COMPARISON_LOOKUPS,
+    OUTER_JSON_PATH_ANNOTATION_NAME,
 )
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.f import F
+from hare.query.expressions.subqueries.outer_reference import OuterReference
+from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.filters import FieldLookups
 from hare.query.filters.lookups.json.json_path_lookups import JsonPathLookups
 from hare.query.filters.resolution.annotation_filters import AnnotationFilters
+from hare.query.lookup_info.value_paths import ValuePaths
 from hare.sql.functions.declarations import JsonComparand
 from hare.sql.terms.term import Term
 from hare.time import Timezone
@@ -51,10 +55,13 @@ class JsonPathFilters:
         return JsonComparand(json_term, value_type, is_aware=Timezone.get_use_timezone())
 
     @staticmethod
-    def get_json_path_mirrored_kwarg(expression_context: ExpressionContext, key: str, value: Any) -> tuple[str, Any]:
+    def get_json_path_mirrored_kwarg(
+        expression_context: ExpressionContext, key: str, value: Any
+    ) -> tuple[str, Any, ExpressionContext]:
         """A comparison of a field with the value at a JSON path (``number__gt=F("data__rank")``)
         as the same comparison of the path with the field (``data__rank__lt=F("number")``), which
-        compares JSON values.
+        compares JSON values - a path of the enclosing query (``OuterReference("data__rank")``) under a
+        name of its own.
 
         Args:
             expression_context: The node's context.
@@ -62,10 +69,12 @@ class JsonPathFilters:
             value: The filter value.
 
         Returns:
-            The key and value to resolve.
+            The key and value to resolve, and the context they resolve in.
         """
+        if isinstance(value, OuterReference):
+            return JsonPathFilters.get_outer_json_path_mirrored_kwarg(expression_context, key, value)
         if not isinstance(value, F):
-            return key, value
+            return key, value, expression_context
         meta = expression_context.model._meta
         field_name, __, lookup = key.partition("__")
         field = meta.fields_map.get(field_name)
@@ -77,9 +86,59 @@ class JsonPathFilters:
             or value.name.partition("__")[0] in meta.fetch_fields
             or not isinstance(value.get_result(expression_context).output_field, JSONPathField)
         ):
-            return key, value
+            return key, value, expression_context
         mirrored_lookup = MIRRORED_COMPARISON_LOOKUPS[lookup]
-        return (f"{value.name}__{mirrored_lookup}" if mirrored_lookup else value.name), F(field_name)
+        return (
+            (f"{value.name}__{mirrored_lookup}" if mirrored_lookup else value.name),
+            F(field_name),
+            expression_context,
+        )
+
+    @staticmethod
+    def get_outer_json_path_mirrored_kwarg(
+        expression_context: ExpressionContext, key: str, value: OuterReference
+    ) -> tuple[str, Any, ExpressionContext]:
+        """``get_json_path_mirrored_kwarg()`` of a path into a JSON field of the enclosing query - the path
+        an annotation of the filtered model under ``OUTER_JSON_PATH_ANNOTATION_NAME``.
+
+        Args:
+            expression_context: The node's context.
+            key: The filter key.
+            value: The reference.
+
+        Returns:
+            The key and value to resolve, and the context they resolve in.
+        """
+        outer_context = OuterScope.current_expression_context.get()
+        meta = expression_context.model._meta
+        field_name, __, lookup = key.partition("__")
+        field = meta.fields_map.get(field_name)
+        path_split = (
+            None if outer_context is None else ValuePaths.get_value_path_split(outer_context.model, value.field)
+        )
+        if (
+            field is None
+            or field_name in meta.fetch_fields
+            or isinstance(GeneratedField.get_effective_field(field), JSONField)
+            or lookup not in MIRRORED_COMPARISON_LOOKUPS
+            or path_split is None
+            or not isinstance(GeneratedField.get_effective_field(path_split[1]), JSONField)
+        ):
+            return key, value, expression_context
+        mirrored_lookup = MIRRORED_COMPARISON_LOOKUPS[lookup]
+        mirrored_key = (
+            f"{OUTER_JSON_PATH_ANNOTATION_NAME}__{mirrored_lookup}"
+            if mirrored_lookup
+            else OUTER_JSON_PATH_ANNOTATION_NAME
+        )
+        return (
+            mirrored_key,
+            F(field_name),
+            dataclasses.replace(
+                expression_context,
+                annotations={**expression_context.annotations, OUTER_JSON_PATH_ANNOTATION_NAME: value},
+            ),
+        )
 
     @staticmethod
     def get_json_base_field(expression_context: ExpressionContext, name: str) -> JSONField[Any] | None:
@@ -128,6 +187,13 @@ class JsonPathFilters:
         """
         annotation_name = AnnotationFilters.get_annotation_name(expression_context, key)
         field_name, separator, path = key.partition("__")
+        if (
+            annotation_name is not None
+            and annotation_name != field_name
+            and F.names_given_annotation(expression_context.annotations, annotation_name)
+        ):
+            # An annotation named like the path - data__score=Value(...) - is filtered as itself.
+            return expression_context, annotation_name
         if (
             not separator
             or (json_field := JsonPathFilters.get_json_base_field(expression_context, field_name)) is None

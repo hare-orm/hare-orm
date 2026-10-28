@@ -1247,9 +1247,10 @@ async def test_dialect_is_part_of_the_cache_key(db):
     relative to whichever one this particular run is actually using, not hardcoded - hardcoding
     "postgres" here once silently made this a same-dialect no-op under a postgres test run)."""
     await Author.objects.create(name="a")
-    # Both dialects registered up front - registering one drops every query-shape cache entry.
-    DialectRegistry.get_dialect("postgresql")
-    DialectRegistry.get_dialect("sqlite")
+    # Register both dialects' lazy SQL helpers before measuring separate plan entries.
+    for dialect_name in ("postgresql", "sqlite"):
+        dialect = DialectRegistry.get_dialect(dialect_name)
+        _ = dialect.renderers, dialect.text_search
     qs = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
     real_dialect = qs.dialect.name
     qs._make_query()

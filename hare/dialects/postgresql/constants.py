@@ -260,6 +260,7 @@ POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     # A bare character[] is of character(1).
     "bpchar": (POSTGRESQL_FIXED_CHAR_FIELD_PATH, {"max_length": 1}),
     "uuid": ("hare.fields.data.uuid_field.UUIDField", {}),
+    "bytea": ("hare.fields.data.binary_field.BinaryField", {}),
     "date": ("hare.fields.data.temporal.DateField", {}),
     "timestamptz": ("hare.fields.data.temporal.DatetimeField", {}),
     "timestamp": ("hare.dialects.postgresql.fields.NaiveDatetimeField", {}),
@@ -281,6 +282,8 @@ POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "geography": ("hare.dialects.postgresql.fields.postgis_field.PostGISField", {}),
 }
 
+#: The texts PostgreSQL's jsonb holds a non-finite float as - JSON has no number for one.
+POSTGRESQL_JSON_NON_FINITE_FLOAT_TEXTS = frozenset({"NaN", "Infinity", "-Infinity"})
 #: Postgres type casts whose quoted default literal (e.g. "'-1.5'::double precision") is a number.
 POSTGRESQL_NUMERIC_CAST_TYPES = frozenset({"smallint", "integer", "bigint", "numeric", "real", "double precision"})
 #: The integer and the float element types of an array default's literal.

@@ -16,7 +16,9 @@ The implicit `GROUP BY` of an aggregate `annotate()` follows these rules:
 - A selected non-aggregate expression is grouped by its `SELECT` position (`GROUP BY 2`), so a literal
   inside it (`F("price") + 5`, `Case(When(..., then=Value("high")))`, `Concat(...)`) binds once.
 - A column `HAVING` reads outside its aggregates (`Q(book_count__gte=2) | Q(city="Oslo")`,
-  `book_count__gt=F("limit")`) is grouped too.
+  `book_count__gt=F("limit")`) is grouped too when the aggregate is computed per model row.
+  A query grouped by the fields named keeps those groups; other columns in `HAVING` remain
+  ungrouped and are subject to the database's rules below.
 - A correlated `Exists(...)`/`Subquery(...)` next to an aggregate is grouped as a whole, by its `SELECT`
   position, not by the outer columns its `OuterReference(...)` reads — two outer rows with different
   `OuterReference` values but the same subquery result land in one group. Only a subquery reading an
@@ -60,7 +62,9 @@ over the base table's own columns (`Sum("advance")`, `Count("id")`) has no to-ma
 any to-many `JOIN` of the query — another aggregate's, a `.filter(books__...)`'s, an annotation's, a
 `values()` field's or the ordering's — raises the same `QueryError`; `Count("id", distinct=True)` is
 fine, and so is `.distinct().aggregate(...)` or an `aggregate()` over an aggregate annotation, which run
-over one row per base row.
+over one row per base row. `aggregate()` on a model queryset discards ordering and annotations it does
+not read, so their unused joins do not trigger this refusal. An aggregate on a `values()` queryset
+operates on that queryset's selected rows.
 
 A to-many field used as a `GROUP BY` key splits the rows into groups instead of repeating them inside
 one: `.annotate(total=Sum("copies")).group_by("tags__name").values_list("tags__name", "total")` (or the
@@ -193,7 +197,8 @@ over it a `float`); `Avg` of integers is what the database computes: an exact `D
 `Decimal` that is not rounded to the field's `decimal_places` (the numeric average at its own division scale —
 `1.7125`, not `1.71`, for a `DecimalField(decimal_places=2)`), on ClickHouse a `float`
 (`Features.computes_decimal_statistics_exactly`), the same in `.aggregate()`, `.annotate()` and a window; over
-no rows, `Min`/`Max`/`Avg`/`StdDev`/`Variance` give `None` on every database, and `Sum` gives `None` on
+no rows, `Min`/`Max`/`Avg`/`StdDev`/`Variance` give `None` on every database (but `Min`/`Max` of a
+ClickHouse array, map or tuple give its [empty value](../dialects/clickhouse/types.md#containers)), and `Sum` gives `None` on
 PostgreSQL and SQLite but ClickHouse's own `0` (`0.00` for a Decimal, `None` for a nullable field);
 `Sum`/`Max`/`Min`/`FirstValue`/`LastValue`/`Lag`/`Lead` keep the type of what they aggregate, including an
 expression or literal annotation (`Sum(F("duration") * 2)` is a `timedelta`, a window `Sum` over
@@ -201,6 +206,8 @@ expression or literal annotation (`Sum(F("duration") * 2)` is a `timedelta`, a w
 written to it (a `dict` for a `JSONField`, a `datetime`/`Decimal` for its field); a default the field's type
 can't hold without loss (`Lag("pages", 1, 0.5)`) raises `QueryError`. `StdDev`/`Variance` type their result
 like `Avg`; `CumeDist`/`PercentRank` are a `float` from 0 to 1, `NthValue` keeps the field's type.
+
+For a `GeneratedField`, the `Lag`/`Lead` default must fit its `output_field` under the same rules.
 
 > [!NOTE]
 > **`LastValue` always sees the whole partition**

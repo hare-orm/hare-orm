@@ -470,6 +470,7 @@ class Labelled(Model):
 
     id = fields.BigIntField(primary_key=True, generated=False)
     label = fields.CharEnumField(EscapedLabel)
+    label_copy = fields.GeneratedField(RawSQLTerm('"label"'), output_field=fields.CharEnumField(EscapedLabel))
 
 
 class Holding(Model):
@@ -607,3 +608,23 @@ class DiamondRestrictLeaf(Model):
     right: fields.ForeignKeyRelation[DiamondRight] = fields.ForeignKeyField(
         "models.DiamondRight", related_name="restrict_leaves", on_delete=fields.RESTRICT, db_constraint=False
     )
+
+
+class StatusArray(Model):
+    """An array of enum labels and its generated copy - compared as its output field, by no < or >."""
+
+    id = fields.BigIntField(primary_key=True, generated=False)
+    statuses = fields.ArrayField(fields.CharEnumField(DeviceStatus))
+    statuses_copy = fields.GeneratedField(
+        RawSQLTerm('"statuses"'), output_field=fields.ArrayField(fields.CharEnumField(DeviceStatus))
+    )
+
+
+class GeneratedMoment(Model):
+    """Generated copies of a date and a datetime column."""
+
+    id = fields.BigIntField(primary_key=True, generated=False)
+    day = fields.DateField(null=True)
+    moment = fields.DatetimeField(null=True)
+    generated_day = fields.GeneratedField(RawSQLTerm('"day"'), output_field=fields.DateField(), null=True)
+    generated_moment = fields.GeneratedField(RawSQLTerm('"moment"'), output_field=fields.DatetimeField(), null=True)

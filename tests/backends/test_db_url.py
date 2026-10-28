@@ -491,6 +491,17 @@ def test_userinfo_literal_at_sign_with_brackets():
     assert res["credentials"]["host"] == "127.0.0.1"
 
 
+@pytest.mark.parametrize("password", ["p@s?s", "p@s#s", "p@s/s?r#d", "p@s?a=b", "p@s?a=b@c"])
+def test_a_password_holding_an_at_sign_and_a_query_mark_is_read_whole(password):
+    """The text after the password's own "@" was read as a host and a query - "s" the host, no database."""
+    res = DbUrlConfigGenerator.expand(
+        f"postgresql+asyncpg://user:{password}@dbhost:5433/mydb?application_name=shop&server_settings=a@b"
+    )
+    assert res["credentials"]["password"] == password
+    assert res["credentials"]["host"] == "dbhost"
+    assert res["credentials"]["database"] == "mydb"
+
+
 def test_generate_config_basic():
     res = DbUrlConfigGenerator.build(
         db_url="sqlite+aiosqlite:///some/test.sqlite",

@@ -10,5 +10,5 @@ DEFAULT_MAX_BACKOFF_SECONDS = 30.0
 #: when reconnecting forever.
 MAX_BACKOFF_EXPONENT = 32
 
-#: How often an idle, healthy LISTEN connection is checked for having died on its own.
+#: How often an idle, healthy listening connection is checked for having died on its own.
 HEALTH_CHECK_INTERVAL_SECONDS = 1.0

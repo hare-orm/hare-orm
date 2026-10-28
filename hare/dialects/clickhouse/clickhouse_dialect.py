@@ -39,6 +39,8 @@ class ClickhouseDialect(Dialect):
     name = ClickhouseDialectName.CLICKHOUSE
     otel_system_name = "clickhouse"
     features = ClickhouseFeatures(
+        # ORDER BY places NaN after the numbers, but every comparison with NaN is false.
+        compares_nan_as_ordered=False,
         supports_transactions=False,
         supports_savepoints=False,
         # A transaction reads the snapshot it began with.
@@ -116,14 +118,17 @@ class ClickhouseDialect(Dialect):
     default_table_options: TableOptions | None = ClickhouseTableOptions()
     minimum_server_version = CLICKHOUSE_MINIMUM_SERVER_VERSION
 
-    def __init__(self, stores_json_natively: bool = False) -> None:
+    def __init__(self, stores_json_natively: bool = False, variants: tuple[Dialect, ...] = ()) -> None:
         """
         Args:
             stores_json_natively: Whether a ``JSONField`` is a ``JSON`` column - the dialect of a
                 connection whose driver reads one (``ClickhouseFeatures.supports_json_type``); else the column
                 holds the JSON text.
+            variants: The dialects of the other storage of JSON - what is registered on this one is
+                registered on them too.
         """
         self.stores_json_natively = stores_json_natively
+        self.variants = variants
 
     def get_journal_table_options(self, connection: DatabaseClient) -> TableOptions | None:
         """A journal every server of the connection's cluster holds a copy of - each of them reads

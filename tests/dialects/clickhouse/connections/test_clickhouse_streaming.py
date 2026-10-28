@@ -95,3 +95,28 @@ def test_a_server_error_unreadable_out_of_the_stream_is_the_statements_error():
         StreamFailureError("unrecognized data found in stream: `0001ff`"), "SELECT throwIf(1)", None
     )
     assert type(error) is OperationalError
+
+
+@pytest.mark.requires("clickhouse-connect")
+@pytest.mark.database_independent
+def test_a_read_sent_again_after_its_connection_broke_is_a_connection_error():
+    """clickhouse-connect sends a read again after its connection broke off, under the same query id - the
+    server answered that the first was still running, an OperationalError instead of the broken
+    connection the documentation names."""
+    from clickhouse_connect.driver.exceptions import DatabaseError
+
+    from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (
+        ClickhouseConnectClient,
+    )
+    from hare.exceptions import DBConnectionError
+
+    client = ClickhouseConnectClient(connection_alias="default", host="127.0.0.1")
+    error = client.get_hare_error(
+        DatabaseError(
+            "Received ClickHouse exception, code: 216, server response: Code: 216. DB::Exception: Query with "
+            "id = 1 is already running. (QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)"
+        ),
+        "SELECT count() FROM numbers(10)",
+        None,
+    )
+    assert type(error) is DBConnectionError

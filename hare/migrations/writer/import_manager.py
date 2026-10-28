@@ -11,8 +11,13 @@ class ImportManager:
     """The imports a migration file being written needs, gathered from what its operations name."""
 
     imports: dict[str, set[str]] = dataclass_field(default_factory=dict)
+    #: The name an import binds where its own is taken by another module's - ``from b import f as f2``,
+    #: by the module and the imported name.
+    import_aliases: dict[tuple[str, str], str] = dataclass_field(default_factory=dict)
     modules: set[str] = dataclass_field(default_factory=set)
+    module_references: dict[str, str] = dataclass_field(default_factory=dict)
     uses_fields_module: bool = False
+    fields_reference: str = "fields"
     uses_indexes: set[str] = dataclass_field(default_factory=set)
     uses_constraints: set[str] = dataclass_field(default_factory=set)
     #: The name each enum the migration declares itself (one it can't import) is declared under,
@@ -29,20 +34,82 @@ class ImportManager:
     #: The source of those functions, in the order they were met.
     function_declarations: list[str] = dataclass_field(default_factory=list)
 
-    def add_from(self, module: str, name: str) -> None:
+    def add_from(self, module: str, name: str) -> str:
+        """Imports a name of a module.
+
+        Args:
+            module: The module.
+            name: The name.
+
+        Returns:
+            The name the migration refers to it by - the name itself, else a free one it is imported as
+            when another import or declaration binds it: two functions of one name from two modules are two
+            values.
+        """
+        imported_names = self.imports.get(module)
+        if imported_names is not None and name in imported_names:
+            return self.import_aliases.get((module, name), name)
+        if self._has_from_import(module, name):
+            return self.import_aliases.get((module, name), name)
+        bound_name = self.get_free_name(name)
         self.imports.setdefault(module, set()).add(name)
+        if bound_name != name:
+            self.import_aliases[module, name] = bound_name
+        return bound_name
 
-    def add_module(self, module: str) -> None:
+    def _has_from_import(self, module: str, name: str) -> bool:
+        """Whether a regular or grouped import already binds this object."""
+        return (
+            name in self.imports.get(module, ())
+            or (module == "hare" and name == "fields" and self.uses_fields_module)
+            or (module == "hare.ddl.indexes" and name in self.uses_indexes)
+            or (module == "hare.ddl.constraints" and name in self.uses_constraints)
+        )
+
+    def add_module(self, module: str) -> str:
+        """Imports a module and returns its reference, aliased when its root name is taken."""
+        reference = self.module_references.get(module)
+        if reference is not None:
+            return reference
+        root_name = module.split(".", 1)[0]
+        shares_root = any(
+            name.split(".", 1)[0] == root_name and self.module_references.get(name, name) == name
+            for name in self.modules
+        )
+        reference = module
+        if not shares_root and root_name in self.bound_names() | MIGRATION_MODULE_NAMES:
+            reference = self.get_free_name(root_name)
         self.modules.add(module)
+        self.module_references[module] = reference
+        return reference
 
-    def add_fields_alias(self) -> None:
+    def add_fields_alias(self) -> str:
+        if self.uses_fields_module:
+            return self.fields_reference
+        if self._has_from_import("hare", "fields"):
+            return self.import_aliases.get(("hare", "fields"), "fields")
+        name = self.get_free_name("fields")
+        if name != "fields":
+            self.import_aliases["hare", "fields"] = name
         self.uses_fields_module = True
+        self.fields_reference = name
+        return name
 
-    def add_index_class(self, name: str) -> None:
-        self.uses_indexes.add(name)
+    def add_index_class(self, name: str) -> str:
+        return self._add_grouped_import("hare.ddl.indexes", name, self.uses_indexes)
 
-    def add_constraint_class(self, name: str) -> None:
-        self.uses_constraints.add(name)
+    def add_constraint_class(self, name: str) -> str:
+        return self._add_grouped_import("hare.ddl.constraints", name, self.uses_constraints)
+
+    def _add_grouped_import(self, module: str, name: str, names: set[str]) -> str:
+        """Adds an import to a dedicated group, keeping earlier references to the same import."""
+        if self._has_from_import(module, name):
+            return self.import_aliases.get((module, name), name)
+        bound_name = self.get_free_name(name)
+        if bound_name != name:
+            self.import_aliases[module, name] = bound_name
+        names.add(name)
+        return bound_name
 
     def bound_names(self) -> set[str]:
         """Names the migration binds at its top: its imports, its enum and function declarations.
@@ -58,14 +125,27 @@ class ImportManager:
         Returns:
             Every top-level name bound by render().
         """
-        names = {module.split(".", 1)[0] for module in self.modules}
-        for imported_names in self.imports.values():
-            names.update(imported_names)
+        names = {self.module_references.get(module, module).split(".", 1)[0] for module in self.modules}
+        for module, imported_names in self.imports.items():
+            names.update(self.import_aliases.get((module, name), name) for name in imported_names)
         if self.uses_fields_module:
-            names.add("fields")
-        names.update(self.uses_indexes)
-        names.update(self.uses_constraints)
+            names.add(self.import_aliases.get(("hare", "fields"), "fields"))
+        names.update(self.import_aliases.get(("hare.ddl.indexes", name), name) for name in self.uses_indexes)
+        names.update(self.import_aliases.get(("hare.ddl.constraints", name), name) for name in self.uses_constraints)
         return names
+
+    def get_imported_name_text(self, module: str, name: str) -> str:
+        """An imported name as its import line writes it.
+
+        Args:
+            module: The module.
+            name: The name.
+
+        Returns:
+            ``name``, or ``name as alias``.
+        """
+        alias = self.import_aliases.get((module, name))
+        return name if alias is None else f"{name} as {alias}"
 
     def get_free_name(self, name: str) -> str:
         """A name no import or declaration of the migration binds yet.
@@ -91,16 +171,25 @@ class ImportManager:
             The lines.
         """
         lines: list[str] = []
-        lines.extend(f"import {module}" for module in sorted(self.modules))
         lines.extend(
-            f"from {module} import {', '.join(sorted(names))}" for module, names in sorted(self.imports.items())
+            f"import {module}"
+            + (f" as {self.module_references[module]}" if self.module_references.get(module, module) != module else "")
+            for module in sorted(self.modules)
+        )
+        lines.extend(
+            f"from {module} import {', '.join(sorted(self.get_imported_name_text(module, name) for name in names))}"
+            for module, names in sorted(self.imports.items())
         )
         if self.uses_fields_module:
-            lines.append("from hare import fields")
+            lines.append(f"from hare import {self.get_imported_name_text('hare', 'fields')}")
         if self.uses_indexes:
-            index_names = ", ".join(sorted(self.uses_indexes))
+            index_names = ", ".join(
+                sorted(self.get_imported_name_text("hare.ddl.indexes", name) for name in self.uses_indexes)
+            )
             lines.append(f"from hare.ddl.indexes import {index_names}")
         if self.uses_constraints:
-            constraint_names = ", ".join(sorted(self.uses_constraints))
+            constraint_names = ", ".join(
+                sorted(self.get_imported_name_text("hare.ddl.constraints", name) for name in self.uses_constraints)
+            )
             lines.append(f"from hare.ddl.constraints import {constraint_names}")
         return lines

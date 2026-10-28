@@ -34,7 +34,7 @@ class Trigger:
             trigger fires for (``NEW``; ``OLD`` for a ``DELETE`` trigger), or ``RawSQLTerm`` of a raw
             SQL condition.
         language: The function's procedural language; None for the dialect's default.
-        deferrable: Makes it a ``CREATE CONSTRAINT TRIGGER``, deferrable to transaction end - needs
+        deferrable: Makes it a constraint trigger, deferrable to transaction end - needs
             ``Features.supports_deferrable_constraints``; always ``AFTER``, ``FOR EACH ROW``.
         initially_deferred: Only with ``deferrable=True`` - every transaction starts deferred.
         enabled: False for a trigger kept but not fired (``ALTER TABLE ... DISABLE TRIGGER``) - a

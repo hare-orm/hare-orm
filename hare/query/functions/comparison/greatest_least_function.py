@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 from hare.exceptions import FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions import Expression, Function, Value
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
@@ -89,7 +90,11 @@ class GreatestLeastFunction(Function):
         expression_context: ExpressionContext,
     ) -> Term:
         if not expression_context.dialect.features.orders_json_values_in_aggregates and any(
-            isinstance(result.output_field, JSONField) for result in (function_arg, *default_results)
+            isinstance(
+                GeneratedField.get_effective_field(result.output_field) if result.output_field is not None else None,
+                JSONField,
+            )
+            for result in (function_arg, *default_results)
         ):
             # It would compare the JSON text, as MAX and MIN would (Features.orders_json_values_in_aggregates).
             raise FieldError(
