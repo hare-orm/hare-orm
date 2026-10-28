@@ -1643,6 +1643,30 @@ async def test_generate_model_source_flags_user_defined_type_as_todo(connection)
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
+async def test_a_check_of_an_in_list_over_a_varchar_column_comes_back_as_declared(connection):
+    """A CharEnumField's CHECK came back as Postgres gives it, (value)::text = ANY (...) - declared again, Postgres
+    gives that text otherwise, and drift found the constraint changed."""
+    constraint_sql = "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conname = $1"
+    await connection.execute_script(
+        "DROP TABLE IF EXISTS scratch_in_list, scratch_in_list_again; "
+        "CREATE TABLE scratch_in_list (id serial primary key, color varchar(10), "
+        "CONSTRAINT scratch_in_list_color CHECK (color IN ('red', 'it''s, blue')))"
+    )
+
+    table = await DatabaseCatalog.inspect_table(connection, "scratch_in_list")
+    (check_constraint,) = table.check_constraints
+    assert check_constraint.check.sql == "color IN ('red', 'it''s, blue')"
+    await connection.execute_script(
+        "CREATE TABLE scratch_in_list_again (id serial primary key, color varchar(10), "
+        f"CONSTRAINT scratch_in_list_again_color CHECK ({check_constraint.check.sql}))"
+    )
+    (original,) = await connection.execute_dicts(constraint_sql, ["scratch_in_list_color"])
+    (declared_again,) = await connection.execute_dicts(constraint_sql, ["scratch_in_list_again_color"])
+    assert declared_again == original
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
 async def test_generate_model_source_reconstructs_an_enum_type_as_a_native_enum_field(connection):
     """A column of an ENUM type - an array of one too - comes back as NativeEnumField of an enum the
     module declares of the type's labels, in their order; no comment the column has none of."""
@@ -3411,8 +3435,9 @@ async def test_policies_grants_sequences_and_functions_are_reconstructed(connect
     the generated module would have closed a row level security table to every other role - and named
     no function or table-less sequence of the schema."""
     await connection.execute_script(
-        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hare_inspectdb_reader') THEN "
-        "CREATE ROLE hare_inspectdb_reader; END IF; END $$;"
+        # A role is the server's: a run on another database of the server may create it at the same moment.
+        "DO $$ BEGIN CREATE ROLE hare_inspectdb_reader; "
+        "EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $$;"
         "CREATE TABLE scratch_secured (id int PRIMARY KEY, tenant int NOT NULL, n bigint, ticket serial);"
         "CREATE SEQUENCE scratch_n START 100 INCREMENT 5 OWNED BY scratch_secured.n;"
         "ALTER TABLE scratch_secured ENABLE ROW LEVEL SECURITY;"

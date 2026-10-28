@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +22,8 @@ from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGen
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
 from hare.dialects.postgresql.client.constants import POSTGRES_KEPT_TEST_SCHEMA_COMMENT_PREFIX
 from hare.instrumentation.observers.observers import Observers
+from tests.matrix.constants import EVERY_SUITE_ENVIRONMENT, SUITE_ENVIRONMENT_OPTION
+from tests.matrix.suite_environments import SuiteEnvironments
 from tests.plan_verification.constants import PLAN_VERIFICATION_AFTER_TEST_MARKER, VERIFY_PLANS_OPTION
 from tests.plan_verification.plan_coverage import PlanCoverage
 from tests.plan_verification.plan_parts_verification import PlanPartsVerification
@@ -34,8 +37,10 @@ from tests.utils.constants import (
     TIMING_MARKER,
 )
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.driver_classes import DriverClasses
 from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
 from tests.utils.power_throttling import PowerThrottling
+from tests.utils.server_session import ServerSession
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -49,6 +54,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         help="Run the tests whose outcome depends on time too (the timing marker) - left out otherwise.",
     )
+    parser.addoption(
+        SUITE_ENVIRONMENT_OPTION,
+        default=EVERY_SUITE_ENVIRONMENT,
+        help=(
+            "The environment of tests/matrix/constants.py SUITE_ENVIRONMENTS the run is in - only its tests run; "
+            f"{EVERY_SUITE_ENVIRONMENT} (the default) runs every environment's tests, in a virtualenv installing "
+            "everything."
+        ),
+    )
+
+
+def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
+    # A module or directory of another environment isn't collected - its imports of packages this run
+    # lacks never run. None leaves the decision to pytest's own rules.
+    return True if SuiteEnvironments.is_other_environment_path(collection_path) else None
+
+
+@pytest.fixture
+def client_class(request: pytest.FixtureRequest) -> Any:
+    """The driver class a test parametrized with ``DriverClasses.get_parameters()`` (``indirect=True``) runs on."""
+    return DriverClasses.get_class(request.param)
 
 
 @pytest.fixture(autouse=True)
@@ -171,10 +197,10 @@ class OwnedTestDatabases:
     UNTAGGED_MINIMUM_AGE_SECONDS = 3 * 60 * 60
     UNTAGGED_URL_ENVIRONMENT_VARIABLE = "HARE_TEST_DB_UNTAGGED"
     APPLICATION_NAME_PREFIX = "hare_test_run_"
-    #: The admin connection holding this process's ownership lock for the whole session.
-    ownership_connection: Any = None
-    #: Server credentials the admin connection was opened with.
-    server_credentials: dict[str, Any] = {}
+    #: The admin session holding this process's ownership lock for the whole session.
+    ownership_connection: ServerSession | None = None
+    #: The URL of the database under test - its server's sessions are opened through its driver.
+    server_url: str = ""
 
     @classmethod
     def get_lock_key(cls, run_tag: str) -> int:
@@ -195,41 +221,24 @@ class OwnedTestDatabases:
         os.environ["HARE_TEST_DB"] = template.replace("{}", f"{cls.run_tag}_{{}}", 1)
 
     @classmethod
-    async def connect(cls, database: str, **options: Any) -> Any:
-        import asyncpg
-
+    async def connect(cls, database: str, application_name: str | None = None) -> ServerSession:
         # A session-level lock holds a session - on the server itself, past a transaction pooler.
-        return await asyncpg.connect(
-            host=cls.server_credentials.get("direct_host") or cls.server_credentials["host"],
-            port=cls.server_credentials.get("direct_port") or cls.server_credentials["port"],
-            user=cls.server_credentials["user"],
-            password=cls.server_credentials["password"],
-            database=database,
-            **options,
-        )
+        return await ServerSession.open(cls.server_url, database, application_name)
 
     @classmethod
     async def acquire_ownership(cls, raw_db_url: str) -> bool:
         """Opens the admin connection and takes this run's ownership lock on it.
 
         Returns:
-            False when there is nothing to own (no PostgreSQL database, no asyncpg, or no reachable
-            server).
+            False when there is nothing to own (no PostgreSQL database, or no reachable server).
         """
         # Another server's port never answers a PostgreSQL handshake - the connect would wait
         # for its whole timeout.
         if _get_dialect_name(raw_db_url) != "postgresql":
             return False
+        cls.server_url = raw_db_url
         try:
-            import asyncpg  # noqa: F401
-        except ImportError:
-            return False
-        cls.server_credentials = DbUrlConfigGenerator.expand(raw_db_url, testing=False)["credentials"]
-        try:
-            connection = await cls.connect(
-                "postgres",
-                server_settings={"application_name": f"{cls.APPLICATION_NAME_PREFIX}{cls.run_tag}"},
-            )
+            connection = await cls.connect("postgres", f"{cls.APPLICATION_NAME_PREFIX}{cls.run_tag}")
         except Exception as exc:  # noqa: BLE001 - best-effort hygiene, never block the real test run
             print(f"[OwnedTestDatabases] could not connect: {exc}", flush=True)
             return False
@@ -276,6 +285,8 @@ class OwnedTestDatabases:
             Whether the database was dropped.
         """
         connection = cls.ownership_connection
+        if connection is None:
+            return False
         owned_name_match = cls.OWNED_NAME_PATTERN.match(database_name)
         if owned_name_match is not None:
             owner_run_tag = owned_name_match.group(1)
@@ -318,6 +329,8 @@ class OwnedTestDatabases:
             Whether the database was dropped.
         """
         connection = cls.ownership_connection
+        if connection is None:
+            return False
         try:
             prepared_rows = await connection.fetch(
                 "SELECT gid FROM pg_prepared_xacts WHERE database = $1", database_name
@@ -339,6 +352,8 @@ class OwnedTestDatabases:
 def pytest_configure(config: pytest.Config) -> None:
     # Runs in every xdist worker too - a worker Windows throttles runs at half the speed.
     PowerThrottling.turn_off()
+    # The shared models of the run's environment (KeptSharedTestDatabase.get_modules()) read it.
+    SuiteEnvironments.set_current(config)
     # A run on a prepared SQLite version (tests/sqlite_versions) stops when another one is loaded -
     # a missing library would otherwise silently test the system's own SQLite.
     required_sqlite_version = os.environ.get(SQLITE_VERSION_ENVIRONMENT_VARIABLE)
@@ -408,9 +423,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     deselected = [
         item for item in items if any(item.get_closest_marker(marker) is not None for marker in left_out_markers)
     ]
+    # The tests of another environment - they require what this run's doesn't install, or don't require what
+    # it does.
+    deselected_ids = {id(item) for item in deselected}
+    deselected.extend(
+        item for item in SuiteEnvironments.get_other_environment_items(items) if id(item) not in deselected_ids
+    )
     if deselected:
         config.hook.pytest_deselected(items=deselected)
-        items[:] = [item for item in items if item not in deselected]
+        deselected_ids = {id(item) for item in deselected}
+        items[:] = [item for item in items if id(item) not in deselected_ids]
 
 
 def pytest_collection_finish(session: pytest.Session) -> None:

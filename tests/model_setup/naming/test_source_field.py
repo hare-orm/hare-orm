@@ -151,42 +151,31 @@ class TestStraightFields:
         assert rel_tos == [obj1]
 
     @pytest.mark.asyncio
-    async def test_get_m2m_forward_fetch_related(self, db):
-        obj1 = await self.model.objects.create(chars="aaa")
-        obj2 = await self.model.objects.create(chars="bbb")
-        await obj1.rel_to.add(obj2)
+    @pytest.mark.parametrize(
+        ("relation_name", "holder_index", "related_index"),
+        [("rel_from", 1, 0), ("rel_to", 0, 1)],
+        ids=["forward", "reverse"],
+    )
+    async def test_get_m2m_fetch_related(self, db, relation_name, holder_index, related_index):
+        objs = [await self.model.objects.create(chars="aaa"), await self.model.objects.create(chars="bbb")]
+        await objs[0].rel_to.add(objs[1])
 
-        obj2a = await self.model.objects.get(eyedee=obj2.eyedee)
-        await prefetch_related_objects([obj2a], "rel_from")
-        assert list(obj2a.rel_from) == [obj1]
-
-    @pytest.mark.asyncio
-    async def test_get_m2m_reverse_fetch_related(self, db):
-        obj1 = await self.model.objects.create(chars="aaa")
-        obj2 = await self.model.objects.create(chars="bbb")
-        await obj1.rel_to.add(obj2)
-
-        obj1a = await self.model.objects.get(eyedee=obj1.eyedee)
-        await prefetch_related_objects([obj1a], "rel_to")
-        assert list(obj1a.rel_to) == [obj2]
+        holder = await self.model.objects.get(eyedee=objs[holder_index].eyedee)
+        await prefetch_related_objects([holder], relation_name)
+        assert list(getattr(holder, relation_name)) == [objs[related_index]]
 
     @pytest.mark.asyncio
-    async def test_get_m2m_forward_prefetch_related(self, db):
-        obj1 = await self.model.objects.create(chars="aaa")
-        obj2 = await self.model.objects.create(chars="bbb")
-        await obj1.rel_to.add(obj2)
+    @pytest.mark.parametrize(
+        ("relation_name", "holder_index", "related_index"),
+        [("rel_from", 1, 0), ("rel_to", 0, 1)],
+        ids=["forward", "reverse"],
+    )
+    async def test_get_m2m_prefetch_related(self, db, relation_name, holder_index, related_index):
+        objs = [await self.model.objects.create(chars="aaa"), await self.model.objects.create(chars="bbb")]
+        await objs[0].rel_to.add(objs[1])
 
-        obj2a = await self.model.objects.get(eyedee=obj2.eyedee).prefetch_related("rel_from")
-        assert list(obj2a.rel_from) == [obj1]
-
-    @pytest.mark.asyncio
-    async def test_get_m2m_reverse_prefetch_related(self, db):
-        obj1 = await self.model.objects.create(chars="aaa")
-        obj2 = await self.model.objects.create(chars="bbb")
-        await obj1.rel_to.add(obj2)
-
-        obj1a = await self.model.objects.get(eyedee=obj1.eyedee).prefetch_related("rel_to")
-        assert list(obj1a.rel_to) == [obj2]
+        holder = await self.model.objects.get(eyedee=objs[holder_index].eyedee).prefetch_related(relation_name)
+        assert list(getattr(holder, relation_name)) == [objs[related_index]]
 
     @pytest.mark.asyncio
     async def test_values_reverse_relation(self, db):

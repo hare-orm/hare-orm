@@ -670,6 +670,16 @@ EXCLUSION_RAW_EXPRESSION_RE = LazyPattern(r"^(?P<expression>.+) WITH (?P<operato
 
 # pg_get_constraintdef() of a CHECK constraint: "CHECK (<expr>)", with NOT VALID matched apart.
 POSTGRES_CHECK_CONSTRAINT_DEF_RE = LazyPattern(r"^CHECK \((?P<expression>.+)\)(?P<not_valid> NOT VALID)?$", re.DOTALL)
+#: pg_get_constraintdef()'s text of an IN list over a varchar column - ``(value)::text = ANY ((ARRAY['a'::character
+#: varying, ...])::text[])``, or with each item cast to text, as it gives that text declared again: no text of it
+#: comes back the same, the IN list it was declared as does.
+POSTGRES_VARCHAR_IN_LIST_RE = LazyPattern(
+    r'^\((?P<column>"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)\)::text = ANY '
+    r"(?:\(\(ARRAY\[(?P<cast_items>.*)\]\)::text\[\]\)|\(ARRAY\[(?P<items>.*)\]\))$",
+    re.DOTALL,
+)
+#: An item of such a list - ``'a'::character varying``, cast to text or not.
+POSTGRES_VARCHAR_IN_LIST_ITEM_RE = LazyPattern(r"\(?'(?P<value>(?:[^']|'')*)'::character varying\)?(?:::text)?")
 
 
 POSTGRES_TRIGGERDEF_RE = LazyPattern(
@@ -787,10 +797,11 @@ ORDER BY c.relname, role, acl.privilege_type, a.attnum
 """
 
 #: The sequences of the named tables of a schema - owned by a column of one (OWNED BY), or owned by none
-#: and taken a column's default from - not the one the column of a single-column primary key takes its
-#: default from (SERIAL), nor an identity column's: what inspectdb writes in Meta.sequences. One such sequence is
-#: declared by one model - of the table owning it, else of the first by name among the tables reading it
-#: (declaring_table).
+#: and taken a column's default from - not the one only the columns of single-column primary keys take their
+#: default from (SERIAL: the generated key takes its own), nor an identity column's: what inspectdb writes in
+#: Meta.sequences. A sequence a key's default and another column's read is one - a model of that other column
+#: reads it. One such sequence is declared by one model - of the table owning it, else of the first by name among
+#: the tables reading it by a column outside a single-column primary key (declaring_table).
 POSTGRESQL_INSPECTED_SEQUENCES_SQL = """
 SELECT owner_table.relname AS table_name, s.sequencename AS name, s.start_value, s.increment_by, s.min_value,
        s.max_value, s.cycle, s.cache_size, owner_column.attname AS owner_column,
@@ -803,13 +814,26 @@ JOIN pg_depend d ON d.objid = sequence_class.oid AND d.classid = 'pg_class'::reg
 JOIN pg_class owner_table ON owner_table.oid = d.refobjid
 JOIN pg_attribute owner_column ON owner_column.attrelid = d.refobjid AND owner_column.attnum = d.refobjsubid
 WHERE s.schemaname = $1 AND owner_table.relname = ANY($2::text[])
-    AND NOT EXISTS (
-        SELECT 1 FROM pg_attrdef column_default
-        JOIN pg_depend default_dependency ON default_dependency.objid = column_default.oid
-            AND default_dependency.classid = 'pg_attrdef'::regclass
-        JOIN pg_index primary_key ON primary_key.indrelid = column_default.adrelid AND primary_key.indisprimary
-            AND primary_key.indnkeyatts = 1 AND column_default.adnum = ANY(primary_key.indkey)
-        WHERE default_dependency.refobjid = sequence_class.oid
+    AND (
+        NOT EXISTS (
+            SELECT 1 FROM pg_attrdef column_default
+            JOIN pg_depend default_dependency ON default_dependency.objid = column_default.oid
+                AND default_dependency.classid = 'pg_attrdef'::regclass
+            JOIN pg_index primary_key ON primary_key.indrelid = column_default.adrelid AND primary_key.indisprimary
+                AND primary_key.indnkeyatts = 1 AND column_default.adnum = ANY(primary_key.indkey)
+            WHERE default_dependency.refobjid = sequence_class.oid
+        )
+        OR EXISTS (
+            SELECT 1 FROM pg_depend reader_dependency
+            JOIN pg_attrdef reader_default ON reader_default.oid = reader_dependency.objid
+            WHERE reader_dependency.refobjid = sequence_class.oid
+                AND reader_dependency.classid = 'pg_attrdef'::regclass
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_index reader_key
+                    WHERE reader_key.indrelid = reader_default.adrelid AND reader_key.indisprimary
+                        AND reader_key.indnkeyatts = 1 AND reader_default.adnum = ANY(reader_key.indkey)
+                )
+        )
     )
 UNION
 SELECT default_table.relname AS table_name, s.sequencename AS name, s.start_value, s.increment_by, s.min_value,
@@ -820,6 +844,11 @@ SELECT default_table.relname AS table_name, s.sequencename AS name, s.start_valu
            JOIN pg_class reading_table ON reading_table.oid = reading_default.adrelid
            WHERE reading_dependency.refobjid = sequence_class.oid
                AND reading_dependency.classid = 'pg_attrdef'::regclass
+               AND NOT EXISTS (
+                   SELECT 1 FROM pg_index reading_key
+                   WHERE reading_key.indrelid = reading_default.adrelid AND reading_key.indisprimary
+                       AND reading_key.indnkeyatts = 1 AND reading_default.adnum = ANY(reading_key.indkey)
+               )
        ) AS declaring_table
 FROM pg_sequences s
 JOIN pg_namespace n ON n.nspname = s.schemaname

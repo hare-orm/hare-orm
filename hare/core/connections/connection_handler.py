@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
+from hare.core.constants import CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE
 from hare.core.log import logger
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.dialect_registry import DialectRegistry
@@ -195,12 +196,17 @@ class ConnectionHandler:
             connection_alias: The connection alias.
 
         Raises:
-            ConfigurationError: The alias doesn't exist.
+            ConfigurationError: The alias doesn't exist, or its connection is bound to another event loop
+                and holds its database (one living in that connection only) - a new one would open an empty one.
         """
         storage = self._storage_var.get()
         try:
             connection = storage[connection_alias]
             if not connection._check_loop():
+                if connection.holds_database_in_connection():
+                    raise ConfigurationError(
+                        CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE.format(connection_alias=connection_alias)
+                    )
                 warnings.warn(
                     f"Hare connection {connection_alias!r} was created on a different "
                     f"event loop and will be reconnected. If this is expected (e.g., "

@@ -21,6 +21,7 @@ from hare.core.constants import (
     SUPPORTED_CONFIG_FILE_EXTENSIONS,
     SWAPPABLE_SETTING_NAME_PATTERN,
     YAML_CONFIG_FILE_EXTENSIONS,
+    YAML_CONFIG_FILE_PACKAGE_MESSAGE,
 )
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.exceptions import ConfigurationError
@@ -159,7 +160,7 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: A section is missing or unknown.
+            ConfigurationError: It, or a section, isn't a mapping, or a section is missing or unknown.
         """
         cls.check_known_keys(data, "the config")
 
@@ -167,6 +168,8 @@ class HareConfig(ConfigSection):
             raise ConfigurationError('Config must define "connections" section')
         if "apps" not in data:
             raise ConfigurationError('Config must define "apps" section')
+        cls.raise_if_not_mapping(data["connections"], 'the "connections" section')
+        cls.raise_if_not_mapping(data["apps"], 'the "apps" section')
 
         connections: dict[str, ConnectionConfig | DBUrlConfig] = {
             name: DBUrlConfig(connection_config)
@@ -211,13 +214,16 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: The file is missing, unreadable or of another extension, or its contents
-                aren't a valid configuration.
+            ConfigurationError: The file is missing, unreadable or of another extension, its contents aren't a
+                valid configuration, or a YAML file is read without PyYAML installed.
         """
         _, extension = os.path.splitext(config_file)
         extension = extension.lower()
         if extension in YAML_CONFIG_FILE_EXTENSIONS:
-            import yaml
+            try:
+                import yaml
+            except ImportError as error:
+                raise ConfigurationError(YAML_CONFIG_FILE_PACKAGE_MESSAGE) from error
 
             try:
                 with open(config_file, encoding="utf-8") as config_stream:

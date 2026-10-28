@@ -68,6 +68,25 @@ class MapField(ContainerField):
         self.value_field = value_field
         super().__init__(**kwargs)
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - a list of ``[key, value]`` pairs, each in the JSON form of the key
+        or value field: a key needn't be text.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        if value is None:
+            return None
+        return [
+            [self.key_field.get_json_value(key), self.value_field.get_json_value(item)] for key, item in value.items()
+        ]
+
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return self.key_field, self.value_field
 

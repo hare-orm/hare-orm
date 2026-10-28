@@ -7,7 +7,6 @@ import uuid
 
 import pytest
 
-from hare.contrib.pydantic import pydantic_model_creator, pydantic_queryset_creator
 from hare.core.connections.connections import Connections
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, DecryptionError, FieldError, ValidationError
@@ -22,9 +21,10 @@ from tests.fields.models_encrypted import (
     EncryptedRecord,
     EncryptedRecordAttachment,
     EncryptedTypedRecord,
-    EncryptedWebhookSettings,
     SensitiveGeneratedRecord,
 )
+
+REQUIRES = ("encryption",)
 
 SECRET_KEY = "test-field-encryption-secret"
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -256,9 +256,12 @@ async def test_sensitive_is_not_part_of_migrations(db_encrypted_fields):
     )
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_pydantic_exclude_sensitive(db_encrypted_fields):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     full_schema = pydantic_model_creator(EncryptedRecord)
     public_schema = pydantic_model_creator(EncryptedRecord, exclude_sensitive=True)
     assert {"secret", "config", "api_token"} <= set(full_schema.model_fields)
@@ -272,9 +275,12 @@ async def test_pydantic_exclude_sensitive(db_encrypted_fields):
     )
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_pydantic_exclude_sensitive_nested(db_encrypted_fields):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     owner_schema = pydantic_model_creator(EncryptedOwner, exclude_sensitive=True, name="EncryptedOwnerPublic")
     nested_record_schema = owner_schema.model_fields["records"].annotation.__args__[0]
     assert "secret" not in nested_record_schema.model_fields
@@ -283,8 +289,11 @@ async def test_pydantic_exclude_sensitive_nested(db_encrypted_fields):
     assert "secret" in owner_full_schema.model_fields["records"].annotation.__args__[0].model_fields
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_pydantic_from_orm_gives_plaintext(db_encrypted_fields):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     created = await EncryptedRecord.objects.create(secret="s3cr3t", config={"url": "x"})
     schema = pydantic_model_creator(EncryptedRecord, exclude=("owner",))
     dumped = (await schema.from_hare_orm(await EncryptedRecord.objects.get(id=created.id))).model_dump()
@@ -365,9 +374,12 @@ async def test_f_json_key_path_over_encrypted_json_raises(db_encrypted_fields):
         await EncryptedRecord.objects.annotate(url=F("config__url")).values_list("url", flat=True)
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_pydantic_root_schema_not_replaced_by_leaf_submodel(db_encrypted_fields):
+    from hare.contrib.pydantic import pydantic_model_creator, pydantic_queryset_creator
+
     first = pydantic_model_creator(EncryptedRecord, exclude_sensitive=True)
     owner_schema = pydantic_model_creator(EncryptedOwner, exclude_sensitive=True)
     nested_record_schema = owner_schema.model_fields["records"].annotation.__args__[0]
@@ -542,8 +554,11 @@ async def test_distinct_that_still_works_with_encrypted_fields(db_encrypted_fiel
     assert await EncryptedRecord.objects.all().distinct().count() == 2
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_generated_field_inherits_sensitive(db_encrypted_fields):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     assert SensitiveGeneratedRecord._meta.sensitive_fields == frozenset({"api_token", "api_token_upper"})
     assert GeneratedField(RawSQLTerm("1"), output_field=CharField(max_length=10, sensitive=True)).sensitive is True
     assert GeneratedField(RawSQLTerm("1"), output_field=IntField()).sensitive is False
@@ -599,29 +614,6 @@ async def test_json_not_serializable_error_hides_value(db_encrypted_fields):
     with pytest.raises(ValidationError, match="not JSON serializable") as error_info:
         await EncryptedRecord.objects.create(config={"token": "LEAKME", "other": object()})
     assert "LEAKME" not in str(error_info.value)
-
-
-@pytest.mark.asyncio
-async def test_json_field_type_round_trip(db_encrypted_fields):
-    from_dict = await EncryptedTypedRecord.objects.create(settings={"url": "https://secret.example"})
-    from_model = await EncryptedTypedRecord.objects.create(
-        settings=EncryptedWebhookSettings(url="https://other.example")
-    )
-    assert from_dict.settings == EncryptedWebhookSettings(url="https://secret.example")
-    fetched = await EncryptedTypedRecord.objects.get(id=from_model.id)
-    assert fetched.settings == EncryptedWebhookSettings(url="https://other.example", retries=3)
-    await EncryptedTypedRecord.objects.filter(id=from_dict.id).update(
-        settings={"url": "https://updated.example", "retries": 5}
-    )
-    assert await EncryptedTypedRecord.objects.filter(id=from_dict.id).values_list("settings", flat=True) == [
-        EncryptedWebhookSettings(url="https://updated.example", retries=5)
-    ]
-    rows = await Connections.get("models").execute_dicts("SELECT settings FROM encrypted_typed_record")
-    for row in rows:
-        raw_settings = row["settings"] if isinstance(row["settings"], dict) else json.loads(row["settings"])
-        assert "example" not in raw_settings["url"]
-    with pytest.raises(ValidationError):
-        await EncryptedTypedRecord.objects.create(settings={"retries": 1})
 
 
 @pytest.mark.database_independent

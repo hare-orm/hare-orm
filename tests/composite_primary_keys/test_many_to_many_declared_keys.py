@@ -84,6 +84,7 @@ async def test_two_sides_of_one_column_name_are_refused(clashing_keys_module):
             pass
 
 
+@pytest.mark.requires("native")
 def test_two_sides_whose_names_differ_in_case_are_kept_where_the_database_tells_them_apart(clashing_keys_module):
     """The sides were compared ignoring case on every database - "key" and "KEY", two columns of PostgreSQL,
     were refused as one."""

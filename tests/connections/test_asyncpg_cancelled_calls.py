@@ -5,9 +5,9 @@ import asyncio
 
 import pytest
 
-pytest.importorskip("asyncpg")
-
 from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient  # noqa: E402
+
+REQUIRES = ("asyncpg",)
 
 pytestmark = pytest.mark.database_independent
 

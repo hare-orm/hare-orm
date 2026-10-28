@@ -7,8 +7,6 @@ import uuid
 
 import pytest
 
-pytest.importorskip("clickhouse_connect")
-
 from hare.ddl.raw_sql_term import RawSQLTerm  # noqa: E402
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator  # noqa: E402
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions  # noqa: E402
@@ -17,6 +15,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_conne
     ClickhouseConnectClient,
 )
 from hare.exceptions import ConfigurationError  # noqa: E402
+
+REQUIRES = ("clickhouse-connect",)
 
 literals = CLICKHOUSE_DIALECT.literals
 

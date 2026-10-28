@@ -141,3 +141,18 @@ def test_non_string_value_raises_validation_error(bad_value):
         field.to_db_value(bad_value, testmodels.UUIDFields)
     with pytest.raises(ValidationError, match="expected a UUID or UUID string"):
         field.from_db_value(bad_value)
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("method_name", ["to_db_value", "to_db_uuid"])
+@pytest.mark.parametrize("value", [uuid.UUID(int=7), str(uuid.UUID(int=7))], ids=["uuid", "text"])
+def test_the_validators_get_the_uuid_of_a_text_value(method_name, value):
+    """A filter value or an assignment given as text reached the validators as text - a validator reading
+    the UUID's attributes (value.version) failed every get(pk=str(...))."""
+    received = []
+    field = fields.UUIDField(validators=[received.append])
+    field.model_field_name = "id"
+
+    getattr(field, method_name)(value, None)
+
+    assert received == [uuid.UUID(int=7)]

@@ -30,6 +30,8 @@ asyncio_default_test_loop_scope = "session"
 | `hare_db` | Контекст, записи которого откатываются в конце теста ([`RollbackIsolation`](isolation-and-cleanup.ru.md#rollback-isolation)). Транзакция, открытая тестом, — точка сохранения, а функции `on_commit()` не выполняются. |
 | `hare_transactional_db` | Контекст, записи которого действительно фиксируются — функции `on_commit()` выполняются, — а все таблицы очищаются в конце теста ([`truncate_all_models()`](isolation-and-cleanup.ru.md#truncate-all-models)). Для кода, которому нужна настоящая фиксация. |
 | `hare_database` | Контекст сессии, общий для всех тестов, — ничего не откатывается. |
+| `hare_app_db` | `hare_db` для тестируемого приложения — см. [Тесты приложения](#application-tests). |
+| `hare_app_transactional_db` | `hare_transactional_db` для тестируемого приложения, работающего в своём цикле событий. |
 | `hare_assert_query_count` | [`assert_query_count()`](assertions.ru.md#assert-num-queries): `async with hare_assert_query_count(1): ...`. |
 | `hare_capture_on_commit` | `RollbackIsolation.capture_on_commit()` от `hare_db` теста. |
 | `hare_rollback_isolation` | `RollbackIsolation` от `hare_db` теста. |
@@ -48,7 +50,8 @@ async def test_rollback(hare_db): ...
 
 Маркер `hare_requires(connection_alias=None, **conditions)` пропускает тест, соединение которого не
 выполняет условия, — те же, что у [`requires_features()`](#requires-features); такой тест берёт одну из
-фикстур `hare_db`, `hare_transactional_db` или `hare_database`.
+фикстур `hare_app_db`, `hare_app_transactional_db`, `hare_db`, `hare_transactional_db` или
+`hare_database`.
 
 | Параметр | Что задаёт |
 |---|---|
@@ -56,6 +59,38 @@ async def test_rollback(hare_db): ...
 | `--hare-reuse-db` | Брать тестовые базы PostgreSQL из [`ReusableTestDatabases`](../dialects/postgresql/testing.ru.md#reuse-databases) вместо создания и удаления. |
 
 Без pytest-asyncio тест, взявший фикстуру, падает с сообщением, что установить.
+
+### <a id="application-tests"></a>Тесты приложения
+
+Приложение, запущенное `HareRobyn`, `HarePlugin` (Litestar), `HareLifecycle` (FastAPI) или `HareTaskiq`,
+при старте открывает базы своей конфигурации. Под `hare_app_db` или `hare_app_transactional_db` оно берёт
+вместо этого контекст теста — как свой глобальный запасной, который видят запросы без собственного
+контекста, — и базы его конфигурации не открываются никогда; остановка приложения возвращает контекст
+тесту открытым. Несколько приложений одного теста (веб-приложение и обработчик задач) делят его: он
+остаётся их запасным, пока не остановится последнее из них, а приложение, которое тест оставил
+работать, возвращает его вместе с тестом. Соединения транзакций приложения и его запросы проверяются
+так же, как при настоящем старте.
+
+| Фикстура | Для чего |
+|---|---|
+| `hare_app_db` | Записи приложения идут в изолирующую транзакцию теста и откатываются вместе с записями теста — для приложения, чьи запросы выполняются в цикле событий теста (ниже). |
+| `hare_app_transactional_db` | Записи приложения фиксируются, а все таблицы очищаются в конце теста — на любом драйвере, где бы ни работало приложение. Нужна серверная база или файл SQLite — база в памяти живёт в соединении одного цикла событий. |
+
+Клиент httpx с `ASGITransport` для FastAPI и `InMemoryBroker` taskiq запускают приложение в цикле событий
+теста. `AsyncTestClient` Litestar и любой `TestClient` (Robyn, Starlette) — в своём потоке и цикле событий:
+драйверы `postgresql` (rust_pg) и SQLite выполняют транзакцию теста и оттуда, поэтому с ними `hare_app_db`
+работает; драйвер, чьи соединения принадлежат циклу, в котором открыты (`postgresql+asyncpg`), отказывает
+оператору транзакции теста из другого цикла с `ConfigurationError` — там берите `hare_app_transactional_db`.
+
+```python
+@pytest.mark.asyncio
+async def test_create_reader(hare_app_db):
+    transport = httpx.ASGITransport(app=app)   # FastAPI - приложение работает в цикле теста
+    async with LifespanManager(app), httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/readers", json={"name": "ann"})
+    assert response.status_code == 201
+    assert await Reader.objects.filter(name="ann").exists()   # откатится после теста
+```
 
 ## <a id="hare-test-context"></a>Контекст на тест: `hare_test_context()`
 
@@ -158,6 +193,10 @@ warnings.filterwarnings("ignore", category=HareLoopSwitchWarning)
 Заменённое подключение закрывается в цикле событий, который его открыл, пока этот цикл ещё работает (цикл
 другого потока); если тот цикл уже закрыт, его соединения разрываются — сервер закрывает их сессии. В
 обоих случаях на сервере ничего не остаётся открытым.
+
+База SQLite в памяти живёт в своём единственном соединении: запрос из другого цикла событий падает с
+`ConfigurationError`, а не открывает новую, пустую базу, — работайте с ней из одного цикла событий или
+возьмите файл базы.
 
 Вне тестов это предупреждение обычно указывает на настоящую ошибку — выясните, почему цикл событий
 изменился между созданием соединения и его использованием.

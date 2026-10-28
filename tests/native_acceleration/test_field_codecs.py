@@ -2,7 +2,8 @@
 of the same type, or the same error with the same message - on a grid of values: naive and aware
 datetimes around DST changes, the ends of the date range, infinities, NaN, null bytes, long integers,
 decimal rounding, enum non-members, None and values of the wrong type. Every grid runs on SQLite and
-both PostgreSQL drivers, with and without ``use_timezone`` and in zones with and without DST.
+rust_pg - asyncpg's reads and a declared JSON type's in modules of their environments - with and without
+``use_timezone`` and in zones with and without DST.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from hare import fields
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
-from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient
 from hare.dialects.postgresql.fields.ranges import (
     DateRangeField,
     DateTimeRangeField,
@@ -47,6 +47,7 @@ from hare.query.rows.native.enums import FieldBucket
 from hare.query.rows.native.field_codecs import FieldCodecs
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.time import Timezone
+from rust.native import rows as native_rows
 from tests.shared_models.testmodels import (
     BinaryFields,
     BooleanFields,
@@ -58,7 +59,6 @@ from tests.shared_models.testmodels import (
     FloatFields,
     IntFields,
     JSONFields,
-    JSONFieldsDeclaredType,
     Service,
     TimeDeltaFields,
     TimeFields,
@@ -67,18 +67,15 @@ from tests.shared_models.testmodels import (
 from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.timezone_context import override_timezone
 
-pytestmark = pytest.mark.database_independent
+REQUIRES = ("native",)
 
-native_rows = pytest.importorskip("rust.native.rows")
-if not hasattr(native_rows, "FieldCodec"):
-    pytest.skip("rust.native is not built", allow_module_level=True)
+pytestmark = pytest.mark.database_independent
 
 SQLITE_TYPES = SqliteTypes.build()
 POSTGRESQL_TYPES = PostgresqlTypes.build()
 #: (name, type registry, the driver's native Python types)
 CONNECTIONS = [
     ("sqlite", SQLITE_TYPES, AiosqliteClient.native_python_types),
-    ("asyncpg", POSTGRESQL_TYPES, AsyncpgClient.native_python_types),
     ("rust_pg", POSTGRESQL_TYPES, PostgresqlClient.native_python_types),
     ("generic", TypeRegistry(), DatabaseClient.native_python_types),
 ]
@@ -174,9 +171,11 @@ def get_layout(model: Any, types: Any, native_types: frozenset[type]) -> Hydrati
     return HydrationLayout.build(model._meta, connection)  # type: ignore[arg-type]
 
 
-def assert_reads_match(model: Any, field_name: str, raw_values: list[Any]) -> None:
+def assert_reads_match(
+    model: Any, field_name: str, raw_values: list[Any], connections: list[tuple[str, Any, Any]] = CONNECTIONS
+) -> None:
     """Reads every raw value with the codec and with the field, on every connection and zone."""
-    for connection_alias, types, native_types in CONNECTIONS:
+    for connection_alias, types, native_types in connections:
         layout = get_layout(model, types, native_types)
         column, field, bucket, dialect_reader = layout.entry_by_field_name[field_name]
         reader = layout.reader_by_field_name[field_name] or (lambda value: value)
@@ -584,7 +583,6 @@ READ_CASES = [
     (DecimalFields, "decimal_null", DECIMAL_VALUES),
     (JSONFields, "data", JSON_READ_VALUES),
     (JSONFields, "data_null", JSON_READ_VALUES),
-    (JSONFieldsDeclaredType, "item", [None, '{"name": "x", "value": 1}', '{"name": 5}', "[]"]),
 ]
 WRITE_CASES = [
     *SCALAR_CASES,
@@ -663,8 +661,6 @@ BUILTIN_FIELD_CODECS: dict[tuple[Any, str], tuple[str, str, dict[str, str]]] = {
     # rust_pg returns the Decimal the column holds.
     (DecimalFields, "decimal"): ("decimal", "decimal", {"rust_pg": "as_is"}),
     (JSONFields, "data"): ("json", "json", {}),
-    # A declared type is validated by pydantic on write.
-    (JSONFieldsDeclaredType, "item"): ("json", "call", {}),
     (BooleanFields, "boolean"): ("boolean", "scalar", {}),
     (BinaryFields, "binary"): ("binary", "scalar", {}),
     (IntFields, "intnum"): ("as_is", "scalar", {}),
@@ -676,8 +672,15 @@ BUILTIN_FIELD_CODECS: dict[tuple[Any, str], tuple[str, str, dict[str, str]]] = {
 @pytest.mark.parametrize(("model", "field_name"), list(BUILTIN_FIELD_CODECS))
 def test_builtin_fields_read_and_write_through_their_codecs(model, field_name):
     """A built-in field never goes to its Python method for every value."""
-    expected_read, expected_write, read_by_connection = BUILTIN_FIELD_CODECS[(model, field_name)]
-    for connection_alias, types, native_types in CONNECTIONS[:3]:
+    assert_builtin_codecs(model, field_name, BUILTIN_FIELD_CODECS[(model, field_name)], CONNECTIONS[:2])
+
+
+def assert_builtin_codecs(
+    model: Any, field_name: str, codecs: tuple[str, str, dict[str, str]], connections: list[tuple[str, Any, Any]]
+) -> None:
+    """Checks the codecs a field reads and writes with on each connection and zone."""
+    expected_read, expected_write, read_by_connection = codecs
+    for connection_alias, types, native_types in connections:
         layout = get_layout(model, types, native_types)
         _column, field, bucket, dialect_reader = layout.entry_by_field_name[field_name]
         for use_timezone, zone in ZONES:

@@ -40,6 +40,8 @@ class CapturedWrite:
         *,
         changed: Iterable[str] | None = None,
     ) -> None:
+        # Before the write's statements - a refusal of the sink leaves no row written without its changes.
+        needs.sink.check_connection(connection)
         self.model = model
         self.needs = needs
         #: The connection the write runs on - its transaction once ``transaction()`` opened one.

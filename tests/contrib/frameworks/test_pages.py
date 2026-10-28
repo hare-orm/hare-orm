@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 from hare.contrib.frameworks import CursorPageSchema, PageSchema, ScrollPageSchema
 from hare.contrib.request_query import CursorPage, Page, ScrollPage
 
+REQUIRES = ("request-query",)
+
 pytestmark = pytest.mark.database_independent
 
 

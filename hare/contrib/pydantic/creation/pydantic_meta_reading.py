@@ -131,4 +131,7 @@ class PydanticMetaReading:
         # so too), not as UTF-8 text that non-UTF-8 bytes can't be encoded to.
         pconfig.setdefault("ser_json_bytes", "base64")
         pconfig.setdefault("val_json_bytes", "base64")
+        # A float JSON has no number for (a FloatField's NaN, inside an ArrayField too) as its text - read back
+        # by the schema itself, where pydantic's null wasn't, and as an outbox event holds it.
+        pconfig.setdefault("ser_json_inf_nan", "strings")
         return pconfig

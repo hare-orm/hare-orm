@@ -80,8 +80,11 @@ class Book(Model):
 ```
 
 Every lookup, `F()` and an expression over the model's own fields (`F("low") + 1`, `Upper("code")`)
-works; a lookup crossing a relation, an aggregate, `Exists(...)` and an empty `Q()` raise
-`ConfigurationError`. Migration files hold the `Q` itself:
+works, a relation compared by its own column too (`Q(owner__isnull=True)`, `Q(owner__in=[1, 2])`); a
+lookup reading a related model's column (`Q(owner__name="a")`, `Q(owner__id__gt=1)`), an aggregate,
+`Exists(...)` anywhere in the `Q` and an empty `Q()` raise `ConfigurationError` when the model is bound —
+before `makemigrations` writes a migration — and so do a policy's condition and a generated field's
+expression reading a related model. Migration files hold the `Q` itself:
 `RenameField` renames the field inside it, and `RemoveField` drops a `CheckConstraint` whose `Q` reads
 only the removed field (one also reading another field raises). Raw SQL is never read: a field it names
 is removed and renamed as if it didn't — change the raw SQL in the model, and `makemigrations` removes and

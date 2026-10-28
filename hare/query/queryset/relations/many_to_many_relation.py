@@ -80,14 +80,15 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         if not objs:
             return
         through_model = self.field.through_model_class
+        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
         if through_model is not None and through_model._meta.change_capture_needs is not None:
             # The links' captured changes are written with them.
-            connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
-            if ChangeCapturing.needs_transaction(connection):
-                async with connection._in_transaction() as transaction_connection:
-                    await self.add(*objs, through_defaults=through_defaults, using=transaction_connection)
-                return
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+            async with ChangeCapturing.transaction(connection) as transaction_connection:
+                await WriteSteps.get_whole_run(
+                    transaction_connection,
+                    self._add_and_report(objs, through_defaults, transaction_connection, transaction_connection),
+                )
+            return
         await WriteSteps.get_whole_run(connection, self._add_and_report(objs, through_defaults, using, connection))
 
     async def _add_and_report(

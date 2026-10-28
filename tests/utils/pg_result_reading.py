@@ -9,6 +9,7 @@ import pytest
 
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.time import Timezone
+from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_rows_queries import get_model_rows_query
 
 
@@ -25,7 +26,10 @@ class PgResultReading:
         Returns:
             The result, the reader and the names - skips the test off rust_pg.
         """
-        pg = pytest.importorskip("rust.native.pg")
+        if DatabaseUnderTest.get_driver().name != "postgresql":
+            pytest.skip("reads the rows of a rust_pg connection")
+        from rust.native import pg
+
         compiler = get_model_rows_query(model.objects.all().order_by("pk"))
         compiler._make_query()
         sql, values = compiler.query.get_parameterized_sql()

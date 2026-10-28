@@ -7,6 +7,8 @@ import pytest
 
 from hare.contrib.outbox import ListenNotifyWakeup, OutboxRelay
 from hare.contrib.test import requires_features
+from hare.instrumentation.declarations import QueryExecuted
+from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import DemoOutboxEvent, TenantScopedOutboxEvent
 from tests.contrib.outbox.wakeup_signals import PROBE_TOPIC, send_signal, signal_until_arrived
@@ -118,3 +120,25 @@ async def test_a_claim_spans_every_tenant(db_outbox):
     relay = OutboxRelay(TenantScopedOutboxEvent, deliver, batch_size=10)
     assert await relay.poll_once() == 2
     assert sorted(delivered) == [1, 2]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_a_transaction_sends_one_notify_per_topic(db_outbox):
+    """Every enqueue() sent a NOTIFY of its own - a statement per event in the write's transaction, though
+    the database delivers one per topic; one NOTIFY of a savepoint rolled back is sent again."""
+    wakeup = ListenNotifyWakeup(channel="hare_test_outbox_one_notify")
+    executed: list[QueryExecuted] = []
+    with Observers.observing(QueryExecuted, executed.append):
+        async with Transactions.atomic():
+            for topic in ("widget.updated", "widget.updated", "gadget.updated", "widget.updated"):
+                await DemoOutboxEvent.enqueue(topic, {}, wakeup=wakeup)
+            with pytest.raises(RuntimeError):
+                async with Transactions.atomic():
+                    await DemoOutboxEvent.enqueue("part.updated", {}, wakeup=wakeup)
+                    raise RuntimeError("savepoint rolled back")
+            await DemoOutboxEvent.enqueue("part.updated", {}, wakeup=wakeup)
+            await DemoOutboxEvent.enqueue("part.updated", {}, wakeup=wakeup)
+
+    notified_topics = [query.parameters[1] for query in executed if "pg_notify" in query.sql]
+    assert notified_topics == ["widget.updated", "gadget.updated", "part.updated", "part.updated"]

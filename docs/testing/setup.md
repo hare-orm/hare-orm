@@ -31,6 +31,8 @@ name per connection and run — created with the models' tables once for the ses
 | `hare_db` | The context, its writes rolled back when the test ends ([`RollbackIsolation`](isolation-and-cleanup.md#rollback-isolation)). A transaction the test opens is a savepoint, and `on_commit()` callbacks don't run. |
 | `hare_transactional_db` | The context, its writes really committed — `on_commit()` callbacks run — and every table emptied when the test ends ([`truncate_all_models()`](isolation-and-cleanup.md#truncate-all-models)). For code that needs a real commit. |
 | `hare_database` | The session's context, shared by every test — nothing undone. |
+| `hare_app_db` | `hare_db` for the application under test — see [Application tests](#application-tests). |
+| `hare_app_transactional_db` | `hare_transactional_db` for the application under test, running in an event loop of its own. |
 | `hare_assert_query_count` | [`assert_query_count()`](assertions.md#assert-num-queries): `async with hare_assert_query_count(1): ...`. |
 | `hare_capture_on_commit` | `RollbackIsolation.capture_on_commit()` of the test's `hare_db`. |
 | `hare_rollback_isolation` | The `RollbackIsolation` of the test's `hare_db`. |
@@ -49,7 +51,8 @@ async def test_rollback(hare_db): ...
 
 The marker `hare_requires(connection_alias=None, **conditions)` skips a test whose connection doesn't
 meet the conditions — the same ones as [`requires_features()`](#requires-features); a test marked so uses
-one of the fixtures `hare_db`, `hare_transactional_db` or `hare_database`.
+one of the fixtures `hare_app_db`, `hare_app_transactional_db`, `hare_db`, `hare_transactional_db` or
+`hare_database`.
 
 | Option | Meaning |
 |---|---|
@@ -57,6 +60,39 @@ one of the fixtures `hare_db`, `hare_transactional_db` or `hare_database`.
 | `--hare-reuse-db` | Lease the PostgreSQL test databases from [`ReusableTestDatabases`](../dialects/postgresql/testing.md#reuse-databases) instead of creating and dropping them. |
 
 Without pytest-asyncio a test using a fixture fails with what to install.
+
+### <a id="application-tests"></a>Application tests
+
+An application started by `HareRobyn`, `HarePlugin` (Litestar), `HareLifecycle` (FastAPI) or `HareTaskiq`
+opens its configuration's databases when it starts. Under `hare_app_db` or `hare_app_transactional_db` it
+takes the test's context instead — as its global fallback, which the requests without a context of their
+own see — and its configuration's databases are never opened; stopping the application gives the
+context back to the test, open. Several applications of one test (a web application and a task worker)
+share it: it stays their fallback until the last of them stops, and an application the test leaves
+running gives it back with the test. The connections the application's transactions run on and its
+request queries are checked as at a real start.
+
+| Fixture | For |
+|---|---|
+| `hare_app_db` | The application's writes go into the test's isolating transaction and are rolled back with the test's — for an application whose queries run in the test's event loop (below). |
+| `hare_app_transactional_db` | The application's writes commit, and every table is emptied when the test ends — on every driver, wherever the application runs. Needs a server database or a SQLite file — an in-memory database lives in the connection of one event loop. |
+
+An httpx `ASGITransport` client of FastAPI and taskiq's `InMemoryBroker` run the application in the test's
+event loop. Litestar's `AsyncTestClient` and every `TestClient` (Robyn's, Starlette's) run it in a thread and
+an event loop of their own: the `postgresql` (rust_pg) and SQLite drivers run the test's transaction from
+there too, so `hare_app_db` works with them; a driver whose connections belong to the loop they were opened on
+(`postgresql+asyncpg`) refuses a statement of the test's transaction from another loop with
+`ConfigurationError` — take `hare_app_transactional_db` there.
+
+```python
+@pytest.mark.asyncio
+async def test_create_reader(hare_app_db):
+    transport = httpx.ASGITransport(app=app)   # FastAPI - the app runs in the test's loop
+    async with LifespanManager(app), httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/readers", json={"name": "ann"})
+    assert response.status_code == 201
+    assert await Reader.objects.filter(name="ann").exists()   # rolled back after the test
+```
 
 ## <a id="hare-test-context"></a>A context per test: `hare_test_context()`
 
@@ -159,6 +195,10 @@ warnings.filterwarnings("ignore", category=HareLoopSwitchWarning)
 The replaced connection is closed on the event loop that opened it, while that loop still runs (a loop of
 another thread); when that loop is already closed, its connections are aborted — the server ends their
 sessions. Either way none stays open on the server.
+
+An in-memory SQLite database lives in its one connection: a query from another event loop raises
+`ConfigurationError` instead of opening a new, empty database — use it from one event loop, or use a
+database file.
 
 Outside tests, this warning usually indicates a real bug — investigate why the event loop changed between
 connection creation and use.

@@ -14,10 +14,9 @@ from hare.exceptions import ValidationError
 from hare.fields.database_default import DatabaseDefault
 from hare.models import Model
 from hare.query.expressions import F
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from tests.shared_models import testmodels, testmodels_postgres
 
-pytestmark = pytest.mark.skipif(HydrateAccelerator.module is None, reason="rust.native isn't built")
+REQUIRES = ("native",)
 
 
 def construct(model: type[Model], kwargs: dict[str, Any], *, native: bool) -> Model | Exception:

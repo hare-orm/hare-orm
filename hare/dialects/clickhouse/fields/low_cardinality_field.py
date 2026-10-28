@@ -44,6 +44,20 @@ class LowCardinalityField(Field[Any]):
         self.enum_type = base_field.enum_type
         super().__init__(**kwargs)
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - the JSON form of the base field.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        return self.base_field.get_json_value(value)
+
     @property
     def constraints(self) -> dict[str, Any]:
         return self.base_field.constraints

@@ -5,7 +5,6 @@ import pytest
 
 from hare.dialects.base.client.transaction_lifecycle import transaction_ending as client_module
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgTransactionClient
 from tests.utils.waiting import WAIT_DEADLINE_SECONDS
 
 pytestmark = pytest.mark.database_independent
@@ -154,6 +153,7 @@ async def test_shielded_cancellation_does_not_call_on_timeout_when_it_lands_in_t
     assert timed_out is False
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_pooled_transaction_context_exit_terminates_an_abandoned_connection_before_release(monkeypatch):
     """TransactionContextPooled.__aexit__ used to unconditionally hand the physical connection
@@ -162,6 +162,8 @@ async def test_pooled_transaction_context_exit_terminates_an_abandoned_connectio
     the abandoned task might still be mid-COMMIT against. It must now terminate() the connection
     first whenever _shielded_operation_abandoned was set, so the pool discards it instead of
     reusing it."""
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgTransactionClient
+
     events: list[str] = []
 
     fake_connection = SimpleNamespace(terminate=lambda: events.append("terminate"))
@@ -184,10 +186,13 @@ async def test_pooled_transaction_context_exit_terminates_an_abandoned_connectio
     assert events == ["terminate", "release"]
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_pooled_transaction_context_exit_releases_normally_when_not_abandoned(monkeypatch):
     """The common case (no timeout ever hit) must be unaffected - no terminate() call, just the
     existing plain release()."""
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgTransactionClient
+
     events: list[str] = []
 
     fake_connection = SimpleNamespace(terminate=lambda: events.append("terminate"))

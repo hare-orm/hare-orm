@@ -20,6 +20,7 @@ from hare.dialects.sqlite.constants import (
     SPATIALITE_TRIGGER_NAME_PREFIXES,
     SQLITE_AUTOINDEX_PREFIX,
     SQLITE_CHECK_CONSTRAINT_HEADER_RE,
+    SQLITE_COLUMN_TYPE_SYNONYMS,
     SQLITE_DATABASE_LIST_SQL,
     SQLITE_DATABASE_PRAGMA_TEMPLATE,
     SQLITE_DATABASE_TABLE_EXISTS_SQL,
@@ -503,7 +504,12 @@ class SqliteIntrospector(SchemaIntrospector):
             The indexes, the single columns' indexes, the unparsed indexes' names and SQL, and the
             unique and the indexed single columns.
         """
-        index_rows = await connection.execute_dicts(SqliteIntrospector.get_pragma_sql(database, "index_list", table))
+        # By name: PRAGMA index_list lists them in the order they were made, which a migrate of the model read
+        # back makes in another order - its model would come back otherwise.
+        index_rows = sorted(
+            await connection.execute_dicts(SqliteIntrospector.get_pragma_sql(database, "index_list", table)),
+            key=lambda row: row["name"],
+        )
 
         # sqlite_master.sql stores each index's original, literal CREATE INDEX text - the only
         # source of an expression term's text and of a partial index's WHERE predicate.
@@ -657,10 +663,11 @@ class SqliteIntrospector(SchemaIntrospector):
                     name=row["name"],
                     # INTEGER is the type of the row id alone - the one key column of a rowid table; elsewhere
                     # it is INT, which an IntField declares. Upper-cased - SQLite before 3.37 gives the type as
-                    # it was written (int), a later one upper-cased, as hare writes it.
+                    # it was written (int), a later one upper-cased, as hare writes it; a synonym of a type
+                    # hare declares (DATETIME) read as hare's own.
                     db_type=SQLITE_INT_TYPE
                     if not (has_row_id_key and row["pk"]) and row["type"].strip().upper() == SQLITE_ROW_ID_TYPE
-                    else row["type"].upper(),
+                    else SQLITE_COLUMN_TYPE_SYNONYMS.get(row["type"].strip().upper(), row["type"].upper()),
                     # A primary key column declared without NOT NULL takes NULL on SQLite, which no
                     # key field holds - read as NOT NULL.
                     nullable=not row["notnull"] and not row["pk"],

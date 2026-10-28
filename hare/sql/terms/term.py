@@ -11,12 +11,9 @@ from hare.sql.terms.node import TNode
 if TYPE_CHECKING:
     from typing import Self
 
-    from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.table import Table
-    from hare.sql.terms.json import JSON
     from hare.sql.terms.negative import Negative
     from hare.sql.terms.values.literal_value import LiteralValue
-    from hare.sql.terms.values.null_value import NullValue
     from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.sql.terms.node import Node
 
@@ -101,37 +98,6 @@ class Term(Node):
         # Need to default here to avoid the recursion. ValueWrapper extends this class.
         wrapper_class = wrapper_class or value_wrapper_terms.ValueWrapper
         return wrapper_class(value)  # type:ignore[return-value]
-
-    @staticmethod
-    def wrap_json(
-        value: Term | QueryBuilder | str | int | bool | dict[str, Any] | list[Any] | None,
-        wrapper_class: type[ValueWrapper] | None = None,
-    ) -> Term | QueryBuilder | NullValue | ValueWrapper | JSON:
-        """A value as a term of a JSON expression - a term as it is, None as ``NULL``, a text or a number as a
-        value, a dict or a list as a JSON value.
-
-        Args:
-            value: The value.
-            wrapper_class: The class wrapping a plain value.
-
-        Returns:
-            The term.
-        """
-        # Imported here: the modules import each other.
-        from hare.sql.builder.queries.query_builder import QueryBuilder
-        from hare.sql.terms.json import JSON
-        from hare.sql.terms.values.null_value import NullValue
-        from hare.sql.terms.values.value_wrapper import ValueWrapper
-
-        if isinstance(value, (Term, QueryBuilder)):
-            return value
-        if value is None:
-            return NullValue()
-        if isinstance(value, (str, int, bool)):
-            wrapper_class = wrapper_class or ValueWrapper
-            return wrapper_class(value)
-
-        return JSON(value)
 
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
         """Replaces all occurrences of the specified table with the new table.

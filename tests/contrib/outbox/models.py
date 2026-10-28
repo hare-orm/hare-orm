@@ -79,3 +79,15 @@ class NonUniqueKeyOutboxEvent(OutboxEvent):
 
     class Meta(OutboxEvent.Meta):
         pass
+
+
+class SubscriberOutboxEvent(OutboxEvent):
+    """Events of webhook subscribers - each event's endpoint and secret in its row, each attempt's result
+    written back."""
+
+    subscriber_url = fields.CharField(max_length=200)
+    subscriber_secret = fields.CharField(max_length=50, null=True)
+    webhook_result = fields.JSONField(null=True)
+
+    class Meta(OutboxEvent.Meta):
+        pass

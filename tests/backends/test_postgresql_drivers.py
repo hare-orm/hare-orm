@@ -9,7 +9,6 @@ import pytest
 
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
 pytestmark = pytest.mark.database_independent
 
@@ -42,7 +41,10 @@ def test_rust_pg_driver_raises_configuration_error_when_the_extension_is_missing
     assert "OK" in result.stdout
 
 
+@pytest.mark.requires("asyncpg")
 def test_each_driver_has_one_engine_name_and_url_scheme() -> None:
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     asyncpg_driver = DialectRegistry.get_driver("postgresql+asyncpg")
     rust_pg_driver = DialectRegistry.get_driver("postgresql")
     assert asyncpg_driver.get_client_class({}) is AsyncpgClient

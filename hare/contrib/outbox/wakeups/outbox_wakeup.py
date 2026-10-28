@@ -45,10 +45,17 @@ class OutboxWakeup:
         #: in (None at the transaction's own level) - signalled once it commits, those of a savepoint
         #: rolled back dropped.
         self.pending_topics: WeakKeyDictionary[TransactionClient, SavepointTopics] = WeakKeyDictionary()
-        #: The relays' callbacks.
-        self.callbacks: list[WakeupCallback] = []
+        #: The relays' callbacks, each with the event loop it is called on.
+        self.subscriptions: list[tuple[WakeupCallback, asyncio.AbstractEventLoop]] = []
         #: The task listening for signals while a relay is subscribed.
         self.listen_task: asyncio.Task[None] | None = None
+
+    def raise_if_unsupported(self, connection: DatabaseClient) -> None:
+        """Refuses a connection the wakeup can't signal the events of - checked before they are written.
+
+        Args:
+            connection: The connection the events are written on.
+        """
 
     async def signal_written(self, connection: DatabaseClient, topics: Iterable[str]) -> None:
         """Signals events written on ``connection`` - once its transaction commits, at once outside one.
@@ -126,7 +133,7 @@ class OutboxWakeup:
             callback: The relay's callback - called on the event loop's thread, never awaited.
             connection_alias: The connection of the relay's outbox model.
         """
-        self.callbacks.append(callback)
+        self.subscriptions.append((callback, asyncio.get_running_loop()))
         if self.listen_task is None:
             self.listen_task = asyncio.get_running_loop().create_task(
                 self.keep_listening(partial(self.listen, connection_alias))
@@ -138,9 +145,11 @@ class OutboxWakeup:
         Args:
             callback: The relay's callback.
         """
-        with contextlib.suppress(ValueError):
-            self.callbacks.remove(callback)
-        if not self.callbacks and self.listen_task is not None:
+        for index, (subscribed_callback, _loop) in enumerate(self.subscriptions):
+            if subscribed_callback == callback:
+                del self.subscriptions[index]
+                break
+        if not self.subscriptions and self.listen_task is not None:
             listen_task, self.listen_task = self.listen_task, None
             listen_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -148,16 +157,37 @@ class OutboxWakeup:
             await self.close()
 
     def dispatch(self, topics: frozenset[str]) -> None:
-        """Gives a received signal to every subscribed relay.
+        """Gives a received signal to every subscribed relay - on the event loop of its subscription, also
+        for a signal of another thread (a write of a thread with an event loop of its own).
 
         Args:
             topics: The topics it names.
         """
-        for callback in list(self.callbacks):
+        try:
+            running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        for callback, loop in list(self.subscriptions):
+            if loop is running_loop:
+                self.call_callback(callback, topics)
+                continue
             try:
-                callback(topics)
-            except Exception:
-                logger.exception("%s: a relay's wakeup callback raised", type(self).__name__)
+                loop.call_soon_threadsafe(self.call_callback, callback, topics)
+            except RuntimeError:
+                # The relay's event loop is closed - the relay is gone.
+                logger.warning("%s: a relay's event loop is closed, its wakeup is dropped", type(self).__name__)
+
+    def call_callback(self, callback: WakeupCallback, topics: frozenset[str]) -> None:
+        """Calls a relay's callback, an error logged - the relay polls anyway.
+
+        Args:
+            callback: The callback.
+            topics: The topics of the signal.
+        """
+        try:
+            callback(topics)
+        except Exception:
+            logger.exception("%s: a relay's wakeup callback raised", type(self).__name__)
 
     async def listen(self, connection_alias: str) -> None:
         """Listens for signals, giving each to ``dispatch()``, until cancelled - raises when the

@@ -104,6 +104,23 @@ class GeometryField(Field[Geometry]):
         self.geography = geography
         self.dimensions = dimensions
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - its GeoJSON geometry object, which the field reads back.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        geometry = self.to_python(value)
+        if geometry is None:
+            return None
+        return Geometry.get_geo_json(geometry)
+
     def get_geometry_type(self) -> GeometryType:
         """The type of geometry the column holds."""
         return self.geometry_type or self.DEFAULT_GEOMETRY_TYPE

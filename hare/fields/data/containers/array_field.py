@@ -55,6 +55,22 @@ class ArrayField(ContainerField):
         self.base_field = base_field
         super().__init__(**kwargs)
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - each element in the JSON form of the element field.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        if value is None:
+            return None
+        return [self.base_field.get_json_value(element) for element in value]
+
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return (self.base_field,)
 

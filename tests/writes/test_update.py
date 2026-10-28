@@ -478,14 +478,18 @@ async def test_save_with_f_expression_stays_unresolved_and_applies_again_on_seco
     assert (await IntFields.objects.get(pk=obj.pk)).intnum == 12
 
 
-@requires_features(supports_update_limit_order_by=True)
 @pytest.mark.asyncio
-async def test_update_with_limit_ordering(db):
-    await Tournament.objects.create(name="1")
-    t2 = await Tournament.objects.create(name="1")
-    await Tournament.objects.filter(name="1").order_by("-id").limit(1).update(name="2")
-    assert (await Tournament.objects.get(pk=t2.pk)).name == "2"
-    assert await Tournament.objects.filter(name="1").count() == 1
+async def test_an_update_with_an_order_and_a_limit_is_one_statement_where_the_database_takes_them(db, monkeypatch):
+    """No built-in database takes UPDATE ... ORDER BY ... LIMIT - the SQL of one that does is checked."""
+    connection = Tournament.get_connection()
+    monkeypatch.setattr(connection, "features", connection.features.replace(supports_update_limit_order_by=True))
+
+    sql = Tournament.objects.filter(name="1").order_by("-id").limit(1).update(name="2").sql()
+
+    assert sql.startswith("UPDATE")
+    assert "ORDER BY" in sql
+    assert "LIMIT" in sql
+    assert "SELECT" not in sql
 
 
 # hare.sql does not translate ** to POWER in MSSQL

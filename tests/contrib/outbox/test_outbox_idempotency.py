@@ -315,3 +315,12 @@ async def test_ordering_key_and_headers_are_stored(db_outbox):
     assert stored.ordering_key == "widget:1"
     assert stored.headers == {"traceparent": "00-ab-cd-01"}
     assert stored.sequence == event.sequence
+
+
+@pytest.mark.asyncio
+async def test_an_events_id_is_a_time_ordered_uuid7(db_outbox):
+    first = await DemoOutboxEvent.enqueue("widget.created", {})
+    second = await DemoOutboxEvent.enqueue("widget.created", {})
+
+    assert (first.id.version, second.id.version) == (7, 7)
+    assert first.id < second.id

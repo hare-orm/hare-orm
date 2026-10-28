@@ -43,10 +43,19 @@ def test_q_to_bool():
 
 
 @pytest.mark.database_independent
-def test_q_compound():
+@pytest.mark.parametrize(
+    ("combine", "connector"),
+    [
+        (lambda q1, q2: Q.with_connector(Connector.OR, q1, q2), "OR"),
+        (lambda q1, q2: q1 | q2, "OR"),
+        (lambda q1, q2: q1 & q2, "AND"),
+    ],
+    ids=["with_connector", "or", "and"],
+)
+def test_q_compound(combine, connector):
     q1 = Q(moo="cow")
     q2 = Q(moo="bull")
-    q = Q.with_connector(Connector.OR, q1, q2)
+    q = combine(q1, q2)
 
     assert q1.children == ()
     assert q1.filters == {"moo": "cow"}
@@ -58,57 +67,16 @@ def test_q_compound():
 
     assert q.children == (q1, q2)
     assert q.filters == {}
-    assert q.connector == "OR"
+    assert q.connector == connector
 
 
 @pytest.mark.database_independent
-def test_q_compound_or():
-    q1 = Q(moo="cow")
-    q2 = Q(moo="bull")
-    q = q1 | q2
-
-    assert q1.children == ()
-    assert q1.filters == {"moo": "cow"}
-    assert q1.connector == "AND"
-
-    assert q2.children == ()
-    assert q2.filters == {"moo": "bull"}
-    assert q2.connector == "AND"
-
-    assert q.children == (q1, q2)
-    assert q.filters == {}
-    assert q.connector == "OR"
-
-
-@pytest.mark.database_independent
-def test_q_compound_and():
-    q1 = Q(moo="cow")
-    q2 = Q(moo="bull")
-    q = q1 & q2
-
-    assert q1.children == ()
-    assert q1.filters == {"moo": "cow"}
-    assert q1.connector == "AND"
-
-    assert q2.children == ()
-    assert q2.filters == {"moo": "bull"}
-    assert q2.connector == "AND"
-
-    assert q.children == (q1, q2)
-    assert q.filters == {}
-    assert q.connector == "AND"
-
-
-@pytest.mark.database_independent
-def test_q_compound_or_notq():
-    with pytest.raises(QueryError, match="OR operation requires a Q node"):
-        Q() | 2  # pylint: disable=W0106
-
-
-@pytest.mark.database_independent
-def test_q_compound_and_notq():
-    with pytest.raises(QueryError, match="AND operation requires a Q node"):
-        Q() & 2  # pylint: disable=W0106
+@pytest.mark.parametrize(
+    ("combine", "operation"), [(lambda q: q | 2, "OR"), (lambda q: q & 2, "AND")], ids=["or", "and"]
+)
+def test_q_compound_notq(combine, operation):
+    with pytest.raises(QueryError, match=f"{operation} operation requires a Q node"):
+        combine(Q())
 
 
 @pytest.mark.database_independent
@@ -271,39 +239,20 @@ def test_q_call_complex_char3(char_fields_context):
     )
 
 
-def test_q_call_with_blank_and(char_fields_context):
-    q = Q(Q(id__gt=5), Q())
-    r = q.get_result(char_fields_context)
-    assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
-
-
-def test_q_call_with_blank_or(char_fields_context):
-    q = Q.with_connector(Connector.OR, Q(id__gt=5), Q())
-    r = q.get_result(char_fields_context)
-    assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
-
-
-def test_q_call_with_blank_and2(char_fields_context):
-    q = Q(id__gt=5) & Q()
-    r = q.get_result(char_fields_context)
-    assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
-
-
-def test_q_call_with_blank_or2(char_fields_context):
-    q = Q(id__gt=5) | Q()
-    r = q.get_result(char_fields_context)
-    assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
-
-
-def test_q_call_with_blank_and3(char_fields_context):
-    q = Q() & Q(id__gt=5)
-    r = q.get_result(char_fields_context)
-    assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
-
-
-def test_q_call_with_blank_or3(char_fields_context):
-    q = Q() | Q(id__gt=5)
-    r = q.get_result(char_fields_context)
+@pytest.mark.parametrize(
+    "make_q",
+    [
+        lambda: Q(Q(id__gt=5), Q()),
+        lambda: Q.with_connector(Connector.OR, Q(id__gt=5), Q()),
+        lambda: Q(id__gt=5) & Q(),
+        lambda: Q(id__gt=5) | Q(),
+        lambda: Q() & Q(id__gt=5),
+        lambda: Q() | Q(id__gt=5),
+    ],
+    ids=["and", "or", "and_operator", "or_operator", "blank_first_and", "blank_first_or"],
+)
+def test_q_call_with_blank(char_fields_context, make_q):
+    r = make_q().get_result(char_fields_context)
     assert r.where_criterion.get_sql(DEFAULT_SQL_CONTEXT) == '"id">5'
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 #: The library ``Faker`` declarations take their values from.
 FAKER_MODULE = "faker"
-FAKER_MISSING_MESSAGE = "Faker() declarations need the faker library - pip install faker"
+FAKER_MISSING_MESSAGE = "Faker() declarations need the faker library - install hare-orm[faker]"
 #: The most locales whose ``faker.Faker`` is kept.
 FAKER_CACHE_MAX_SIZE = 32
 #: The inner class of a factory holding its parameters and traits.

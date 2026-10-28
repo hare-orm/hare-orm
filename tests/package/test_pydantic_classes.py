@@ -8,6 +8,8 @@ from pydantic import BaseModel, TypeAdapter
 
 from hare.lazy_loading.pydantic_classes import PydanticClasses
 
+REQUIRES = ("pydantic",)
+
 pytestmark = pytest.mark.database_independent
 
 

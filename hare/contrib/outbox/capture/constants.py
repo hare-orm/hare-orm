@@ -10,10 +10,9 @@ DEFAULT_CHANGE_ORDERING_KEY_TEMPLATE = "{label}:{pk}"
 #: values.
 CHANGE_OPERATION_NAMES: dict[str, str] = {"insert": "inserted", "update": "updated", "delete": "deleted"}
 
+#: The options of ChangeCapture besides its outbox - what ChangeCapture.replace() takes.
+CHANGE_CAPTURE_OPTION_NAMES = frozenset(
+    {"operations", "payload", "fields", "exclude", "topic", "ordering_key", "extend", "extend_many"}
+)
 #: The keys of a captured change's envelope - ``ChangeExtension.payload`` may not set them.
 CHANGE_ENVELOPE_KEYS = frozenset({"model", "operation", "pk", "changed", "before", "after", "occurred_at"})
-
-#: The text a captured row's float that JSON has no number for is written as - as Python's json
-#: module writes it.
-NON_FINITE_FLOAT_TEXTS = {float("inf"): "Infinity", float("-inf"): "-Infinity"}
-NAN_FLOAT_TEXT = "NaN"

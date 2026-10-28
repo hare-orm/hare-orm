@@ -26,6 +26,8 @@ WEAK_STATE = {
     ("hare/instrumentation/observers/observer_dispatch.py", "weakref.WeakKeyDictionary()"),
     # The topics of the outbox events each open transaction wrote - signalled once it commits.
     ("hare/contrib/outbox/wakeups/outbox_wakeup.py", "self.pending_topics"),
+    # The topics each open transaction sent a NOTIFY of - one NOTIFY per topic and transaction.
+    ("hare/contrib/outbox/wakeups/listen_notify_wakeup.py", "self.notified_topics"),
     # A health check's readings of each pool at its previous run - what "since the last check" counts from.
     ("hare/health/health_check.py", "weakref.WeakKeyDictionary()"),
     # The cursors of each pool's measured waits and connects the pool metrics took.

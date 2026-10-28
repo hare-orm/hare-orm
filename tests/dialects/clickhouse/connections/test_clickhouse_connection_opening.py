@@ -3,10 +3,12 @@ start together."""
 
 import asyncio
 import time
+import uuid
 
 import pytest
 
 from hare import Connections
+from hare.dialects.clickhouse.keeper.clickhouse_database_keeper_nodes import ClickhouseDatabaseKeeperNodes
 from hare.dialects.clickhouse.keeper.clickhouse_migration_lock import ClickhouseMigrationLock
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError
 from tests.dialects.clickhouse.constants import CLICKHOUSE_KEEPER_HOSTS
@@ -84,6 +86,24 @@ async def test_migrate_runs_one_after_another_in_keeper_without_transactions(cli
 
 
 @pytest.mark.asyncio
+async def test_a_database_named_with_a_slash_takes_a_separate_migration_lock(clickhouse_db):
+    """The name went into the lock's path as it was: the lock of ``<a>/migrate`` made the node of ``<a>``'s
+    lock a persistent one, and a ``migrate`` of ``<a>`` waited for its deletion forever."""
+    addresses = ClickhouseMigrationLock.get_addresses(CLICKHOUSE_KEEPER_HOSTS)
+    database = f"h11slash_{uuid.uuid4().hex}"
+    nested_lock = ClickhouseMigrationLock(addresses, f"{database}/migrate", WAIT_DEADLINE_SECONDS)
+    plain_lock = ClickhouseMigrationLock(addresses, database, WAIT_DEADLINE_SECONDS)
+    try:
+        await nested_lock.take()
+        await asyncio.wait_for(plain_lock.take(), WAIT_DEADLINE_SECONDS)
+    finally:
+        await plain_lock.close()
+        await nested_lock.close()
+        for name in (database, f"{database}/migrate"):
+            await ClickhouseDatabaseKeeperNodes(addresses, name, WAIT_DEADLINE_SECONDS).delete("")
+
+
+@pytest.mark.asyncio
 async def test_a_connection_opening_while_its_client_closes_is_closed_too(clickhouse_db):
     """A close while the connection was still opening found nothing to close: a statement waiting for
     it then read the client's connection as None (a raw AttributeError on clickhouse-connect), and the
@@ -147,11 +167,11 @@ async def test_a_client_closed_and_dropped_opens_no_connection_again(clickhouse_
     assert client._connection is None
 
 
+@pytest.mark.requires("clickhouse-connect")
 @pytest.mark.database_independent
 def test_a_response_the_server_breaks_off_is_an_operational_error():
     """A statement ON CLUSTER failing on one of the servers breaks off the HTTP response - the HTTP
     library's own ClientPayloadError left execute_script() raw."""
-    pytest.importorskip("clickhouse_connect")
     from aiohttp import ClientPayloadError
 
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (

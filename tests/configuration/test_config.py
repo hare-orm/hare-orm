@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 import tests.shared_models.testmodels as testmodels_module
@@ -50,12 +52,22 @@ def test_from_config_file_malformed_json_raises_configuration_error(tmp_path):
         HareConfig.from_config_file(str(config_file))
 
 
+@pytest.mark.requires("yaml")
 def test_from_config_file_malformed_yaml_raises_configuration_error(tmp_path):
     """yaml.safe_load() used to raise a bare yaml.YAMLError subclass instead of ConfigurationError."""
     config_file = tmp_path / "hare.yaml"
     yaml_content = "connections:\n  default: sqlite+aiosqlite://:memory:\napps:\n  app:\n  models: bad\n"
     config_file.write_text(yaml_content, encoding="utf-8")
     with pytest.raises(ConfigurationError, match="Invalid YAML"):
+        HareConfig.from_config_file(str(config_file))
+
+
+def test_a_yaml_config_file_without_pyyaml_names_its_extra(tmp_path, monkeypatch):
+    """A YAML file read without PyYAML raised a bare ModuleNotFoundError: yaml."""
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    config_file = tmp_path / "hare.yaml"
+    config_file.write_text("connections: {}\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match=r"hare-orm\[yaml\]"):
         HareConfig.from_config_file(str(config_file))
 
 

@@ -31,6 +31,7 @@ from hare.query.rows.native.enums import FieldBucket
 from hare.query.rows.native.field_codecs import FieldCodecs
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.time import Timezone
+from rust.native import rows as hydrate
 from tests.shared_models.testmodels import (
     BooleanFields,
     Currency,
@@ -48,20 +49,7 @@ from tests.utils.model_rows_queries import get_model_rows_query
 from tests.utils.row_hydration import RowHydration
 from tests.utils.timezone_context import override_timezone
 
-_hydrate_candidate = pytest.importorskip("rust.native.rows")
-# rust/ has no __init__.py anywhere (a deliberate PEP 420 namespace package, see
-# rust/hydrate/pyproject.toml's own module-name docs) - so rust/hydrate/ itself (the crate
-# source directory, always present in a checkout) is ALSO a valid, empty namespace-package
-# portion for "rust.hydrate". Confirmed live: with the compiled extension absent,
-# `import rust.hydrate` resolves to that bare directory instead of raising ImportError, so
-# importorskip alone never skips - only checking for the real extension's own attribute does.
-if not hasattr(_hydrate_candidate, "ModelReader"):
-    pytest.skip(
-        "rust.hydrate is an empty namespace package (extension not built) - run "
-        "`maturin develop --release --manifest-path rust/hydrate/Cargo.toml` to opt in",
-        allow_module_level=True,
-    )
-hydrate = _hydrate_candidate
+REQUIRES = ("native",)
 
 
 def _get_decode_plan(model, only_fields: list[str] | None = None):

@@ -161,3 +161,10 @@ app = HareRobyn(__file__, hare_config=HARE_CONFIG, health_routes=HealthRoutes(He
 ```
 
 The readiness and liveness routes it adds — see [Web frameworks](web-frameworks.md#health-routes).
+
+## <a id="tests"></a>Tests
+
+Robyn's `TestClient` runs the application in an event loop of its own — with hare's pytest plugin take
+`hare_app_transactional_db`: the application takes the test's context, its writes commit, and every table
+is emptied when the test ends — see [Application tests](../testing/setup.md#application-tests). It needs a
+server database or a SQLite file.

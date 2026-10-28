@@ -22,6 +22,55 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-27
+
+### Breaking changes
+
+- `bulk_create(ignore_conflicts=True)` возвращает вставленные объекты, и только они помечаются сохранёнными;
+  объектам, ключи которых генерирует база, нужен `on_conflict=[...]`.
+- `JSONField(field_type=...)`, файлы конфигурации YAML и `Faker()` требуют extras `pydantic`, `yaml` и
+  `faker`.
+- Транзакция `postgresql+asyncpg` отказывает оператору из другого цикла событий, а база SQLite в памяти —
+  другому циклу событий; оба — с `ConfigurationError`.
+- `bulk_update()` у QuerySet со срезом или с `distinct(*fields)` даёт `QueryError`, как `update()`; раньше
+  он записывал объекты вне среза.
+- Условие ограничения или индекса, политика или `GeneratedField`, читающие связанную модель, отклоняются
+  при привязке модели (`ConfigurationError`), а не её миграцией.
+- Фильтр `FloatField` по `NaN` в SQLite даёт `ValidationError` — SQLite подставлял его как `NULL`.
+
+### Added
+
+- Outbox: `ChangeCapture(extend_many=...)` и `ChangeCapture.replace()`, `OutboxEvent.enqueue_many()`,
+  шаблоны тем и `exclude_topics` у `OutboxRelay`, `WebhookDelivery` подписчикам (`target`, `allows_url`,
+  `result_field`, `signature_header`).
+- `Q` как значение в `annotate()`, `alias()`, `values()`, `values_list()` и `update()` (`ConditionValue`).
+- Фикстуры pytest-плагина `hare_app_db` и `hare_app_transactional_db` для тестируемого приложения.
+- `VersionedModel.get_last_visible_version_or_exception()`, `Uuid7`, `ClickhouseRequestQuery`,
+  `Field.get_json_value()`, `prefetch_related(None)`.
+
+### Changed
+
+- Ключи `VersionedModel` и `OutboxEvent` — UUID версии 7; `ListenNotifyWakeup` отправляет один `NOTIFY` на
+  тему в транзакции; тестовая база PostgreSQL удаляется вместе с её сессиями.
+
+### Fixed
+
+- Миграции outbox-моделей, параметризованного `field_type` и индекса-выражения над внешним ключом;
+  `makemigrations` без `asyncpg`; события изменений полей любого типа; чистый wheel; валидаторы `UUIDField`,
+  получившего текст; JSON схемы pydantic с NaN и бесконечностью; `count()`, `exists()` и страница
+  запроса из параметров с предзагрузкой, `Exists()` QuerySet с предзагрузкой.
+- ClickHouse: первый `atomic()` процесса на подключении с `transactions=true` и `autonomous()` с параметром,
+  который шёл без транзакции; блокировка миграций в Keeper у базы с `/` в имени; серии ключей базы, чьё имя —
+  начало имени другой, и серии тестовой базы, остававшиеся в Keeper; индекс `bloom_filter`, записанный без
+  аргумента, — ложное расхождение схемы.
+- Захват изменений: запись в открытой транзакции, чьё событие не записалось, сохраняла строку;
+  `InProcessWakeup`, вызванный из потока со своим циклом событий.
+- `bulk_create(ignore_conflicts=True)` сопоставлял строки по порядку ключей словаря (hstore, jsonb).
+- `inspectdb` и расхождения схемы: колонки SQLite `DATETIME`/`DOUBLE`/`FLOAT` и порядок индексов; проверка
+  `IN` над `varchar` и последовательность, общая для таблиц, в PostgreSQL.
+- Настройки или их раздел, не являющиеся словарём, дают `ConfigurationError`, а не `TypeError`; параметр
+  `transactions` интеграций приложений проверяется.
+
 ## [0.10.0] - 2026-10-26
 
 ### Breaking changes
@@ -144,6 +193,7 @@
 - **Документация** на английском и русском и бенчмарки против SQLAlchemy, Tortoise ORM, yara-orm и
   Django — см. [Бенчмарки](https://hare-orm.github.io/hare-orm/ru/benchmarks/).
 
-[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...dev
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...dev
+[0.11.0]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/hare-orm/hare-orm/releases/tag/v0.9.0

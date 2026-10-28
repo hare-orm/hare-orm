@@ -21,7 +21,6 @@ from tests.shared_models.testmodels import (
     Address,
     BinaryFields,
     CallableDefault,
-    CamelCaseAliasPerson,
     CompositePkThing,
     DatetimeFields,
     DirtyTrackedDbDefault,
@@ -44,9 +43,11 @@ from tests.shared_models.testmodels import (
     User,
     UUIDFields,
     VersionedDocument,
-    json_pydantic_default,
 )
 from tests.shared_models.testmodels_postgres import ValidatorModel
+from tests.shared_models.testmodels_pydantic import CamelCaseAliasPerson, PydanticJSONFields
+
+REQUIRES = ("pydantic",)
 
 
 # Fixtures for TestPydantic
@@ -1226,7 +1227,6 @@ async def test_json_field(db):
         "data_null": None,
         "data_default": {"a": 1},
         "data_validate": None,
-        "data_pydantic": json_pydantic_default.model_dump(),
         "data_decimal": None,
         "data_index": None,
     }
@@ -1237,7 +1237,6 @@ async def test_json_field(db):
         "data_null": None,
         "data_default": {"a": 1},
         "data_validate": None,
-        "data_pydantic": json_pydantic_default.model_dump(),
         "data_decimal": None,
         "data_index": None,
     }
@@ -3009,7 +3008,7 @@ def test_optional_field_accepts_explicit_null_despite_orm_validators(db):
 
 
 def test_json_field_declared_type_goes_into_the_schema(db):
-    JSONFields_Pydantic = pydantic_model_creator(JSONFields, name="JSONFieldsDeclaredType")
+    JSONFields_Pydantic = pydantic_model_creator(PydanticJSONFields, name="JSONFieldsDeclaredType")
     schema = JSONFields_Pydantic.model_json_schema()
 
     assert schema["properties"]["data_pydantic"]["$ref"] == "#/$defs/TestSchemaForJSONField"

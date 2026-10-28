@@ -10,9 +10,6 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-
-pytest.importorskip("clickhouse_driver")
-
 import pytz  # noqa: E402
 from clickhouse_driver.columns.datetimecolumn import DateTime64Column, DateTimeColumn  # noqa: E402
 from clickhouse_driver.connection import Connection as LibraryConnection  # noqa: E402
@@ -32,6 +29,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError  # noqa: E402
 from tests.dialects.clickhouse.models import Player  # noqa: E402
 from tests.utils.waiting import wait_until  # noqa: E402
+
+REQUIRES = ("clickhouse-driver",)
 
 BEFORE_1970 = datetime.datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=datetime.UTC)
 

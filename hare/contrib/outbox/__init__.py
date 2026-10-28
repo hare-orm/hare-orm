@@ -14,10 +14,12 @@ from hare.contrib.outbox.deliveries import (
     RedisStreamsDelivery,
     TopicRouter,
     WebhookDelivery,
+    WebhookTarget,
 )
 from hare.contrib.outbox.exceptions import DeliveryError
 from hare.contrib.outbox.outbox_event import OutboxEvent
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
+from hare.contrib.outbox.outbox_message import OutboxMessage
 from hare.contrib.outbox.relay import (
     OutboxBacklog,
     OutboxDeadLettered,
@@ -54,6 +56,7 @@ __all__ = [
     "OutboxDelivery",
     "OutboxEvent",
     "OutboxJsonEncoding",
+    "OutboxMessage",
     "OutboxRelay",
     "OutboxWakeup",
     "RabbitMQDelivery",
@@ -62,4 +65,5 @@ __all__ = [
     "RedisWakeup",
     "TopicRouter",
     "WebhookDelivery",
+    "WebhookTarget",
 ]

@@ -89,6 +89,9 @@ def pydantic_model_creator(
 Типы значений: `BinaryField` передаётся в JSON как base64 (`model_dump_json()` его кодирует,
 `model_validate_json()` раскодирует, в схеме `format: base64url`), поэтому любые байты доходят
 неизменными; чтобы изменить это, передайте свои `ser_json_bytes`/`val_json_bytes` в `model_config`.
+Число с плавающей точкой, для которого в JSON нет числа, — NaN или бесконечность у `FloatField`, в том числе
+внутри `ArrayField`, — пишется текстом (`"NaN"`, `"Infinity"`, как в событии outbox) и читается схемой
+обратно (`ser_json_inf_nan`).
 `JSONField` с объявленным `field_type` получает в схеме этот тип (без него — `Any`).
 `IntEnumField`/`CharEnumField` — это `$ref` только на перечисление, без числового диапазона или
 ограничения длины колонки.

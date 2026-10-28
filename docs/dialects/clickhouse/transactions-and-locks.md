@@ -17,7 +17,8 @@ config = {
 With `transactions=true`, `Transactions.atomic()` runs a ClickHouse transaction. The server must run a
 ClickHouse Keeper and have `allow_experimental_transactions` on: the connection checks it when it opens,
 with a `BEGIN TRANSACTION` and its `ROLLBACK`, and raises `ConfigurationError` otherwise. Without
-`transactions=true` `atomic()` raises `UnSupportedError`.
+`transactions=true` `atomic()` raises `UnSupportedError`. `Transactions.autonomous()` with an option
+(`isolation`, `read_only`, ...) runs one on its new connection too, rolled back when the block raises.
 
 ```python
 async with Transactions.atomic():
@@ -67,5 +68,6 @@ ClickHouse locks no row: `select_for_update()` raises `UnSupportedError` before 
 transaction or out of one, and so does `RowChanges.get_for_update()` of a request query. A write can't
 wait for another one to end — two `update()`s of one row both apply, the later mutation's values staying.
 
-ClickHouse Keeper (`keeper_hosts`) holds `migrate`'s [migration lock](../../migrations/migrations.md#migration-lock)
-alone; hare speaks ZooKeeper's protocol to it itself — no library is installed for it.
+ClickHouse Keeper (`keeper_hosts`) holds `migrate`'s [migration lock](../../migrations/migrations.md#migration-lock),
+and deleting a database (`db_delete()`) deletes its nodes there — the [series of its keys](models.md#keys) and
+the node of its lock; hare speaks ZooKeeper's protocol to it itself — no library is installed for it.

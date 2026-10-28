@@ -62,7 +62,12 @@ async def test_a_date_part_in_f_follows_the_current_zone(db):
             (4, datetime.date(2026, 3, 29)),
             (5, datetime.date(2026, 3, 29)),
         ]
-        assert await DatetimeFields.objects.filter(id__lt=F("datetime__hour")).values_list("id", flat=True) == [2, 3]
+        assert sorted(
+            await DatetimeFields.objects.filter(id__lt=F("datetime__hour")).values_list("id", flat=True)
+        ) == [
+            2,
+            3,
+        ]
 
 
 @pytest.mark.asyncio

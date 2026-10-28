@@ -4,17 +4,19 @@ file that can't be used failed differently on each driver (a retried connection 
 import ssl
 import urllib.parse
 
-import asyncpg
 import pytest
 
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
 pytestmark = pytest.mark.database_independent
 
-CLIENTS = [(AsyncpgClient, "postgresql+asyncpg"), (RustPgClient, "postgresql")]
+CLIENTS = [
+    DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, "postgresql+asyncpg"),
+    DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, "postgresql"),
+]
 
 
 def make_client(client_class, url):
@@ -23,7 +25,7 @@ def make_client(client_class, url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS)
+@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS, indirect=["client_class"])
 async def test_a_root_certificate_that_cannot_be_read_is_a_configuration_error(tmp_path, client_class, scheme):
     missing_file = (tmp_path / "missing-root.crt").as_posix()
     client = make_client(
@@ -34,7 +36,7 @@ async def test_a_root_certificate_that_cannot_be_read_is_a_configuration_error(t
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS)
+@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS, indirect=["client_class"])
 async def test_a_root_certificate_file_holding_no_certificate_is_a_configuration_error(tmp_path, client_class, scheme):
     certificate_file = tmp_path / "root.crt"
     certificate_file.write_text("no certificate")
@@ -46,8 +48,13 @@ async def test_a_root_certificate_file_holding_no_certificate_is_a_configuration
         await client.create_connection(with_db=True)
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.asyncio
 async def test_asyncpg_checks_the_server_against_the_root_certificate_of_the_db_url(monkeypatch):
+    import asyncpg
+
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     taken_dsns = []
 
     def create_pool(dsn, **settings):
@@ -67,7 +74,10 @@ async def test_asyncpg_checks_the_server_against_the_root_certificate_of_the_db_
     ]
 
 
+@pytest.mark.requires("asyncpg")
 def test_the_root_certificate_takes_a_tls_mode_not_an_ssl_context():
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     with pytest.raises(ConfigurationError, match="SSLContext"):
         AsyncpgClient(
             connection_alias="default",
@@ -78,7 +88,7 @@ def test_the_root_certificate_takes_a_tls_mode_not_an_ssl_context():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS)
+@pytest.mark.parametrize(("client_class", "scheme"), CLIENTS, indirect=["client_class"])
 async def test_a_root_certificate_path_with_a_null_byte_is_a_configuration_error(client_class, scheme):
     client = make_client(client_class, f"{scheme}://orders@127.0.0.1:1/orders?sslmode=verify-full&ssl_root_cert=x%00y")
     with pytest.raises(ConfigurationError, match="cannot be used"):

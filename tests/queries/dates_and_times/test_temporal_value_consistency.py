@@ -9,6 +9,7 @@ import os
 import warnings
 from zoneinfo import ZoneInfo
 
+import orjson
 import pytest
 
 from hare import fields
@@ -168,7 +169,10 @@ async def test_annotation_filter_encodes_the_value_like_a_field_filter(use_timez
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("use_timezone", "timezone"), ZONE_CONFIGS)
+@pytest.mark.parametrize(
+    ("use_timezone", "timezone"),
+    [*ZONE_CONFIGS[:-1], pytest.param(False, "UTC", marks=pytest.mark.requires("tzlocal"))],
+)
 async def test_value_literal_is_written_like_a_plain_value(use_timezone, timezone):
     async with temporal_context(use_timezone, timezone):
         naive_moment = datetime.datetime(2024, 6, 1, 12, 0)
@@ -362,7 +366,10 @@ async def test_naive_postgres_time_gets_the_fixed_offset_on_every_read_path(time
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("use_timezone", "timezone"), [(True, "UTC"), (True, "Europe/Moscow"), (False, "UTC")])
+@pytest.mark.parametrize(
+    ("use_timezone", "timezone"),
+    [(True, "UTC"), (True, "Europe/Moscow"), pytest.param(False, "UTC", marks=pytest.mark.requires("tzlocal"))],
+)
 async def test_datetime_field_over_postgres_timestamp_column_round_trips(use_timezone, timezone):
     async with temporal_context(use_timezone, timezone):
         if not is_postgres():
@@ -430,7 +437,6 @@ def test_migration_writer_renders_dates_and_times_as_plain_datetime_classes(valu
     ],
 )
 def test_json_standard_library_path_writes_what_orjson_writes(value):
-    orjson = pytest.importorskip("orjson")
     assert JsonCodec.dumps_exact(value) == orjson.dumps(value).decode()
 
 

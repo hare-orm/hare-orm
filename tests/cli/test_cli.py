@@ -1575,9 +1575,10 @@ HARE_ORM = {
     assert "Unknown app label" in result.output
 
 
+@pytest.mark.parametrize("flags", [[], ["--check"]], ids=["plain", "check_exits_zero"])
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_makemigrations_no_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_makemigrations_no_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str]) -> None:
     _write_package(tmp_path, "cli_app")
     module_name = _write_settings(
         tmp_path,
@@ -1616,7 +1617,7 @@ HARE_ORM = {
     monkeypatch.setattr(migration_maker, "MigrationAutodetector", FakeAutodetector)
 
     with _override_hare_apps(object()):
-        result = await _run_cli(["-c", f"{module_name}.HARE_ORM", "makemigrations"])
+        result = await _run_cli(["-c", f"{module_name}.HARE_ORM", "makemigrations", *flags])
         assert result.exit_code == 0
         assert "No changes detected" in result.output
 
@@ -1672,54 +1673,6 @@ HARE_ORM = {
         assert [p.name for p in migrations_path.glob("*.py")] == ["__init__.py"]
     finally:
         _purge_cli_app_modules()
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_makemigrations_check_exits_zero_when_no_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_package(tmp_path, "cli_app")
-    module_name = _write_settings(
-        tmp_path,
-        """
-HARE_ORM = {
-    "connections": {"default": "sqlite+aiosqlite://:memory:"},
-    "apps": {
-        "app": {"models": ["cli_app.models"], "default_connection": "default"},
-    },
-}
-""".lstrip(),
-        f"cli_settings_{tmp_path.name}",
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    importlib.invalidate_caches()
-    sys.modules.pop("cli_app", None)
-    sys.modules.pop("cli_app.migrations", None)
-
-    async def fake_init(**_kwargs) -> None:
-        return None
-
-    class FakeAutodetector:
-        warnings: list[str] = []  # noqa: RUF012
-
-        data_loss_warnings: list[str] = []  # noqa: RUF012
-
-        project_state = None
-
-        def __init__(self, _apps, _apps_config, **_kwargs) -> None:
-            return None
-
-        async def changes(self) -> list[MigrationWriter]:
-            return []
-
-    monkeypatch.setattr(cli_module.Hare, "init", fake_init)
-    monkeypatch.setattr(migration_maker, "MigrationAutodetector", FakeAutodetector)
-
-    with _override_hare_apps(object()):
-        result = await _run_cli(["-c", f"{module_name}.HARE_ORM", "makemigrations", "--check"])
-        assert result.exit_code == 0
-        assert "No changes detected" in result.output
 
 
 @pytest.mark.database_independent
@@ -2742,6 +2695,7 @@ HARE_ORM = {
         _purge_cli_app_modules()
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_sqlmigrate_postgres_wraps_in_transaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2762,11 +2716,8 @@ class Widget(Model):
         tmp_path,
         """
 HARE_ORM = {
-    # +asyncpg explicit, not the bare "postgresql://" scheme's rust_pg default - this test only
-    # exercises sqlmigrate's SQL-generation/transaction-wrapping logic, never a real connection,
-    # but constructing the config still imports the driver's client class either way, and
-    # asyncpg (unlike rust_pg's rust.pg) never needs a separate compiled-extension build step.
-    "connections": {"default": "postgresql+asyncpg://user:pass@localhost:5432/db"},
+    # sqlmigrate's SQL and its transaction - no connection is opened.
+    "connections": {"default": "postgresql://user:pass@localhost:5432/db"},
     "apps": {
         "app": {
             "models": ["cli_app.models"],
@@ -3040,6 +2991,7 @@ async def test_inspectdb_unknown_connection_maps_to_cli_error(tmp_path: Path, mo
     assert "Unknown connection" in result.output, diagnostics
 
 
+@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_migrate_unreachable_postgres_maps_to_cli_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unreachable connection used to let hare.exceptions.DBConnectionError escape all the way
@@ -3243,6 +3195,7 @@ async def test_config_file_malformed_json_maps_to_cli_error(tmp_path: Path) -> N
     assert "Traceback (most recent call last)" not in result.output
 
 
+@pytest.mark.requires("yaml")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_config_file_malformed_yaml_maps_to_cli_error(tmp_path: Path) -> None:
@@ -3868,13 +3821,13 @@ def test_ctrl_c_stops_a_command_with_a_message_and_code_130(monkeypatch, capsys)
     assert capsys.readouterr().err.strip() == "hare: interrupted"
 
 
+@pytest.mark.requires("clickhouse-driver")
 @pytest.mark.database_independent
 def test_a_driver_librarys_warnings_stay_out_of_the_output_unless_logging_is_configured(monkeypatch):
     """clickhouse-driver logged a failed connect with its traceback - with no logging configured, Python
     printed it through its last-resort handler before hare's own one-line message."""
     import logging
 
-    pytest.importorskip("clickhouse_driver")
     from hare.cli.hare_cli import HareCLI
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_client import (
@@ -3896,14 +3849,13 @@ def test_a_driver_librarys_warnings_stay_out_of_the_output_unless_logging_is_con
     assert library_logger.handlers == []
 
 
+@pytest.mark.requires("ipython")
 @pytest.mark.sqlite_only
 def test_shell_runs_timeouts_in_its_cells_and_closes_the_connections(tmp_path: Path) -> None:
     """nest_asyncio runs the cells in tasks asyncio's C current_task() didn't see - asyncio.timeout() and
     wait_for() failed in a cell and as the SQLite connection closed on leaving the shell."""
     import subprocess
 
-    pytest.importorskip("IPython")
-    pytest.importorskip("nest_asyncio")
     package = tmp_path / "shell_app"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="ascii")

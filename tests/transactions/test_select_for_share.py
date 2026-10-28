@@ -69,6 +69,8 @@ async def test_a_database_without_the_lock_refuses_it(db, monkeypatch, flag, fea
         ({"no_key": True, "share": True}, "takes one of no_key, share and key_share"),
     ],
 )
-def test_a_wrong_flag_is_refused(kwargs, message):
+@pytest.mark.asyncio
+async def test_a_wrong_flag_is_refused(db, kwargs, message):
+    """Without a context the models may not be set up yet - the call was only kept, refused at init."""
     with pytest.raises(QueryError, match=message):
         IntFields.objects.select_for_update(**kwargs)

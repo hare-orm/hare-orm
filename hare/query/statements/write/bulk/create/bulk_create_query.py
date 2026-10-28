@@ -40,6 +40,9 @@ from hare.query.expressions import Q
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.query.statements.constants import (
+    IGNORE_CONFLICTS_KEYLESS_REASON,
+    IGNORE_CONFLICTS_MATCHING_MESSAGE,
+    IGNORE_CONFLICTS_NO_RETURNING_REASON,
     MISSING_CONFLICT_TARGET_CONDITION_TEXT,
     MISSING_CONFLICT_TARGET_MESSAGE,
     PRIMARY_KEY_CONFLICT_CONSTRAINT,
@@ -75,6 +78,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         "_batch_size",
         "_writer",
         "_reported_rows",
+        "_inserted_objects",
         "_existing_primary_keys",
         "_stored_primary_keys",
         "_update_fields",
@@ -138,16 +142,6 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             )
         # The checks needing the dialect are made when the query is awaited and its connection is
         # known.
-        if returning and ignore_conflicts and not on_conflict:
-            # Skipped rows aren't returned, so the returned ones are matched by the on_conflict
-            # columns - required up front, not found out when a conflict happens.
-            returning = BulkCreateQuery.get_inherited_returning(
-                returning_explicitly_requested,
-                "bulk_create(ignore_conflicts=True, returning=True) requires on_conflict=[...] "
-                "naming the conflict target columns - a row skipped by ON CONFLICT DO NOTHING "
-                "never appears in RETURNING, so the surviving rows can't be matched back to "
-                "their objects without them (a named on_conflict_constraint isn't enough).",
-            )
         BulkWriteBatches.check_batch_size(batch_size, "bulk_create")
         objects = CollectionArguments.get_list(objects, "bulk_create()")
         BulkObjects.validate(model, objects, "bulk_create")
@@ -196,6 +190,9 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         #: The keys of the rows a failed insert left on a database without transactions - the
         #: statements before the failing one wrote them, and they are reported.
         self._stored_primary_keys: list[Any] = []
+        #: The objects a RETURNING row was matched to - those inserted, where ``ignore_conflicts`` may
+        #: skip some; None otherwise.
+        self._inserted_objects: list[TModel] | None = None
 
     async def _prepare_objects(self) -> None:
         """Gets the objects ready to be written: scoped to the active tenant, their async defaults
@@ -472,6 +469,15 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             raise UnSupportedError(
                 f"bulk_create(use_copy=True) is not supported on {dialect} - it has no bulk load of rows."
             )
+        if self._ignore_conflicts:
+            # The objects inserted are those RETURNING gives a row of - skipped ones have none.
+            if not dialect.features.supports_returning:
+                raise UnSupportedError(
+                    IGNORE_CONFLICTS_MATCHING_MESSAGE.format(
+                        model=self.model.__name__, reason=IGNORE_CONFLICTS_NO_RETURNING_REASON.format(dialect=dialect)
+                    )
+                )
+            self._returning = True
         if dialect.features.copies_bulk_inserts and not (
             self._returning
             or self._ignore_conflicts
@@ -769,6 +775,7 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
         given_objects = self._objects
         self._objects = list(given_objects)
         keyless_objects = [obj for obj in given_objects if not obj._custom_generated_pk]
+        self._inserted_objects = [] if self._ignore_conflicts else None
         try:
             return await self._write_prepared_objects(given_objects)
         except BaseException:
@@ -785,9 +792,23 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
             given_objects: The objects as given.
 
         Returns:
-            The objects, as given.
+            The objects, as given - with ``ignore_conflicts``, those inserted.
+
+        Raises:
+            UnSupportedError: ``ignore_conflicts`` with objects whose keys the database generates, and no
+                ``on_conflict`` to match them by.
         """
         await self._prepare_objects()
+        if (
+            self._ignore_conflicts
+            and not self._on_conflict
+            and not ReturnedRowsMatching.objects_have_primary_keys(self)
+        ):
+            raise UnSupportedError(
+                IGNORE_CONFLICTS_MATCHING_MESSAGE.format(
+                    model=self.model.__name__, reason=IGNORE_CONFLICTS_KEYLESS_REASON
+                )
+            )
         # The stamps and blind indexes of the insert - one moment for every object, put back when the call
         # fails.
         stamped_values = InstanceValues()
@@ -854,7 +875,10 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                 ) from error
             raise
         await self._record_written(pre_write_states, stamped_values, omit_fields)
-        return given_objects
+        if self._inserted_objects is None:
+            return given_objects
+        inserted_object_ids = {id(obj) for obj in self._inserted_objects}
+        return [obj for obj in given_objects if id(obj) in inserted_object_ids]
 
     async def _record_written(
         self,
@@ -888,10 +912,12 @@ class BulkCreateQuery(AwaitableQuery[TModel], Generic[TModel]):
                     rollback_restores.extend(stamped_values.get_rollback_restores((obj,)))
             WrittenInstances.mark_saved(self._objects, self._connection)
 
-        # The inserted values are the objects' dirty-tracking baseline - unless ON CONFLICT may have
-        # skipped a row: which objects were written isn't known then, and they stay dirty.
-        if track_dirty_fields and not ConflictClause.may_skip_conflicting_rows(self):
-            for obj in self._objects:
+        # The inserted values are the objects' dirty-tracking baseline - where ON CONFLICT may have
+        # skipped a row, of the objects known inserted; the others stay dirty.
+        if track_dirty_fields:
+            for obj in (
+                self._objects if not ConflictClause.may_skip_conflicting_rows(self) else self._inserted_objects or ()
+            ):
                 DirtyFields.snapshot_dirty_fields(obj)
 
         if not restores_on_rollback:

@@ -96,7 +96,8 @@ or `async with NotificationListener(...) as listener: ...`.
   Consecutive failures (a failed connect, or a connection that dies before surviving one check) wait
   `backoff * 2**attempt` seconds (or the next entry of a `backoff` sequence, the last one repeating),
   clamped to `max_backoff_seconds`. After `reconnect_attempts` failed retries it logs at ERROR and stops.
-  The counter resets once a connection survives a health check.
+  The counter resets once a connection survives a health check. Once it listened, a reconnect refused as
+  configuration (its database dropped and made again) is retried the same way — on both drivers.
 - **No support (SQLite, ClickHouse):** `start()` and `run()` raise `UnSupportedError` before any
   connection is opened — the database has no notification channels; poll instead.
 - A `channel` no `LISTEN` takes raises `ConfigurationError`, as no reconnect would ever listen on it: empty,

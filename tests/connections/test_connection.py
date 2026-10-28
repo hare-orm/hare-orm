@@ -419,7 +419,7 @@ async def test_check_loop_returns_false_on_different_loop():
 @patch("hare.core.connections.connection_handler.ConnectionHandler._create_connection")
 def test_get_reconnects_on_loop_change(mocked_create_connection, conn_handler):
     """When _check_loop() returns False, get() should warn and create a new connection."""
-    stale_conn = Mock(_check_loop=Mock(return_value=False))
+    stale_conn = Mock(_check_loop=Mock(return_value=False), holds_database_in_connection=Mock(return_value=False))
     fresh_conn = Mock(
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )
@@ -445,7 +445,9 @@ async def test_get_closes_stale_connection_on_loop_change(mocked_create_connecti
     """Replacing a connection because its bound event loop changed must not just drop the old
     one on the floor - without an explicit close(), its pool/socket resources are never
     released (a real leak, not just an unreferenced Python object)."""
-    stale_conn = Mock(_check_loop=Mock(return_value=False), close=AsyncMock())
+    stale_conn = Mock(
+        _check_loop=Mock(return_value=False), holds_database_in_connection=Mock(return_value=False), close=AsyncMock()
+    )
     fresh_conn = Mock(
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )
@@ -524,7 +526,12 @@ async def test_a_stale_connection_of_a_running_loop_is_closed_on_that_loop(mocke
         closed_on.append(asyncio.get_running_loop())
 
     try:
-        stale_conn = Mock(_check_loop=Mock(return_value=False), _bound_loop=thread_loop, close=close)
+        stale_conn = Mock(
+            _check_loop=Mock(return_value=False),
+            holds_database_in_connection=Mock(return_value=False),
+            _bound_loop=thread_loop,
+            close=close,
+        )
         mocked_create_connection.return_value = Mock(
             _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
         )
@@ -548,7 +555,12 @@ async def test_a_stale_connection_of_a_closed_loop_abandons_its_connections(mock
     server."""
     closed_loop = asyncio.new_event_loop()
     closed_loop.close()
-    stale_conn = Mock(_check_loop=Mock(return_value=False), _bound_loop=closed_loop, close=AsyncMock())
+    stale_conn = Mock(
+        _check_loop=Mock(return_value=False),
+        holds_database_in_connection=Mock(return_value=False),
+        _bound_loop=closed_loop,
+        close=AsyncMock(),
+    )
     mocked_create_connection.return_value = Mock(
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )

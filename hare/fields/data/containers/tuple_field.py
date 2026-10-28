@@ -65,6 +65,25 @@ class TupleField(ContainerField):
         self.fields_in_order = fields
         super().__init__(**kwargs)
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - a list of each element in the JSON form of its element field.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        if value is None:
+            return None
+        return [
+            element_field.get_json_value(element)
+            for element_field, element in zip(self.fields_in_order, value, strict=True)
+        ]
+
     def get_child_fields(self) -> tuple[Field[Any], ...]:
         return self.fields_in_order
 

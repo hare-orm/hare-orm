@@ -3,7 +3,6 @@ filters and writes checked, the managers, the fields of an abstract base and the
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -13,13 +12,10 @@ import pytest
 
 from tests.stubs.stub_configs import REPOSITORY_PATH
 
-pytestmark = [
-    pytest.mark.database_independent,
-    pytest.mark.skipif(
-        importlib.util.find_spec("pyright") is None or shutil.which("node") is None,
-        reason="pyright and node aren't installed",
-    ),
-]
+# The pyright command line - its environment installs it and node.
+REQUIRES = ("pyright-cli",)
+
+pytestmark = pytest.mark.database_independent
 
 USAGE = """
 from hare.query.expressions import F

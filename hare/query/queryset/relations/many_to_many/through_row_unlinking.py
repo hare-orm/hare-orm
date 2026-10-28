@@ -63,23 +63,22 @@ class ThroughRowUnlinking:
             visibility: See ``ThroughRowUnlinking.unlink()``.
         """
         through_model = relation.field.through_model_class
+        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
         if through_model is not None and through_model._meta.change_capture_needs is not None:
             # The links' captured changes are written with them.
-            connection = Connections.get_client(using) or ThroughRows.through_table_connection(
-                relation, for_write=True
-            )
-            if ChangeCapturing.needs_transaction(connection):
-                async with connection._in_transaction() as transaction_connection:
-                    await ThroughRowUnlinking.remove_or_clear(
+            async with ChangeCapturing.transaction(connection) as transaction_connection:
+                await WriteSteps.get_whole_run(
+                    transaction_connection,
+                    ThroughRowUnlinking.unlink_and_report(
                         relation,
                         instances,
                         transaction_connection,
                         check_tenant_scope=check_tenant_scope,
                         forward_pk_values=forward_pk_values,
                         visibility=visibility,
-                    )
-                return
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
+                    ),
+                )
+            return
         # On a database without transactions the rows, their capture and their report are one step a cancel can't
         # split.
         await WriteSteps.get_whole_run(

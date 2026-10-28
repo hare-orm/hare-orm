@@ -1846,6 +1846,7 @@ async def test_savepoint_wrapper_finalizes_and_rejects_queries_after_rollback(db
     assert await Tournament.objects.filter(name="inside-rolled-back-savepoint").first() is None
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
@@ -1919,6 +1920,7 @@ async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
     assert await Tournament.objects.filter(id=other.id).first() is not None
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_cancelled_commit_still_runs_on_commit_callbacks(db_truncate):
@@ -2254,6 +2256,7 @@ async def test_rust_pg_cancelled_savepoint_rollback_still_lands_and_updates_stat
     assert await Tournament.objects.filter(id=other.id).first() is not None
 
 
+@pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_begin_cancelled_after_landing_rolls_back_before_releasing_pool(

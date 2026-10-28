@@ -26,12 +26,18 @@ async def test_a_json_column_is_a_json_field_of_its_type_where_the_driver_reads_
 @pytest.mark.database_independent
 @pytest.mark.parametrize(
     ("driver_package", "client_class_name", "stores_json_natively"),
-    [("clickhouse_connect", "ClickhouseConnectClient", True), ("clickhouse_driver", "ClickhouseDriverClient", False)],
+    [
+        pytest.param(
+            "clickhouse_connect", "ClickhouseConnectClient", True, marks=pytest.mark.requires("clickhouse-connect")
+        ),
+        pytest.param(
+            "clickhouse_driver", "ClickhouseDriverClient", False, marks=pytest.mark.requires("clickhouse-driver")
+        ),
+    ],
 )
 def test_a_client_picks_its_json_column_before_it_connects(driver_package, client_class_name, stores_json_natively):
     """The dialect was picked on connect, so sqlmigrate - which never connects - printed a String
     column where migrate created a JSON one."""
-    pytest.importorskip(driver_package)
     client_module = importlib.import_module(
         f"hare.dialects.clickhouse.drivers.{driver_package}.client.{driver_package}_client"
     )

@@ -95,6 +95,17 @@ MISSING_CONFLICT_TARGET_MESSAGE = (
 )
 #: The tail of MISSING_CONFLICT_TARGET_MESSAGE when ``conflict_where`` is given.
 MISSING_CONFLICT_TARGET_CONDITION_TEXT = " matching conflict_where"
+#: The error of ``bulk_create(ignore_conflicts=True)`` whose inserted objects can't be told from the skipped ones.
+IGNORE_CONFLICTS_MATCHING_MESSAGE = (
+    "{model}.objects.bulk_create(ignore_conflicts=True) gives the objects it inserted, told by the rows "
+    "RETURNING gives back - {reason}"
+)
+#: IGNORE_CONFLICTS_MATCHING_MESSAGE's reason for objects whose keys the database generates.
+IGNORE_CONFLICTS_KEYLESS_REASON = (
+    "with keys the database generates, name the conflicting fields to match them by: on_conflict=[...]"
+)
+#: IGNORE_CONFLICTS_MATCHING_MESSAGE's reason for a database without RETURNING.
+IGNORE_CONFLICTS_NO_RETURNING_REASON = "{dialect} has no RETURNING"
 #: The ``on_conflict_constraint`` naming the model's primary key, whatever name its constraint has.
 PRIMARY_KEY_CONFLICT_CONSTRAINT = "pk"
 

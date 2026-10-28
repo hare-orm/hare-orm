@@ -16,3 +16,43 @@ DECIMAL_FIELDS_MARKER = "decimal_fields"
 TIMING_MARKER = "timing"
 #: Runs the tests of TIMING_MARKER too.
 RUN_TIMING_OPTION = "--run-timing"
+#: The connection alias of a ServerSession - the bookkeeping session of the PostgreSQL server under test.
+SERVER_SESSION_CONNECTION_ALIAS = "hare_test_server"
+#: The requirement of the tests needing pydantic - its environment registers tests.shared_models.testmodels_pydantic.
+PYDANTIC_REQUIREMENT = "pydantic"
+#: The requirement of the tests needing phonenumbers - its environment registers the model of a PhoneField
+#: with region=.
+PHONE_REQUIREMENT = "phone"
+#: The client classes of hare's PostgreSQL drivers, by dotted path - a test parametrized with
+#: DriverClasses imports asyncpg's only in the environment installing the package.
+RUST_PG_CLIENT_PATH = "hare.dialects.postgresql.drivers.rust_pg.client.RustPgClient"
+RUST_PG_TRANSACTION_CLIENT_PATH = "hare.dialects.postgresql.drivers.rust_pg.client.RustPgTransactionClient"
+ASYNCPG_CLIENT_PATH = "hare.dialects.postgresql.drivers.asyncpg.client.AsyncpgClient"
+ASYNCPG_TRANSACTION_CLIENT_PATH = "hare.dialects.postgresql.drivers.asyncpg.client.AsyncpgTransactionClient"
+POSTGRES_CLIENT_PATHS = (RUST_PG_CLIENT_PATH, ASYNCPG_CLIENT_PATH)
+#: What each package of hare importing an optional library requires - the extras installing it; a package
+#: inside one requires what the innermost one listed does.
+PACKAGE_REQUIREMENTS = {
+    "hare.dialects.postgresql.drivers.rust_pg.client": ("native",),
+    "hare.dialects.postgresql.drivers.asyncpg.client": ("asyncpg",),
+    "hare.dialects.postgresql.drivers.asyncpg.asyncpg_date_codec": ("asyncpg",),
+    "hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs": ("asyncpg",),
+    "hare.dialects.postgresql.drivers.asyncpg.asyncpg_interval_codec": ("asyncpg",),
+    "hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamp_codec": ("asyncpg",),
+    "hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamptz_codec": ("asyncpg",),
+    "hare.dialects.clickhouse.drivers.clickhouse_connect.client": ("clickhouse-connect",),
+    "hare.dialects.clickhouse.drivers.clickhouse_driver.client": ("clickhouse-driver",),
+    "hare.contrib.pydantic": ("pydantic",),
+    "hare.contrib.request_query": ("request-query",),
+    "hare.dialects.postgresql.request_query": ("request-query",),
+    "hare.dialects.sqlite.request_query": ("request-query",),
+    "hare.dialects.clickhouse.request_query": ("request-query",),
+    "hare.contrib.frameworks": ("pydantic",),
+    "hare.contrib.frameworks.litestar": ("litestar",),
+    "hare.contrib.frameworks.fastapi": ("fastapi",),
+    "hare.contrib.frameworks.robyn": ("robyn",),
+    "hare.contrib.taskiq": ("taskiq",),
+    "hare.contrib.opentelemetry": ("opentelemetry",),
+    "hare.contrib.mypy": ("mypy",),
+    "hare.contrib.pytest": ("pytest",),
+}

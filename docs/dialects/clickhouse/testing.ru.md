@@ -12,11 +12,11 @@ make test_clickhouse         # tests/dialects/clickhouse на обоих дра�
 ```
 
 Сервер сам служит себе ClickHouse Keeper — порт 9182 на хосте — и работает с
-`allow_experimental_transactions` (`tests/docker/clickhouse`): тесты транзакций подключаются с
-`transactions=true`, тесты блокировки миграций — ещё и с `keeper_hosts=127.0.0.1:9182`, а генерируемые ключи
-берутся из его серий. `make test_clickhouse` запускает `tests/dialects/clickhouse/` со своими моделями —
-общим тестовым моделям остального набора нужны ограничения уникальности и внешние ключи, которых
-ClickHouse не держит.
+`allow_experimental_transactions` (`tests/docker/clickhouse`): тесты подключаются с
+`keeper_hosts=127.0.0.1:9182`, поэтому серии ключей тестовой базы удаляются вместе с ней, тесты транзакций —
+ещё и с `transactions=true`, а генерируемые ключи берутся из его серий. `make test_clickhouse` запускает
+`tests/dialects/clickhouse/` со своими моделями — общим тестовым моделям остального набора нужны ограничения
+уникальности и внешние ключи, которых ClickHouse не держит.
 
 ## <a id="cluster"></a>Кластер
 

@@ -28,7 +28,7 @@ from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
 from hare.query.constants import AGGREGATE_OVER_DISTINCT_ON_MESSAGE, GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK
 from hare.query.enums import GetException, RowShape, TableSampleMethod
-from hare.query.expressions import Exists, Expression, F, Ordering, Q
+from hare.query.expressions import ConditionValue, Exists, Expression, F, Ordering, Q
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.subqueries.recursive_rows import RecursiveRows
 from hare.query.filters.resolution.filter_values import FilterValues
@@ -1176,9 +1176,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         return queryset
 
     @CallsBeforeSetup.recorded
-    def annotate(self, **kwargs: Expression | Term) -> Self:
+    def annotate(self, **kwargs: Expression | Term | Q) -> Self:
         """
-        The queryset with each row's value of every expression given, under its name.
+        The queryset with each row's value of every expression given, under its name - a ``Q`` as the
+        condition's value (``ConditionValue``): true, false, or NULL where SQL's logic gives it.
 
         Raises:
             TypeError: A value is neither an expression nor a SQL term - a bare field name, say.
@@ -1205,7 +1206,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         return self._continue_annotation_call_signature(queryset, "annotate", kwargs)
 
     @CallsBeforeSetup.recorded
-    def alias(self, **kwargs: Expression | Term) -> Self:
+    def alias(self, **kwargs: Expression | Term | Q) -> Self:
         """
         Like ``.annotate()`` - usable in ``.filter()``/``.order_by()`` - but the expression is
         never added to the SELECT list on its own, only when explicitly requested via
@@ -1328,6 +1329,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             return self.alias(**type_aliases).values_list(*field_names, flat=flat, named=named, **expressions)
         queryset = self._get_values_source_queryset()
         FilterArguments.check_selected_names(queryset, field_names, "values_list")
+        expressions = {key: ConditionValue.get_value_expression(value) for key, value in expressions.items()}
         ValuesArguments.raise_if_values_unusable(
             queryset, ".values_list()", field_names, expressions, allow_field_name_kwargs=False
         )
@@ -1370,6 +1372,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             return self.alias(**type_aliases).values(*field_names, **expressions)
         queryset = self._get_values_source_queryset()
         FilterArguments.check_selected_names(queryset, field_names, "values")
+        expressions = {key: ConditionValue.get_value_expression(value) for key, value in expressions.items()}
         ValuesArguments.raise_if_values_unusable(
             queryset, ".values()", field_names, expressions, allow_field_name_kwargs=True
         )
@@ -1651,7 +1654,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         """
         WrittenTargetChecks.raise_if_refused(self, "update", allows_values=True)
         # The values as they are now - the update runs when awaited.
-        kwargs = {key: FilterValues.get_detached_value(value, written=True) for key, value in kwargs.items()}
+        kwargs = {
+            key: FilterValues.get_detached_value(ConditionValue.get_value_expression(value), written=True)
+            for key, value in kwargs.items()
+        }
         if self.model._meta.generic_foreign_key_fields:
             kwargs = GenericForeignKeys.expand_kwargs(self.model._meta, kwargs, apply_defaults=False)
         return StatementSelection.get_rows_source(self)._get_update_query(**kwargs)
@@ -2017,7 +2023,10 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         Args:
             objects: The objects to create.
             batch_size: How many objects one query creates.
-            ignore_conflicts: Skip the rows conflicting with an existing one.
+            ignore_conflicts: Skip the rows conflicting with an existing one - the insert gives the
+                objects it inserted, told by the rows ``RETURNING`` gives back, and only those are
+                marked saved. Objects whose keys the database generates need ``on_conflict`` to be
+                matched by. Needs ``Features.supports_returning``.
             update_fields: The fields a conflicting row takes from the object (upsert) - a relation
                 name means its key column(s). For a tenant-scoped model only a conflicting row of
                 the active tenant is updated. A conflicting row also gets its ``auto_now`` fields
@@ -2030,20 +2039,21 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 ``Features.supports_conflict_where``.
             returning: Read the database-generated primary key, generated columns and omitted
                 ``db_default`` columns back onto each object. Needs ``Features.supports_returning``;
-                without ``Features.guarantees_returning_order`` every object needs its pk set. With
-                ``ignore_conflicts`` it needs ``on_conflict=[...]`` to match the rows. None takes
-                ``Meta.returning``. Not with ``use_copy``.
+                without ``Features.guarantees_returning_order`` every object needs its pk set. Always
+                with ``ignore_conflicts``. None takes ``Meta.returning``. Not with ``use_copy``.
             use_copy: Load the rows through the database's bulk load of rows
                 (``Features.supports_copy``) - faster for large batches, with no ``RETURNING`` and
                 no conflict handling. A database whose usual way to write many rows it is
                 (``Features.copies_bulk_inserts``) takes it with or without this.
 
         Returns:
-            The insert - awaited, it gives the objects as given.
+            The insert - awaited, it gives the objects as given; with ``ignore_conflicts``, those it
+            inserted.
 
         Raises:
             UnSupportedError: The dialect has no such option, or ``use_copy`` is combined with
-                ``returning`` or conflict handling.
+                ``returning`` or conflict handling, or ``ignore_conflicts`` has objects without keys and
+                no ``on_conflict``.
             QueryError: The parameters contradict each other; a tenant-scoped model has no active
                 tenant or an object of another one;
                 ``returning=True`` with skipped rows has no ``on_conflict``; ``update_fields`` names
@@ -2112,8 +2122,13 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
                 ``objects`` still has an unresolved async ``default=`` value pending for
                 ``tenant_field`` (save or refresh it first); if two or more objects in
                 ``objects`` share the same primary key; or if a field being updated holds an
-                ``F()``/expression value (use ``QuerySet.update()`` or ``save()`` for those).
+                ``F()``/expression value (use ``QuerySet.update()`` or ``save()`` for those); if the queryset
+                is sliced or of ``.distinct(*fields)`` - the rows it shows aren't a filter of the rows written,
+                as on ``update()``.
         """
+        FilterArguments.raise_if_slice_taken(self, "Cannot bulk_update() a query once a slice has been taken.")
+        if self._distinct_on:
+            raise QueryError("Cannot call bulk_update() after .distinct(*fields).")
         return BulkUpdateQuery(self, objects, fields, batch_size=batch_size, returning=returning)
 
     async def create(self, **kwargs: Any) -> TModel:
@@ -2480,15 +2495,28 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             raise FieldError(f"select_related() relation {part!r} for {model._meta.full_name} not found")
 
     @CallsBeforeSetup.recorded
-    def prefetch_related(self, *args: str | Prefetch) -> Self:
+    def prefetch_related(self, *args: str | Prefetch | None) -> Self:
         """
         Loads the given relations of every row with one query per relation - the rows of
         the queryset and, through ``prefetch_related_objects()``, instances already in hand.
+        ``prefetch_related(None)`` drops every relation prefetched so far - for a count, an
+        existence check or an aggregate of a queryset that prefetches.
 
         Raises:
             FieldError: If the field to prefetch on is not a relation, or not found.
+            QueryError: ``None`` is given beside relations.
         """
-        args = GenericForeignKeyPaths.expand_relation_paths(self.model, args, "prefetch_related")
+        if None in args:
+            if args != (None,):
+                raise QueryError(
+                    "prefetch_related(None) drops every prefetched relation - it takes no relation beside"
+                )
+            queryset = self._clone_keeping_calls()
+            queryset._prefetch_map = {}
+            queryset._prefetch_queries = {}
+            return self._continue_call_signature(queryset, ("prefetch_related", ()))
+        relation_args = cast("tuple[str | Prefetch, ...]", args)
+        args = GenericForeignKeyPaths.expand_relation_paths(self.model, relation_args, "prefetch_related")
         if self._combination is not None:
             return cast(
                 "Self",

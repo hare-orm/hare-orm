@@ -24,11 +24,10 @@ def reject_nil(value):
         raise ValueError("nil")
 
 
+@pytest.mark.requires("native")
 @pytest.mark.parametrize("null", [True, False])
 @pytest.mark.parametrize("validators", [None, [reject_nil]])
 def test_a_written_uuid_is_the_uuid_itself(null, validators):
-    if HydrateAccelerator.module is None:
-        pytest.skip("the native module isn't built")
     types = ClickhouseDialect().types
     field = fields.UUIDField(null=null, validators=validators)
     field.model = UUIDFkRelatedModel

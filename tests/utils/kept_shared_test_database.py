@@ -11,6 +11,7 @@ from hare.contrib.test.constants import REUSABLE_DATABASE_SLOT_NAMESPACE
 from hare.core.hare_context import HareContext
 from hare.dialects.postgresql.client.reusable_test_schemas import ReusableTestSchemas
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import PYDANTIC_REQUIREMENT
 
 
 class KeptSharedTestDatabase:
@@ -23,13 +24,17 @@ class KeptSharedTestDatabase:
     @staticmethod
     def get_modules() -> list[str]:
         """The models of the shared database - on PostgreSQL its own models too, those of the fields
-        only it has (a DecimalField, which SQLite has none of)."""
-        # Local import: the database under test reads the configured URL.
+        only it has (a DecimalField, which SQLite has none of); in an environment installing pydantic, the
+        models whose fields need it."""
+        # Local imports: the database under test reads the configured URL, the environments pytest's options.
+        from tests.matrix.suite_environments import SuiteEnvironments
         from tests.utils.database_under_test import DatabaseUnderTest
 
         modules = ["tests.shared_models.testmodels"]
         if DatabaseUnderTest.get_dialect().name == "postgresql":
             modules.append("tests.shared_models.testmodels_postgres")
+        if SuiteEnvironments.installs(PYDANTIC_REQUIREMENT):
+            modules.append("tests.shared_models.testmodels_pydantic")
         return modules
 
     @staticmethod
@@ -38,7 +43,7 @@ class KeptSharedTestDatabase:
         ownership connection for the whole session.
 
         Args:
-            ownership_connection: The asyncpg connection holding the session's locks.
+            ownership_connection: The ServerSession holding the session's locks.
             database_url_template: The database URL with one "{}" placeholder.
 
         Returns:

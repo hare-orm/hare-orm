@@ -183,6 +183,10 @@ CLICKHOUSE_SERVER_FACTS_SQL = (
     "AS keeper_tables"
 )
 CLICKHOUSE_KEEPER_CONNECTIONS_SQL = "SELECT count() AS keepers FROM system.zookeeper_connection"
+#: The node of ClickHouse Keeper the server keeps the series of generateSerialID under - empty for none.
+CLICKHOUSE_SERIES_KEEPER_PATH_SQL = (
+    "SELECT (SELECT any(value) FROM system.server_settings WHERE name = 'series_keeper_path') AS series_keeper_path"
+)
 #: The next keys of a series.
 CLICKHOUSE_KEY_SERIES_TAKE_SQL = "SELECT generateSerialID({series}) FROM numbers({count})"
 #: How many keys a series lags behind the greatest key of its table - its next key taken, and the ones

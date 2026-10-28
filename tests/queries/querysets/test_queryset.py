@@ -772,20 +772,18 @@ async def test_delete(db, intfields_data):
     assert await IntFields.objects.all().count() == 29
 
 
-@requires_features(supports_update_limit_order_by=True)
 @pytest.mark.asyncio
-async def test_delete_limit(db, intfields_data):
-    await IntFields.objects.all().limit(1).delete()
-    assert await IntFields.objects.all().count() == 29
+async def test_a_delete_with_an_order_and_a_limit_is_one_statement_where_the_database_takes_them(db, monkeypatch):
+    """No built-in database takes DELETE ... ORDER BY ... LIMIT - the SQL of one that does is checked."""
+    connection = IntFields.get_connection()
+    monkeypatch.setattr(connection, "features", connection.features.replace(supports_update_limit_order_by=True))
 
+    sql = IntFields.objects.all().order_by("-id").limit(1).delete().sql()
 
-@requires_features(supports_update_limit_order_by=True)
-@pytest.mark.asyncio
-async def test_delete_limit_order_by(db, intfields_data):
-    await IntFields.objects.all().order_by("-id").limit(1).delete()
-    assert await IntFields.objects.all().count() == 29
-    with pytest.raises(DoesNotExist):
-        await IntFields.objects.get(intnum=97)
+    assert sql.startswith("DELETE")
+    assert "ORDER BY" in sql
+    assert "LIMIT" in sql
+    assert "SELECT" not in sql
 
 
 @pytest.mark.asyncio
@@ -949,10 +947,20 @@ async def test_iterator_offset_fallback_still_loses_rows_under_concurrent_delete
 
 
 @pytest.mark.asyncio
-@requires_features(supports_streaming=False)
-async def test_stream_raises_unsupported_without_streaming(db, intfields_data):
+@pytest.mark.parametrize(
+    "make_queryset",
+    [
+        lambda: IntFields.objects.all(),
+        lambda: IntFields.objects.values("id"),
+        lambda: IntFields.objects.filter(id__gte=0).union(IntFields.objects.all()),
+    ],
+    ids=["rows", "values", "union"],
+)
+async def test_stream_raises_unsupported_without_streaming(db, intfields_data, monkeypatch, make_queryset):
+    connection = IntFields.get_connection()
+    monkeypatch.setattr(connection, "features", connection.features.replace(supports_streaming=False))
     with pytest.raises(UnSupportedError, match="stream"):
-        async for _ in IntFields.objects.all().stream():
+        async for _ in make_queryset().stream():
             pass
 
 

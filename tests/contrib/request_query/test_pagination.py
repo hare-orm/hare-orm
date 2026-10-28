@@ -8,6 +8,7 @@ from hare.contrib.request_query import (
     CursorPage,
     CursorPagination,
     InvalidRequestQuery,
+    OffsetPagination,
     OrderingConfig,
     Page,
     RequestQuery,
@@ -19,7 +20,7 @@ from hare.contrib.test import assert_query_count
 from hare.exceptions import (
     QueryError,
 )
-from tests.contrib.request_query.models import Book, OrderLine
+from tests.contrib.request_query.models import Author, Book, OrderLine
 from tests.contrib.request_query.queries import AuthorQuery, BookQuery, BookScrollQuery, OrderLineQuery
 
 
@@ -176,3 +177,28 @@ async def test_a_cursor_of_another_ordering_or_a_forged_one_is_refused(library):
     null_key = Cursor(CursorDirection.NEXT, ("order_id", "line_no"), (1, None)).encode()
     with pytest.raises(InvalidRequestQuery, match="not a cursor of this query"):
         await OrderLineQuery(cursor=null_key).page()
+
+
+class AuthorWithBooksQuery(RequestQuery[Author]):
+    """Its queryset prefetches - what a page shows of each author."""
+
+    name: str | None = None
+
+    class Meta:
+        queryset = Author.objects.prefetch_related("books")
+        ordering = OrderingConfig(default=("id",))
+        pagination = OffsetPagination(default_limit=2)
+
+
+@pytest.mark.asyncio
+async def test_a_query_prefetching_counts_and_checks_without_its_prefetch(library):
+    """count(), exists() and an offset page's count refused a queryset prefetching - the prefetch only
+    belongs to the rows fetched."""
+    request = FakeRequest("http://api.test/authors")
+
+    page = await AuthorWithBooksQuery(request=request).page()
+
+    assert (page.count, [author.name for author in page.result]) == (3, ["Anna", "Boris"])
+    assert sorted(book.title for book in page.result[0].books) == ["Alpha", "Beta"]
+    assert await AuthorWithBooksQuery(request=request, name="Clara").count() == 1
+    assert await AuthorWithBooksQuery(request=request, name="Dora").exists() is False

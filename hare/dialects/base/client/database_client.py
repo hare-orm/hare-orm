@@ -112,6 +112,9 @@ class DatabaseClient(abc.ABC):
     #: Whether the client runs its statements inside a transaction - a ``TransactionClient``. Read on
     #: every statement: ``isinstance()`` against the abstract class costs two calls more.
     is_transaction_client: ClassVar[bool] = False
+    #: Whether the driver's connections belong to the event loop they were opened on - a statement of a
+    #: transaction from another loop is refused.
+    connections_bound_to_event_loop: ClassVar[bool] = False
     #: How many times a read that lost its connection is retried on a fresh one - set by the
     #: clients that retry; none by default.
     read_retry_max_retries: int = 0
@@ -578,6 +581,15 @@ class DatabaseClient(abc.ABC):
         """Drops the connections opened on an event loop that is closed - they can't be closed through
         it; nothing by default, for a driver whose connections need no event loop to close.
         """
+
+    def holds_database_in_connection(self) -> bool:
+        """Whether the database lives in the client's connection only - another connection to its
+        address opens another, empty database. False by default.
+
+        Returns:
+            True for such a database.
+        """
+        return False
 
     def _check_loop(self) -> bool:
         """Whether the running event loop is the one the client was created on."""

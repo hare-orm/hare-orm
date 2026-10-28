@@ -11,39 +11,8 @@ import pytest
 
 from hare.contrib.outbox import DeliveryError, OutboxRelay, TopicRouter, WebhookDelivery
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, EVENT_TOPIC_HEADER, WEBHOOK_SIGNATURE_HEADER
+from tests.contrib.outbox.http_receiver import HttpReceiver
 from tests.contrib.outbox.models import DemoOutboxEvent
-
-
-class HttpReceiver:
-    """A minimal HTTP server recording each request and answering with ``status``."""
-
-    def __init__(self, status: int = 200) -> None:
-        self.status = status
-        self.requests: list[tuple[dict[str, str], bytes]] = []
-        self.server: asyncio.Server | None = None
-
-    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        head = await reader.readuntil(b"\r\n\r\n")
-        headers = {}
-        for line in head.decode().split("\r\n")[1:]:
-            if ":" in line:
-                name, value = line.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
-        body = await reader.readexactly(int(headers.get("content-length", "0")))
-        self.requests.append((headers, body))
-        writer.write(f"HTTP/1.1 {self.status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".encode())
-        await writer.drain()
-        writer.close()
-
-    async def __aenter__(self) -> str:
-        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
-        port = self.server.sockets[0].getsockname()[1]
-        return f"http://127.0.0.1:{port}/events"
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        assert self.server is not None
-        self.server.close()
-        await self.server.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -87,9 +56,9 @@ class RefusingKafkaProducer:
         return confirmation
 
 
+@pytest.mark.requires("kafka")
 @pytest.mark.asyncio
 async def test_a_kafka_event_the_producer_refuses_fails_alone(db_outbox):
-    pytest.importorskip("aiokafka")
     from hare.contrib.outbox import KafkaDelivery
 
     producer = RefusingKafkaProducer()
@@ -126,6 +95,7 @@ async def test_a_topic_without_a_route_fails(db_outbox):
         TopicRouter({}).get_delivery("anything")
 
 
+@pytest.mark.requires("http")
 @pytest.mark.asyncio
 async def test_a_webhook_posts_the_payload_signed(db_outbox):
     event = await DemoOutboxEvent.enqueue("widget.created", {"n": 1}, headers={"author": "alice", "attempt": 2})
@@ -149,6 +119,7 @@ async def test_a_webhook_posts_the_payload_signed(db_outbox):
     assert event.published_at is not None
 
 
+@pytest.mark.requires("http")
 @pytest.mark.asyncio
 async def test_a_webhook_sends_a_header_value_beyond_ascii(db_outbox):
     """The client wrote a text header only in ASCII - every delivery of the event failed."""
@@ -166,6 +137,7 @@ async def test_a_webhook_sends_a_header_value_beyond_ascii(db_outbox):
     assert event.published_at is not None
 
 
+@pytest.mark.requires("http")
 @pytest.mark.asyncio
 async def test_a_webhook_answering_an_error_fails_the_event(db_outbox):
     event = await DemoOutboxEvent.enqueue("widget.created", {})
@@ -179,6 +151,7 @@ async def test_a_webhook_answering_an_error_fails_the_event(db_outbox):
     assert "503" in event.last_error
 
 
+@pytest.mark.requires("http")
 @pytest.mark.asyncio
 async def test_a_webhook_event_with_a_header_name_beyond_ascii_fails_with_a_reason(db_outbox):
     """The client's own encoding error failed the event's every delivery."""

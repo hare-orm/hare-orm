@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import urllib.parse
+
 from hare.dialects.clickhouse.keeper.constants import (
     KEEPER_DEFAULT_PORT,
     KEEPER_EPHEMERAL_NODE,
@@ -17,7 +19,8 @@ from hare.exceptions import ConfigurationError, OperationalError
 class ClickhouseMigrationLock:
     """The lock ``migrate`` holds for its whole run: one ephemeral node of ClickHouse Keeper per
     database, ``/hare/migrations/<database>/migrate`` - a second ``migrate`` waits until the first
-    one's session ends, the server deleting the node with it, also when the process dies."""
+    one's session ends, the server deleting the node with it, also when the process dies. The database's
+    name is written escaped (``get_database_path()``), so no name reaches into another database's node."""
 
     def __init__(self, addresses: tuple[tuple[str, int], ...], database: str, connect_timeout: float) -> None:
         """
@@ -27,9 +30,23 @@ class ClickhouseMigrationLock:
             connect_timeout: Seconds a server may take to open the session.
         """
         self.addresses = addresses
-        self.path = f"{KEEPER_MIGRATION_LOCKS_PATH}/{database}/{KEEPER_MIGRATION_LOCK_NAME}"
+        self.path = f"{ClickhouseMigrationLock.get_database_path(database)}/{KEEPER_MIGRATION_LOCK_NAME}"
         self.connect_timeout = connect_timeout
         self.session: KeeperSession | None = None
+
+    @staticmethod
+    def get_database_path(database: str) -> str:
+        """The node a database's migration lock is taken under - its name with each byte but a letter, a
+        digit and ``_.-~`` written as ``%XX``: a ``/`` of the name would put the node under another
+        database's, ``a/migrate`` under the lock of ``a``.
+
+        Args:
+            database: The database.
+
+        Returns:
+            ``/hare/migrations/<escaped database>``.
+        """
+        return f"{KEEPER_MIGRATION_LOCKS_PATH}/{urllib.parse.quote(database, safe='')}"
 
     @staticmethod
     def get_addresses(keeper_hosts: str) -> tuple[tuple[str, int], ...]:

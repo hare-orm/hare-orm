@@ -11,6 +11,8 @@ from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 
+REQUIRES = ("opentelemetry",)
+
 
 @pytest.fixture
 def exporter():

@@ -434,6 +434,7 @@ async def test_values_path_into_non_json_field_raises(rows):
         await TypedRow.objects.all().values_list("name__first")
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("zone", ["UTC", "Asia/Tokyo"])
 async def test_json_object_naive_timestamp_is_its_wall_clock(zone):

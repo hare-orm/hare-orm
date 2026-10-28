@@ -319,8 +319,11 @@ class ModelState:
         meta = model._meta
         options: dict[str, Any] = {}
         if meta.indexes:
+            # A migration operation's model has no relations bound - its foreign keys have no columns yet; its
+            # indexes are resolved once the state renders the models (StateRendering).
+            resolves_expressions = not getattr(model, "__migration_state__", False)
             for index in meta.indexes:
-                if isinstance(index, Index) and index.expressions:
+                if resolves_expressions and isinstance(index, Index) and index.expressions:
                     # State diffing only sees ModelState snapshots, with no model class to resolve
                     # an index's expressions against - resolved here, while the model exists.
                     index.get_expressions(model)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Generator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
 from hare.cli.config_locator import ConfigLocator
+from hare.contrib.application_lifecycle import ApplicationLifecycle
 from hare.contrib.pytest.constants import (
     CONTEXT_FIXTURE_NAMES,
     DEFAULT_TEST_DB_URL,
@@ -81,6 +83,40 @@ class HareFixtures:
         finally:
             await truncate_all_models(context=hare_database)
             HareContext.current_context.reset(token)
+
+    @pytest_asyncio.fixture(loop_scope="session")
+    async def hare_app_db(self, hare_db: HareContext) -> AsyncGenerator[HareContext]:
+        """The test's context - its writes rolled back - for the application under test, started in the
+        test and running in its event loop (Litestar's ``AsyncTestClient``, an httpx ASGI client of
+        FastAPI, taskiq's ``InMemoryBroker``): the application takes it instead of opening its
+        configuration's databases."""
+        with HareFixtures.as_application_context(hare_db):
+            yield hare_db
+
+    @pytest_asyncio.fixture(loop_scope="session")
+    async def hare_app_transactional_db(self, hare_transactional_db: HareContext) -> AsyncGenerator[HareContext]:
+        """The test's context - its writes committed, the tables emptied after the test - for an
+        application running in an event loop or thread of its own (Robyn's ``TestClient``): the
+        isolating transaction of the test's loop can't hold its queries."""
+        with HareFixtures.as_application_context(hare_transactional_db):
+            yield hare_transactional_db
+
+    @staticmethod
+    @contextmanager
+    def as_application_context(context: HareContext) -> Generator[None]:
+        """Makes a test's context the one an application started in the block takes.
+
+        Args:
+            context: The test's context.
+        """
+        ApplicationLifecycle.test_context = context
+        try:
+            yield
+        finally:
+            ApplicationLifecycle.test_context = None
+            # An application the test left running gives the context back with the test.
+            ApplicationLifecycle.test_context_applications.clear()
+            HareContext.clear_global_if(context)
 
     @pytest.fixture
     def hare_assert_query_count(self) -> Callable[..., Any]:

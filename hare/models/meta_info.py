@@ -944,6 +944,7 @@ class MetaInfo:
         ModelDefinitionChecks.validate_distinct_columns(self)
         ModelDefinitionChecks.validate_triggers_fire_on_a_table(self)
         ModelDefinitionChecks.check_index_expressions(self)
+        ModelDefinitionChecks.validate_declarations_read_model_columns(self)
         ModelDefinitionChecks.validate_soft_delete_field(self)
         ModelDefinitionChecks.validate_tenant_field(self)
         ModelDefinitionChecks.validate_schema(self)

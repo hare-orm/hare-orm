@@ -8,11 +8,8 @@ import contextlib
 from typing import Any, Literal, get_args
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
 
 from hare import Connections
-from hare.contrib.pydantic import pydantic_model_creator
-from hare.contrib.request_query import FilterField, InvalidRequestQuery, RequestQuery
 from hare.exceptions import FieldError, IntegrityError, NoValuesFetched, QueryError, ValidationError
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.models.tenancy.tenancy import Tenancy
@@ -291,7 +288,7 @@ async def test_the_type_is_read_and_ordered(db_generic_fk):
     assert [row["target__type"] for row in rows] == ["post", "post", "photo", "article_version", "photo"]
     assert await Comment.objects.order_by("target__type", "id").values_list("id", flat=True) == [4, 3, 5, 1, 2]
     assert await Comment.objects.order_by("-target__type", "id").values_list("id", flat=True) == [1, 2, 3, 5, 4]
-    assert await Comment.objects.filter(target__type="photo").values_list("id", "target__type") == [
+    assert sorted(await Comment.objects.filter(target__type="photo").values_list("id", "target__type")) == [
         (3, "photo"),
         (5, "photo"),
     ]
@@ -403,8 +400,11 @@ async def test_a_unique_constraint_naming_the_field_is_one_per_branch(db_generic
             await Like.objects.create(id=3, author=author, target=post)
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_pydantic_output_is_a_union_told_apart_by_type(db_generic_fk):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     first_post, _second_post, photo, version = await make_comments()
     schema = pydantic_model_creator(Comment)
     assert "post" not in schema.model_fields and "post_id" not in schema.model_fields
@@ -421,8 +421,13 @@ async def test_pydantic_output_is_a_union_told_apart_by_type(db_generic_fk):
         schema.model_validate(await Comment.objects.get(id=1))
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_pydantic_input_takes_the_type_and_the_key(db_generic_fk):
+    from pydantic import ValidationError as PydanticValidationError
+
+    from hare.contrib.pydantic import pydantic_model_creator
+
     _first_post, second_post, _photo, version = await make_targets()
     schema = pydantic_model_creator(Comment, exclude_readonly=True)
     payload = schema.model_validate({"target": {"type": "post", "id": second_post.id}})
@@ -441,9 +446,12 @@ async def test_pydantic_input_takes_the_type_and_the_key(db_generic_fk):
     assert serialized["target"] == {"type": "post", "id": second_post.id}
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_a_schema_leaving_out_or_naming_the_field_leaves_out_or_keeps_its_branches(db_generic_fk):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     without_target = pydantic_model_creator(Comment, exclude=("target",), name="CommentWithoutTarget")
     assert set(without_target.model_fields) == {"id", "text"}
     only_target = pydantic_model_creator(Comment, include=("id", "target"), name="CommentOnlyTarget")
@@ -475,18 +483,22 @@ async def test_a_soft_deleted_or_tenant_hidden_target_is_hidden_as_through_a_for
         assert await (await Mention.objects.select_related("mentioned").get(id=2)).mentioned == shop
 
 
-class CommentRequestQuery(RequestQuery[Comment]):
-    class Meta:
-        queryset = Comment.objects.all()
-        filters = (
-            FilterField("target", lookups=(Lookup.EXACT, Lookup.IN, Lookup.ISNULL)),
-            FilterField("target__type", lookups=(Lookup.EXACT, Lookup.IN, Lookup.NOT)),
-        )
-        pagination = None
-
-
+@pytest.mark.requires("request-query")
 @pytest.mark.asyncio
 async def test_request_query_filters_by_target_and_type(db_generic_fk):
+    from pydantic import ValidationError as PydanticValidationError
+
+    from hare.contrib.request_query import FilterField, InvalidRequestQuery, RequestQuery
+
+    class CommentRequestQuery(RequestQuery[Comment]):
+        class Meta:
+            queryset = Comment.objects.all()
+            filters = (
+                FilterField("target", lookups=(Lookup.EXACT, Lookup.IN, Lookup.ISNULL)),
+                FilterField("target__type", lookups=(Lookup.EXACT, Lookup.IN, Lookup.NOT)),
+            )
+            pagination = None
+
     await make_comments()
     CommentRequestQuery.prepare_parameters()
     fields_by_name = CommentRequestQuery.model_fields
@@ -523,11 +535,14 @@ async def test_a_loaded_relation_with_no_branch_set_reads_none_as_a_foreign_key_
     assert reaction.subject is None
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_a_schema_of_a_generic_foreign_key_is_built_once(db_generic_fk):
     """The discriminator of the union was a new function each time, its address part of the schema's
     hash: every call built a new class - and so did the schema of each target, reached backwards."""
+    from hare.contrib.pydantic import pydantic_model_creator
+
     for options in ({}, {"exclude_readonly": True}, {"relations_as_ids": True}):
         assert pydantic_model_creator(Comment, **options) is pydantic_model_creator(Comment, **options)
     assert pydantic_model_creator(Post) is pydantic_model_creator(Post)

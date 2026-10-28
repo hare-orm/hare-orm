@@ -91,7 +91,8 @@ help:
 	@echo  "    test_clickhouse_matrix_up / test_clickhouse_matrix_down  Starts / removes a ClickHouse server per matrix version (ports 3YYMM, 4YYMM, 6YYMM)"
 	@echo  "    test_clickhouse_cluster_matrix_up / test_clickhouse_cluster_matrix_down  Starts / removes a ClickHouse cluster per matrix version (ports 5YYMM, 2YYMM)"
 	@echo  "    test_brokers_matrix_up / test_brokers_matrix_down  Starts / removes Redis, RabbitMQ and Kafka of each matrix version (ports 16XYY, 15XYY, 19XYY)"
-	@echo  "    matrix_venvs       Creates .venv-3.12/.venv-3.13/.venv-3.14 with every dependency group"
+	@echo  "    matrix_venvs       Creates the virtualenvs of the matrix runs MATRIX_OPTIONS choose - .venv-<python>-<environment>[-<driver extra>]"
+	@echo  "    test_environment   Runs the tests of ENVIRONMENT (tests/matrix SUITE_ENVIRONMENTS) on HARE_TEST_DB in its virtualenv"
 	@echo  "    sqlite_versions    Downloads and prepares the matrix SQLite versions for each matrix Python"
 	@echo  "    spatialite         Downloads SpatiaLite for the SpatiaLite tests (Windows) and prints their variables"
 	@echo  "    test_clickhouse_up / test_clickhouse_down  Starts / removes the ClickHouse test server (ports 8124, 9124)"
@@ -103,8 +104,8 @@ help:
 	@echo  "    test_lowest_dependencies  Runs the suite in .venv-lowest on SQLite and Postgres via both drivers"
 	@echo  "    build_native       Builds rust.native (the rust_pg driver, row codecs) for this OS into rust/ (needs a Rust toolchain)"
 	@echo  "    build_native_linux Builds the Linux rust.native of every matrix Python into rust/ in Docker"
-	@echo  "    build_native_windows Builds the Windows rust.native of every matrix Python (.venv-3.X) into rust/"
-	@echo  "    build_native_macos Builds the macOS rust.native (universal2) of every matrix Python (.venv-3.X) into rust/"
+	@echo  "    build_native_windows Builds the Windows rust.native of every matrix Python (.venv-3.X-core) into rust/"
+	@echo  "    build_native_macos Builds the macOS rust.native (universal2) of every matrix Python (.venv-3.X-core) into rust/"
 	@echo  "    rust_check         Runs cargo fmt --check, clippy and the Rust unit tests"
 	@echo  "    test_postgres_rust Runs the test suite against Postgres via the rust_pg driver"
 	@echo  "    testall / ci       Runs check + test_database_independent, test_sqlite, test_postgres_asyncpg"
@@ -116,7 +117,7 @@ up:
 	poetry lock
 
 deps:
-	poetry install --extras asyncpg --extras opentelemetry $(options)
+	poetry install --all-extras --with pyright-cli,pytz $(options)
 
 
 # check/style/lint/codeqc are pure code-quality checks (formatting, types, security) - none of
@@ -264,10 +265,11 @@ test_clickhouse_up:
 test_clickhouse_down:
 	docker rm -f $(clickhouse_container)
 
-# Over both drivers: clickhouse-connect on the HTTP interface, clickhouse-driver on the native protocol.
+# Over both drivers: clickhouse-connect on the HTTP interface, clickhouse-driver on the native protocol. The
+# connections name the server's Keeper, so a test database's key series are deleted with it.
 test_clickhouse:
-	$(py_warn) $(test_db_env)="clickhouse+clickhouse-connect://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:8124/test_\{\}" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
-	$(py_warn) $(test_db_env)="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9124/test_\{\}" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
+	$(py_warn) $(test_db_env)="clickhouse+clickhouse-connect://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:8124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/contracts tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
+	$(py_warn) $(test_db_env)="clickhouse+clickhouse-driver://default:$(HARE_CLICKHOUSE_PASS)@127.0.0.1:9124/test_\{\}?keeper_hosts=127.0.0.1:9182" poetry run pytest $(pytest_postgres_opts) tests/dialects/clickhouse tests/contracts tests/fields/value_types/test_ordered_values.py tests/fields/value_types/test_ip_address_text_lookups.py tests/fields/value_types/test_ip_address_zones.py
 
 # The ClickHouse test cluster (tests/docker/clickhouse_cluster): two servers on a network of their own,
 # one shard of two replicas (hare_replicated) and two shards (hare_sharded), the first server the
@@ -297,9 +299,11 @@ test_clickhouse_cluster:
 # Kafka hare supports. Each server's port is made of its version's digits - tests/matrix/matrix_ports.py.
 #
 # Each CI test job runs one part of it through these same targets, the variables narrowed on the
-# command line: `make matrix_venvs matrix_python_versions=3.13 matrix_interpreter=<its python>`,
-# `make sqlite_versions matrix_python_versions=3.13`, `make test_db_matrix_up
-# matrix_postgres_versions=16`, `make test_matrix MATRIX_OPTIONS="--python 3.13 --suite asyncpg-16"`.
+# command line: `make matrix_venvs MATRIX_OPTIONS="--python 3.13 --suite asyncpg-16"
+# matrix_interpreter=<its python>`, `make sqlite_versions matrix_python_versions=3.13`, `make
+# test_db_matrix_up matrix_postgres_versions=16`, `make test_matrix MATRIX_OPTIONS="--python 3.13 --suite
+# asyncpg-16"`. Every run has the tests of one environment of tests/matrix SUITE_ENVIRONMENTS - the
+# extras its tests require, nothing else optional - in a virtualenv of its own.
 matrix_python_versions = 3.12 3.13 3.14
 matrix_postgres_versions = 14 15 16 17 18
 # Each minor version from the oldest hare supports.
@@ -323,9 +327,10 @@ matrix_kafka_images = 3.9=apache/kafka:3.9.2 4.3=apache/kafka:4.3.1
 # for the newest one.
 matrix_sqlite_versions =
 # The interpreter matrix_venvs creates the virtualenvs from - empty for `py -X.Y` on Windows and
-# `pythonX.Y` elsewhere; a path only makes sense with one version in matrix_python_versions.
+# `pythonX.Y` elsewhere; a path only makes sense with one --python in MATRIX_OPTIONS.
 matrix_interpreter =
-# Options of tests/matrix/matrix_runner.py: --python, --suite, --workers, --print-failed-logs, --newest.
+# Options of tests/matrix/matrix_runner.py: --python, --suite, --environment, --workers, --jobs,
+# --print-failed-logs, --newest.
 MATRIX_OPTIONS ?=
 
 test_db_matrix_up:
@@ -452,23 +457,27 @@ test_brokers_matrix_down:
 	for version in $(matrix_rabbitmq_versions); do docker rm -f hare-orm-test-rabbitmq-$$version; done
 	for version in $(matrix_kafka_versions); do docker rm -f hare-orm-test-kafka-$$version; done
 
-# One virtualenv per Python of the matrix, with every dependency group - `py -X.Y` on Windows,
-# `pythonX.Y` elsewhere.
+# The virtualenvs of the matrix runs MATRIX_OPTIONS choose, one per Python, environment and database
+# driver - `py -X.Y` on Windows, `pythonX.Y` elsewhere, matrix_interpreter when given.
 matrix_venvs:
-	for version in $(matrix_python_versions); do \
-		if [ -n "$(matrix_interpreter)" ]; then "$(matrix_interpreter)" -m venv .venv-$$version; \
-		elif command -v py >/dev/null 2>&1; then py -$$version -m venv .venv-$$version; \
-		else python$$version -m venv .venv-$$version; fi || exit 1; \
-		VIRTUAL_ENV="$(CURDIR)/.venv-$$version" poetry install --all-groups --extras asyncpg --extras opentelemetry \
-			--extras clickhouse-connect --extras clickhouse-driver || exit 1; \
-	done
+	poetry run python -m tests.matrix.matrix_runner --virtualenvs $(MATRIX_OPTIONS) \
+		$(if $(matrix_interpreter),--interpreter "$(matrix_interpreter)")
+
+# The tests of one environment on HARE_TEST_DB: `make test_environment ENVIRONMENT=litestar
+# HARE_TEST_DB=postgresql://...` - its virtualenv .venv-<ENVIRONMENT_PYTHON>-<ENVIRONMENT>[-<driver extra>]
+# made first (matrix_venvs).
+ENVIRONMENT ?= core
+ENVIRONMENT_PYTHON ?= 3.14
+test_environment:
+	poetry run python -m tests.matrix.environment_run $(ENVIRONMENT_PYTHON) $(ENVIRONMENT) $(pytest_opts)
 
 # The SQLite versions of the matrix, prepared for each matrix Python - the run fails when a Python
-# would still load another SQLite with the prepared environment.
+# would still load another SQLite with the prepared environment. Run by the virtualenv of the `all`
+# environment, which every SQLite suite has.
 sqlite_versions:
 	for version in $(matrix_python_versions); do \
-		if [ -x .venv-$$version/Scripts/python.exe ]; then python=.venv-$$version/Scripts/python.exe; \
-		else python=.venv-$$version/bin/python; fi; \
+		if [ -x .venv-$$version-all/Scripts/python.exe ]; then python=.venv-$$version-all/Scripts/python.exe; \
+		else python=.venv-$$version-all/bin/python; fi; \
 		$$python -m tests.sqlite_versions.download_sqlite_versions $(matrix_sqlite_versions) || exit 1; \
 	done
 
@@ -476,8 +485,8 @@ sqlite_versions:
 # environment variables pointing the tests at it (CI appends them to $GITHUB_ENV). Linux and macOS
 # install it from their packages.
 spatialite:
-	@python=.venv-$(firstword $(matrix_python_versions))/Scripts/python.exe; \
-	if [ ! -x $$python ]; then python=.venv-$(firstword $(matrix_python_versions))/bin/python; fi; \
+	@python=.venv-$(firstword $(matrix_python_versions))-core/Scripts/python.exe; \
+	if [ ! -x $$python ]; then python=.venv-$(firstword $(matrix_python_versions))-core/bin/python; fi; \
 	$$python -m tests.spatialite.download_spatialite
 
 test_matrix:
@@ -536,7 +545,7 @@ build_native_linux:
 
 # The interpreters build_native_windows and build_native_macos build for - the .venv-<version> of
 # every matrix Python; CI passes the runner's own Pythons.
-native_interpreters ?= $(foreach version,$(matrix_python_versions),.venv-$(version)/$(if $(filter Windows_NT,$(OS)),Scripts/python.exe,bin/python))
+native_interpreters ?= $(foreach version,$(matrix_python_versions),.venv-$(version)-core/$(if $(filter Windows_NT,$(OS)),Scripts/python.exe,bin/python))
 
 # The Windows extension of every matrix Python (rust/native.cp3XX-win_amd64.pyd) - what CI's Windows
 # jobs run. Only the Windows files are replaced; the Linux and macOS ones stay. A build `maturin

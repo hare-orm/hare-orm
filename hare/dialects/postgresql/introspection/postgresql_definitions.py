@@ -15,6 +15,8 @@ from hare.dialects.postgresql.constants import (
     POSTGRES_FUNCTION_BODY_WRAPPER_RE,
     POSTGRES_FUNCTIONDEF_RE,
     POSTGRES_TRIGGERDEF_RE,
+    POSTGRES_VARCHAR_IN_LIST_ITEM_RE,
+    POSTGRES_VARCHAR_IN_LIST_RE,
     POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE,
 )
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
@@ -91,9 +93,31 @@ class PostgresqlDefinitions:
             return None
         # Postgres wraps the whole predicate in one more pair of parentheses than it was declared
         # with - "CHECK ((age >= 0))" for a declared "age >= 0".
+        expression = SchemaIntrospector.strip_outer_parentheses(match.group("expression")) or ""
         return CheckConstraint(
-            name=name, check=RawSQLTerm(SchemaIntrospector.strip_outer_parentheses(match.group("expression")) or "")
+            name=name, check=RawSQLTerm(PostgresqlDefinitions.get_in_list_sql(expression) or expression)
         )
+
+    @staticmethod
+    def get_in_list_sql(expression: str) -> str | None:
+        """The IN list a CHECK's predicate over a varchar column was declared as - the predicate an enum field's
+        CHECK writes: Postgres reads it back as ``(value)::text = ANY (...)``, a text it gives otherwise once
+        declared again, so drift would find the declaration of that text another one.
+
+        Args:
+            expression: The predicate as Postgres gives it.
+
+        Returns:
+            ``column IN ('a', ...)``, None for another predicate.
+        """
+        match = POSTGRES_VARCHAR_IN_LIST_RE.match(expression)
+        if match is None:
+            return None
+        items = match.group("cast_items") or match.group("items") or ""
+        values = [item.group("value") for item in POSTGRES_VARCHAR_IN_LIST_ITEM_RE.finditer(items)]
+        if not values or POSTGRES_VARCHAR_IN_LIST_ITEM_RE.sub("", items).replace(", ", ""):
+            return None
+        return f"{match.group('column')} IN ({', '.join(f"'{value}'" for value in values)})"
 
     @staticmethod
     def parse_trigger(name: str, trigger_def: str, function_def: str) -> Trigger | None:

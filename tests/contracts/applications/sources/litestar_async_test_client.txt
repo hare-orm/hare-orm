@@ -1,0 +1,18 @@
+from litestar import Litestar, post
+from litestar.testing import AsyncTestClient
+
+from hare.contrib.frameworks.litestar import HarePlugin
+from plugin_models import Note
+
+
+@post("/notes/{note_id:int}", status_code=201)
+async def create_note(note_id: int) -> None:
+    await Note.objects.create(id=note_id, text="written by the application")
+
+
+application = Litestar([create_note], plugins=[HarePlugin("plugin_settings.HARE_ORM")])
+
+
+async def write_through_application(note_id):
+    async with AsyncTestClient(app=application) as client:
+        assert (await client.post(f"/notes/{note_id}")).status_code == 201

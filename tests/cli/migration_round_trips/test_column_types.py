@@ -244,6 +244,7 @@ async def test_an_array_takes_the_type_and_the_extension_of_what_it_holds(projec
     await project.cli_ok("migrate", "app", "zero")
 
 
+@pytest.mark.requires("encryption")
 @pytest.mark.asyncio
 async def test_a_blind_index_added_to_an_encrypted_field_round_trips(project_factory) -> None:
     """The migration wrote the blind index as fields.BlindIndexField, which hare.fields didn't export - the
@@ -272,6 +273,7 @@ async def test_a_blind_index_added_to_an_encrypted_field_round_trips(project_fac
         FieldEncryption.reset()
 
 
+@pytest.mark.requires("encryption")
 @pytest.mark.asyncio
 async def test_a_text_field_with_rows_becomes_an_encrypted_field_with_a_blind_index(project_factory) -> None:
     """SQLite rebuilt the table copying the blind index column from the old table, which had none yet."""

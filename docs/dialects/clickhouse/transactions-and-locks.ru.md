@@ -17,7 +17,8 @@ config = {
 С `transactions=true` `Transactions.atomic()` выполняет транзакцию ClickHouse. Сервер должен работать с
 ClickHouse Keeper и включённой `allow_experimental_transactions`: подключение проверяет это при открытии
 командами `BEGIN TRANSACTION` и `ROLLBACK`, а иначе даёт `ConfigurationError`. Без `transactions=true`
-`atomic()` даёт `UnSupportedError`.
+`atomic()` даёт `UnSupportedError`. `Transactions.autonomous()` с параметром (`isolation`, `read_only`, ...)
+тоже выполняет транзакцию — на своём новом соединении, с откатом, если блок бросает исключение.
 
 ```python
 async with Transactions.atomic():
@@ -66,5 +67,6 @@ ClickHouse не блокирует строк: `select_for_update()` даёт `U
 и вне её, — и так же `RowChanges.get_for_update()` запроса из запроса API. Запись не может дождаться
 окончания другой: два `update()` одной строки применяются оба, и остаются значения более поздней мутации.
 
-ClickHouse Keeper (`keeper_hosts`) хранит только [блокировку миграций](../../migrations/migrations.ru.md#migration-lock)
-`migrate`; hare сам говорит с ним по протоколу ZooKeeper — библиотека для этого не ставится.
+ClickHouse Keeper (`keeper_hosts`) хранит [блокировку миграций](../../migrations/migrations.ru.md#migration-lock)
+`migrate`, а удаление базы (`db_delete()`) удаляет её узлы там — [серии её ключей](models.ru.md#keys) и узел её
+блокировки; hare сам говорит с ним по протоколу ZooKeeper — библиотека для этого не ставится.

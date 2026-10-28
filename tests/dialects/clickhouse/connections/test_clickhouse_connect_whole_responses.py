@@ -5,9 +5,6 @@ import datetime
 import os
 
 import pytest
-
-pytest.importorskip("clickhouse_connect")
-
 from clickhouse_connect.driver.external import ExternalData  # noqa: E402
 
 from hare import Connections  # noqa: E402
@@ -17,6 +14,8 @@ from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_conne
 from hare.dialects.clickhouse.drivers.clickhouse_connect.constants import (  # noqa: E402
     CLICKHOUSE_CONNECT_INLINE_PARSE_MAX_BYTES,
 )
+
+REQUIRES = ("clickhouse-connect",)
 
 
 @pytest.fixture

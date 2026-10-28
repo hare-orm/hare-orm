@@ -16,8 +16,10 @@ from hare.migrations.migration import Migration
 from hare.migrations.operations import AlterField, CreateModel
 from hare.migrations.state.state import State
 from hare.query.expressions import F
-from tests.fields.models_encrypted import EncryptedDocumentRecord, EncryptedWebhookSettings
+from tests.fields.models_encrypted import EncryptedDocumentRecord
 from tests.utils.operations import apply_operations
+
+REQUIRES = ("encryption",)
 
 SECRET_KEY = "test-field-encryption-secret"
 NEW_SECRET_KEY = "test-field-encryption-secret-2"
@@ -50,10 +52,10 @@ def field_encryption_key():
     FieldEncryption.reset()
 
 
-async def fetch_raw_document(record_id: int, column: str) -> Any:
+async def fetch_raw_document(record_id: int, column: str, table: str = "encrypted_document_record") -> Any:
     connection = Connections.get("models")
     literals = connection.dialect.literals
-    quoted_table = literals.quote_identifier("encrypted_document_record")
+    quoted_table = literals.quote_identifier(table)
     rows = await connection.execute_dicts(
         f"SELECT {literals.quote_identifier(column)} AS stored FROM {quoted_table} WHERE id = {record_id}"
     )
@@ -174,19 +176,6 @@ async def test_key_lookups_need_plaintext_keys(db_encrypted_fields):
 
 
 @pytest.mark.asyncio
-async def test_a_declared_type_of_any_root_is_restored(db_encrypted_fields):
-    settings = [EncryptedWebhookSettings(url="https://a.example", retries=1), {"url": "https://b.example"}]
-    record = await EncryptedDocumentRecord.objects.create(id=1, settings_list=settings)
-    fetched = await EncryptedDocumentRecord.objects.get(id=record.id)
-    assert fetched.settings_list == [
-        EncryptedWebhookSettings(url="https://a.example", retries=1),
-        EncryptedWebhookSettings(url="https://b.example", retries=3),
-    ]
-    stored = await fetch_raw_document(record.id, "settings_list")
-    assert all(set(item) and all(key.startswith("gAAAAA") for key in item) for item in stored)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("column", ["plain_keys", "encrypted_keys"])
 async def test_a_wrong_key_or_a_plain_stored_value_raises_decryption_error(db_encrypted_fields, column):
     await EncryptedDocumentRecord.objects.create(id=1, **{column: {"a": ["b", 1]}})
@@ -220,9 +209,6 @@ async def test_ciphertext_is_copied_only_between_fields_storing_it_the_same_way(
         await EncryptedDocumentRecord.objects.filter(id=1).update(encrypted_keys=F("plain_keys"))
     with pytest.raises(FieldError, match="same encrypt_keys"):
         await EncryptedDocumentRecord.objects.filter(id=1).update(plain_keys=F("encrypted_keys"))
-    await EncryptedDocumentRecord.objects.filter(id=1).update(settings_list=F("encrypted_keys"))
-    stored = await fetch_raw_document(1, "settings_list")
-    assert decrypt_stored_document(stored, decrypts_keys=True) == {"b": "c"}
 
 
 @pytest.mark.database_independent

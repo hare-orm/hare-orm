@@ -6,6 +6,8 @@ import pytest
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_hstore_codec import AsyncpgHstoreCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_tsvector_codec import AsyncpgTsvectorCodec
 
+REQUIRES = ("asyncpg",)
+
 #: tsvector input -> the text PostgreSQL prints of it.
 TSVECTOR_TEXTS = {
     "": "",

@@ -177,7 +177,7 @@ class ModelColumns:
                 lines.append(f"    _setattr(self, {model_field!r}, {value})")
         if meta.track_dirty_fields:
             namespace["_snapshot_dirty_fields"] = DirtyFields.snapshot_dirty_fields
-            lines.append("    DirtyFields.snapshot_dirty_fields(self)")
+            lines.append("    _snapshot_dirty_fields(self)")
         lines.append("    return self")
         source = "def _hydrate(row, timezone_context, connection_alias):\n" + "\n".join(lines)
         exec(source, namespace)  # nosec B102 - model-derived source, no external input

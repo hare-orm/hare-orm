@@ -14,8 +14,6 @@ from decimal import Decimal
 from enum import IntEnum, StrEnum
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict
-
 from hare import fields, prefetch_related_objects
 from hare.contrib.versioning.versioned_model import VersionedModel
 from hare.ddl.constraints import UniqueConstraint
@@ -36,15 +34,6 @@ from hare.query.queryset import QuerySet
 
 def generate_token():
     return binascii.hexlify(os.urandom(16)).decode("ascii")
-
-
-class TestSchemaForJSONField(BaseModel):
-    foo: int
-    bar: str
-    __test__ = False
-
-
-json_pydantic_default = TestSchemaForJSONField(foo=1, bar="baz")
 
 
 class Author(Model):
@@ -405,11 +394,6 @@ class JSONFields(Model):
 
     # From Python 3.10 onwards, validator can be defined with staticmethod
     data_validate = fields.JSONField[dict | list](null=True, validators=[raise_if_not_dict_or_list])
-
-    # Test cases where generics are provided and the type is a pydantic base model
-    data_pydantic = fields.JSONField[TestSchemaForJSONField](
-        default=json_pydantic_default, field_type=TestSchemaForJSONField
-    )
 
     # Test cases where encoders are provided
     data_decimal = fields.JSONField[dict | list](null=True, encoder=DecimalEncoder.dumps)
@@ -1107,14 +1091,6 @@ class VersionedDocumentWithAuthor(VersionedModel):
     author: fields.ForeignKeyRelation[Author] = fields.ForeignKeyField(
         "models.Author", related_name="versioned_documents"
     )
-
-
-class JSONFieldsDeclaredType(Model):
-    """JSONFields whose field_type is a pydantic model and a list of them."""
-
-    id = fields.IntField(primary_key=True)
-    item = fields.JSONField[TestSchemaForJSONField](field_type=TestSchemaForJSONField, null=True)
-    items = fields.JSONField[list[TestSchemaForJSONField]](field_type=list[TestSchemaForJSONField], null=True)
 
 
 class VersionedDocumentWithReviewer(VersionedModel):
@@ -2396,34 +2372,6 @@ class Pair(Model):
 class OldStyleModel(Model):
     id = fields.IntField(primary_key=True)
     external_id = fields.IntField(db_index=True)
-
-
-def camelize_var(var_name: str):
-    var_parts: list[str] = var_name.split("_")
-    return var_parts[0] + "".join([part.title() for part in var_parts[1:]])
-
-
-class CamelCaseAliasPerson(Model):
-    """CamelCaseAliasPerson model.
-
-    - A model that generates camelized aliases automatically by
-        configuring config_class.
-    """
-
-    id = fields.IntField(primary_key=True)
-    first_name = fields.CharField(max_length=255)
-    last_name = fields.CharField(max_length=255)
-    full_address = fields.TextField(null=True)
-
-    class PydanticMeta:
-        """Defines the default config for pydantic model generator."""
-
-        model_config = ConfigDict(
-            title="My custom title",
-            extra="ignore",
-            alias_generator=camelize_var,
-            populate_by_name=True,
-        )
 
 
 def callable_default() -> str:

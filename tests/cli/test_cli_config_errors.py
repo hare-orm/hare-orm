@@ -57,9 +57,10 @@ class {name}(Model):
     [
         ('{"engine": "hare.dialects.nosuch", "credentials": {}}', "Unknown database engine 'hare.dialects.nosuch'"),
         ('{"engine": "sqlite+aiosqlite", "credentials": {}}', "needs a non-empty file_path"),
-        (
-            '{"engine": "postgresql+asyncpg", "credentials": {"port": "abc"}}',
+        pytest.param(
+            '{"engine": "postgresql", "credentials": {"port": "abc"}}',
             "port must be a whole number",
+            marks=pytest.mark.requires("native"),
         ),
         (
             '"sqlite+aiosqlite://:memory:?jurnal_mode=WAL"',
@@ -119,6 +120,7 @@ async def test_a_configuration_module_failing_as_it_is_imported_exits_cleanly(tm
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.requires("mypy")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_stubs_into_a_path_that_is_a_file_exit_cleanly(tmp_path, monkeypatch):

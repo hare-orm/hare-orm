@@ -33,7 +33,7 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | Column | Meaning |
 |---|---|
 | `sequence` | The primary key, a `BIGINT` the database generates — the order the relay delivers in |
-| `id` | The event's `UUID` — what a receiver deduplicates on |
+| `id` | The event's `UUID` — what a receiver deduplicates on; a version 7 UUID (`Uuid7.new`), time-ordered |
 | `topic` | Up to 255 characters — deliveries route on it |
 | `payload` | A JSON value |
 | `headers` | A JSON object — metadata besides the payload (a trace context, the author of a change), carried into the headers of a Kafka, RabbitMQ or HTTP message |
@@ -78,8 +78,9 @@ a captured change. Besides JSON's own values it writes an explicit table:
 | an enum member | its value |
 
 Any other value raises `ValidationError` (its cause a `TypeError`) when the event is written — it never
-quietly becomes its `str()`. A float NaN or infinity of `enqueue()` raises `ValidationError` too: JSON
-has no number for it.
+quietly becomes its `str()`. A float NaN or infinity of `enqueue()` raises `ValidationError` too, at any
+depth of the payload: JSON has no number for it, and the event is never written as text no JSON reader
+reads.
 
 ## <a id="enqueue"></a>`enqueue()`
 
@@ -156,6 +157,42 @@ A subclass with columns of its own (a relation to what the event is about, a ten
 `extra_field_values=`. The tenant comes from the active `Tenancy.scope()` or from these values — an
 explicit tenant is accepted without an active scope, as `create()` accepts it.
 
+### <a id="enqueue-many"></a>Several events: `enqueue_many()`
+
+```python
+class OutboxEvent(Model):
+    @classmethod
+    async def enqueue_many(
+        cls,
+        messages: Iterable[OutboxMessage],
+        *,
+        using: str | DatabaseClient | None = None,
+        wakeup: OutboxWakeup | None = None,
+    ) -> list[Self]: ...
+```
+
+```python
+from hare.contrib.outbox import OutboxMessage
+
+await WebhookOutboxEvent.enqueue_many(
+    OutboxMessage(event_topic, payload, extra_field_values={"webhook": webhook}) for webhook in subscriptions
+)
+```
+
+`OutboxMessage(topic, payload, idempotency_key=None, ordering_key=None, headers=None,
+extra_field_values=None)` takes what `enqueue()` takes for one event, checked the same way. The events
+are written in one transaction — a savepoint of the caller's — with an `INSERT` per run of consecutive
+messages alike (with an idempotency key or without, of one tenant named in `extra_field_values` where no
+tenant scope is active), in the order given, so the events of an ordering key are delivered in that
+order. The call returns the events in that order: for an idempotency key already stored, or given twice,
+the event stored under it — read for all such keys in one `SELECT`. The wakeup signals once, for the
+topics of the events written.
+
+The keys are taken in the order of the messages, which is the events' order, so two concurrent calls
+naming the same keys in other orders can deadlock on PostgreSQL: one of them raises
+`TransactionRetryError` — retry it (`Transactions.atomic(retries=...)`), or give shared keys in one
+order.
+
 ## <a id="change-capture"></a>Capturing a model's changes: `ChangeCapture`
 
 ```python
@@ -183,15 +220,17 @@ Every ORM write of the model writes an outbox event per changed row, **in the wr
 | `insert_from()`, `merge()` | each row written |
 | the links of a many-to-many relation | the rows of a `through=Model` model declaring `change_capture`, inserted and deleted |
 
-Raw SQL isn't captured. An auto-generated through table has no model, so declare a through model to
-capture the links of a relation. A write outside a transaction opens one around itself and its events —
-only for a captured model; on a database without transactions the events are written right after the
-write, and a `bulk_create()` failing or cancelled after some of its batches captures the rows they left.
-There a cancelled write of a captured model — and a delete whose `on_delete` hare carries out — runs to
-its end with its events, and the cancel is raised after them. A `bulk_update()` of a captured model writes
-every batch in that one transaction (an error leaves none of them, whatever `batch_size`; on a database
-without transactions the batches written before it are captured), except for a stale object: the other
-rows and their events are written, and `StaleObjectError` is raised after them.
+Raw SQL isn't captured. An auto-generated through table has no model, so declare a through model to capture
+the links of a relation. A write outside a transaction opens one around itself and its events — only for a
+captured model — and one inside a transaction a savepoint: an event failing after its row is written undoes
+the write, also when the caller catches the error and goes on in the transaction; on a database without
+transactions the events are written right after the write, and a `bulk_create()` failing or cancelled after
+some of its batches captures the rows they left. There a cancelled write of a captured model — and a delete
+whose `on_delete` hare carries out — runs to its end with its events, and the cancel is raised after them. A
+`bulk_update()` of a captured model writes every batch in that one transaction (an error leaves none of
+them, whatever `batch_size`; on a database without transactions the batches written before it are captured),
+except for a stale object: the other rows and their events are written, and `StaleObjectError` is raised
+after them.
 
 `Meta.change_capture` takes any `ChangeSink` (`hare.instrumentation.capture`); `ChangeCapture` is the one
 writing an outbox. A sink of your own implements `get_written_models()` — the models it writes, each on
@@ -213,7 +252,13 @@ class ChangeCapture:
         topic: KeyDeclaration = "{app}.{model}.{operation}",
         ordering_key: KeyDeclaration | None = "{label}:{pk}",
         extend: Callable[[CapturedChange], ChangeExtension | None | Awaitable[ChangeExtension | None]] | None = None,
+        extend_many: Callable[
+            [list[CapturedChange]],
+            Sequence[ChangeExtension | None] | Awaitable[Sequence[ChangeExtension | None]],
+        ] | None = None,
     ) -> None: ...
+
+    def replace(self, **options: Any) -> Self: ...
 ```
 
 | Argument | Meaning |
@@ -226,6 +271,7 @@ class ChangeCapture:
 | `topic` | A template of `{app}`, `{model}`, `{table}` and `{operation}` (`inserted`, `updated`, `deleted`), or a function of the change. By default `"{app}.{model}.{operation}"` in lower case — `library.loan.updated` |
 | `ordering_key` | A template of `{label}` (`library.Loan`), `{pk}` (a composite key's parts joined by `:`), `{app}`, `{model}` and `{table}`, or a function of the change — see [`ordering_key`](#ordering-key) |
 | `extend` | A function of the change — sync or async — giving a `ChangeExtension` or `None`; it runs at the write, in its transaction |
+| `extend_many` | A function of the changes of one write statement giving the extension of each — see [`extend_many`](#extend-many); not with `extend` |
 
 <a id="ordering-key"></a>**`ordering_key`.** A template of `{label}` (`library.Loan`), `{pk}` (a
 composite key's parts joined by `:`), `{app}`, `{model}` and `{table}`, or a function of the change; the
@@ -239,6 +285,20 @@ written in the table, a template naming something else, `BEFORE_AND_AFTER` witho
 `Meta.track_dirty_fields`, an abstract outbox, an outbox capturing changes itself. Declared on an
 abstract base model, it captures every model built on it — each under its own name — so one declaration
 covers a service.
+
+<a id="change-capture-replace"></a>**`replace(**options)`** gives a copy with other options and the same
+outbox — for a model refining the capture of its base:
+
+```python
+class Account(CapturedModel):
+    class Meta(CapturedModel.Meta):
+        change_capture = CapturedModel.Meta.change_capture.replace(exclude=("token",))
+```
+
+It takes the constructor's options besides `outbox` (another name — `TypeError`) and checks their values
+as the constructor does. `fields` replaces `exclude` and the other way round, `extend` replaces
+`extend_many` and the other way round. The copy is of the capture's class, with the attributes of a
+subclass of `ChangeCapture` kept; the capture copied is not changed.
 
 A topic is the model's label, not its table: it is unique across apps and connections, the same in
 migrations and generic relations, and tells nothing of the storage (a tenant's schema, partitions).
@@ -269,7 +329,23 @@ version the write adds itself; `null` when not known and for an insert or delete
 | `AFTER` | `after` — the row as the write left it; for a delete, `before` — the row as it was |
 | `BEFORE_AND_AFTER` | both; `before` is `null` for an insert, `after` for a delete |
 
-A float of the row JSON has no number for is written as its text: `"Infinity"`, `"-Infinity"`, `"NaN"`.
+Each value of `before` and `after` is its field's JSON form - `Field.get_json_value()`:
+
+| Field | In the event |
+|---|---|
+| `FloatField`, `Float32Field`, a float inside any container or `VectorField` | a number; NaN or infinity as its text, `"NaN"`, `"Infinity"`, `"-Infinity"` |
+| `DecimalField`, `UUIDField`, dates and times, `TimeDeltaField`, IP fields, `BinaryField`, enum fields | as in the table above |
+| `ArrayField`, `TupleField` | a list, each element in its element field's form |
+| `NestedField` | a list of objects, each value in its element field's form |
+| `MapField` | a list of `[key, value]` pairs - a key needn't be text (`UUID`, a date, a tuple) |
+| `JSONField` with `field_type` | the value as pydantic writes it as JSON (`model_dump(mode="json")`) |
+| `RangeField` and its subclasses | `{"lower", "upper", "lower_inc", "upper_inc", "is_empty"}` - the mapping the field reads back, bounds as above |
+| `MultiRangeField` and its subclasses | a list of such mappings |
+| `GeometryField` and its subclasses (`PointField`, ...) | its GeoJSON geometry object, which the field reads back — coordinates in the field's `srid`; GeoJSON (RFC 7946) names no coordinate system |
+| `LowCardinalityField` | its base field's form |
+
+A field of your own whose values JSON has no form for gives its own `get_json_value()` - see [Writing
+your own field](../models/field-types.md#writing-your-own-field).
 
 What each mode adds to a write:
 
@@ -329,6 +405,23 @@ class CapturedModel(Model):
 | `headers` | The event's headers |
 | `extra_field_values` | Columns of the outbox model besides `OutboxEvent`'s own |
 
+<a id="extend-many"></a>**`extend_many`** — for an extension read from the database: a function of the
+changes of one write statement — sync or async — giving the `ChangeExtension` (or `None`) of each, in
+their order. It is called once per statement of each model — a `bulk_create`, an `update()`, a batch of
+`bulk_update`, a `MERGE`, a cascade's delete of one model — where `extend` is called per row, so one
+query serves every row of the statement. Another number of extensions than changes fails the write with
+`ValidationError`; each extension is checked as one of `extend`. Not with `extend`
+(`ConfigurationError`).
+
+```python
+async def add_recipients(changes):
+    recipients = await get_recipients_of(change.pk for change in changes)
+    return [ChangeExtension(payload={"recipients": recipients[change.pk]}) for change in changes]
+
+
+change_capture = ChangeCapture(MyOutboxEvent, extend_many=add_recipients)
+```
+
 The change — `CapturedChange` (`hare.contrib.outbox`) — has `model`, `operation`, `pk`, `changed`,
 `before`, `after`, `occurred_at` and `tenant` (the row's `Meta.tenant_field`). When the outbox model has
 a tenant field too, it is the row's tenant unless `extra_field_values` sets it. A model of
@@ -351,6 +444,7 @@ relay = OutboxRelay(
     delivery_timeout_seconds=30.0,
     concurrency=10,
     topics=None,
+    exclude_topics=(),
     wakeup=None,                       # the model's Meta.outbox_wakeup by default
     name=None,                         # host:pid:random by default
 )
@@ -397,7 +491,16 @@ events the relay polls again at once, else it waits for a wakeup signal or `poll
 lease and retry times are the relays' clocks.
 
 `topics` limits the relay to those topics' events — claimed, delivered, counted and cleaned up — so
-relays of different topics share one table.
+relays of different topics share one table; `exclude_topics` leaves those topics to other relays. Each
+takes topic names and prefix patterns ending in `*`: `"library.*"` is every topic starting with
+`library.` (`_` and `%` in it are plain characters). A `*` or `?` anywhere else in a pattern raises
+`ConfigurationError`. A wakeup naming topics wakes the relay when one of them is the relay's. The
+changes of a model and the tasks of [`TaskiqDelivery`](taskiq.md) in one outbox, each by its relay:
+
+```python
+change_relay = OutboxRelay(MyOutboxEvent, KafkaDelivery("localhost:9092"), exclude_topics=["taskiq"])
+task_relay = TaskiqDelivery(broker, model=MyOutboxEvent).get_relay()   # topics=["taskiq"]
+```
 
 ### <a id="dead-letters"></a>Dead letters, backlog and cleanup
 
@@ -407,6 +510,7 @@ it is retried or removed:
 ```python
 await relay.retry_dead_lettered()                       # every one
 await relay.retry_dead_lettered(topics=["library.loan.updated"], ids=[event_id])
+await relay.retry_dead_lettered(topics=["library.*"])      # the same patterns as topics=
 await relay.cleanup_dead_lettered(older_than=timedelta(days=30))
 await relay.cleanup_published(older_than=timedelta(days=7))
 ```
@@ -448,19 +552,20 @@ row, given up with an ERROR — the relay keeps polling.
 
 | Wakeup | Extra | How |
 |---|---|---|
-| `InProcessWakeup()` | — | the relays of the same process, right after the commit |
+| `InProcessWakeup()` | — | the relays of the same process, right after the commit — each on its own event loop, also for a write of another thread |
 | `ListenNotifyWakeup(channel="hare_outbox")` | — | a `NOTIFY` per topic in the events' transaction — PostgreSQL delivers it on commit; the relays `LISTEN` through a [`NotificationListener`](../dialects/postgresql/listen-notify.md) |
 | `RedisWakeup(url, channel=...)` or `RedisWakeup(client=...)` | `redis` | pub/sub |
 | `KafkaWakeup(bootstrap_servers, topic=..., create_topic=True, replication_factor=1)` | `kafka` | a topic of signals each relay reads from the end, outside any consumer group; created keeping signals for a minute |
 | `RabbitMQWakeup(url, exchange=...)` | `rabbitmq` | a fanout exchange, an exclusive auto-deleted queue per relay |
 
 On a connection without `LISTEN`/`NOTIFY` (`Features.supports_listen_notify` off) a write signalling a
-`ListenNotifyWakeup` raises `ConfigurationError`, and a relay listening `UnSupportedError` — leave the outbox
-without it there, its relays poll.
+`ListenNotifyWakeup` raises `ConfigurationError` before any event is written, and a relay listening
+`UnSupportedError` — leave the outbox without it there, its relays poll.
 
 A wakeup of your own subclasses `OutboxWakeup`: `signal(topics)` sends a signal,
 `listen(connection_alias)` listens until cancelled and gives each signal to `dispatch(topics)`, `close()`
-releases what they opened.
+releases what they opened; `raise_if_unsupported(connection)` refuses a connection it can't signal on,
+before the events are written.
 
 ## <a id="deliveries"></a>Deliveries
 
@@ -478,8 +583,57 @@ built-in deliveries send them.
 | `KafkaDelivery(bootstrap_servers, topic=None)` or `KafkaDelivery(producer=...)` | `kafka` | to `topic` or the event's topic, keyed by the ordering key — one key's events stay in one partition; a batch sent at once, `acks="all"` |
 | `RabbitMQDelivery(url, exchange="", routing_key=None)` | `rabbitmq` | persistent messages through an existing exchange (the default one when empty), the routing key the event's topic by default; each confirmed by the broker (publisher confirms) |
 | `RedisStreamsDelivery(url, stream=None, max_length=None)` or `(client=...)` | `redis` | an `XADD` to `stream` or the event's topic — the event's id, topic, ordering key, headers and payload as JSON; a batch through one pipeline, streams trimmed to `max_length` |
-| `WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)` | `http` | a `POST`; with `secret`, `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; header values as UTF-8 bytes; any status other than 2xx fails the event |
+| [`WebhookDelivery(url, secret=None, timeout_seconds=10, headers=None)`](#webhookdelivery) or `(target=...)` | `http` | a `POST`; with a secret, `hare-outbox-signature: sha256=<HMAC-SHA256 of the body>`; header values as UTF-8 bytes; any status other than 2xx fails the event, a redirect is not followed |
 | [`TaskiqDelivery`](taskiq.md#kiq-on-commit) | `taskiq` | a taskiq task |
+
+### <a id="webhookdelivery"></a>`WebhookDelivery` of subscribers
+
+```python
+class WebhookDelivery(OutboxDelivery):
+    def __init__(
+        self,
+        url: str | None = None,
+        *,
+        target: Callable[[OutboxEvent], WebhookTarget | Awaitable[WebhookTarget]] | None = None,
+        secret: str | bytes | None = None,
+        timeout_seconds: float = 10.0,
+        headers: Mapping[str, str] | None = None,
+        allows_url: Callable[[str], bool | Awaitable[bool]] | None = None,
+        signature_header: str = "hare-outbox-signature",
+        result_field: str | None = None,
+    ) -> None: ...
+```
+
+| Argument | Meaning |
+|---|---|
+| `url` | The endpoint of every event, signed with `secret` — or `target` |
+| `target` | A function of the event — sync or async — giving its `WebhookTarget(url, secret=None, headers={})`: the endpoint, the key of the signature and the headers of the event's subscriber. Its secret is the target's — not with `secret` (`ConfigurationError`) |
+| `headers` | Headers of every request; a target's headers and the event's own go over them |
+| `allows_url` | A function of a URL — sync or async — refusing it with `False`, called before every request: an event of a refused URL is not sent, fails and is tried again like any failure — for a check against requests to the service's own network. A redirect is never followed, so the URL checked is the one requested |
+| `signature_header` | The header the signature `sha256=<HMAC-SHA256 of the body>` goes in — `hare-outbox-signature` by default, another name for receivers that expect their own (`X-Webhook-Signature`) |
+| `result_field` | A field of the outbox model — a `JSONField` of your subclass — each attempt's result is written to: `{"status_code", "body", "error"}`; the body and the error cut to 4000 characters (`WEBHOOK_RESULT_BODY_MAX_LENGTH`), a NUL character written as U+FFFD (PostgreSQL's JSON holds none); the status and the body `None` without an answer |
+
+Neither or both of `url` and `target` raise `ConfigurationError`.
+
+```python
+from hare.contrib.outbox import WebhookDelivery, WebhookTarget
+
+
+class SubscriberOutboxEvent(OutboxEvent):
+    subscription = fields.ForeignKeyField("app.Subscription", on_delete=OnDelete.CASCADE)
+    webhook_result = fields.JSONField(null=True)
+
+    class Meta(OutboxEvent.Meta):
+        pass
+
+
+async def get_target(event):
+    subscription = await event.subscription
+    return WebhookTarget(subscription.url, subscription.secret)
+
+
+delivery = WebhookDelivery(target=get_target, allows_url=is_public_url, result_field="webhook_result")
+```
 
 ### <a id="topicrouter"></a>`TopicRouter`
 

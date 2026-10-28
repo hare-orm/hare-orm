@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Self, cast
-from uuid import uuid4
 
 from hare import fields
 from hare.contrib.versioning.constants import NEW_VERSION_EXCLUDED_FIELDS_META_OPTION
 from hare.exceptions import DoesNotExist, IncompleteInstanceError, QueryError
 from hare.fields.composite_primary_key import CompositePrimaryKey
+from hare.fields.uuid7 import Uuid7
 from hare.models import Model
 from hare.models.class_building.extension_model_options import ExtensionModelOptions
 from hare.query.expressions import Q
@@ -34,7 +34,7 @@ class VersionedModel(Model):
                 new_version_excluded_fields = ("single_use_token",)
     """
 
-    id = fields.UUIDField(default=uuid4, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True)
     version = fields.PositiveSmallIntField(default=1)
 
     pk = CompositePrimaryKey("id", "version")
@@ -68,6 +68,31 @@ class VersionedModel(Model):
                 raise exception()
             raise DoesNotExist(cls)
         return cast("Self", obj)
+
+    @classmethod
+    async def get_last_visible_version_or_exception(
+        cls, *args: Q, exception: type[Exception] | None = None, **kwargs: Any
+    ) -> Self:
+        """
+        Returns the highest-``version`` row of those the model's manager shows - soft-deleted versions
+        hidden, the tenant scope applied - unlike ``get_last_version_or_exception()``, which sees every
+        version to build the next one.
+
+        Args:
+            exception: Exception class to raise if no match is found. Defaults to
+                ``hare.exceptions.DoesNotExist``.
+            args: ``Q`` filters, ANDed together.
+            kwargs: Field filters.
+
+        Raises:
+            DoesNotExist: No visible version matches - or ``exception`` when given.
+        """
+        obj = await cls.objects.filter(*args, **kwargs).order_by("-version").first()
+        if not obj:
+            if exception:
+                raise exception()
+            raise DoesNotExist(cls)
+        return obj
 
     def get_new_version(self, **kwargs: Any) -> Self:
         """

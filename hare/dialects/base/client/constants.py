@@ -34,3 +34,10 @@ UNENCODABLE_SURROGATE_MESSAGE = (
 DISCARDED_CLIENT_MESSAGE = (
     "The connection {alias!r} was closed and dropped - a query runs on the connection the context gives now"
 )
+#: The refusal of a statement of a transaction from another event loop, on a driver whose connections
+#: belong to the loop they were opened on.
+TRANSACTION_ON_ANOTHER_EVENT_LOOP_MESSAGE = (
+    "The transaction on {alias!r} began on another event loop, and the connections of its driver belong to "
+    "the loop they were opened on - run its statements on that loop. An application under test running in an "
+    "event loop of its own takes the pytest plugin's hare_app_transactional_db"
+)

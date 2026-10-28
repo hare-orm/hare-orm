@@ -123,6 +123,7 @@ pip install hare-orm[encryption]     # EncryptedTextField / EncryptedJSONField (
 pip install hare-orm[fastapi]        # also: litestar, robyn, request-query, taskiq
 pip install hare-orm[kafka]          # outbox delivery; also: rabbitmq, redis, http
 pip install hare-orm[opentelemetry]  # an OpenTelemetry span around every query
+pip install hare-orm[pydantic]       # JSONField(field_type=...) and pydantic models; also: yaml, faker
 pip install hare-orm[pytest]         # the pytest plugin; also: mypy, pyright
 pip install hare-orm[ipython]        # `hare shell` with IPython
 ```

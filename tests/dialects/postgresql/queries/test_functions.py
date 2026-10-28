@@ -383,6 +383,7 @@ async def test_string_agg_of_a_non_text_field(db_agg):
     assert sorted(rows[0]["distinct_ratings"].split(",")) == ["8", "9"]
 
 
+@pytest.mark.requires("tzlocal")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_extract_and_trunc_of_a_naive_datetime_agree_with_the_day_lookup(db_agg):

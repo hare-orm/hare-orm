@@ -1,7 +1,6 @@
 """Vector columns and similarity search on SQLite: VectorField stored as sqlite-vec's float32 BLOB,
 L2Distance/CosineDistance/InnerProduct and ``__nearby`` through the sqlite-vec extension
-(``load_sqlite_vec=True``). The tests needing the extension skip where the sqlite-vec package
-isn't installed."""
+(``load_sqlite_vec=True``) - the tests needing the extension in the environment installing sqlite-vec."""
 
 import math
 from array import array
@@ -20,10 +19,7 @@ from tests.dialects.sqlite.models_vector import SqliteVectorEntry
 
 MODULES = ["tests.dialects.sqlite.models_vector"]
 SQLITE_TYPES = DialectRegistry.get_dialect("sqlite").types
-VECTOR_EXTENSION_INSTALLED = SqliteVectorExtension.sqlite_vec_module is not None
-requires_sqlite_vec = pytest.mark.skipif(
-    not VECTOR_EXTENSION_INSTALLED, reason="the sqlite-vec package isn't installed"
-)
+requires_sqlite_vec = pytest.mark.requires("sqlite-vec")
 
 
 @pytest_asyncio.fixture(scope="module")

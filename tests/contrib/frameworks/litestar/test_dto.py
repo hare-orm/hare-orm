@@ -13,6 +13,8 @@ from hare import Hare
 from hare.contrib.frameworks.litestar import HareDTO, HarePlugin
 from tests.contrib.frameworks.models import Badge, Chapter, Draft, Memo, Tag, Writer
 
+REQUIRES = ("litestar",)
+
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {

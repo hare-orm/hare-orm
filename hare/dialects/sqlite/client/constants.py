@@ -91,8 +91,6 @@ SQLITE_SPATIAL_METADATA_OPTION = ConnectionOption(
 #: The interactive client ``hare dbshell`` opens.
 SQLITE_SHELL_PROGRAM = "sqlite3"
 
-#: How a file name names an in-memory database - no other program can open one.
-SQLITE_IN_MEMORY_URI_MARKERS = (":memory:", "mode=memory")
 
 #: The file beside a database whose OS lock ``migrate`` holds for its whole run - SQLite's own sidecar
 #: files (``-journal``, ``-wal``) are named so too.

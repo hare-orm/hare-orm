@@ -225,6 +225,21 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         QueryCtes.apply_with_ctes(self)
         return filter_criterion or None
 
+    def _get_stored_key(self, obj: TModel, pk_fields: Sequence[Field[Any]], pk_names: Sequence[str]) -> Any:
+        """An object's primary key as the database stores it - as ``_read_returned_keys()`` gives a row's: a
+        tuple for a composite key.
+
+        Args:
+            obj: The object.
+            pk_fields: The key's fields.
+            pk_names: Their attribute names.
+
+        Returns:
+            The key.
+        """
+        stored_key = ReturnedValues.get_stored_key(self.dialect.types, pk_fields, pk_names, obj)
+        return stored_key if len(stored_key) > 1 else stored_key[0]
+
     def _get_returning_columns(self, pk_columns: list[str]) -> list[str]:
         """The columns the UPDATE returns: the primary key - the rows come in no order - and, with
         returning=True, the generated columns. The key alone is returned for a model with an
@@ -772,6 +787,13 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
                     if updated_pk_values is None
                     else list(map(updated_pk_values.__contains__, map(get_key, objects_item)))
                 )
+                if updated_pk_values is not None and not all(is_written):
+                    # A key a field writes otherwise (an email's domain in lower case) is in the rows as stored.
+                    is_written = [
+                        written
+                        or self._get_stored_key(obj, pk_field_objs, primary_key_attribute_names) in updated_pk_values
+                        for obj, written in zip(objects_item, is_written, strict=True)
+                    ]
                 written_objects = list(compress(objects_item, is_written))
                 unwritten_objects = list(compress(objects_item, map(not_, is_written)))
                 self._unwritten_objects.extend(unwritten_objects)
