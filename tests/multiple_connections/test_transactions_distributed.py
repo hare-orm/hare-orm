@@ -15,9 +15,9 @@ from hare.contrib.test import ReusableTestDatabases
 from hare.core.connections.connections import Connections
 from hare.core.hare_context import HareContext
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
+from hare.dialects.postgresql.client.constants import POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.exceptions import (
     ConfigurationError,
     DistributedTransactionCommitAmbiguousError,
@@ -284,7 +284,7 @@ async def test_an_empty_coordinator_alias_is_the_default_connection(distributed_
 
     assert await _widget_count(COORDINATOR) == 1
     assert await _widget_count(PARTICIPANT_A) == 1
-    assert await Connections.get(PARTICIPANT_A).execute_dicts("SELECT gid FROM pg_prepared_xacts") == []
+    assert await Connections.get(PARTICIPANT_A).execute_dicts(POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL) == []
 
 
 @pytest.mark.parametrize("participant", ["", None])
@@ -296,7 +296,7 @@ async def test_a_participant_alias_naming_the_coordinator_is_refused(distributed
         async with Transactions.distributed(coordinator=COORDINATOR, participants=[participant]):
             pass
 
-    assert await Connections.get(COORDINATOR).execute_dicts("SELECT gid FROM pg_prepared_xacts") == []
+    assert await Connections.get(COORDINATOR).execute_dicts(POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL) == []
 
 
 @pytest.mark.asyncio
@@ -977,6 +977,7 @@ async def test_distributed_participant_on_rollback_callback_can_query_its_own_al
     assert await _widget_count(PARTICIPANT_A) == 1
 
 
+@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_distributed_rust_pg_participant_connection_is_released_after_commit(distributed_dbs) -> None:
     """rust_pg-only regression guard: PREPARE TRANSACTION ends the SQL-level transaction but,
@@ -985,6 +986,8 @@ async def test_distributed_rust_pg_participant_connection_is_released_after_comm
     pool. Without RustPgTransactionContext.__aexit__ explicitly releasing it afterward (via the
     Rust-side finish_prepared()), every successful Transactions.distributed() call permanently
     leaked each participant's pooled connection."""
+    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
+
     participant_client = Connections.get(PARTICIPANT_A)
     if not isinstance(participant_client, RustPgClient):
         pytest.skip(

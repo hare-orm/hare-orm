@@ -144,3 +144,10 @@ app = HareFastAPI(hare_config=HARE_CONFIG, health_routes=HealthRoutes(HealthChec
 
 Какие маршруты готовности и работоспособности он добавляет — см.
 [Веб-фреймворки](web-frameworks.ru.md#health-routes).
+
+## <a id="tests"></a>Тесты
+
+С pytest-плагином hare тестируемое приложение работает на тестовых базах: запущенное в цикле событий теста
+(его lifespan, с клиентом httpx и `ASGITransport`), под `hare_app_db` оно берёт контекст теста, и его
+записи откатываются вместе с записями теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests).
+`TestClient` из Starlette запускает приложение в своём потоке — с ним берите `hare_app_transactional_db`.

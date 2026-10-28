@@ -54,7 +54,9 @@ as an ordering —
 NULL placement are the same index as `fields=("a",)`/`("-a",)`. SQLite indexes can't place NULLs (they
 keep them first ascending, last descending), and ClickHouse's keep no key direction at all: a model
 declaring such an index raises `ConfigurationError` when it is bound to its connection (`Hare.init()`),
-before `makemigrations` writes a migration no `migrate` could apply.
+before `makemigrations` writes a migration no `migrate` could apply. So does an expression reading a
+related model (`Coalesce(F("owner"), 0)`, `Lower("owner__name")`): an index reads its table's own
+columns — name the relation's column, `Coalesce(F("owner_id"), 0)`.
 
 ## <a id="expression-keys"></a>Expression keys
 

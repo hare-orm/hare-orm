@@ -14,6 +14,7 @@ from hare.fields.data.containers.map_field import MapField
 from hare.fields.data.containers.nested_field import NestedField
 from hare.fields.data.containers.tuple_field import TupleField
 from hare.fields.data.json.json_field import JSONField
+from hare.fields.data.json.json_text_field import JSONTextField
 from hare.fields.data.network.ip_address_field import IPAddressField
 from hare.fields.data.network.ipv4_address_field import IPv4AddressField
 from hare.fields.data.numeric.big_int_field import BigIntField
@@ -106,6 +107,7 @@ __all__ = [
     "IPAddressField",
     "IPv4AddressField",
     "JSONField",
+    "JSONTextField",
     "MapField",
     "NestedField",
     "PositiveBigIntField",

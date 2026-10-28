@@ -559,7 +559,8 @@ whole address for the links of a page when the request's `url` isn't it.
 
 `RequestQuery` checks every filter and search lookup against each dialect a driver connects to, so it
 can't use a lookup only one of them runs. A dialect's own request query — `PostgresqlRequestQuery` of
-`hare.dialects.postgresql.request_query`, `SqliteRequestQuery` of `hare.dialects.sqlite.request_query` —
+`hare.dialects.postgresql.request_query`, `SqliteRequestQuery` of `hare.dialects.sqlite.request_query`,
+`ClickhouseRequestQuery` of `hare.dialects.clickhouse.request_query` —
 checks against that dialect only, and requires its model's connection to be of it:
 
 ```python

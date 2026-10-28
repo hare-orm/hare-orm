@@ -87,7 +87,10 @@ with the same message (`tags[0]: Length of 'abcdefg' 7 > 5`).
 
 Value types: a `BinaryField` is carried in JSON as base64 (`model_dump_json()` encodes it,
 `model_validate_json()` decodes it, the schema says `format: base64url`), so arbitrary bytes round-trip;
-pass your own `ser_json_bytes`/`val_json_bytes` in `model_config` to change that. A `JSONField` with a
+pass your own `ser_json_bytes`/`val_json_bytes` in `model_config` to change that. A float JSON has no number
+for — NaN or infinity of a `FloatField`, inside an `ArrayField` too — is written as its text (`"NaN"`,
+`"Infinity"`, as an outbox event holds it) and read back by the schema (`ser_json_inf_nan`). A `JSONField`
+with a
 declared `field_type` gets that type in the schema (`Any` without one). An `IntEnumField`/`CharEnumField`
 is a `$ref` to the enum alone, without the column's numeric range or length constraints.
 

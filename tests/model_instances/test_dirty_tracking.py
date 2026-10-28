@@ -359,11 +359,14 @@ async def test_bulk_create_ignore_conflicts_does_not_snapshot_a_skipped_object_a
     never-persisted data as "already saved" with no way to detect it went unwritten."""
     await DirtyTrackedUnique.objects.create(sku="A1", name="Widget")
     dup = DirtyTrackedUnique(sku="A1", name="Duplicate")
+    new = DirtyTrackedUnique(sku="B1", name="New")
 
-    await DirtyTrackedUnique.objects.bulk_create([dup], ignore_conflicts=True)
+    inserted = await DirtyTrackedUnique.objects.bulk_create([dup, new], ignore_conflicts=True, on_conflict=["sku"])
 
+    assert inserted == [new]
     assert dup.get_dirty_fields() != {}, "skipped by ON CONFLICT DO NOTHING - must not be reported clean"
-    assert await DirtyTrackedUnique.objects.all().count() == 1
+    assert new.get_dirty_fields() == {}
+    assert await DirtyTrackedUnique.objects.all().count() == 2
 
 
 # ============================================================================

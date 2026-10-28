@@ -14,6 +14,8 @@ from hare.exceptions import DBConnectionError, OperationalError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 
+REQUIRES = ("asyncpg",)
+
 
 def _make_client(**overrides):
     kwargs = {

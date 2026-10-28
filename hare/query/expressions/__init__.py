@@ -6,6 +6,7 @@ from hare.query.expressions.arithmetic.combinable_expression import CombinableEx
 from hare.query.expressions.arithmetic.combined_expression import CombinedExpression
 from hare.query.expressions.case.case import Case
 from hare.query.expressions.case.when import When
+from hare.query.expressions.conditions.condition_value import ConditionValue
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.declarations import ConstantExpression
 from hare.query.expressions.enums import ArithmeticOperator
@@ -56,6 +57,7 @@ __all__ = [
     "Aggregate",
     "When",
     "Case",
+    "ConditionValue",
     "Window",
     "WindowFrame",
     "RowRange",

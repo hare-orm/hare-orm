@@ -166,3 +166,10 @@ app = HareRobyn(__file__, hare_config=HARE_CONFIG, health_routes=HealthRoutes(He
 
 Какие маршруты готовности и работоспособности он добавляет — см.
 [Веб-фреймворки](web-frameworks.ru.md#health-routes).
+
+## <a id="tests"></a>Тесты
+
+`TestClient` из Robyn запускает приложение в своём цикле событий — с pytest-плагином hare берите
+`hare_app_transactional_db`: приложение берёт контекст теста, его записи фиксируются, а все таблицы
+очищаются в конце теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests). Нужна
+серверная база или файл SQLite.

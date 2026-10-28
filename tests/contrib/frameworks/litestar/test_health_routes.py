@@ -12,6 +12,8 @@ from hare.contrib.frameworks.litestar import HarePlugin
 from hare.health import HealthCheck
 from tests.contrib.frameworks.health_apps import HEALTHY_CONFIG, AlwaysDegraded, make_unhealthy_config
 
+REQUIRES = ("litestar",)
+
 pytestmark = pytest.mark.sqlite_only
 
 

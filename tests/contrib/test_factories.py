@@ -2,6 +2,7 @@
 related objects, traits, many-to-many links, composite and generic keys, the tenant of the scope."""
 
 import itertools
+import sys
 
 import pytest
 import pytest_asyncio
@@ -200,16 +201,17 @@ def test_a_factory_names_its_model():
         Nameless.build()
 
 
+@pytest.mark.requires("faker")
 @pytest.mark.database_independent
 def test_faker_values():
-    faker_value = Faker("name")
-    try:
-        import faker  # noqa: F401
-    except ModuleNotFoundError:
-        with pytest.raises(ConfigurationError, match="pip install faker"):
-            faker_value.evaluate(0)
-    else:
-        assert isinstance(faker_value.evaluate(0), str)
+    assert isinstance(Faker("name").evaluate(0), str)
+
+
+@pytest.mark.database_independent
+def test_faker_values_need_the_faker_library(monkeypatch):
+    monkeypatch.setitem(sys.modules, "faker", None)
+    with pytest.raises(ConfigurationError, match=r"hare-orm\[faker\]"):
+        Faker("name", locale="xx_NOT_MADE").evaluate(0)
 
 
 @pytest.mark.sqlite_only

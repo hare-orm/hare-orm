@@ -188,7 +188,9 @@ The keys of a config mapping are the fields of these classes: the top level take
 `HareConfig`, a connection written as a mapping those of `ConnectionConfig`, an app those of `AppConfig`,
 the `cli` section those of `CliConfig`. Any other key raises `ConfigurationError` naming the closest
 known key — a misspelt `default_conection` would otherwise leave the app's models on the default
-connection without a word.
+connection without a word. The config itself, its `connections` and `apps` sections and every app
+are mappings, every connection a mapping or a URL: anything else (an empty YAML file, a list) raises
+`ConfigurationError` too.
 
 An unknown `engine` raises `ConfigurationError`, as does a connection parameter the database doesn't
 know: a misspelled credential (`comand_timeout`) is rejected by both PostgreSQL drivers — `rust_pg`

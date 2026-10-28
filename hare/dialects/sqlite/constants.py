@@ -262,6 +262,14 @@ SQLITE_ROW_ID_TYPE = "INTEGER"
 #: The type an IntField column is declared - a column of another key declared INTEGER is the same
 #: column to SQLite, read back as this one.
 SQLITE_INT_TYPE = "INT"
+#: Declared types SQLite stores alike and hare reads as the same field, as hare declares that field - a
+#: DATETIME column of another tool is the column of a DatetimeField, read back as hare writes it.
+SQLITE_COLUMN_TYPE_SYNONYMS = {
+    "DATETIME": "TIMESTAMP",
+    "DOUBLE": "REAL",
+    "DOUBLE PRECISION": "REAL",
+    "FLOAT": "REAL",
+}
 
 #: The table options after the column list of a CREATE TABLE text as ``sqlite_master`` keeps it -
 #: ``WITHOUT ROWID`` and ``STRICT``, comma-separated.

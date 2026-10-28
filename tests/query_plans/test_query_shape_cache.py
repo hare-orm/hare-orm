@@ -3534,10 +3534,10 @@ async def test_fractional_filter_value_after_an_integer_one_of_the_same_shape_is
     for intnum in range(5):
         await IntFields.objects.create(intnum=intnum)
 
-    assert await IntFields.objects.filter(intnum__gt=1).values_list("intnum", flat=True) == [2, 3, 4]
-    assert await IntFields.objects.filter(intnum__gt=2.5).values_list("intnum", flat=True) == [3, 4]
+    assert sorted(await IntFields.objects.filter(intnum__gt=1).values_list("intnum", flat=True)) == [2, 3, 4]
+    assert sorted(await IntFields.objects.filter(intnum__gt=2.5).values_list("intnum", flat=True)) == [3, 4]
     assert await IntFields.objects.filter(intnum__gt=Decimal("3.5")).values_list("intnum", flat=True) == [4]
-    assert await IntFields.objects.filter(intnum__gt=2).values_list("intnum", flat=True) == [3, 4]
+    assert sorted(await IntFields.objects.filter(intnum__gt=2).values_list("intnum", flat=True)) == [3, 4]
     assert await IntFields.objects.filter(intnum=1).values_list("intnum", flat=True) == [1]
     with pytest.raises(ValidationError, match="intnum: expected an int, got float"):
         await IntFields.objects.filter(intnum=2.5).values_list("intnum", flat=True)

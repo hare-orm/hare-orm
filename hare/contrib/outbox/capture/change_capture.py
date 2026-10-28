@@ -1,19 +1,18 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
-import math
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from hare.contrib.outbox.capture.change_extension import ChangeExtension
 from hare.contrib.outbox.capture.constants import (
+    CHANGE_CAPTURE_OPTION_NAMES,
     CHANGE_ENVELOPE_KEYS,
     CHANGE_OPERATION_NAMES,
     DEFAULT_CHANGE_ORDERING_KEY_TEMPLATE,
     DEFAULT_CHANGE_TOPIC_TEMPLATE,
-    NAN_FLOAT_TEXT,
-    NON_FINITE_FLOAT_TEXTS,
 )
 from hare.contrib.outbox.constants import (
     ENQUEUE_ARGUMENT_FIELD_NAMES,
@@ -38,6 +37,11 @@ if TYPE_CHECKING:
 
 #: A topic or ordering key: a template, or a function of the change.
 KeyDeclaration = str | Callable[["CapturedChange"], str | None]
+#: What extend_many takes: a function of the changes of one write giving an extension of each, sync or async.
+ExtendMany = Callable[
+    [list["CapturedChange"]],
+    Sequence[ChangeExtension | None] | Awaitable[Sequence[ChangeExtension | None]],
+]
 
 
 class ChangeCapture(ChangeSink):
@@ -73,9 +77,14 @@ class ChangeCapture(ChangeSink):
             no ordering.
         extend: A function of the change - sync or async - giving a ``ChangeExtension`` to add to
             its event, or None; run at the write, in its transaction.
+        extend_many: A function of the changes of one write statement - sync or async - giving the
+            ``ChangeExtension`` (or None) of each, in their order: one call per statement of each model,
+            where ``extend`` is called per row - for an extension read from the database for many rows at
+            once. Not with ``extend``.
 
     Raises:
-        ConfigurationError: An unknown operation or payload, both ``fields`` and ``exclude``.
+        ConfigurationError: An unknown operation or payload, both ``fields`` and ``exclude``, both
+            ``extend`` and ``extend_many``.
     """
 
     def __init__(
@@ -89,22 +98,86 @@ class ChangeCapture(ChangeSink):
         topic: KeyDeclaration = DEFAULT_CHANGE_TOPIC_TEMPLATE,
         ordering_key: KeyDeclaration | None = DEFAULT_CHANGE_ORDERING_KEY_TEMPLATE,
         extend: Callable[[CapturedChange], ChangeExtension | None | Awaitable[ChangeExtension | None]] | None = None,
+        extend_many: ExtendMany | None = None,
     ) -> None:
-        try:
-            self.operations = frozenset(RowOperation(operation) for operation in operations)
-            self.payload = ChangePayload(payload)
-        except ValueError as error:
-            raise ConfigurationError(f"ChangeCapture: {error}") from None
         if fields is not None and exclude:
             raise ConfigurationError("ChangeCapture takes fields or exclude, not both")
+        if extend is not None and extend_many is not None:
+            raise ConfigurationError("ChangeCapture takes extend or extend_many, not both")
         #: The outbox model as it was given - a label is found as the registry links the models.
         self.outbox_reference = outbox
         self._outbox: type[OutboxEvent] | None = outbox if isinstance(outbox, type) else None
-        self.fields = tuple(fields) if fields is not None else None
-        self.exclude = tuple(exclude)
+        self.operations: frozenset[RowOperation] = self.get_checked_option("operations", operations)
+        self.payload: ChangePayload = self.get_checked_option("payload", payload)
+        self.fields: tuple[str, ...] | None = self.get_checked_option("fields", fields)
+        self.exclude: tuple[str, ...] = self.get_checked_option("exclude", exclude)
         self.topic = topic
         self.ordering_key = ordering_key
         self.extend = extend
+        self.extend_many = extend_many
+
+    @staticmethod
+    def get_checked_option(name: str, value: Any) -> Any:
+        """An option's value as the capture keeps it - checked and normalized.
+
+        Args:
+            name: The option, of ``CHANGE_CAPTURE_OPTION_NAMES``.
+            value: Its value.
+
+        Returns:
+            The value kept.
+
+        Raises:
+            ConfigurationError: An unknown operation or payload.
+        """
+        try:
+            if name == "operations":
+                return frozenset(RowOperation(operation) for operation in value)
+            if name == "payload":
+                return ChangePayload(value)
+        except ValueError as error:
+            raise ConfigurationError(f"ChangeCapture: {error}") from None
+        if name == "fields":
+            return tuple(value) if value is not None else None
+        if name == "exclude":
+            return tuple(value)
+        return value
+
+    def replace(self, **options: Any) -> Self:
+        """A copy with other options and the same outbox - for a model refining the capture of its abstract
+        base: ``change_capture = Base.Meta.change_capture.replace(exclude=("secret",))``. ``fields`` replaces
+        ``exclude`` and the other way round, ``extend`` replaces ``extend_many`` and the other way round; a
+        subclass's own attributes are kept.
+
+        Args:
+            options: Options of the constructor besides ``outbox``.
+
+        Returns:
+            The copy.
+
+        Raises:
+            TypeError: An option the capture doesn't take.
+            ConfigurationError: An option's value, as the constructor refuses it, or both of a pair given.
+        """
+        unknown_names = sorted(set(options) - CHANGE_CAPTURE_OPTION_NAMES)
+        if unknown_names:
+            raise TypeError(f"ChangeCapture.replace() takes no {', '.join(unknown_names)}")
+        if "fields" in options and "exclude" in options and options["fields"] is not None and options["exclude"]:
+            raise ConfigurationError("ChangeCapture takes fields or exclude, not both")
+        if options.get("extend") is not None and options.get("extend_many") is not None:
+            raise ConfigurationError("ChangeCapture takes extend or extend_many, not both")
+        capture = copy.copy(self)
+        if "fields" in options:
+            capture.exclude = ()
+        if "exclude" in options:
+            capture.fields = None
+        if "extend" in options:
+            capture.extend_many = None
+        if "extend_many" in options:
+            capture.extend = None
+        for name, value in options.items():
+            setattr(capture, name, ChangeCapture.get_checked_option(name, value))
+        return capture
 
     @property
     def outbox(self) -> type[OutboxEvent]:
@@ -261,29 +334,56 @@ class ChangeCapture(ChangeSink):
             "changed": list(change.changed) if change.changed is not None else None,
         }
         if self.payload is not ChangePayload.KEYS:
-            envelope["before"] = ChangeCapture.get_row_values(change.before)
-            envelope["after"] = ChangeCapture.get_row_values(change.after)
+            envelope["before"] = ChangeCapture.get_row_values(model, change.before)
+            envelope["after"] = ChangeCapture.get_row_values(model, change.after)
         envelope["occurred_at"] = change.occurred_at
         return envelope
 
     @staticmethod
-    def get_row_values(values: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        """A captured row's values as its event holds them - a float NaN or infinity, which a row
-        holds and JSON has no number for, as its text.
+    def get_row_values(model: type[Model], values: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        """A captured row's values as its event holds them - each in its field's JSON form
+        (``Field.get_json_value()``): a geometry as GeoJSON, a range as its mapping, a float JSON has no
+        number for as its text, at any depth of a container.
 
         Args:
+            model: The row's model.
             values: The row's values by field name, None when not captured.
 
         Returns:
             The values.
+
+        Raises:
+            TypeError: A value has no JSON form.
         """
         if values is None:
             return None
-        row_values = dict(values)
-        for name, value in row_values.items():
-            if type(value) is float and not math.isfinite(value):
-                row_values[name] = NAN_FLOAT_TEXT if math.isnan(value) else NON_FINITE_FLOAT_TEXTS[value]
-        return row_values
+        fields_map = model._meta.fields_map
+        return {name: fields_map[name].get_json_value(value) for name, value in values.items()}
+
+    async def get_extensions(self, model: type[Model], changes: list[CapturedChange]) -> list[ChangeExtension | None]:
+        """What ``extend`` - once per change - or ``extend_many`` - once per write - adds to the changes'
+        events.
+
+        Args:
+            model: The model.
+            changes: The changes of one write statement.
+
+        Returns:
+            The extension of each change, in their order.
+
+        Raises:
+            ValidationError: An extension sets a key of the envelope or a field the outbox sets itself, or
+                extend_many gives another number of extensions than changes.
+        """
+        if self.extend_many is None:
+            return [await self.get_extension(model, change) for change in changes]
+        extensions = self.extend_many(changes)
+        if inspect.isawaitable(extensions):
+            extensions = await extensions
+        extension_list = list(extensions)
+        if len(extension_list) != len(changes):
+            raise ValidationError(f"extend_many gave {len(extension_list)} extensions for {len(changes)} changes")
+        return [ChangeCapture.check_extension(extension) for extension in extension_list]
 
     async def get_extension(self, model: type[Model], change: CapturedChange) -> ChangeExtension | None:
         """What ``extend`` adds to a change's event.
@@ -303,8 +403,25 @@ class ChangeCapture(ChangeSink):
         extension = self.extend(change)
         if inspect.isawaitable(extension):
             extension = await extension
+        return ChangeCapture.check_extension(extension)
+
+    @staticmethod
+    def check_extension(extension: ChangeExtension | None) -> ChangeExtension | None:
+        """An extension, checked.
+
+        Args:
+            extension: The extension, None for none.
+
+        Returns:
+            The extension.
+
+        Raises:
+            ValidationError: It sets a key of the envelope, or a field the outbox sets itself, or its
+                headers aren't a mapping of non-empty text names.
+        """
         if extension is None:
             return None
+        OutboxEvent.validate_headers(extension.headers)
         colliding_keys = sorted(CHANGE_ENVELOPE_KEYS & set(extension.payload or ()))
         if colliding_keys:
             raise ValidationError(f"ChangeExtension.payload can't set the envelope's {', '.join(colliding_keys)}")
@@ -315,6 +432,22 @@ class ChangeCapture(ChangeSink):
             raise ValidationError(f"ChangeExtension.extra_field_values can't set {', '.join(managed_names)}")
         return extension
 
+    def check_connection(self, connection: DatabaseClient) -> None:
+        """Refuses a write whose events the outbox can't take on its connection - before the write runs.
+
+        Args:
+            connection: The connection of the write.
+
+        Raises:
+            ConfigurationError: The outbox's wakeup can't signal on the connection's database.
+            QueryError: The outbox has ``Meta.tenant_schema`` and no single tenant is active.
+        """
+        outbox = self.outbox
+        outbox.raise_if_wakeup_unsupported(connection)
+        if outbox._meta.checks_tenant_client:
+            # The events go on the connection of the captured write - checked as the outbox's own query is.
+            outbox._meta.check_tenant_client(connection)
+
     async def write(self, connection: DatabaseClient, model: type[Model], changes: list[CapturedChange]) -> None:
         """Writes an outbox event of each change, in the transaction of the write.
 
@@ -324,30 +457,29 @@ class ChangeCapture(ChangeSink):
             changes: The changes.
 
         Raises:
-            ValidationError: An extension sets a key of the envelope, or a field the outbox sets itself.
+            ValidationError: An extension sets a key of the envelope or a field the outbox sets itself,
+                extend_many gives another number of extensions than changes, or a topic or ordering key is
+                empty text.
         """
         outbox = self.outbox
         tenant_field = outbox._meta.tenant_field
         events: list[OutboxEvent] = []
-        for change in changes:
+        extensions = await self.get_extensions(model, changes)
+        for change, extension in zip(changes, extensions, strict=True):
             payload = self.get_envelope(model, change)
             headers: dict[str, Any] = {}
             field_values: dict[str, Any] = {}
-            extension = await self.get_extension(model, change)
             if extension is not None:
                 payload.update(extension.payload or {})
                 headers.update(extension.headers or {})
                 field_values.update(extension.extra_field_values or {})
             if tenant_field and tenant_field not in field_values and change.tenant is not None:
                 field_values[tenant_field] = change.tenant
+            topic = self.get_key(self.topic, model, change)
+            ordering_key = self.get_key(self.ordering_key, model, change)
+            OutboxEvent.validate_keys(topic, None, ordering_key)
             events.append(
-                outbox(
-                    topic=self.get_key(self.topic, model, change),
-                    payload=payload,
-                    ordering_key=self.get_key(self.ordering_key, model, change),
-                    headers=headers,
-                    **field_values,
-                )
+                outbox(topic=topic, payload=payload, ordering_key=ordering_key, headers=headers, **field_values)
             )
         # Each event carries the tenant of its row - a write of rows of several tenants (a cascade, an
         # all_tenants() update) writes them all.

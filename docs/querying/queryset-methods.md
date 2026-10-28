@@ -57,7 +57,7 @@ uses the connection (or open transaction) current at that moment.
 | `create(**kwargs)` | `async def` | Creates a row and returns its object — `Model(**kwargs)` saved on the queryset's connection (`Model.objects.using("replica").create(...)`); the queryset's filters don't take part — see [`create()`](#create) |
 | `get_or_create(defaults=None, **kwargs)` | `async def` | The object matching `kwargs` among the queryset's rows, or a new one created from `kwargs` and `defaults` — `(object, created)` — see [`get_or_create()`](#get-or-create) |
 | `update_or_create(defaults=None, create_defaults=None, **kwargs)` | `async def` | Updates the object matching `kwargs` with `defaults`, or creates it with `create_defaults` (`defaults` when not given) — `(object, created)` — see [`update_or_create()`](#update-or-create) |
-| `bulk_create(objects, batch_size=None, *, ignore_conflicts=False, update_fields=None, on_conflict=None, on_conflict_constraint=None, conflict_where=None, returning=None, use_copy=False)` | await | Returns the objects, as given (a generator's too) — the ones a conflict skipped or updated included — see [`bulk_create()`](#bulk-create) |
+| `bulk_create(objects, batch_size=None, *, ignore_conflicts=False, update_fields=None, on_conflict=None, on_conflict_constraint=None, conflict_where=None, returning=None, use_copy=False)` | await | Returns the objects, as given (a generator's too) — the ones an upsert updated included; with `ignore_conflicts=True`, the ones it inserted — see [`bulk_create()`](#bulk-create) |
 | `insert_from(queryset, *, fields)` | await | Writes the rows a queryset selects into the model's table in one `INSERT ... SELECT`, awaiting to the number of rows written. See [Inserting the rows of a query](#insert-from). |
 | `merge(source, *, on)` | await | One `MERGE` matching a list of rows or a queryset to the model's rows and updating, deleting or inserting them branch by branch. See [Merging rows](#merge). |
 | `refresh_materialized_view(name, *, concurrently=False)` | await | Fills a materialized view of `Meta.materialized_views` with the rows of its query again, on the connection the model writes to. See [Materialized views](../models/schema-objects.md#materialized-views). |
@@ -66,7 +66,7 @@ uses the connection (or open transaction) current at that moment.
 | `only(*fields)` | chain | Whitelists fields → a partial model — see [`only()`](#only) |
 | `defer(*fields)` | chain | Blacklists direct fields — a forward relation's name defers its key field(s), as `only()` of it loads them; repeated calls add up. Reading a deferred field raises `NoValuesFetched`, as after `only()`. No `related__field` support. Mutually exclusive with `.only()`. |
 | <code>select&#95;related(&#42;args: str &#124; Select)</code> | chain | JOINs related objects; accepts a string or `Select(relation, extra_condition=Q(...))` — see [`select_related()`](#select-related) |
-| <code>prefetch&#95;related(&#42;args: str &#124; Prefetch)</code> | chain | Separate queries (not a JOIN of the queried rows); accepts a string (including `"a__b"`) or `Prefetch(...)` — see [`prefetch_related()`](#prefetch-related) |
+| <code>prefetch&#95;related(&#42;args: str &#124; Prefetch &#124; None)</code> | chain | Separate queries (not a JOIN of the queried rows); accepts a string (including `"a__b"`) or `Prefetch(...)` — see [`prefetch_related()`](#prefetch-related) |
 | `defer_related(*fields)` | chain | Turns off the automatic preload for relation fields with `lazy=RelationLoadStrategy.JOINED`/`.SELECT`, for this query only. |
 | `include_deleted()` / `only_deleted()` | chain | Soft-deleted rows together with the live ones / the soft-deleted rows alone — instead of the default filter of [`Meta.soft_delete_field`](../soft-delete-versions-tenants/soft-delete.md) — see [`include_deleted()` / `only_deleted()`](#include-deleted-only-deleted) |
 | `all_tenants()` | chain | Every tenant's rows, instead of the default filter of [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.md#all-tenants) — also for the tenant-scoped models the query reaches through relations. Combines with `include_deleted()`/`only_deleted()` in either order. |
@@ -710,6 +710,22 @@ whatever name its constraint has. `conflict_where` (PostgreSQL only) — a `Q` o
 `ON CONFLICT (...) WHERE <conflict_where>` can target it; mutually exclusive with
 `on_conflict_constraint`, requires `on_conflict` to name that index's columns.
 
+<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** gives the objects it inserted, in the order
+given — the ones a conflict skipped are left out, keep the pk they were given and aren't marked saved. The
+statements read their rows back (`RETURNING`, with or without `returning=True`), and each row is matched
+to its object by the `on_conflict` fields, else by the primary key — the values as the fields write them
+(an `EmailField`'s domain in lower case); where the database returns the rows in no order (SQLite), by
+every column written, so objects with no value of the conflict target are told apart too. Objects whose
+keys the database
+generates need `on_conflict=[...]` — without it the call raises `UnSupportedError` before any SQL, as on
+a database without `RETURNING`. Of several objects sharing one conflict key in the call the first is the
+one inserted.
+
+```python
+inserted = await Subscriber.objects.bulk_create(subscribers, ignore_conflicts=True, on_conflict=["email"])
+await notify_new_subscribers(inserted)   # no second query for the rows written
+```
+
 On a database without `INSERT ... ON CONFLICT` (ClickHouse, `Features.supports_insert_conflicts` off),
 `bulk_create()` with `ignore_conflicts`, `update_fields`, `on_conflict` or `on_conflict_constraint`
 raises `UnSupportedError` before any SQL is sent.
@@ -737,7 +753,8 @@ dialect, not just PostgreSQL. No-op on a model with no `GeneratedField`. Same `M
 as `bulk_create()` when left `None`. On a model with `Meta.optimistic_lock_field`, each object's
 in-memory version is bumped (and, with `track_dirty_fields`, its dirty snapshot reset) for every row that
 actually wrote, before raising `StaleObjectError` for any row in that batch that didn't — an object whose
-row the queryset's own `.filter(...)` excludes is simply not updated, not reported as stale — unlike
+row the queryset's own `.filter(...)` excludes is simply not updated, not reported as stale (a sliced
+queryset and one of `.distinct(<fields>)` raise `QueryError`, as on `.update()`) — unlike
 plain `.update()`, this one does check staleness, since it already has each object's loaded version to
 compare against. `fields` must be a non-empty list of field names (a bare string or an empty list raises
 `QueryError`); a repeated name is written once, an unknown one raises `FieldError`, and the primary key
@@ -787,7 +804,7 @@ related rows the condition matches — and so do `count()`, `exists()`, `aggrega
 
 ```python
 class QuerySet:
-    def prefetch_related(self, *args: str | Prefetch) -> Self: ...
+    def prefetch_related(self, *args: str | Prefetch | None) -> Self: ...
 ```
 
 Separate queries (not a JOIN of the queried rows); accepts a string (including `"a__b"`) or
@@ -796,6 +813,10 @@ one query, joined to its through table, when the through table and the related r
 connection, the relation has no `through=` model and a `Prefetch` queryset neither filters by that
 relation nor annotates, `.distinct()`s or prefetches further; otherwise the through table is read in a
 query of its own first.
+
+`count()`, `exists()` and `aggregate()` of a queryset that prefetches raise `QueryError` — they return no
+instances to attach the relations to; `prefetch_related(None)` drops every relation prefetched so far:
+`books.prefetch_related(None).count()`. A request query counts its rows so.
 
 ### <a id="include-deleted-only-deleted"></a>`include_deleted()` / `only_deleted()`
 

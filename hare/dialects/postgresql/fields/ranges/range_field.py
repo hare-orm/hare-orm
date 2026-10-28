@@ -15,6 +15,7 @@ from hare.dialects.postgresql.fields.constants import (
 from hare.exceptions import ValidationError
 from hare.fields import Field
 from hare.fields.data.boolean_field import BooleanField
+from hare.fields.json_values import JsonValues
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions.compatibility.constants import RANGE_VALUE_TYPE
 
@@ -359,6 +360,30 @@ class RangeField(Field[Range[Any]]):
             upper_inc=value.upper_inc,
             is_empty=value.isempty,
         )
+
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - the mapping the field reads back (``RANGE_MAPPING_KEYS``), each
+        bound in its JSON form.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        range_value = self.to_python(value)
+        if range_value is None:
+            return None
+        return {
+            "lower": JsonValues.get_json_value(range_value.lower),
+            "upper": JsonValues.get_json_value(range_value.upper),
+            "lower_inc": range_value.lower_inc,
+            "upper_inc": range_value.upper_inc,
+            "is_empty": range_value.is_empty,
+        }
 
     def to_python(self, value: Any) -> Range[Any] | None:
         # Bounds are coerced and the range canonicalized, so memory holds what a read returns.

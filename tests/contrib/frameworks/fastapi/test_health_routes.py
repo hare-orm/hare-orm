@@ -11,6 +11,9 @@ from hare.contrib.frameworks.health_routes import HealthRoutes
 from hare.health import HealthCheck
 from tests.contrib.frameworks.health_apps import HEALTHY_CONFIG, AlwaysDegraded, make_unhealthy_config
 
+# FastAPI's test client runs on httpx.
+REQUIRES = ("fastapi", "http")
+
 pytestmark = pytest.mark.sqlite_only
 
 

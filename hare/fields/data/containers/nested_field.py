@@ -35,6 +35,26 @@ class NestedField(ArrayField):
         self.element_fields = element_fields
         super().__init__(TupleField(element_fields), **kwargs)
 
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - a list of objects, each value in the JSON form of its element field.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: A value inside it has no JSON form.
+        """
+        if value is None:
+            return None
+        nested_rows = []
+        for element in value:
+            items = element.items() if isinstance(element, Mapping) else zip(self.element_fields, element, strict=True)
+            nested_rows.append({name: self.element_fields[name].get_json_value(item) for name, item in items})
+        return nested_rows
+
     def get_path_transform(self, segment: str) -> tuple[Callable[[Term], Term], Field[Any]] | None:
         """A column of every row as an array (``items__sku``), else what an array reads."""
         # Local import: hare.sql's terms import the fields package.

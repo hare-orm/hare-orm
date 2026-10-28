@@ -140,6 +140,29 @@ async def test_drift_finds_another_granularity_or_argument_of_an_index(clickhous
 
 
 @pytest.mark.asyncio
+async def test_a_bloom_filter_index_written_without_its_argument_is_one_of_the_default(clickhouse_db):
+    """A bloom_filter index of another tool, its false positive share left to ClickHouse's default, was read
+    as one without it - drift reported hare's bloom_filter(0.025) of the same index as another one."""
+    connection = Article._meta.connection
+    state = State()
+    state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
+    await connection.execute_script(
+        "ALTER TABLE article DROP INDEX article_lower_title_idx; "
+        "ALTER TABLE article ADD INDEX article_lower_title_idx lowerUTF8(title) TYPE bloom_filter GRANULARITY 1"
+    )
+    try:
+        drift = await detect_drift(connection, state, ["models"])
+    finally:
+        await connection.execute_script(
+            "ALTER TABLE article DROP INDEX article_lower_title_idx; "
+            "ALTER TABLE article ADD INDEX article_lower_title_idx lowerUTF8(title) TYPE bloom_filter(0.025) "
+            "GRANULARITY 1"
+        )
+
+    assert [operation for operation in drift.operations if getattr(operation, "model_name", "") == "Article"] == []
+
+
+@pytest.mark.asyncio
 async def test_a_check_constraint_refuses_a_row(clickhouse_db):
     with pytest.raises(IntegrityError, match="article_views_counted"):
         await Article.objects.create(id=1, title="t", body="b", views=-1, tags=[])

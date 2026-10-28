@@ -13,6 +13,8 @@ from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.fields.encrypted.field_encryption import FieldEncryption
 
+REQUIRES = ("encryption",)
+
 #: The secret the encrypted fields of the write rules models are encrypted and indexed with.
 WRITE_RULES_SECRET = "write-rules-test-secret"
 

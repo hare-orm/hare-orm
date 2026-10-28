@@ -471,3 +471,67 @@ async def test_a_field_index_declared_in_meta_indexes_too_is_one_index(project_f
     await project.cli_ok("drift", "app")
     await project.cli_ok("migrate")
     await project.assert_in_sync()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key_field", "fallback"),
+    [("IntField(primary_key=True)", "0"), ("UUIDField(primary_key=True)", "uuid.UUID(int=0)")],
+    ids=["integer key", "uuid key"],
+)
+async def test_an_index_of_an_expression_over_a_foreign_key_column_round_trips(project_factory, key_field, fallback):
+    """A NULL-safe unique index over a foreign key's column - Coalesce(F("owner_id"), ...) - failed migrate: the
+    migration's model had no relations bound, so no owner_id column to resolve the expression against."""
+    project = await project_factory()
+    project.write_models(
+        "import uuid\n"
+        "from hare.ddl.indexes import Index\n"
+        "from hare.query.expressions import F\n"
+        "from hare.query.functions import Coalesce\n"
+        + textwrap.dedent(
+            f"""
+            class Owner(Model):
+                id = fields.{key_field}
+            class Item(Model):
+                id = fields.IntField(primary_key=True)
+                owner = fields.ForeignKeyField("app.Owner", related_name="items", null=True)
+                class Meta:
+                    indexes = (Index(Coalesce(F("owner_id"), {fallback}), unique=True, name="uq_item_owner"),)
+            """
+        )
+    )
+    await project.cli_ok("makemigrations")
+    await project.cli_ok("migrate")
+    await project.assert_in_sync()
+    assert "uq_item_owner" in await get_index_names(project, "item")
+    await project.cli_ok("migrate", "app", "zero")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expression", ['Coalesce(F("owner"), 0)', 'Lower("owner__name")'], ids=["relation", "path"])
+async def test_an_index_of_an_expression_through_a_relation_is_refused_before_a_migration(project_factory, expression):
+    """An index expression reading the related table was written into a migration no migrate could apply."""
+    project = await project_factory()
+    project.write_models(
+        "from hare.ddl.indexes import Index\n"
+        "from hare.query.expressions import F\n"
+        "from hare.query.functions import Coalesce, Lower\n"
+        + textwrap.dedent(
+            f"""
+            class Owner(Model):
+                id = fields.IntField(primary_key=True)
+                name = fields.CharField(max_length=20)
+            class Item(Model):
+                id = fields.IntField(primary_key=True)
+                owner = fields.ForeignKeyField("app.Owner", related_name="items", null=True)
+                class Meta:
+                    indexes = (Index({expression}, name="item_owner_expression"),)
+            """
+        )
+    )
+
+    result = await project.cli("makemigrations")
+
+    assert result.exit_code not in (0, None)
+    assert "reads a column of a related model" in result.output
+    assert project.migration_files() == []

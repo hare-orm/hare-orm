@@ -14,10 +14,10 @@ from hare.fields.validators.limits.max_length_validator import MaxLengthValidato
 from hare.fields.validators.limits.max_value_validator import MaxValueValidator
 from hare.fields.validators.limits.min_length_validator import MinLengthValidator
 from hare.fields.validators.limits.min_value_validator import MinValueValidator
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
+
+REQUIRES = ("native",)
 
 pytestmark = [
-    pytest.mark.skipif(HydrateAccelerator.module is None, reason="rust.native isn't built"),
     pytest.mark.database_independent,
 ]
 

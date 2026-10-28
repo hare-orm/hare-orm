@@ -258,6 +258,7 @@ async def test_trunc_to_an_hour_tells_apart_the_two_moments_of_a_repeated_hour(d
         await Moment.objects.filter(id__in=[11, 12]).delete()
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_naive_moment_is_truncated_and_read_in_a_zone_from_the_local_wall_clock():
     """Under use_timezone=False a moment is the system's local wall clock: SQLite truncated it as if
@@ -283,6 +284,7 @@ async def test_a_naive_moment_is_truncated_and_read_in_a_zone_from_the_local_wal
         assert await get_first_value(Extract("at", "hour")) == naive.hour
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_naive_moment_before_1970_is_truncated():
     """SQLite converted the truncated wall clock back with datetime.astimezone(), which raises

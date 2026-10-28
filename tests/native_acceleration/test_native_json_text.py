@@ -6,13 +6,14 @@ import random
 import re
 import struct
 
+import orjson
 import pytest
 
 from hare.fields.data.json.json_codec import JsonCodec
 
-orjson = pytest.importorskip("orjson")
+REQUIRES = ("native",)
+
 pytestmark = [
-    pytest.mark.skipif(JsonCodec.native_encoder is None, reason="rust.native isn't built"),
     pytest.mark.database_independent,
 ]
 

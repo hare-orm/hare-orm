@@ -38,6 +38,8 @@ from tests.contrib.frameworks.litestar.broken_models import Draft
 from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
 
+REQUIRES = ("litestar",)
+
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {

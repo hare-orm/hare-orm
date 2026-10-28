@@ -147,7 +147,9 @@ async def test_a_database_without_table_sample_refuses_it(db):
         (lambda: IntFields.objects.filter(id=1).union(IntFields.objects.filter(id=2)).sample(10), "sample\\(\\)"),
     ],
 )
-def test_a_wrong_argument_is_refused(make, message):
+@pytest.mark.asyncio
+async def test_a_wrong_argument_is_refused(db, make, message):
+    """Without a context the models may not be set up yet - the call was only kept, refused at init."""
     with pytest.raises(QueryError, match=message):
         make()
 

@@ -1,0 +1,25 @@
+import pytest
+from hare.contrib.application_lifecycle import ApplicationLifecycle
+from hare.core.hare_context import HareContext
+from plugin_models import Note
+
+
+@pytest.mark.asyncio
+async def test_1_a_write_through_the_application_is_seen_by_the_test({fixture}):
+    await write_through_application(1)
+    assert await Note.objects.values_list("id", flat=True) == [1]
+    assert ApplicationLifecycle.test_context is {fixture}
+
+
+@pytest.mark.asyncio
+async def test_2_the_write_is_gone_in_the_next_test({fixture}):
+    assert await Note.objects.count() == 0
+
+
+@pytest.mark.asyncio
+async def test_3_stopping_the_application_leaves_the_tests_context_open({fixture}):
+    await write_through_application(2)
+    await write_through_application(3)
+    assert sorted(await Note.objects.values_list("id", flat=True)) == [2, 3]
+    # The stopped application gave the test's context back - it is no global fallback any more.
+    assert HareContext.global_context is None

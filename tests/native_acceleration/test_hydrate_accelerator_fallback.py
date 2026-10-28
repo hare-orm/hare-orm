@@ -130,14 +130,12 @@ async def test_select_error_the_rows_cause_keeps_the_accelerator(db, broken_hydr
     assert HydrateAccelerator.module is fake_hydrate
 
 
+@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_accelerated_select_sets_the_connection_without_a_second_pass(db, monkeypatch):
     """Bug: after rust.hydrate built the objects, a second Python pass walked all of them again
     just to set each one's connection. A build taking connection_alias sets it while building
     them - the compiled Python reader is never asked for."""
-    hydrate = pytest.importorskip("rust.native.rows")
-    if "connection_alias" not in (getattr(hydrate.ModelReader.read, "__text_signature__", None) or ""):
-        pytest.skip("this rust.hydrate build predates connection_alias")
     await IntFields.objects.create(intnum=1)
     await IntFields.objects.create(intnum=2)
 
@@ -152,10 +150,7 @@ async def test_accelerated_select_sets_the_connection_without_a_second_pass(db, 
 
 
 def _accelerator_reads_json_itself() -> bool:
-    hydrate = pytest.importorskip("rust.native.rows")
-    return JsonCodec.orjson is not None and "connection_alias" in (
-        getattr(hydrate.ModelReader.read, "__text_signature__", None) or ""
-    )
+    return JsonCodec.orjson is not None and HydrateAccelerator.module is not None
 
 
 @pytest.mark.asyncio
@@ -187,6 +182,7 @@ async def test_accelerated_select_reads_a_long_json_integer_exactly(db):
     assert type(row.data["big"]) is int
 
 
+@pytest.mark.requires("native")
 @pytest.mark.asyncio
 async def test_select_related_rows_hydrate_through_the_accelerator(db, monkeypatch):
     """select_related() rows went through the pure-Python loop, one related instance per row
@@ -194,10 +190,7 @@ async def test_select_related_rows_hydrate_through_the_accelerator(db, monkeypat
     matched nothing still gives None, and a nested relation hangs off its parent."""
     from tests.shared_models.testmodels import DoubleFK
 
-    hydrate = pytest.importorskip("rust.native.rows")
-    if "column_offset" not in (getattr(hydrate.ModelReader.read, "__text_signature__", None) or ""):
-        pytest.skip("this rust.hydrate build predates column_offset")
-    if HydrateAccelerator.module is None or not DoubleFK.get_connection().features.supports_positional_rows:
+    if not DoubleFK.get_connection().features.supports_positional_rows:
         pytest.skip("rows of this connection aren't read by the accelerator")
     leaf = await DoubleFK.objects.create(name="leaf", left=None)
     middle = await DoubleFK.objects.create(name="middle", left=leaf)

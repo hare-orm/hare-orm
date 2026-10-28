@@ -17,6 +17,8 @@ from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.native.native_modules import NativeModules
 from tests.utils.waiting import wait_until
 
+REQUIRES = ("native",)
+
 
 def get_completion_queues() -> list[Any]:
     # A reference a tokio worker let go of without the GIL is released by pyo3 on the next call into the

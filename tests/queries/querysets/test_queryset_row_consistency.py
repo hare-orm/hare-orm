@@ -270,6 +270,34 @@ async def test_bulk_update_filtered_on_aggregate_writes_only_matching_rows(db):
     assert await Author.objects.filter(name="renamed").values_list("id", flat=True) == [first_author.id]
 
 
+@pytest.mark.parametrize(
+    "make_queryset",
+    [lambda: Book.objects.order_by("id")[:1], lambda: Book.objects.order_by("id").offset(1)],
+    ids=["slice", "offset"],
+)
+@pytest.mark.asyncio
+async def test_bulk_update_of_a_sliced_queryset_is_refused(db, make_queryset):
+    """The slice was ignored - the objects outside it were written, while update() and delete() refuse."""
+    await create_authors_with_books()
+    books = await Book.objects.all().order_by("id")
+    for book in books:
+        book.subject = "bulk"
+
+    with pytest.raises(QueryError, match=r"Cannot bulk_update\(\) a query once a slice has been taken"):
+        await make_queryset().bulk_update(books, ["subject"])
+    assert await Book.objects.filter(subject="bulk").count() == 0
+
+
+@requires_features(supports_distinct_on=True)
+@pytest.mark.asyncio
+async def test_bulk_update_of_a_queryset_of_distinct_fields_is_refused(db):
+    await create_authors_with_books()
+    books = await Book.objects.all().order_by("id")
+
+    with pytest.raises(QueryError, match=r"Cannot call bulk_update\(\) after \.distinct\(\*fields\)"):
+        await Book.objects.order_by("author_id").distinct("author_id").bulk_update(books, ["subject"])
+
+
 @pytest.mark.asyncio
 async def test_count_of_distinct_queryset_counts_rows_an_annotation_over_to_many_keeps_apart(db):
     first_author, second_author = await create_authors_with_books()

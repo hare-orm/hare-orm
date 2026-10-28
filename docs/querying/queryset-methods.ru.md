@@ -58,7 +58,7 @@
 | `create(**kwargs)` | `async def` | Создаёт строку и возвращает её объект — `Model(**kwargs)`, сохранённый на подключении запроса (`Model.objects.using("replica").create(...)`); фильтры запроса не участвуют — см. [`create()`](#create) |
 | `get_or_create(defaults=None, **kwargs)` | `async def` | Объект, подходящий под `kwargs` среди строк запроса, либо новый, созданный из `kwargs` и `defaults`, — `(object, created)` — см. [`get_or_create()`](#get-or-create) |
 | `update_or_create(defaults=None, create_defaults=None, **kwargs)` | `async def` | Обновляет объект, подходящий под `kwargs`, значениями `defaults` либо создаёт его с `create_defaults` (с `defaults`, если они не заданы) — `(object, created)` — см. [`update_or_create()`](#update-or-create) |
-| `bulk_create(objects, batch_size=None, *, ignore_conflicts=False, update_fields=None, on_conflict=None, on_conflict_constraint=None, conflict_where=None, returning=None, use_copy=False)` | await | Возвращает объекты в том виде, в каком их передали (и объекты генератора) — вместе с теми, что пропущены или обновлены из-за конфликта — см. [`bulk_create()`](#bulk-create) |
+| `bulk_create(objects, batch_size=None, *, ignore_conflicts=False, update_fields=None, on_conflict=None, on_conflict_constraint=None, conflict_where=None, returning=None, use_copy=False)` | await | Возвращает объекты в том виде, в каком их передали (и объекты генератора) — вместе с теми, что обновлены вставкой-или-обновлением; с `ignore_conflicts=True` — те, что вставлены, — см. [`bulk_create()`](#bulk-create) |
 | `insert_from(queryset, *, fields)` | await | Записывает строки, которые выбирает запрос, в таблицу модели одним `INSERT ... SELECT` и возвращает число записанных строк. См. [Вставка строк запроса](#insert-from). |
 | `merge(source, *, on)` | await | Один `MERGE`, сопоставляющий список строк или запрос со строками модели и по веткам обновляющий, удаляющий или вставляющий их. См. [Слияние строк](#merge). |
 | `refresh_materialized_view(name, *, concurrently=False)` | await | Заново наполняет материализованное представление из `Meta.materialized_views` строками его запроса на подключении, в которое пишет модель. См. [Материализованные представления](../models/schema-objects.ru.md#materialized-views). |
@@ -67,7 +67,7 @@
 | `only(*fields)` | цепочка | Загружает только перечисленные поля — получается частично загруженная модель — см. [`only()`](#only) |
 | `defer(*fields)` | цепочка | Не загружает перечисленные поля самой модели — имя прямой связи откладывает её ключевые поля, как `only()` по нему их загружает; повторные вызовы складываются. Чтение отложенного поля даёт `NoValuesFetched`, как после `only()`. `related__field` не поддерживается. Несовместим с `.only()`. |
 | <code>select&#95;related(&#42;args: str &#124; Select)</code> | цепочка | Загружает связанные объекты в том же запросе через `JOIN`; принимает строку или `Select(relation, extra_condition=Q(...))` — см. [`select_related()`](#select-related) |
-| <code>prefetch&#95;related(&#42;args: str &#124; Prefetch)</code> | цепочка | Загружает связанные объекты отдельными запросами (не через `JOIN` с выбираемыми строками); принимает строку (в том числе `"a__b"`) или `Prefetch(...)` — см. [`prefetch_related()`](#prefetch-related) |
+| <code>prefetch&#95;related(&#42;args: str &#124; Prefetch &#124; None)</code> | цепочка | Загружает связанные объекты отдельными запросами (не через `JOIN` с выбираемыми строками); принимает строку (в том числе `"a__b"`) или `Prefetch(...)` — см. [`prefetch_related()`](#prefetch-related) |
 | `defer_related(*fields)` | цепочка | Отключает для этого запроса автоматическую загрузку связей с `lazy=RelationLoadStrategy.JOINED`/`.SELECT`. |
 | `include_deleted()` / `only_deleted()` | цепочка | Мягко удалённые строки вместе с живыми / только мягко удалённые — вместо фильтра [`Meta.soft_delete_field`](../soft-delete-versions-tenants/soft-delete.ru.md) по умолчанию — см. [`include_deleted()` / `only_deleted()`](#include-deleted-only-deleted) |
 | `all_tenants()` | цепочка | Строки всех арендаторов вместо фильтра [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.ru.md#all-tenants) по умолчанию — в том числе для моделей с арендатором, до которых запрос доходит через связи. Сочетается с `include_deleted()`/`only_deleted()` в любом порядке. |
@@ -725,6 +725,22 @@ generate_series(...)` в PostgreSQL (одним `DEFAULT VALUES` на объек
 <conflict_where>` мог на него указать; несовместимо с `on_conflict_constraint` и требует, чтобы `on_conflict`
 называл колонки этого индекса.
 
+<a id="bulk-create-ignore-conflicts"></a>**`ignore_conflicts=True`** возвращает вставленные объекты в
+переданном порядке: пропущенные из-за конфликта в результат не входят, сохраняют данный им pk и не
+помечаются сохранёнными. Операторы читают свои строки обратно (`RETURNING`, с `returning=True` и без), и
+каждая строка сопоставляется со своим объектом по полям `on_conflict`, иначе — по первичному ключу, по
+значениям в том виде, в каком их записывают поля (домен `EmailField` в нижнем регистре); где база
+возвращает строки в произвольном порядке (SQLite) — по всем записанным колонкам, поэтому различаются и
+объекты без значения цели конфликта. Объектам, ключи которых генерирует база,
+нужен `on_conflict=[...]` — без него вызов падает с
+`UnSupportedError` до любого SQL, как и на базе без `RETURNING`. Из нескольких объектов с одним ключом
+конфликта в вызове вставляется первый.
+
+```python
+inserted = await Subscriber.objects.bulk_create(subscribers, ignore_conflicts=True, on_conflict=["email"])
+await notify_new_subscribers(inserted)   # без второго запроса за записанными строками
+```
+
 На базе без `INSERT ... ON CONFLICT` (ClickHouse, `Features.supports_insert_conflicts` выключен)
 `bulk_create()` с `ignore_conflicts`, `update_fields`, `on_conflict` или `on_conflict_constraint` даёт
 `UnSupportedError` до отправки SQL.
@@ -753,7 +769,8 @@ class QuerySet:
 с `Meta.optimistic_lock_field` версия в памяти увеличивается у каждого объекта, строка которого
 действительно записалась (а при `track_dirty_fields` сбрасывается его снимок изменений), и только потом
 даётся `StaleObjectError` для строк партии, которые не записались. Объект, строку которого исключает
-собственный `.filter(...)` запроса, просто не обновляется и не считается устаревшим. В отличие от
+собственный `.filter(...)` запроса, просто не обновляется и не считается устаревшим (срез запроса и
+запрос с `.distinct(<fields>)` дают `QueryError`, как у `.update()`). В отличие от
 обычного `.update()`, здесь устаревание проверяется: у каждого объекта есть ранее загруженная версия для
 сравнения. `fields` — непустой список имён полей (строка вместо списка или пустой список дают
 `QueryError`); повторённое имя записывается один раз, неизвестное даёт `FieldError`, а первичный ключ
@@ -806,7 +823,7 @@ class QuerySet:
 
 ```python
 class QuerySet:
-    def prefetch_related(self, *args: str | Prefetch) -> Self: ...
+    def prefetch_related(self, *args: str | Prefetch | None) -> Self: ...
 ```
 
 Загружает связанные объекты отдельными запросами (не через `JOIN` с выбираемыми строками); принимает
@@ -815,6 +832,10 @@ class QuerySet:
 таблицей, когда связующая таблица и связанные строки лежат на одном соединении, у связи нет модели
 `through=`, а QuerySet из `Prefetch` не фильтрует по этой связи, не добавляет вычисляемых значений,
 `.distinct()` и вложенной предзагрузки; иначе сначала отдельным запросом читается связующая таблица.
+
+`count()`, `exists()` и `aggregate()` у QuerySet с предзагрузкой дают `QueryError` — они не возвращают
+объектов, к которым прикрепить связи; `prefetch_related(None)` снимает всю предзагрузку, заданную раньше:
+`books.prefetch_related(None).count()`. Так считает свои строки запрос из параметров.
 
 ### <a id="include-deleted-only-deleted"></a>`include_deleted()` / `only_deleted()`
 

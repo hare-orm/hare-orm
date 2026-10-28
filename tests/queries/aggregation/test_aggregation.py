@@ -3229,3 +3229,16 @@ async def test_an_aggregate_named_as_a_field_leaves_the_filters_reading_the_fiel
         "intnum": 10,
         "total": 12,
     }
+
+
+@pytest.mark.asyncio
+async def test_prefetch_related_none_drops_the_prefetches_for_a_count(db):
+    tournament = await Tournament.objects.create(name="New Tournament")
+    await Event.objects.create(name="Final", tournament_id=tournament.id)
+    prefetching = Tournament.objects.all().prefetch_related("events")
+
+    assert await prefetching.prefetch_related(None).count() == 1
+    assert await prefetching.prefetch_related(None).exists() is True
+    assert [len(item.events) for item in await prefetching] == [1]
+    with pytest.raises(QueryError, match="no relation beside"):
+        prefetching.prefetch_related(None, "events")

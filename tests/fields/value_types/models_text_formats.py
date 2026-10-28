@@ -13,7 +13,24 @@ class Contact(Model):
     unicode_slug = fields.SlugField(allow_unicode=True, null=True, db_index=False)
     short_slug = fields.SlugField(max_length=10, null=True, validators=[MinLengthValidator(3)])
     phone = fields.PhoneField(null=True)
-    us_phone = fields.PhoneField(region="US", null=True)
 
     class Meta:
         table = "text_format_contact"
+
+
+class ContactLogin(Model):
+    id = fields.IntField(primary_key=True)
+    login = fields.EmailField(unique=True)
+
+    class Meta:
+        table = "text_format_contact_login"
+
+
+class ContactAccount(Model):
+    email = fields.EmailField(primary_key=True)
+    name = fields.CharField(max_length=20)
+    version = fields.IntField(default=0)
+
+    class Meta:
+        table = "text_format_contact_account"
+        optimistic_lock_field = "version"

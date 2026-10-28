@@ -7,12 +7,12 @@ import pytest
 
 from hare.dialects.base.client.password_provider import PasswordProvider
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 from tests.utils.waiting import wait_until
 
-CLIENT_CLASSES = [AsyncpgClient, RustPgClient]
+CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
 def get_password() -> str:
@@ -118,7 +118,7 @@ async def test_the_background_refresh_applies_new_passwords():
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 @pytest.mark.parametrize(
     "password_provider", [get_password, "tests.configuration.test_password_provider.get_password"]
 )
@@ -130,7 +130,7 @@ def test_a_client_takes_a_function_or_its_dotted_path(client_class, password_pro
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 def test_a_client_without_a_provider_has_none(client_class):
     assert make_client(client_class, password="secret").password_provider is None
 
@@ -145,8 +145,8 @@ def test_the_url_takes_a_dotted_path():
     assert credentials["password_refresh_seconds"] == 120
 
 
-# The check is the clients' shared __init__: every value on the first client class, the first value
-# on each other one.
+# The check is the clients' shared __init__: every value on rust_pg's client class, the first value
+# on asyncpg's.
 INVALID_PROVIDER_SETTINGS = [
     ({"password": "secret", "password_provider": get_password}, "password and password_provider"),
     ({"password_refresh_seconds": 30}, "password_refresh_seconds needs password_provider"),
@@ -163,9 +163,13 @@ INVALID_PROVIDER_SETTINGS = [
 @pytest.mark.parametrize(
     ("client_class", "settings", "message"),
     [
-        *[(CLIENT_CLASSES[0], *(settings, message)) for (settings, message) in INVALID_PROVIDER_SETTINGS],
-        *[(client_class, *INVALID_PROVIDER_SETTINGS[0]) for client_class in CLIENT_CLASSES[1:]],
+        *[
+            DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, settings, message)
+            for (settings, message) in INVALID_PROVIDER_SETTINGS
+        ],
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, *INVALID_PROVIDER_SETTINGS[0]),
     ],
+    indirect=["client_class"],
 )
 def test_the_settings_are_checked(client_class, settings, message):
     with pytest.raises(ConfigurationError, match=message):
@@ -180,9 +184,9 @@ def test_a_sqlite_client_refuses_a_provider():
         AiosqliteClient(connection_alias="default", file_path=":memory:", password_provider=get_password)
 
 
+@pytest.mark.requires("clickhouse-connect")
 @pytest.mark.database_independent
 def test_a_clickhouse_client_refuses_a_provider():
-    pytest.importorskip("clickhouse_connect")
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (
         ClickhouseConnectClient,
     )
@@ -195,9 +199,9 @@ def test_a_clickhouse_client_refuses_a_provider():
         )
 
 
+@pytest.mark.requires("clickhouse-driver")
 @pytest.mark.database_independent
 def test_a_clickhouse_client_of_the_native_protocol_refuses_a_provider():
-    pytest.importorskip("clickhouse_driver")
     from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_client import (
         ClickhouseDriverClient,
     )

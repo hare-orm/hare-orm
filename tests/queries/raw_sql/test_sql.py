@@ -311,31 +311,18 @@ def test_empty_criterion_invert_is_a_no_op():
 
 
 @pytest.mark.database_independent
-def test_mul_of_div_keeps_parens():
-    a, b, c = Field("a"), Field("b"), Field("c")
-    expr = a * (b / c)
-    assert str(expr) == '"a"*("b"/"c")'
-
-
-@pytest.mark.database_independent
-def test_div_of_mul_still_needs_parens():
-    a, b, c = Field("a"), Field("b"), Field("c")
-    expr = a / (b * c)
-    assert str(expr) == '"a"/("b"*"c")'
-
-
-@pytest.mark.database_independent
-def test_mul_of_mul_does_not_need_parens():
-    a, b, c = Field("a"), Field("b"), Field("c")
-    expr = a * (b * c)
-    assert str(expr) == '"a"*"b"*"c"'
-
-
-@pytest.mark.database_independent
-def test_sub_of_mul_does_not_need_parens():
-    a, b, c = Field("a"), Field("b"), Field("c")
-    expr = a - (b * c)
-    assert str(expr) == '"a"-"b"*"c"'
+@pytest.mark.parametrize(
+    ("combine", "expected"),
+    [
+        (lambda a, b, c: a * (b / c), '"a"*("b"/"c")'),
+        (lambda a, b, c: a / (b * c), '"a"/("b"*"c")'),
+        (lambda a, b, c: a * (b * c), '"a"*"b"*"c"'),
+        (lambda a, b, c: a - (b * c), '"a"-"b"*"c"'),
+    ],
+    ids=["mul_of_div_keeps_parens", "div_of_mul_keeps_parens", "mul_of_mul_drops_parens", "sub_of_mul_drops_parens"],
+)
+def test_arithmetic_of_arithmetic_gets_parens_only_where_precedence_needs_them(combine, expected):
+    assert str(combine(Field("a"), Field("b"), Field("c"))) == expected
 
 
 @pytest.mark.database_independent

@@ -17,6 +17,7 @@ async def count_plan_hits(statement) -> tuple[object, int]:
     return result, StatementPlans.hits - hits
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_query_without_time_zone_support_runs_on_its_plan(db):
     model = testmodels.DatetimeFields
@@ -54,6 +55,7 @@ async def test_plans_of_the_two_time_zone_modes_stay_apart(db):
             await model.objects.all().delete()
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_plan_of_the_machines_zone_configured_isnt_run_for_naive_datetimes(db):
     """The key held the zone's name alone - the machine's own zone, configured under use_timezone,

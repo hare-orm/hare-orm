@@ -12,6 +12,7 @@ import pytest_asyncio
 from hare.contrib.test import hare_test_context, truncate_all_models
 from hare.exceptions import ConfigurationError
 from tests.dialects.clickhouse.constants import CLICKHOUSE_KEEPER_HOSTS
+from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @contextlib.asynccontextmanager
@@ -26,7 +27,7 @@ async def open_transactions_context(url_options):
             context = await stack.enter_async_context(
                 hare_test_context(
                     modules=["tests.dialects.clickhouse.transactions.models"],
-                    db_url=f"{db_url}?{url_options}",
+                    db_url=DatabaseUnderTest.get_url_with_options(url_options, db_url),
                     app_label="models",
                     connection_label="models",
                 )
@@ -50,7 +51,10 @@ async def clickhouse_transactions_db(clickhouse_transactions_module):
 
 @pytest_asyncio.fixture(scope="module")
 async def clickhouse_keeper_transactions_module():
-    async with open_transactions_context(f"transactions=true&keeper_hosts={CLICKHOUSE_KEEPER_HOSTS}") as context:
+    keeper_options = (
+        "" if "keeper_hosts=" in DatabaseUnderTest.get_url() else f"&keeper_hosts={CLICKHOUSE_KEEPER_HOSTS}"
+    )
+    async with open_transactions_context(f"transactions=true{keeper_options}") as context:
         yield context
 
 

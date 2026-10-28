@@ -10,8 +10,9 @@ from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeF
 from hare.dialects.sqlite.functions.statistics.sqlite_statistic import SqliteStatistic
 from hare.dialects.sqlite.functions.statistics.sqlite_statistics import SqliteStatistics
 
+REQUIRES = ("native",)
+
 pytestmark = [
-    pytest.mark.skipif(SqliteNativeFunctions.module is None, reason="rust.native isn't built"),
     pytest.mark.database_independent,
 ]
 

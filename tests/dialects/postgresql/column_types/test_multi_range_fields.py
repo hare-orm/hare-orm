@@ -231,6 +231,7 @@ def test_a_database_without_the_types_refuses_the_fields():
         IntMultiRangeField().get_column_type(sqlite_dialect)
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_a_multirange_given_as_its_schema_writes_it(db_multi_range):
     """A model's schema writes a multirange as a list of mappings - create(**schema.model_dump()) raised

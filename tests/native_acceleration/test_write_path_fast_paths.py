@@ -9,7 +9,6 @@ from decimal import Decimal
 import pytest
 
 from hare.core.caching.caches import Caches
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import ValidationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.models.tenancy.tenancy import Tenancy
@@ -60,15 +59,21 @@ def test_json_shortcut_leaves_problem_values_to_the_full_path():
         field.encode_value({"object": object()})
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_binds_a_row_of_plain_values_as_it_is():
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     row = [1, "text", 2.5, None, True, b"bytes", Decimal("1.5"), datetime.date(2020, 1, 2)]
     assert AsyncpgClient._asyncpg_bind_values(row) is row
     assert AsyncpgClient._asyncpg_bind_values(tuple(row)) == row
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_still_adapts_a_row_holding_a_value_that_needs_it():
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     naive_time = datetime.time(10, 30)
     bound = AsyncpgClient._asyncpg_bind_values([1, naive_time, "x"])
     assert bound[0] == 1 and bound[2] == "x"

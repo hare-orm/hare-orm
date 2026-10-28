@@ -48,6 +48,19 @@ class RelationRows:
         relation_rows.bound_settings = None
         return relation_rows
 
+    def set_fetched(self, related_objects: list[Any]) -> None:
+        """Takes the fetched rows - a relation object made for the rows before they were fetched is held
+        weakly from now on, as one made for fetched rows is (see the class).
+
+        Args:
+            related_objects: The rows.
+        """
+        self._fetched = True
+        self.related_objects = related_objects
+        if self.held_relation is not None:
+            self.relation_reference = weakref.ref(self.held_relation)
+            self.held_relation = None
+
     def keep_relation(self, relation: RelatedQuerySet[Any]) -> None:
         """Keeps the relation object made for the rows - weakly for fetched rows, held for rows not
         fetched (see the class).

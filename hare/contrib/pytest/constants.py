@@ -17,7 +17,13 @@ HARE_REQUIRES_MARKER_HELP = (
     "hare_requires(connection_alias=None, **conditions): skip the test unless the connection's features match"
 )
 #: The fixtures giving a test its context - the marker checks the connection of the first one used.
-CONTEXT_FIXTURE_NAMES = ("hare_db", "hare_transactional_db", "hare_database")
+CONTEXT_FIXTURE_NAMES = (
+    "hare_app_db",
+    "hare_app_transactional_db",
+    "hare_db",
+    "hare_transactional_db",
+    "hare_database",
+)
 #: Why the fixtures can't run without pytest-asyncio.
 PYTEST_ASYNCIO_MISSING_MESSAGE = "hare's pytest fixtures run on pytest-asyncio - install hare-orm[pytest]"
 #: The module the plugin registers its fixtures from, missing without the extra.

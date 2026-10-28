@@ -521,42 +521,26 @@ async def test_filter_by_aggregation_field(db):
     assert tournaments[0].id == tournament.id
 
 
+@pytest.mark.parametrize(
+    ("make_filtered", "expected"),
+    [
+        pytest.param(lambda queryset: queryset.filter(events_count=1, name="0"), "0", id="with_and"),
+        pytest.param(lambda queryset: queryset.filter(Q(events_count=1, name="0")), "0", id="with_and_as_one_node"),
+        pytest.param(
+            lambda queryset: queryset.filter(Q(events_count=1) & Q(name="0")), "0", id="with_and_as_two_nodes"
+        ),
+        pytest.param(lambda queryset: queryset.filter(~Q(events_count=1, name="0")), "1", id="with_not"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_filter_by_aggregation_field_with_and(db):
+async def test_filter_by_aggregation_field_in_an_and(db, make_filtered, expected):
     tournament = await Tournament.objects.create(name="0")
     tournament_second = await Tournament.objects.create(name="1")
     await Event.objects.create(name="1", tournament=tournament)
     await Event.objects.create(name="2", tournament=tournament_second)
 
-    tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(events_count=1, name="0")
-    assert len(tournaments) == 1
-    assert tournaments[0].id == tournament.id
-
-
-@pytest.mark.asyncio
-async def test_filter_by_aggregation_field_with_and_as_one_node(db):
-    tournament = await Tournament.objects.create(name="0")
-    tournament_second = await Tournament.objects.create(name="1")
-    await Event.objects.create(name="1", tournament=tournament)
-    await Event.objects.create(name="2", tournament=tournament_second)
-
-    tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(Q(events_count=1, name="0"))
-    assert len(tournaments) == 1
-    assert tournaments[0].id == tournament.id
-
-
-@pytest.mark.asyncio
-async def test_filter_by_aggregation_field_with_and_as_two_nodes(db):
-    tournament = await Tournament.objects.create(name="0")
-    tournament_second = await Tournament.objects.create(name="1")
-    await Event.objects.create(name="1", tournament=tournament)
-    await Event.objects.create(name="2", tournament=tournament_second)
-
-    tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(
-        Q(events_count=1) & Q(name="0")
-    )
-    assert len(tournaments) == 1
-    assert tournaments[0].id == tournament.id
+    tournaments = await make_filtered(Tournament.objects.annotate(events_count=Count("events")))
+    assert [t.name for t in tournaments] == [expected]
 
 
 @pytest.mark.parametrize(
@@ -570,6 +554,11 @@ async def test_filter_by_aggregation_field_with_and_as_two_nodes(db):
         pytest.param(
             lambda: ~(Q(name="2") | Q(events_count=1)), {"1"}, id="filter_by_aggregation_field_with_or_not_reversed"
         ),
+        pytest.param(
+            lambda: Q.with_connector(Connector.OR, events_count=1, name="2"),
+            {"0", "2"},
+            id="filter_by_aggregation_field_with_or_as_one_node",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -582,32 +571,6 @@ async def test_filter_by_aggregation_field_in_an_or(db, make_condition, expected
     tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(make_condition())
     assert len(tournaments) == len(expected)
     assert {t.name for t in tournaments} == expected
-
-
-@pytest.mark.asyncio
-async def test_filter_by_aggregation_field_with_or_as_one_node(db):
-    tournament = await Tournament.objects.create(name="0")
-    await Tournament.objects.create(name="1")
-    await Tournament.objects.create(name="2")
-    await Event.objects.create(name="1", tournament=tournament)
-
-    tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(
-        Q.with_connector(Connector.OR, events_count=1, name="2")
-    )
-    assert len(tournaments) == 2
-    assert {t.name for t in tournaments} == {"0", "2"}
-
-
-@pytest.mark.asyncio
-async def test_filter_by_aggregation_field_with_not(db):
-    tournament = await Tournament.objects.create(name="0")
-    tournament_second = await Tournament.objects.create(name="1")
-    await Event.objects.create(name="1", tournament=tournament)
-    await Event.objects.create(name="2", tournament=tournament_second)
-
-    tournaments = await Tournament.objects.annotate(events_count=Count("events")).filter(~Q(events_count=1, name="0"))
-    assert len(tournaments) == 1
-    assert tournaments[0].id == tournament_second.id
 
 
 @pytest.mark.asyncio

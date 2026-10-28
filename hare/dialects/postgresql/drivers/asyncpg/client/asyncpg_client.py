@@ -28,10 +28,10 @@ from hare.dialects.postgresql.drivers.asyncpg.asyncpg_extension_type_codecs impo
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_interval_codec import AsyncpgIntervalCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamp_codec import AsyncpgTimestampCodec
 from hare.dialects.postgresql.drivers.asyncpg.asyncpg_timestamptz_codec import AsyncpgTimestamptzCodec
+from hare.dialects.postgresql.drivers.asyncpg.client.constants import ASYNCPG_CONNECTION_PARAMETERS
 from hare.dialects.postgresql.drivers.asyncpg.constants import (
     ASYNCPG_ARGUMENT_COUNT_MESSAGE_PREFIX,
     ASYNCPG_CONNECTION_OPTIONS,
-    ASYNCPG_CONNECTION_PARAMETERS,
     ASYNCPG_DECODE_FRAME_NAME_PREFIX,
     ASYNCPG_POOL_ONLY_PARAMETERS,
     ASYNCPG_ROOT_CERTIFICATE_DSN_PARAMETER,
@@ -73,6 +73,7 @@ class AsyncpgClient(PostgresqlClient):
     """The PostgreSQL client of the asyncpg driver."""
 
     driver_name = "postgresql+asyncpg"
+    connections_bound_to_event_loop = True
     # asyncpg decodes a whole numeric ending in zero digit groups with a positive exponent
     # (100000 as Decimal('1.0E+5')) - a DecimalField value is quantized to the field's scale.
     native_python_types = PostgresqlClient.native_python_types - {decimal.Decimal}

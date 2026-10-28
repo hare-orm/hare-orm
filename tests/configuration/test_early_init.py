@@ -6,7 +6,6 @@ import sys
 import pytest
 
 from hare import Hare, fields
-from hare.contrib.pydantic import pydantic_model_creator
 from hare.core.config import HareConfig
 from hare.models import Model
 
@@ -44,8 +43,11 @@ class Event(Model):
         ordering = ["name"]
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_early_init():
+    from hare.contrib.pydantic import pydantic_model_creator
+
     Event_TooEarly = pydantic_model_creator(Event)
     assert Event_TooEarly.model_json_schema() == {
         "title": "Event",

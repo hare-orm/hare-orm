@@ -13,7 +13,7 @@ from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.dialects.postgresql.fields.hstore.h_store_text import HStoreText
 from hare.exceptions import ValidationError
 from hare.query.expressions import F, Q
-from tests.dialects.postgresql.column_types.models_hstore import Item, Shelf
+from tests.dialects.postgresql.column_types.models_hstore import Item, Shelf, UniqueAttributes
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 
 
@@ -53,6 +53,25 @@ async def items(hstore_context: Any) -> AsyncGenerator[None]:
 
 async def matching(*conditions, **lookups):
     return sorted(await Item.objects.filter(*conditions, **lookups).values_list("id", flat=True))
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_insert_skipping_a_conflicting_hstore_returns_the_object_inserted(hstore_context):
+    """PostgreSQL gives an hstore's keys back in an order of its own: the row inserted was matched to the
+    skipped object written with its keys in another order - it got the key and was marked saved."""
+    inserted_object = UniqueAttributes(tag="A", attributes={"zz": "1", "a": "2"})
+    skipped_object = UniqueAttributes(tag="B", attributes={"a": "2", "zz": "1"})
+    try:
+        inserted = await UniqueAttributes.objects.bulk_create(
+            [inserted_object, skipped_object], ignore_conflicts=True, on_conflict=["attributes"]
+        )
+
+        assert inserted == [inserted_object]
+        assert inserted_object.id == await UniqueAttributes.objects.get(tag="A").values_list("id", flat=True)
+        assert skipped_object.id is None
+        assert not skipped_object._saved_in_db
+    finally:
+        await UniqueAttributes.objects.all().delete()
 
 
 @pytest.mark.asyncio

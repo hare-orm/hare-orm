@@ -10,6 +10,8 @@ from hare.contrib.pydantic import pydantic_model_creator
 from hare.models import Model
 from tests.shared_models.testmodels import CharPkModel, CompositePkTriple, O2oPkProfile
 
+REQUIRES = ("pydantic",)
+
 
 def required_by_field_name(schema) -> dict[str, bool]:
     return {name: field.is_required() for name, field in schema.model_fields.items()}

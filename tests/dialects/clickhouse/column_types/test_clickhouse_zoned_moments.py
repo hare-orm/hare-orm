@@ -144,6 +144,7 @@ async def test_a_time_of_day_is_read_from_its_wall_clock(moments):
     assert await ZonedMoment.objects.filter(clock__hour=22).count() == 0
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_naive_moment_without_time_zones_is_its_local_wall_clock():
     raw_db_url = os.getenv("HARE_TEST_DB", "").replace("\\{", "{").replace("\\}", "}")
@@ -161,6 +162,7 @@ async def test_a_naive_moment_without_time_zones_is_its_local_wall_clock():
         ]
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 async def test_a_naive_moment_is_cast_and_written_as_text_at_its_local_wall_clock():
     """Without time zones the column holds the instant of the local wall clock - the casts to text, a

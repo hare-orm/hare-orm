@@ -30,7 +30,7 @@ def test_local_now_is_a_naive_moment_of_the_local_wall_clock():
 
 
 @pytest.mark.timing
-@pytest.mark.skipif(NativeModules.clock is None, reason="rust.native isn't built")
+@pytest.mark.requires("native")
 def test_native_clock_reads_the_same_moment_as_python():
     native_utc = NativeModules.clock.get_utc_now()
     assert native_utc.tzinfo is UTC

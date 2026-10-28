@@ -12,6 +12,8 @@ import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.isolated_contexts import hare_test_context
+from tests.matrix.suite_environments import SuiteEnvironments
+from tests.utils.constants import PHONE_REQUIREMENT, PYDANTIC_REQUIREMENT
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
@@ -135,10 +137,14 @@ async def db_subclass_fields(db_subclass_fields_module):
 
 @pytest_asyncio.fixture(scope="module")
 async def db_encrypted_fields_module():
-    """Module-scoped fixture for the encrypted-field tests (tests.fields.models_encrypted)."""
+    """Module-scoped fixture for the encrypted-field tests (tests.fields.models_encrypted) - in an
+    environment installing pydantic, the models whose fields declare a pydantic type too."""
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    modules = ["tests.fields.models_encrypted"]
+    if SuiteEnvironments.installs(PYDANTIC_REQUIREMENT):
+        modules.append("tests.fields.models_encrypted_pydantic")
     async with hare_test_context(
-        modules=["tests.fields.models_encrypted"],
+        modules=modules,
         db_url=db_url,
         app_label="models",
         connection_label="models",
@@ -195,10 +201,14 @@ async def db_write_paths(db_write_paths_module):
 
 @pytest_asyncio.fixture(scope="module")
 async def db_text_formats_module():
-    """Module-scoped fixture for the text format field tests (tests.fields.value_types.models_text_formats)."""
+    """Module-scoped fixture for the text format field tests (tests.fields.value_types.models_text_formats) -
+    in an environment installing phonenumbers, the model of a PhoneField with region= too."""
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
+    modules = ["tests.fields.value_types.models_text_formats"]
+    if SuiteEnvironments.installs(PHONE_REQUIREMENT):
+        modules.append("tests.fields.value_types.models_text_formats_phone")
     async with hare_test_context(
-        modules=["tests.fields.value_types.models_text_formats"],
+        modules=modules,
         db_url=db_url,
         app_label="models",
         connection_label="models",

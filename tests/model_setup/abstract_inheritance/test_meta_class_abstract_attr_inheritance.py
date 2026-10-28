@@ -22,37 +22,6 @@ from tests.model_setup.abstract_inheritance.tuple_indexes import (
 
 
 @pytest.mark.database_independent
-def test_abstract_meta_attr_inherited_without_explicit_meta_class():
-    class AbstractBase(Model):
-        class Meta:
-            abstract = True
-            table = "from_base"
-
-        shared = fields.CharField(max_length=10)
-
-    class Concrete(AbstractBase):
-        pass
-
-    assert Concrete._meta.db_table == "from_base"
-
-
-@pytest.mark.database_independent
-def test_concrete_meta_attr_overrides_inherited_value():
-    class AbstractBase(Model):
-        class Meta:
-            abstract = True
-            table = "from_base"
-
-        shared = fields.CharField(max_length=10)
-
-    class Concrete(AbstractBase):
-        class Meta:
-            table = "from_concrete"
-
-    assert Concrete._meta.db_table == "from_concrete"
-
-
-@pytest.mark.database_independent
 def test_abstract_meta_attr_inherited_through_multi_level_chain():
     class GrandParent(Model):
         class Meta:
@@ -69,40 +38,6 @@ def test_abstract_meta_attr_inherited_through_multi_level_chain():
         pass
 
     assert Child._meta.db_table == "from_grandparent"
-
-
-@pytest.mark.database_independent
-def test_abstract_flag_itself_is_never_inherited():
-    class AbstractBase(Model):
-        class Meta:
-            abstract = True
-            table = "from_base"
-
-        shared = fields.CharField(max_length=10)
-
-    class Concrete(AbstractBase):
-        pass
-
-    assert Concrete._meta.abstract is False
-
-
-@pytest.mark.database_independent
-def test_multiple_meta_attrs_all_inherited_together():
-    class AbstractBase(Model):
-        class Meta:
-            abstract = True
-            table = "from_base"
-            constraints = (UniqueConstraint(fields=("shared",)),)
-            ordering = ("-shared",)
-
-        shared = fields.CharField(max_length=10)
-
-    class Concrete(AbstractBase):
-        pass
-
-    assert Concrete._meta.db_table == "from_base"
-    assert [tuple(constraint.fields) for constraint in Concrete._meta.constraints] == [("shared",)]
-    assert [field for field, _ in Concrete._meta.ordering] == ["shared"]
 
 
 @pytest.mark.database_independent

@@ -568,7 +568,8 @@ query = BookQuery.from_query_parameters([("status", "draft"), ("tag_ids", "1")],
 `RequestQuery` проверяет каждый оператор фильтра и поиска на каждом диалекте, к которому подключается
 драйвер, поэтому не может использовать оператор, который выполняет только один из них. Собственный запрос
 диалекта — `PostgresqlRequestQuery` из `hare.dialects.postgresql.request_query`, `SqliteRequestQuery` из
-`hare.dialects.sqlite.request_query` — проверяет только на своём диалекте и требует, чтобы подключение
+`hare.dialects.sqlite.request_query`, `ClickhouseRequestQuery` из `hare.dialects.clickhouse.request_query` —
+проверяет только на своём диалекте и требует, чтобы подключение
 его модели было этого диалекта:
 
 ```python

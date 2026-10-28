@@ -256,9 +256,11 @@ process, another host — waits for it, then finds the first one's migrations ap
 applies only what is left. PostgreSQL takes a transaction-level advisory lock on a connection of its
 own; SQLite an OS lock on the file `<database>-migrate-lock` beside the database file (none for an
 in-memory database); ClickHouse an ephemeral node of ClickHouse Keeper,
-`/hare/migrations/<database>/migrate`, when the connection sets
-[`keeper_hosts`](../dialects/clickhouse/connecting.md) — without it there is no lock, and only one
-`migrate` of a ClickHouse database may run at a time. Every lock is given back when the process dies.
+`/hare/migrations/<database>/migrate` (the name with each byte but a letter, a digit and `_.-~`
+written as `%XX`), when the connection sets [`keeper_hosts`](../dialects/clickhouse/connecting.md) —
+without it there is no lock, and only one `migrate` of a ClickHouse database may run at a time; deleting
+the database (`db_delete()`) deletes `/hare/migrations/<database>` too. Every lock is given back when the
+process dies.
 A dry run takes none.
 
 ### <a id="sqlite-table-rebuild"></a>Rebuilding a table (SQLite)

@@ -18,6 +18,8 @@ from tests.contrib.models_pydantic_relation_ids import (
     RelationIdUuidTarget,
 )
 
+REQUIRES = ("pydantic",)
+
 
 @pytest_asyncio.fixture(scope="module")
 async def db_relation_ids_module():

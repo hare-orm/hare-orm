@@ -4,7 +4,6 @@ same table name in two schemas, and hare_test_context() cleanup after a failed s
 import os
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import pytest
 
@@ -14,6 +13,7 @@ from hare.core.connections.connections import Connections
 from hare.exceptions import OperationalError
 from tests.utils.attached_databases import get_url_with_attached_databases
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.server_session import ServerSession
 
 TEST_DB_URL = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
 IS_POSTGRES = DatabaseUnderTest.get_dialect().name == "postgresql"
@@ -108,8 +108,6 @@ async def test_failed_schema_generation_drops_the_created_sqlite_database(tmp_pa
 @requires_postgres
 @pytest.mark.asyncio
 async def test_failed_schema_generation_drops_the_created_postgres_database():
-    import asyncpg
-
     database_name = f"hare_failed_schema_{uuid.uuid4().hex[:12]}"
     db_url = TEST_DB_URL.replace("{}", database_name) if "{}" in TEST_DB_URL else TEST_DB_URL
 
@@ -117,14 +115,7 @@ async def test_failed_schema_generation_drops_the_created_postgres_database():
         async with hare_test_context(["tests.schema.models_failing_schema"], db_url=db_url):
             pass
 
-    url_parts = urlsplit(db_url)
-    connection = await asyncpg.connect(
-        host=url_parts.hostname,
-        port=url_parts.port or 5432,
-        user=url_parts.username,
-        password=url_parts.password,
-        database="postgres",
-    )
+    connection = await ServerSession.open(db_url, "postgres")
     try:
         database_names = await connection.fetch("SELECT datname FROM pg_database WHERE datname = $1", database_name)
     finally:

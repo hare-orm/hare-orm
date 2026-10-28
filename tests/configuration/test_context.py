@@ -13,7 +13,6 @@ import contextlib
 import json
 
 import pytest
-import yaml
 
 import tests.shared_models.testmodels as testmodels_module
 from hare.contrib.test.isolated_contexts import hare_test_context
@@ -479,10 +478,15 @@ class TestInit:
 
     @pytest.mark.database_independent
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("serializer", [json.dumps, yaml.dump])
-    async def test_init_with_config_file(self, tmp_path, serializer):
+    @pytest.mark.parametrize("suffix", [".json", pytest.param(".yaml", marks=pytest.mark.requires("yaml"))])
+    async def test_init_with_config_file(self, tmp_path, suffix):
         """init() with config_file (JSON/YAML) initializes context correctly."""
-        suffix = ".yaml" if serializer is yaml.dump else ".json"
+        if suffix == ".yaml":
+            import yaml
+
+            serializer = yaml.dump
+        else:
+            serializer = json.dumps
         config_file = tmp_path / f"config{suffix}"
 
         config = HareConfig(

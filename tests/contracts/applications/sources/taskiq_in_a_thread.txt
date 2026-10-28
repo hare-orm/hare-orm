@@ -1,0 +1,31 @@
+import asyncio
+
+from taskiq import InMemoryBroker
+
+from hare.contrib.taskiq import HareTaskiq
+from plugin_models import Note
+
+broker = InMemoryBroker(await_inplace=True)
+hare_taskiq = HareTaskiq(broker, "plugin_settings.HARE_ORM")
+
+
+@broker.task(task_name="create_note")
+async def create_note(note_id: int) -> None:
+    await Note.objects.create(id=note_id, text="written by the application")
+
+
+async def write_in_a_loop_of_its_own(note_id):
+    await broker.startup()
+    try:
+        result = await (await create_note.kiq(note_id)).wait_result(timeout=10)
+        assert not result.is_err, repr(result.error)
+    finally:
+        await broker.shutdown()
+
+
+def run_the_worker(note_id):
+    asyncio.run(write_in_a_loop_of_its_own(note_id))
+
+
+async def write_through_application(note_id):
+    await asyncio.to_thread(run_the_worker, note_id)

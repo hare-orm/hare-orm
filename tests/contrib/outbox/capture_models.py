@@ -190,3 +190,47 @@ class CapturedMeasurement(Model):
 
     class Meta:
         change_capture = ChangeCapture("models.CaptureOutboxEvent")
+
+
+class BatchExtension:
+    """extend_many of BatchExtendedRow - the changes of each call, an author per change."""
+
+    calls: list[list[str]] = []
+
+    @staticmethod
+    async def extend_many(changes):
+        BatchExtension.calls.append([change.after["name"] for change in changes])
+        return [ChangeExtension(headers={"author": change.after["name"].upper()}) for change in changes]
+
+
+class BatchExtendedRow(Model):
+    id = fields.IntField(primary_key=True)
+    name = fields.CharField(max_length=50)
+
+    class Meta:
+        change_capture = ChangeCapture(
+            CaptureOutboxEvent,
+            operations=(RowOperation.INSERT, RowOperation.UPDATE),
+            extend_many=BatchExtension.extend_many,
+        )
+
+
+class LabelledChangeCapture(ChangeCapture):
+    """A capture of a project - an attribute of its own its copies keep."""
+
+    label = "service"
+
+
+class CapturedAccountBase(Model):
+    id = fields.IntField(primary_key=True)
+    name = fields.CharField(max_length=50)
+    token = fields.CharField(max_length=50, default="")
+
+    class Meta:
+        abstract = True
+        change_capture = LabelledChangeCapture(CaptureOutboxEvent, operations=(RowOperation.INSERT,))
+
+
+class CapturedAccount(CapturedAccountBase):
+    class Meta(CapturedAccountBase.Meta):
+        change_capture = CapturedAccountBase.Meta.change_capture.replace(exclude=("token",))

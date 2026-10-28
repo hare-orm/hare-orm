@@ -39,6 +39,27 @@ Operators: `&` / `|` (build a new `Q` joining both with AND/OR), `~` (returns a 
 non-mutating), `.negate()` (mutates `_is_negated` in place instead), `bool(q)` (`True` if it has any
 filters, an `Exists` or a truthy child — `False` for an empty `Q()`).
 
+### <a id="condition-value"></a>A condition as a value: `ConditionValue`
+
+```python
+class ConditionValue(Expression):
+    def __init__(self, condition: Q | Exists) -> None: ...
+```
+
+```python
+tickets = Ticket.objects.annotate(is_open=Q(closed_at__isnull=True))
+reports = Report.objects.annotate(is_shared=Exists(shared_with_user) | Exists(shared_with_team))
+await Ticket.objects.filter(due_at__lt=now).update(is_late=Q(closed_at__isnull=True))
+```
+
+A condition read as each row's value: true where `filter()` with it takes the row, false where it
+doesn't, `None` where SQL's three-valued logic makes it NULL (`Q(desc="x")` on a row whose `desc` is
+NULL). A `Q` — `Exists(...) | Exists(...)` is one — given to `annotate()`, `alias()`, `values()`,
+`values_list()` or `update()` is made a `ConditionValue`; an annotated condition is filtered and
+ordered by as any boolean annotation (`.filter(is_open=True)`). The value is decoded through
+`BooleanField(null=True)` — a database writing a condition as `0`/`1` (SQLite, ClickHouse) gives a
+`bool` too.
+
 ## <a id="f"></a>`F`
 
 ```python

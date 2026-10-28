@@ -2,6 +2,8 @@ import pytest
 
 from hare.contrib.pydantic.creation.model_annotations import ModelAnnotations
 
+REQUIRES = ("pydantic",)
+
 pytestmark = pytest.mark.database_independent
 
 

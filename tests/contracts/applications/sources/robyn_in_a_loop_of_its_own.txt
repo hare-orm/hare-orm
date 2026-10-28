@@ -1,0 +1,37 @@
+import asyncio
+
+from robyn import Request
+from robyn.testing import TestClient
+
+from hare.contrib.frameworks.robyn import HareRobyn
+from plugin_models import Note
+
+
+class HareTestClient(TestClient):
+    """Robyn's test client, starting and stopping the application as its server would."""
+
+    def __enter__(self):
+        self._loop.run_until_complete(self.app.start_hare())
+        return self
+
+    def __exit__(self, *arguments):
+        self._loop.run_until_complete(self.app.stop_hare())
+        super().__exit__(*arguments)
+
+
+application = HareRobyn(__file__, hare_config="plugin_settings.HARE_ORM")
+
+
+@application.post("/notes/:note_id", status_code=201)
+async def create_note(request: Request) -> dict[str, str]:
+    await Note.objects.create(id=int(request.path_params["note_id"]), text="written by the application")
+    return {"written": "yes"}
+
+
+def post_note(note_id):
+    with HareTestClient(application) as client:
+        return client.post(f"/notes/{note_id}").status_code
+
+
+async def write_through_application(note_id):
+    assert await asyncio.to_thread(post_note, note_id) == 201

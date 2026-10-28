@@ -43,6 +43,9 @@ number is handed out once, across every process writing the model.
 
 - The series is named after the database and the model (`<database>.<app_label>.<Model>`), not its
   table: renaming the table keeps it, and each database of a server has a series of its own.
+- A server keeps at most `max_autoincrement_series` series (1000 by default), and dropping a database
+  leaves its series in Keeper. With `keeper_hosts` naming the server's Keeper, deleting the database
+  (`db_delete()` — a test database at the end of its tests) deletes its series too.
 - Rows written with keys of their own (an import, a copy from another database) leave the series behind.
   The first write of a model in a process moves the series past the greatest key of its table; the
   migration operation `SynchronizeKeySeries("Model")` does it at once.
@@ -195,8 +198,9 @@ class Meta:
 ```
 
 An index is added and dropped with `ALTER TABLE ... ADD INDEX`/`DROP INDEX`; `hare inspectdb` and
-`hare drift` read the type and its arguments back, and an expression key
-(`BloomFilterIndex(Lower("title"), name=...)`) as its SQL. A `MinMaxIndex` of granularity 1 is the same
+`hare drift` read the type and its arguments back — a `bloom_filter` written without its argument as one
+of ClickHouse's default 0.025 — and an expression key (`BloomFilterIndex(Lower("title"), name=...)`) as its
+SQL. A `MinMaxIndex` of granularity 1 is the same
 index as a plain `Index`. A key keeps no direction: `"-field"`, `.asc()` and `.desc()` keys raise
 `UnSupportedError` when the index is created. An index takes no condition: a `PartialIndex` is created as
 the index of every row.

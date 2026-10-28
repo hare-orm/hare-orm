@@ -227,27 +227,20 @@ async def test_an_int_field_plus_a_float_literal_returns_float(db, model_class, 
     assert isinstance(rows[0]["result"], float)
 
 
+@pytest.mark.parametrize(
+    ("make_result", "expected"),
+    [
+        (lambda: F("intnum") - 0.5, 6.5),
+        (lambda: F("intnum") * 0.5, 3.5),
+        (lambda: F("intnum") / 0.5, 14.0),
+    ],
+    ids=["minus", "times", "divided_by"],
+)
 @pytest.mark.asyncio
-async def test_int_field_minus_float_literal_returns_float(db):
+async def test_int_field_and_float_literal_arithmetic_returns_float(db, make_result, expected):
     await testmodels.IntFields.objects.create(intnum=7)
-    rows = await testmodels.IntFields.objects.annotate(result=F("intnum") - 0.5).values("result")
-    assert rows == [{"result": 6.5}]
-    assert isinstance(rows[0]["result"], float)
-
-
-@pytest.mark.asyncio
-async def test_int_field_times_float_literal_returns_float(db):
-    await testmodels.IntFields.objects.create(intnum=7)
-    rows = await testmodels.IntFields.objects.annotate(result=F("intnum") * 0.5).values("result")
-    assert rows == [{"result": 3.5}]
-    assert isinstance(rows[0]["result"], float)
-
-
-@pytest.mark.asyncio
-async def test_int_field_divided_by_float_literal_returns_float(db):
-    await testmodels.IntFields.objects.create(intnum=7)
-    rows = await testmodels.IntFields.objects.annotate(result=F("intnum") / 0.5).values("result")
-    assert rows == [{"result": 14.0}]
+    rows = await testmodels.IntFields.objects.annotate(result=make_result()).values("result")
+    assert rows == [{"result": expected}]
     assert isinstance(rows[0]["result"], float)
 
 

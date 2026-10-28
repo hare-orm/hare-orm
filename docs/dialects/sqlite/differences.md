@@ -25,7 +25,7 @@ of at all — `MERGE`, `LATERAL`, sequences, row level security and the rest —
 | Date and time types | Dates, times and datetimes are stored as ISO text; hare's functions truncate, extract and shift them — see [Functions](functions.md#registered-functions). |
 | Integer ranges of a column type | Any 64-bit integer fits any integer column, so hare checks a value it writes against its field's range. A value the database computes is SQLite's own — see [Results](#results). |
 | A negative zero | A `FloatField`'s `-0.0` reads back as `0.0`. |
-| A `NaN` | A `FloatField` refuses `NaN`: SQLite stores it as `NULL`. |
+| A `NaN` | A `FloatField` refuses `NaN`, written or a filter's operand: SQLite stores and binds it as `NULL`. |
 | A null byte in a `LIKE` pattern or a full-text query | The pattern is refused: `LIKE` reads it up to the null byte and would match what the pattern doesn't hold (`Features.cuts_like_pattern_at_null_byte`); so is the text of a `SearchQuery` — of `__search`, `SearchRank` and `SearchHeadline` alike — which FTS5 reads the same way. A null byte in a stored text or JSON value is kept. |
 | A long `LIKE` pattern | SQLite refuses a pattern past 50000 bytes (`SQLITE_MAX_LIKE_PATTERN_LENGTH`) — `__contains` and the other text lookups of a longer text raise `ValidationError`. |
 | `NULL` placement in an ordering | `NULL` sorts as the smallest value, first ascending — see [NULL ordering](../../querying/queryset-methods.md#null-ordering). |

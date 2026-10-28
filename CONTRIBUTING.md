@@ -198,8 +198,8 @@ installs it on the first `cargo` call in the checkout, so a check passing locall
 ```bash
 make build_native           # rust.native for this OS and the current Python, into rust/
 make build_native_linux     # the Linux rust.native of Python 3.12-3.14, in Docker
-make build_native_windows   # the Windows rust.native of Python 3.12-3.14 (.venv-3.X)
-make build_native_macos     # the macOS rust.native of Python 3.12-3.14 (.venv-3.X), universal2
+make build_native_windows   # the Windows rust.native of Python 3.12-3.14 (.venv-3.X-core)
+make build_native_macos     # the macOS rust.native of Python 3.12-3.14 (.venv-3.X-core), universal2
 make rust_check             # cargo fmt --check, clippy and the Rust unit tests (part of make check)
 ```
 
@@ -248,6 +248,66 @@ requested one and fails otherwise; every test run also gets `HARE_TEST_SQLITE_VE
 before its first test when another SQLite is loaded — a run never falls back to the system's
 SQLite silently.
 
+### Test environments
+
+Each test runs in the one environment of `tests/matrix/constants.py` `SUITE_ENVIRONMENTS` that installs
+exactly the packages it needs: `core` installs none of the extras, `litestar` the `litestar` extra, `pure`
+nothing optional and no `rust.native` either (the pure wheel). Code that breaks without a package is then
+caught by the environments without it, and a test never skips because a package is missing.
+
+The matrix runs the environments of extras on the tests reading no database, once per Python and OS -
+each collecting only the modules that may hold its tests (`tests/matrix/extra_test_modules.py`): a module
+whose `REQUIRES`, a `conftest.py` above it, or what it imports from the test suite names one of the
+environment's extras in a string; an environment no module may hold tests of doesn't run. On
+a database every test runs in `all`, installing every extra, on each server version - one run per
+version and driver; `core` and `pure` run there on the newest server of each database and the newest
+Python only.
+
+- A test module needing an extra declares it before its other code: `REQUIRES = ("litestar",)` - read
+  without importing the module, so a run without the package doesn't import it either. A `conftest.py`
+  declares it for its whole directory.
+- A single test or parameter adds its own with `@pytest.mark.requires("encryption")` or
+  `pytest.param(..., marks=pytest.mark.requires("yaml"))`, and imports the package inside the test.
+- `native` is the requirement of a test needing `rust.native` - such a test doesn't run in `pure`.
+- A test requiring what no environment installs exactly fails the collection: add an environment.
+- A test parametrized over the PostgreSQL drivers takes their classes by path
+  (`DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)`, the `client_class` fixture with
+  `indirect=True`), so asyncpg's parameter runs only where asyncpg is installed.
+
+`pytest --hare-suite-environment=<name>` runs one environment's tests; without the option every
+environment's tests run (`all`), which needs a virtualenv installing everything - `make deps`. The matrix
+runs each environment in a virtualenv of its own, `.venv-<python>-<environment>[-<driver extra>]`, the extra
+of the database's driver added for a run on that database:
+
+```bash
+make matrix_venvs MATRIX_OPTIONS="--python 3.14 --environment core --environment litestar"
+make test_environment ENVIRONMENT=litestar HARE_TEST_DB=postgresql://postgres:postgres@127.0.0.1:5433/test_{}
+```
+
+### Contract matrices
+
+`tests/contracts/` checks each capability of hare against every place it is used, as a matrix: the rows are
+enumerated from hare itself (`HareRegistry` walks its packages), so a class added to hare is checked at once,
+and a row without its expected result fails a completeness test instead of being skipped.
+
+| Matrix | Rows × columns | Where |
+| --- | --- | --- |
+| Field × place of its value | every concrete field class (`field_samples.py`) × migration, change event (strict JSON), pydantic schema, request query, factory, inspectdb | `test_field_*.py` |
+| Write path × observer | every method writing rows (`writes/write_methods.py`) × `ChangeCapture`, `RowsChanged`, validators, `auto_now`, optimistic lock, tenant scope, encryption, `GeneratedField` | `writes/` |
+| Extra × entry point | every module importable in the environment, the dialect registry, the CLI, a URL of a driver without its package | `entry_points/` |
+| Contrib model × migrations | outbox, versioned, tenant, encrypted, gis, vector, generic and composite key, many-to-many models | `contrib_models/` |
+| Integration × test fixture | Robyn, Litestar, FastAPI, taskiq × `hare_app_db`, `hare_app_transactional_db` × driver | `applications/` |
+| Documentation × code | every `from hare… import …` of `docs/**/*.md` | `documentation/` |
+| `Meta` option × inheritance | every model option and extension option × no `Meta`, a bare one, `Meta(Base.Meta)`, overridden, `None` | `meta_options/` |
+| Exception × integration answer | every public exception × each integration's status, without the database's text | `exceptions/` |
+
+A new field class needs its `FieldSample` (with its values and their JSON forms), a new writing method its
+write path, a new `Meta` option its sample — or an entry with the reason in `tests/contracts/constants.py`.
+A cell failing because of hare is a bug to fix, never an expectation to change. The matrices run in every
+environment and on every database of the matrix (`MATRIX_CLICKHOUSE_TEST_PATHS` includes them). The
+ClickHouse test URLs name the server's Keeper (`keeper_hosts`): a test database's `generateSerialID` series are
+deleted with it, so local runs never reach the server's `max_autoincrement_series` (1000).
+
 ### Running the matrix locally
 
 You need Python 3.12, 3.13 and 3.14 (`py -3.X` on Windows, `python3.X` elsewhere), Docker for the
@@ -257,14 +317,14 @@ use the `rust.native` builds in `rust/`: the committed Linux, Windows and macOS 
 `rust/`.
 
 ```bash
-make matrix_venvs         # .venv-3.12, .venv-3.13, .venv-3.14 with every dependency group
+make matrix_venvs         # the virtualenv of each Python, environment and database driver of the runs
 make sqlite_versions      # every SQLite version, prepared for each of those Pythons
 make test_db_matrix_up    # PostgreSQL 14-18: hare-orm-test-db-14 ... -18 on ports 5414-5418
 make test_pgbouncer_matrix_up          # PgBouncer 1.22-1.26 in front of PostgreSQL 18, 1.26 also in front of 14
 make test_clickhouse_matrix_up         # a ClickHouse server per version: HTTP 3YYMM, native 4YYMM, Keeper 6YYMM
 make test_clickhouse_cluster_matrix_up # a two-server ClickHouse cluster per version: HTTP 5YYMM, native 2YYMM
 make test_brokers_matrix_up            # Redis 7.2/8.10 (16XYY), RabbitMQ 4.0/4.3 (15XYY), Kafka 3.9/4.3 (19XYY)
-make test_matrix          # every run, then a table: Python x suite -> passed/failed, counts, time
+make test_matrix          # every run, then a table: Python x environment x suite -> passed/failed, counts, time
 make test_db_matrix_down test_pgbouncer_matrix_down test_clickhouse_matrix_down \
     test_clickhouse_cluster_matrix_down test_brokers_matrix_down   # removes the servers
 ```
@@ -273,8 +333,9 @@ A server's port is made of its version's digits (`tests/matrix/matrix_ports.py`)
 interface of ClickHouse 25.8, `12218` PgBouncer 1.22 in front of PostgreSQL 18. Start only the servers of
 the suites you run — every ClickHouse server and cluster at once needs a lot of memory.
 
-Each run writes its pytest output to `.test-matrix/<python>-<suite>.log`; `make test_matrix`
-fails when any run failed. The suites are `database-independent`, `sqlite-<version>`,
+A run is the tests of one environment in one suite. Each run writes its pytest output to
+`.test-matrix/<python>-<environment>-<suite>.log`; `make test_matrix` fails when any run failed - a
+run choosing no test of its environment passes. The suites are `database-independent`, `sqlite-<version>`,
 `sqlite-regexp`, `asyncpg-<postgres>`, `rust_pg-<postgres>`, `pgbouncer-<asyncpg|rust_pg>-<pgbouncer>-<postgres>`,
 `clickhouse-connect-<clickhouse>`, `clickhouse-driver-<clickhouse>`, `clickhouse-connect-cluster-<clickhouse>`,
 `clickhouse-driver-cluster-<clickhouse>`, `redis-<version>`, `rabbitmq-<version>` and `kafka-<version>`. Run a
@@ -287,8 +348,9 @@ make test_matrix MATRIX_OPTIONS="--workers auto --print-failed-logs"   # 8 worke
 make test_matrix MATRIX_OPTIONS="--jobs 4 --workers 4 --suite 'asyncpg-*'"   # four runs at once, 4 workers each
 make test_matrix MATRIX_OPTIONS="--newest"   # the newest Python and the newest version of each server only
 make test_matrix MATRIX_OPTIONS="--python 3.14 --suite 'clickhouse-*-26.3'"   # ClickHouse 26.3, a server and a cluster
+make test_matrix MATRIX_OPTIONS="--environment core --environment 'clickhouse-*'"   # the tests of those environments
 make sqlite_versions matrix_sqlite_versions=newest
-make matrix_venvs matrix_python_versions=3.13 matrix_interpreter=/usr/bin/python3.13
+make matrix_venvs MATRIX_OPTIONS="--python 3.13" matrix_interpreter=/usr/bin/python3.13
 make sqlite_versions matrix_python_versions=3.13 matrix_sqlite_versions=3.35.5
 make test_db_matrix_up matrix_postgres_versions=16
 make test_clickhouse_matrix_up test_clickhouse_cluster_matrix_up matrix_clickhouse_versions=26.3
@@ -334,7 +396,8 @@ tested: the rulesets require the `ci-passed` status on a branch up to date with 
 `main` publishes the documentation (`.github/workflows/docs.yml`, `make docs`).
 
 Each job runs the Makefile targets above — the test jobs together are `make test_matrix`, each one
-part of it:
+part of it, every [environment](#test-environments)'s tests of its suites in that environment's own
+virtualenv:
 
 | Job | What it does | Makefile targets |
 | --- | --- | --- |

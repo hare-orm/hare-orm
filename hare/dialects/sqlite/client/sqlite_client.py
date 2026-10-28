@@ -19,7 +19,6 @@ from hare.dialects.sqlite.client.constants import (
     SQLITE_CLOSE_TIMEOUT_SECONDS,
     SQLITE_DEFAULT_CASE_SENSITIVE_LIKE,
     SQLITE_FUNCTION_ERROR_MESSAGES,
-    SQLITE_IN_MEMORY_URI_MARKERS,
     SQLITE_LIKE_PATTERN_TOO_LONG_ERROR,
     SQLITE_LIKE_PATTERN_TOO_LONG_MESSAGE,
     SQLITE_MISSING_CONFLICT_TARGET_MESSAGE,
@@ -280,9 +279,13 @@ class SqliteClient(DatabaseClient):
     def get_address(self) -> str:
         return self.filename
 
+    def holds_database_in_connection(self) -> bool:
+        # An in-memory database is the connection's own.
+        return self.filename == SQLITE_IN_MEMORY_FILENAME
+
     def hold_migration_lock(self) -> AbstractAsyncContextManager[None]:
         # An in-memory database lives in this process only - no other one migrates it.
-        if any(marker in self.filename for marker in SQLITE_IN_MEMORY_URI_MARKERS):
+        if self.filename == SQLITE_IN_MEMORY_FILENAME:
             return nullcontext()
         return SqliteMigrationLock.hold(self.filename)
 
@@ -448,7 +451,7 @@ class SqliteClient(DatabaseClient):
         return error
 
     async def get_shell_command(self) -> ShellCommand:
-        if any(marker in self.filename for marker in SQLITE_IN_MEMORY_URI_MARKERS):
+        if self.filename == SQLITE_IN_MEMORY_FILENAME:
             raise UnSupportedError(
                 f"{self.connection_alias!r} is an in-memory SQLite database - it lives in this process only, "
                 "no other program can open it"

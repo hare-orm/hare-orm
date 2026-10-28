@@ -3,13 +3,12 @@ real commits and rollbacks, which a wrapping rollback transaction would hide."""
 
 import os
 
-import pytest
 import pytest_asyncio
 
 from hare.contrib.test import truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
 
-pytest.importorskip("taskiq")
+REQUIRES = ("taskiq",)
 
 
 @pytest_asyncio.fixture(scope="module")

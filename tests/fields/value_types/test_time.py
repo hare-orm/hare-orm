@@ -665,6 +665,7 @@ async def test_datetime_filter_by_year_extracts_in_configured_zone(db, tz):
         assert await model.objects.filter(datetime__day=1, id=obj.id).count() == 0
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 @test.requires_features(dialect="postgresql")
 async def test_datetime_filter_by_hour_extracts_in_local_zone_with_use_tz_false(db):
@@ -687,6 +688,7 @@ async def test_datetime_filter_by_hour_extracts_in_local_zone_with_use_tz_false(
         assert await model.objects.filter(id=obj.id, datetime__hour=20).count() == 0
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 @test.requires_features(dialect="postgresql")
 async def test_datetime_filter_by_hour_use_tz_false_boundary_values(db):
@@ -708,6 +710,7 @@ async def test_datetime_filter_by_hour_use_tz_false_boundary_values(db):
         assert await model.objects.filter(id=obj.id, datetime__week=first_week.isocalendar()[1]).count() == 1
 
 
+@pytest.mark.requires("tzlocal")
 @pytest.mark.asyncio
 @test.requires_features(dialect="postgresql")
 async def test_datetime_filter_by_hour_use_tz_false_across_dst_dates(db):
@@ -1169,16 +1172,25 @@ def test_timezone():
         aware_now = Timezone.make_aware(naive_now, tz_shanghai.key)
         assert aware_now.utcoffset() == now_shanghai.utcoffset()
         assert "+" in Timezone.make_aware(naive_now).isoformat()
-        # test compatible with pytz
-        with contextlib.suppress(ImportError):
-            import pytz
 
-            aware_now = Timezone.make_aware(naive_now, pytz.timezone(tz_shanghai.key))
-            assert aware_now.utcoffset() == now_shanghai.utcoffset()
-            pytz_shanghai = pytz.timezone(tz_shanghai.key)
-            assert pytz_shanghai.zone == tz_shanghai.zone == tz_shanghai.key
-            assert localtime_shanghai == Timezone.localtime(utcnow, pytz_shanghai)
-            assert localtime_shanghai.utcoffset() == Timezone.localtime(timezone=pytz_shanghai).utcoffset()
+
+@pytest.mark.requires("pytz")
+@pytest.mark.database_independent
+def test_timezone_takes_a_pytz_zone():
+    import pytz
+
+    with override_timezone(use_timezone=True):
+        utcnow = datetime.now(UTC)
+        tz_shanghai = ZoneInfo("Asia/Shanghai")
+        localtime_shanghai = Timezone.localtime(utcnow, tz_shanghai.key)
+        now_shanghai = datetime.now(tz_shanghai)
+        naive_now = Timezone.make_naive(utcnow, tz_shanghai.key)
+        aware_now = Timezone.make_aware(naive_now, pytz.timezone(tz_shanghai.key))
+        assert aware_now.utcoffset() == now_shanghai.utcoffset()
+        pytz_shanghai = pytz.timezone(tz_shanghai.key)
+        assert pytz_shanghai.zone == tz_shanghai.zone == tz_shanghai.key
+        assert localtime_shanghai == Timezone.localtime(utcnow, pytz_shanghai)
+        assert localtime_shanghai.utcoffset() == Timezone.localtime(timezone=pytz_shanghai).utcoffset()
 
 
 @pytest.mark.database_independent

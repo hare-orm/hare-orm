@@ -37,12 +37,13 @@ class UUIDField(Field[TUuid]):
         super().__init__(**kwargs)
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> str | None:
+        if value is not None and not isinstance(value, UUID):
+            # A plain attribute assignment or a filter value isn't normalized - a malformed string fails
+            # here, and the validators get the UUID.
+            value = self.to_python(value)
         self.validate(value)
         if value is None:
             return None
-        if not isinstance(value, UUID):
-            # A plain attribute assignment isn't normalized - a malformed string fails here.
-            value = self.to_python(value)
         return str(value)
 
     def to_db_uuid(self, value: Any, instance: type[Model] | Model) -> UUID | None:
@@ -56,11 +57,12 @@ class UUIDField(Field[TUuid]):
         Returns:
             The UUID, or None.
         """
+        if value is not None and type(value) is not UUID:
+            # A plain attribute assignment or a filter value isn't normalized - a malformed string fails
+            # here, and the validators get the UUID.
+            value = self.to_python(value)
         self.validate(value)
-        if value is None or type(value) is UUID:
-            return value
-        # A plain attribute assignment isn't normalized - a malformed string fails here.
-        return self.to_python(value)
+        return value
 
     def to_python(self, value: Any) -> UUID | None:
         if value is None or type(value) is UUID:

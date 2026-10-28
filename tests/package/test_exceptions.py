@@ -3,7 +3,6 @@ import pickle
 
 import pytest
 
-from hare.contrib.frameworks.exceptions import ServerErrorResponse
 from hare.exceptions import DoesNotExist, MultipleObjectsReturned, OperationalError, ProtectedError
 from hare.fields.validators.exceptions import InvalidScheme
 from tests.shared_models.testmodels import Tournament
@@ -59,6 +58,7 @@ def test_sql_error_str_names_the_sql_but_not_the_bind_parameters():
     assert error.parameters == ["hunter2"]
 
 
+@pytest.mark.requires("request-query")
 def test_errors_of_inspectdb_and_request_queries_round_trip_through_pickle():
     from hare.contrib.request_query.exceptions import InvalidRequestQuery, RequestQueryForbidden
     from hare.inspectdb.exceptions import DuplicateModelClassNameError, SchemaNotFoundError
@@ -75,9 +75,12 @@ def test_errors_of_inspectdb_and_request_queries_round_trip_through_pickle():
     assert pickle.loads(pickle.dumps(RequestQueryForbidden("deleted", "no"))).parameter == "deleted"
 
 
+@pytest.mark.requires("pydantic")
 def test_errors_formatting_their_message_round_trip_through_copy_and_pickle():
     """The formatted message was passed on as the argument and formatted again on restore -
     "Invalid scheme: Invalid scheme: ftp is not allowed is not allowed"."""
+    from hare.contrib.frameworks.exceptions import ServerErrorResponse
+
     for original in (ServerErrorResponse(500), InvalidScheme("ftp"), InvalidScheme("ftp", "custom")):
         for round_trip in (copy.copy, copy.deepcopy, lambda error: pickle.loads(pickle.dumps(error))):
             restored = round_trip(original)

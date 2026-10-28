@@ -23,6 +23,7 @@ from hare.fields.constants import (
 )
 from hare.fields.db_default_not_set import DbDefaultNotSet
 from hare.fields.enums import NativeWriteCheck, RelationType
+from hare.fields.json_values import JsonValues
 from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.fields.registrations.registered_transform import RegisteredTransform
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
@@ -464,6 +465,22 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             value = self.get_written_value_of_another_type(value)
         self.validate(value)
         return value
+
+    def get_json_value(self, value: Any) -> Any:
+        """The JSON form of a value of the field - what an outbox event holds of it: JSON values only, a float
+        JSON has no number for as its text (``"NaN"``, ``"Infinity"``). The default writes what
+        ``JsonValues`` writes; a field whose values JSON has no form for there gives its own.
+
+        Args:
+            value: A value of the field, None included.
+
+        Returns:
+            The value's JSON form.
+
+        Raises:
+            TypeError: The value has no JSON form.
+        """
+        return JsonValues.get_json_value(value)
 
     def get_written_value_of_another_type(self, value: Any) -> Any:
         """The value a write takes of a value of another type than ``field_type`` - converted as

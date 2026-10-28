@@ -3,16 +3,11 @@ drivers."""
 
 import pytest
 
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
-CLIENT_CLASSES = [AsyncpgClient]
-try:
-    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
-except ImportError:
-    pass
-else:
-    CLIENT_CLASSES.append(RustPgClient)
+CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
 def _make_client(client_class, **credentials):
@@ -26,8 +21,8 @@ def _make_client(client_class, **credentials):
     )
 
 
-# The check is the clients' shared __init__: every value on the first client class, the first value
-# on each other one.
+# The check is the clients' shared __init__: every value on rust_pg's client class, the first value
+# on asyncpg's.
 INVALID_POOL_CREDENTIALS = [
     ({"pool_acquire_timeout": -1}, "pool_acquire_timeout must be greater than 0"),
     ({"pool_acquire_timeout": 0}, "pool_acquire_timeout must be greater than 0"),
@@ -51,9 +46,13 @@ INVALID_POOL_CREDENTIALS = [
 @pytest.mark.parametrize(
     ("client_class", "credentials", "message"),
     [
-        *[(CLIENT_CLASSES[0], *(credentials, message)) for (credentials, message) in INVALID_POOL_CREDENTIALS],
-        *[(client_class, *INVALID_POOL_CREDENTIALS[0]) for client_class in CLIENT_CLASSES[1:]],
+        *[
+            DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, credentials, message)
+            for (credentials, message) in INVALID_POOL_CREDENTIALS
+        ],
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, *INVALID_POOL_CREDENTIALS[0]),
     ],
+    indirect=["client_class"],
 )
 def test_invalid_pool_credentials_are_rejected(client_class, credentials, message):
     with pytest.raises(ConfigurationError, match=message):
@@ -61,7 +60,7 @@ def test_invalid_pool_credentials_are_rejected(client_class, credentials, messag
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", CLIENT_CLASSES, indirect=True)
 @pytest.mark.parametrize(
     ("credentials", "expected"),
     [
@@ -76,11 +75,11 @@ def test_valid_pool_credentials_are_accepted(client_class, credentials, expected
     assert (client.pool_minsize, client.pool_maxsize, client.pool_acquire_timeout) == expected
 
 
+@pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_rust_driver_rejects_a_negative_acquire_timeout_without_panicking():
-    pg = pytest.importorskip("rust.native.pg")
-    if not hasattr(pg, "connect"):
-        pytest.skip("the rust_pg native extension is not built")
+    from rust.native import pg
+
     with pytest.raises(ValueError, match="pool_acquire_timeout"):
         await pg.connect("127.0.0.1", 1, "postgres", None, None, pool_acquire_timeout=-1.0)

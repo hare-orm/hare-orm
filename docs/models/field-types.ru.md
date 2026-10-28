@@ -192,6 +192,7 @@ class Review(Model):
 | `TimeDeltaField` | `datetime.timedelta` | — | `BIGINT` (хранится в микросекундах); число вместо `timedelta` даёт `ValidationError` |
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
 | `JSONField[T]` | `dict` / `list` (или класс модели Pydantic) | `encoder`, `decoder`, `field_type` (для документации OpenAPI) | `JSON` (PostgreSQL: `JSONB`); обычный индекс-дерево (btree: `unique=True`/`db_index=True`/`Index(fields=...)`) не допускается, но индекс другого вида в `Meta.indexes`, например `GinIndex(fields=[...])`, принимается |
+| `JSONTextField` | `dict` / `list` / любое значение JSON | как у `JSONField` | колонка `JSONField`, но на ClickHouse — `String` с текстом JSON: его тип `JSON` теряет null у ключа и список на верхнем уровне; любое значение читается таким, каким записано (`payload` и `headers` outbox) |
 | `UUIDField` | `uuid.UUID` | — (`primary_key=True` без явного `default` сам задаёт `default=uuid4`) | `CHAR(36)` (PostgreSQL: `UUID`); читается как обычный `uuid.UUID` на любом драйвере |
 | `BinaryField` | `bytes` (и `bytearray`, `memoryview`; иное даёт `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); фильтруется по равенству, `__in`, `__isnull` и сравнениям (порядок байтов) — текстовый lookup (`__contains`, ...) даёт `FieldError`, — обновляется через `update()`, принимает `unique=True`/`db_index=True` (индекс B-tree — в PostgreSQL значение больше примерно 2,7 КБ проиндексировать нельзя) |
 
@@ -232,8 +233,10 @@ class Book(Model):
 
 `FloatField` принимает `int`, `float` и `Decimal`; `bool`, текст, а также `int` или конечный `Decimal` за
 пределом диапазона float (`Decimal("1e500")`) дают `ValidationError`. `NaN` он
-отклоняет в SQLite при любой записи — SQLite сохранил бы его как NULL; PostgreSQL и ClickHouse его
-хранят. Отрицательный ноль
+отклоняет в SQLite при любой записи и как операнд фильтра — SQLite сохранил бы и подставил бы его как NULL;
+PostgreSQL и ClickHouse его хранят. Фильтр по `NaN` сравнивает так, как сравнивает база: в PostgreSQL `NaN`
+равен `NaN` и больше любого числа, в ClickHouse он не равен ничему (`__not=NaN` берёт все строки).
+Отрицательный ноль
 (`-0.0`) сохраняет знак в PostgreSQL и ClickHouse и читается как `0.0` в SQLite, который так его хранит;
 они везде равны друг другу.
 
@@ -301,6 +304,13 @@ hare, где действует пояс UTC.
 Без `field_type` (в том числе с обобщённым `JSONField[T]`, который действует только для проверки типов)
 значения остаются обычным JSON.
 
+Миграция пишет `field_type` кодом, который его импортирует: класс — по имени, под которым его отдаёт
+модуль, параметризованный тип — по исходному типу и аргументам (`dict[str, list[int]]`, `int | None`,
+`typing.Literal["a"]`, `typing.List[int]`). Тип, до которого не доходит ни одна инструкция import, —
+класс, который Pydantic создаёт для `GenericModel[int]`, псевдоним из инструкции `type`, —
+`makemigrations` отклоняет с `ConfigurationError`; объявите подкласс
+(`class IntItems(GenericModel[int]): pass`) и передайте его.
+
 Значение, которое JSON не может хранить, даёт `ValidationError` при любой записи (`create()`, `save()`,
 `update()`, `bulk_create()`, в том числе с `use_copy=True`, `bulk_update()`): число `NaN` или `Infinity` где
 угодно внутри значения. Нулевой байт внутри значения JSON хранится так, как его хранит база, там, где она его
@@ -347,9 +357,11 @@ class Book(Model):
     )
 ```
 
-- `expression` — выражение hare над полями модели (`F`, функции, арифметика): DDL каждой базы пишет его
-  своим SQL, миграция, переименовывающая поле, которое оно читает, переименовывает его и здесь, а миграция,
-  меняющая тип колонки, которую оно читает, удаляет вычисляемую колонку до изменения и добавляет после.
+- `expression` — выражение hare над полями модели (`F`, функции, арифметика; собственная колонка связи —
+  `F("owner_id")`, а выражение, читающее связанную модель, даёт `ConfigurationError` при привязке модели):
+  DDL каждой базы пишет его своим SQL, миграция, переименовывающая поле, которое оно читает,
+  переименовывает его и здесь, а миграция, меняющая тип колонки, которую оно читает, удаляет вычисляемую
+  колонку до изменения и добавляет после.
   Или `RawSQLTerm` с SQL, который записывается в команды DDL как есть (**никогда не собирайте его из
   данных, пришедших извне**), или своё выражение для каждого диалекта:
   `{"sqlite": RawSQLTerm(...), "postgresql": RawSQLTerm(...)}`; диалект, которого нет в словаре, даёт

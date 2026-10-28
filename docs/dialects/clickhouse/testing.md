@@ -12,8 +12,9 @@ make test_clickhouse         # tests/dialects/clickhouse over both drivers
 ```
 
 The server is its own ClickHouse Keeper — port 9182 on the host — with `allow_experimental_transactions`
-on (`tests/docker/clickhouse`): the transaction tests connect with `transactions=true`, the migration lock
-tests with `keeper_hosts=127.0.0.1:9182` too, and the generated keys come from its series.
+on (`tests/docker/clickhouse`): the tests connect with `keeper_hosts=127.0.0.1:9182`, so a test database's
+key series are deleted with it, the transaction tests with `transactions=true` too, and the generated keys
+come from its series.
 `make test_clickhouse` runs `tests/dialects/clickhouse/`, whose models are its own — the shared test
 models of the rest of the suite need the unique and foreign key constraints ClickHouse doesn't keep.
 

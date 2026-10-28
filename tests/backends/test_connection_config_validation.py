@@ -13,17 +13,12 @@ from hare.core.config import HareConfig
 from hare.core.connections.connections import Connections
 from hare.core.constants import ENV_PYTEST_XDIST_WORKER
 from hare.core.hare_context import HareContext
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
-POSTGRES_CLIENT_CLASSES = [AsyncpgClient]
-try:
-    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
-except ImportError:
-    pass
-else:
-    POSTGRES_CLIENT_CLASSES.append(RustPgClient)
+POSTGRES_CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
 def _make_postgres_client(client_class, **credentials):
@@ -39,8 +34,8 @@ def _make_postgres_client(client_class, **credentials):
     )
 
 
-# The check is the clients' shared __init__: every value on the first client class, the first value
-# on each other one.
+# The check is the clients' shared __init__: every value on rust_pg's client class, the first value
+# on asyncpg's.
 INVALID_POSTGRES_CREDENTIALS = [
     ({"port": "abc"}, "port must be a whole number"),
     ({"port": 0}, "port must be between 1 and 65535"),
@@ -67,11 +62,12 @@ INVALID_POSTGRES_CREDENTIALS = [
     ("client_class", "credentials", "message"),
     [
         *[
-            (POSTGRES_CLIENT_CLASSES[0], *(credentials, message))
+            DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, credentials, message)
             for (credentials, message) in INVALID_POSTGRES_CREDENTIALS
         ],
-        *[(client_class, *INVALID_POSTGRES_CREDENTIALS[0]) for client_class in POSTGRES_CLIENT_CLASSES[1:]],
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, *INVALID_POSTGRES_CREDENTIALS[0]),
     ],
+    indirect=["client_class"],
 )
 def test_invalid_postgres_credentials_are_rejected(client_class, credentials, message):
     with pytest.raises(ConfigurationError, match=message):
@@ -79,7 +75,7 @@ def test_invalid_postgres_credentials_are_rejected(client_class, credentials, me
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 def test_valid_postgres_credentials_are_normalized(client_class):
     client = _make_postgres_client(
         client_class,
@@ -96,6 +92,7 @@ def test_valid_postgres_credentials_are_normalized(client_class):
     assert client.extra["statement_cache_size"] == 10
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.parametrize(
     ("credentials", "message"),
     [
@@ -108,12 +105,17 @@ def test_valid_postgres_credentials_are_normalized(client_class):
     ],
 )
 def test_invalid_asyncpg_credentials_are_rejected(credentials, message):
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     with pytest.raises(ConfigurationError, match=message):
         _make_postgres_client(AsyncpgClient, **credentials)
 
 
+@pytest.mark.requires("asyncpg")
 @pytest.mark.database_independent
 def test_asyncpg_accepts_its_own_connection_parameters():
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
     client = _make_postgres_client(
         AsyncpgClient, timeout="30", max_queries="100", ssl=True, max_inactive_connection_lifetime=0
     )
@@ -125,16 +127,13 @@ def test_asyncpg_accepts_its_own_connection_parameters():
 @pytest.mark.parametrize(
     "engine",
     [
-        "postgresql",
-        "postgresql",
-        "postgresql+asyncpg",
+        pytest.param("postgresql", marks=pytest.mark.requires("native")),
+        pytest.param("postgresql+asyncpg", marks=pytest.mark.requires("asyncpg")),
     ],
 )
 async def test_dict_config_with_a_misspelled_postgres_parameter_fails_init(engine):
     """rust_pg (and the postgres dispatcher picking it) silently dropped a misspelled credential
     that the DB_URL form already rejected."""
-    if engine != "postgresql+asyncpg" and len(POSTGRES_CLIENT_CLASSES) == 1:
-        pytest.skip("the rust_pg native extension is not built")
     config = {
         "connections": {
             "default": {
@@ -174,19 +173,19 @@ class _RecordingPostgresClient:
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 async def test_database_name_is_quoted_and_owner_is_omitted_without_a_user(client_class):
     client = _RecordingPostgresClient.make(client_class, database='my "db"', user=None)
 
     await client.db_create()
     await client.db_delete()
 
-    assert client.sent_statements == ['CREATE DATABASE "my ""db"""', 'DROP DATABASE "my ""db"""']
+    assert client.sent_statements == ['CREATE DATABASE "my ""db"""', 'DROP DATABASE "my ""db""" WITH (FORCE)']
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 async def test_database_owner_is_quoted(client_class):
     client = _RecordingPostgresClient.make(client_class, database="plain", user='odd"role')
 

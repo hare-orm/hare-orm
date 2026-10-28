@@ -199,12 +199,16 @@ class NotificationListener:
         self._callback_context = contextvars.copy_context()
         try:
             attempt = 0
+            # Once it listened, a refused reconnect is the server's state, not the configuration: a database
+            # dropped and made again - retried as any failure.
+            has_listened = False
             while not self._stopping:
                 connection: Any = None
                 failure: str | None = None
                 try:
                     connection = await listen(self.channel, self._on_driver_notify)
                     self._connection = connection
+                    has_listened = True
                     self._first_attempt_finished.set()
                     # The attempt counter only resets once the connection survives a health
                     # check: one that dies faster than that (idle-session timeout, a firewall
@@ -222,9 +226,13 @@ class NotificationListener:
                         attempt = 0
                         continue
                     failure = "listener closed before becoming healthy"
-                except (asyncio.CancelledError, ConfigurationError):
-                    # No retry fixes the configuration.
+                except asyncio.CancelledError:
                     raise
+                except ConfigurationError as error:
+                    if not has_listened:
+                        # No retry fixes the configuration.
+                        raise
+                    failure = f"listening setup failed: {error}"
                 except Exception as error:
                     failure = f"listening setup failed: {error}"
                 finally:

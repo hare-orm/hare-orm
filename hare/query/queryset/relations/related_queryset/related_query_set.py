@@ -307,9 +307,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         if attribute_name:
             setattr(self.instance, attribute_name, sequence)
         else:
-            relation_rows = self.relation_rows
-            relation_rows._fetched = True
-            relation_rows.related_objects = sequence
+            self.relation_rows.set_fetched(sequence)
 
     def _reset_cache_on_rollback(self, connection: DatabaseClient) -> None:
         """Registers a reset of this relation's fetched rows if the transaction or savepoint ``connection`` is

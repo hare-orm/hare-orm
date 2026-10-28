@@ -575,3 +575,35 @@ class EventLog(Model):
     class Meta:
         primary_key = None
         ordering = ("source",)
+
+
+class DiamondRoot(Model):
+    """Two CASCADE branches (left/right) joined again by the leaves below them."""
+
+    id = fields.BigIntField(primary_key=True, generated=False)
+
+
+class DiamondLeft(Model):
+    id = fields.BigIntField(primary_key=True, generated=False)
+    root: fields.ForeignKeyRelation[DiamondRoot] = fields.ForeignKeyField(
+        "models.DiamondRoot", related_name="lefts", on_delete=fields.CASCADE, db_constraint=False
+    )
+
+
+class DiamondRight(Model):
+    id = fields.BigIntField(primary_key=True, generated=False)
+    root: fields.ForeignKeyRelation[DiamondRoot] = fields.ForeignKeyField(
+        "models.DiamondRoot", related_name="rights", on_delete=fields.CASCADE, db_constraint=False
+    )
+
+
+class DiamondRestrictLeaf(Model):
+    """Removed through the left branch of its root, guarded by the right one."""
+
+    id = fields.BigIntField(primary_key=True, generated=False)
+    left: fields.ForeignKeyRelation[DiamondLeft] = fields.ForeignKeyField(
+        "models.DiamondLeft", related_name="restrict_leaves", on_delete=fields.CASCADE, db_constraint=False
+    )
+    right: fields.ForeignKeyRelation[DiamondRight] = fields.ForeignKeyField(
+        "models.DiamondRight", related_name="restrict_leaves", on_delete=fields.RESTRICT, db_constraint=False
+    )

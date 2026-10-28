@@ -241,3 +241,18 @@ app = Litestar(route_handlers, plugins=[HarePlugin(HARE_CONFIG, health_routes=He
 ```
 
 The readiness and liveness routes it adds — see [Web frameworks](web-frameworks.md#health-routes).
+
+## <a id="tests"></a>Tests
+
+With hare's pytest plugin the application under test runs on the test databases and takes the test's
+context. `AsyncTestClient` runs it in the thread of an anyio portal, an event loop of its own: under
+`hare_app_transactional_db` its writes commit and the tables are emptied after the test, on every driver;
+under `hare_app_db` they are rolled back with the test's on the `postgresql` and SQLite drivers, and
+`postgresql+asyncpg` refuses them — see [Application tests](../testing/setup.md#application-tests).
+
+```python
+@pytest.mark.asyncio
+async def test_create_reader(hare_app_transactional_db):
+    async with AsyncTestClient(app=app) as client:
+        assert (await client.post("/readers", json={"name": "ann"})).status_code == 201
+```

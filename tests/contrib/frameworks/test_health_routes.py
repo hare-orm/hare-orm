@@ -6,6 +6,8 @@ import pytest
 from hare.contrib.frameworks.health_routes import HealthRoutes
 from hare.health import HealthCheck, HealthStatus
 
+REQUIRES = ("pydantic",)
+
 
 @pytest.mark.database_independent
 def test_each_health_status_gets_its_status_code():

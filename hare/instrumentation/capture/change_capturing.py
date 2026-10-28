@@ -85,23 +85,11 @@ class ChangeCapturing:
         return isinstance(connection, TransactionClient) and not connection._is_transaction_finished()
 
     @staticmethod
-    def needs_transaction(connection: DatabaseClient) -> bool:
-        """Whether a write of a captured model on a connection opens a transaction for itself and its
-        changes - none is open, and the database has transactions.
-
-        Args:
-            connection: The connection of the write.
-
-        Returns:
-            True when it does.
-        """
-        return connection.features.supports_transactions and not ChangeCapturing.is_in_transaction(connection)
-
-    @staticmethod
     @asynccontextmanager
     async def transaction(connection: DatabaseClient) -> AsyncIterator[DatabaseClient]:
-        """The transaction a write of a captured model and its changes share - the open one, else a
-        new one around both; on a database without transactions, none.
+        """The transaction a write of a captured model and its changes share - a new one around both, a
+        savepoint of the open one: a change failing after its row is written undoes the write, also when the
+        caller of the write goes on in the open transaction. On a database without transactions, none.
 
         Args:
             connection: The connection of the write.
@@ -109,7 +97,7 @@ class ChangeCapturing:
         Yields:
             The connection to write on.
         """
-        if not ChangeCapturing.needs_transaction(connection):
+        if not connection.features.supports_transactions:
             yield connection
             return
         async with connection._in_transaction() as transaction_connection:

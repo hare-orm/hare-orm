@@ -124,7 +124,9 @@ class InstanceCapture:
         if update_fields is not None:
             changed: list[str] | None = update_fields
         elif model._meta.track_dirty_fields:
-            changed = list(obj.get_dirty_fields())
+            # In the order the model declares its fields - the same event whatever the set's order.
+            dirty_field_names = obj.get_dirty_fields()
+            changed = [field_name for field_name in model._meta.fields_map if field_name in dirty_field_names]
         else:
             changed = None
         captured = CapturedWrite(model, capture_needs, writer.connection, RowOperation.UPDATE, changed=changed)

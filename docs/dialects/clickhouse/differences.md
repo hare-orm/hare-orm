@@ -25,6 +25,7 @@ the call is refused before any SQL is sent.
 | A backslash as a plain character of a quoted name | A name holding a backslash — a table, a column, an alias — is written with it doubled: ClickHouse reads a single one as an escape. |
 | A recursive query adding rows by `UNION DISTINCT` | `with_recursive()` needs `max_depth`, which ends a cycle in the rows — see [Recursive queries and CTEs](../../querying/queryset-methods.md#recursive). Without it the walk raises `UnSupportedError`. |
 | `NULL` first in a descending ordering | ClickHouse puts `NULL` last in both directions — see [`NULL` first in a descending ordering](#null-first-in-a) |
+| A key with a `NULL` part in `__in` | `Q(relation__in=[...])` of a relation to a composite key compares a tuple of columns: for a row whose key holds `NULL` ClickHouse gives false where SQLite and PostgreSQL give `NULL` — `filter()` takes the same rows, an annotated condition (`annotate(x=Q(...))`) holds `False`, not `None` |
 | A cursor of a transaction | `stream()` reads rows outside a transaction too: the server sends them as it computes them. Leaving the `async for` early closes the stream and gives the connection back. |
 | A zone's UTC offset with seconds | Read without its seconds — see [A zone's UTC offset with seconds](#zone-offset-seconds). |
 
@@ -147,7 +148,8 @@ ClickHouse's own, and differs from PostgreSQL's:
   as ISO text. A text lookup (`contains`, `startswith`, `iexact`, ...) on a boolean, float or decimal
   column matches the text ClickHouse gives the value.
 - **Case mapping.** `Upper()`, `Lower()` and the `i...` lookups go through `upperUTF8()` and
-  `lowerUTF8()`, the server's own.
+  `lowerUTF8()`, the server's own — the `i...` lookups compare upper-cased text, so `iexact="ß"` matches `SS`
+  and `ss` too (`upperUTF8('ß')` is `SS`).
 - **`Substr`, `Chr` and `Ord`** are `substringUTF8()` (a start of 0 is refused, a negative start counts
   from the end, a negative length leaves characters off the end), `char()` (a code point no character has
   is refused, 0 gives `\x00`) and the code point of the first character for `Ord`. The text

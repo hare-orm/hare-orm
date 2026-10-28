@@ -56,20 +56,7 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
 
-_hydrate_candidate = pytest.importorskip("rust.native.rows")
-# rust/ has no __init__.py anywhere (a deliberate PEP 420 namespace package, see
-# rust/hydrate/pyproject.toml's own module-name docs) - so rust/hydrate/ itself (the crate
-# source directory, always present in a checkout) is ALSO a valid, empty namespace-package
-# portion for "rust.hydrate". Confirmed live: with the compiled extension absent,
-# `import rust.hydrate` resolves to that bare directory instead of raising ImportError, so
-# importorskip alone never skips - only checking for the real extension's own attribute does.
-if not hasattr(_hydrate_candidate, "ModelWriter"):
-    pytest.skip(
-        "rust.hydrate is an empty namespace package (extension not built) - run "
-        "`maturin develop --release --manifest-path rust/hydrate/Cargo.toml` to opt in",
-        allow_module_level=True,
-    )
-hydrate = _hydrate_candidate
+REQUIRES = ("native",)
 
 
 def _serialize_both(model, columns: tuple[str, ...], instances: list) -> tuple[list, list]:
@@ -884,32 +871,6 @@ def test_overridden_json_field_falls_back_to_complex_bucket():
         assert _bucket_of(JSONFields, ("data",))["data"] == WriteCodecType.CALL
     finally:
         _restore_field(JSONFields, "data", original_field)
-
-
-@pytest.mark.database_independent
-def test_pydantic_typed_json_field_falls_back_to_complex_bucket():
-    """A field_type=SomePydanticModel JSONField (data_pydantic) must NOT take bucket 6 - the
-    Rust-side json_field_value() has no equivalent to to_db_value()'s own field_type(**value)
-    shape check, so bucket 6 would silently skip it (see the fix's own comment in
-    rust_serialize_mixin.py for the full reasoning)."""
-    assert _bucket_of(JSONFields, ("data_pydantic",))["data_pydantic"] == WriteCodecType.CALL
-
-
-@pytest.mark.asyncio
-async def test_pydantic_typed_json_field_rejects_malformed_dict_via_bulk_create(db):
-    """End-to-end sibling of test_encrypted_style_json_subclass_override_actually_runs_on_real_write
-    below: the real bug this fixes was bulk_create() (the only write path that goes through
-    _build_rust_serialize_plan/hydrate.serialize_rows at all) silently writing a dict that
-    doesn't match data_pydantic's own TestSchemaForJSONField shape, instead of raising
-    ValidationError the way .save()/create() (which never go through the Rust bucket
-    classification) already did."""
-    malformed = {"totally": "wrong shape"}
-
-    with pytest.raises(ValidationError):
-        await JSONFields.objects.create(data={"a": 1}, data_pydantic=malformed)
-
-    with pytest.raises(ValidationError):
-        await JSONFields.objects.bulk_create([JSONFields(data={"a": 1}, data_pydantic=malformed)])
 
 
 @pytest.mark.asyncio

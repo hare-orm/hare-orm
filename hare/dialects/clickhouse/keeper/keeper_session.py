@@ -7,7 +7,10 @@ import struct
 from hare.dialects.clickhouse.keeper.constants import (
     KEEPER_CLOSE_SESSION_OPERATION,
     KEEPER_CREATE_OPERATION,
+    KEEPER_DELETE_OPERATION,
     KEEPER_EXISTS_OPERATION,
+    KEEPER_GET_CHILDREN_OPERATION,
+    KEEPER_NO_ERROR,
     KEEPER_NO_NODE_ERROR,
     KEEPER_PING_OPERATION,
     KEEPER_PING_REQUEST_ID,
@@ -16,7 +19,7 @@ from hare.dialects.clickhouse.keeper.constants import (
     KEEPER_WATCH_EVENT_REQUEST_ID,
 )
 from hare.dialects.clickhouse.keeper.keeper_codec import KeeperCodec
-from hare.exceptions import DBConnectionError
+from hare.exceptions import DBConnectionError, OperationalError
 
 
 class KeeperSession:
@@ -185,6 +188,37 @@ class KeeperSession:
         """
         error_code, _reply = await self.send(KEEPER_CREATE_OPERATION, KeeperCodec.get_create_body(path, flags))
         return error_code
+
+    async def delete(self, path: str) -> int:
+        """Deletes a node of any version.
+
+        Args:
+            path: The node's path.
+
+        Returns:
+            The error code.
+        """
+        error_code, _reply = await self.send(KEEPER_DELETE_OPERATION, KeeperCodec.get_delete_body(path))
+        return error_code
+
+    async def get_children(self, path: str) -> list[str]:
+        """The names of a node's children.
+
+        Args:
+            path: The node's path.
+
+        Returns:
+            The names - none for no node.
+
+        Raises:
+            OperationalError: Keeper refused the request.
+        """
+        error_code, reply = await self.send(KEEPER_GET_CHILDREN_OPERATION, KeeperCodec.get_children_body(path))
+        if error_code == KEEPER_NO_NODE_ERROR:
+            return []
+        if error_code != KEEPER_NO_ERROR:
+            raise OperationalError(f"ClickHouse Keeper refused the children of {path!r}: error {error_code}")
+        return KeeperCodec.read_children(reply)
 
     async def wait_for_deletion(self, path: str) -> None:
         """Waits until a node is deleted or changed - at once when there is none.

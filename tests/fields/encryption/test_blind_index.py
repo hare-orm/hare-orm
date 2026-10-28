@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 
 from hare import Model, fields
-from hare.contrib.pydantic import pydantic_model_creator
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.exceptions import ConfigurationError, FieldError, IntegrityError, QueryError, ValidationError
@@ -16,6 +15,8 @@ from hare.fields.encrypted.field_encryption import FieldEncryption
 from hare.query.expressions import F
 from hare.transactions import Transactions
 from tests.fields.encryption.models_blind_index import BlindIndexedCustomer
+
+REQUIRES = ("encryption",)
 
 SECRET = "blind-index-test-secret"
 
@@ -193,9 +194,12 @@ def test_the_fields_deconstruct_for_a_migration():
     assert kwargs["source_field"] == "phone_number_blind_index"
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_a_blind_index_is_in_no_pydantic_schema(db_blind_index):
     """The HMAC of the plaintext was a field of every schema, and of the JSON of every row."""
+
+    from hare.contrib.pydantic import pydantic_model_creator
 
     customer = await BlindIndexedCustomer.objects.create(email="ann@example.com", phone="+100")
     for options in ({}, {"exclude_readonly": True}, {"exclude_sensitive": True}):

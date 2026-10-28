@@ -13,9 +13,9 @@ import pytest
 
 import hare.cli.hare_cli as cli_module
 from hare.cli.commands import database_shell_commands as database_shell
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
-from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
 pytestmark = pytest.mark.database_independent
 
@@ -139,7 +139,7 @@ def make_postgres_client(client_class, **settings):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", [AsyncpgClient, RustPgClient])
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS), indirect=True)
 async def test_psql_takes_the_password_from_the_environment(client_class):
     client = make_postgres_client(client_class, password="secret", schema="app", application_name="api")
 
@@ -165,7 +165,7 @@ async def get_rotated_password() -> str:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_class", [AsyncpgClient, RustPgClient])
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS), indirect=True)
 async def test_psql_takes_the_password_of_the_provider(client_class):
     client = make_postgres_client(client_class, password_provider=get_rotated_password)
 
@@ -176,20 +176,21 @@ async def test_psql_takes_the_password_of_the_provider(client_class):
 @pytest.mark.parametrize(
     ("client_class", "settings", "environment"),
     [
-        (AsyncpgClient, {"ssl": "verify-full"}, {"PGSSLMODE": "verify-full"}),
-        (AsyncpgClient, {"ssl": True}, {"PGSSLMODE": "require"}),
-        (AsyncpgClient, {"ssl": False}, {"PGSSLMODE": "disable"}),
-        (
-            AsyncpgClient,
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, {"ssl": "verify-full"}, {"PGSSLMODE": "verify-full"}),
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, {"ssl": True}, {"PGSSLMODE": "require"}),
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, {"ssl": False}, {"PGSSLMODE": "disable"}),
+        DriverClasses.get_parameter(
+            ASYNCPG_CLIENT_PATH,
             {"ssl": "verify-ca", "ssl_root_cert": "/etc/ca.pem"},
             {"PGSSLMODE": "verify-ca", "PGSSLROOTCERT": "/etc/ca.pem"},
         ),
-        (
-            RustPgClient,
+        DriverClasses.get_parameter(
+            RUST_PG_CLIENT_PATH,
             {"ssl_mode": "verify-ca", "ssl_root_cert": "/etc/ca.pem"},
             {"PGSSLMODE": "verify-ca", "PGSSLROOTCERT": "/etc/ca.pem"},
         ),
     ],
+    indirect=["client_class"],
 )
 async def test_psql_gets_the_tls_settings(client_class, settings, environment):
     client = make_postgres_client(client_class, **settings)
@@ -197,9 +198,9 @@ async def test_psql_gets_the_tls_settings(client_class, settings, environment):
     assert (await client.get_shell_command()).environment == environment
 
 
+@pytest.mark.requires("clickhouse-connect")
 @pytest.mark.asyncio
 async def test_clickhouse_client_speaks_the_native_protocol():
-    pytest.importorskip("clickhouse_connect")
     from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (
         ClickhouseConnectClient,
     )

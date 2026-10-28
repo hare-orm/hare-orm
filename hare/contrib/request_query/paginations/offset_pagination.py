@@ -18,7 +18,7 @@ class OffsetPagination(BaseOffsetPagination):
     async def get_page(self, request_query: RequestQuery[Any]) -> Page[Any]:
         limit, offset = self.get_limit_and_offset(request_query)
         queryset = await request_query.get_filtered_queryset()
-        count = await queryset.count()
+        count = await queryset.prefetch_related(None).count()
         ordered = request_query.get_ordered_queryset(queryset)
         items = await request_query.finish_rows(list(await ordered.offset(offset).limit(limit)))
         return Page(

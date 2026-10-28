@@ -8,7 +8,6 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
-from hare.contrib.pydantic import pydantic_model_creator
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
@@ -72,8 +71,11 @@ async def test_a_written_row_gets_the_values_computed_on_write(clickhouse_db):
     assert (invoice.total, invoice.note) == (decimal.Decimal("2.50"), None)
 
 
+@pytest.mark.requires("pydantic")
 @pytest.mark.asyncio
 async def test_a_schema_refuses_a_written_row_whose_computed_values_are_unloaded(clickhouse_db):
+    from hare.contrib.pydantic import pydantic_model_creator
+
     invoice = await Invoice.objects.create(id=11, price=decimal.Decimal("2.50"), quantity=4)
     schema = pydantic_model_creator(Invoice)
     with pytest.raises(NoValuesFetched, match="'total'"):

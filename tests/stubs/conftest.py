@@ -16,6 +16,8 @@ from tests.stubs.stub_configs import (
     write_stubs,
 )
 
+REQUIRES = ("pyright",)
+
 
 @pytest.fixture(scope="module")
 def stubs_path(tmp_path_factory: pytest.TempPathFactory) -> Path:

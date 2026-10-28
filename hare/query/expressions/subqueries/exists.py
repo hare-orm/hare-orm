@@ -118,7 +118,8 @@ class Exists(Expression):
             from hare.query.queryset.pending_calls.pending_filter_calls import PendingFilterCalls
 
             PendingFilterCalls.build_pending_filter_calls(inner)
-        exists_query = inner.exists()
+        # A subquery loads no instances - the relations the queryset prefetches have nothing to attach to.
+        exists_query = inner.prefetch_related(None).exists()
         # Made again for each description and build - its values come from the wrapped queryset.
         exists_query._plan_origin = inner
         return exists_query

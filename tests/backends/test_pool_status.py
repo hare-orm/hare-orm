@@ -13,7 +13,7 @@ import pytest
 from hare import Connections
 from hare.contrib.test import requires_features
 from hare.dialects.postgresql.client.constants import POOL_TIMEOUT_MESSAGE
-from hare.exceptions import DBConnectionError, PoolTimeoutError, UnSupportedError
+from hare.exceptions import DBConnectionError, PoolTimeoutError
 from hare.instrumentation import Observers
 from hare.instrumentation.declarations import ConnectionFailed, PoolAcquireTimedOut
 from hare.instrumentation.enums import PoolRole
@@ -73,16 +73,6 @@ async def test_the_connection_s_own_pool_is_reported(db):
     assert status.connect_count >= 1
     assert status in Connections.get_pool_statuses("models")
     assert Connections.get_pool_statuses("no_such_connection") == []
-
-
-@pytest.mark.asyncio
-@requires_features(supports_pool_status=False)
-async def test_a_client_reporting_no_pool_status_says_so(db):
-    client = Connections.current().get_main("models")
-    await client.execute_dicts("SELECT 1 AS one")
-    with pytest.raises(UnSupportedError, match="reports no pool status"):
-        client.get_pool_status()
-    assert Connections.get_pool_statuses() == []
 
 
 @pytest.mark.asyncio

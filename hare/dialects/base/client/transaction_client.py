@@ -5,7 +5,10 @@ import asyncio
 import weakref
 from typing import Any, ClassVar
 
-from hare.dialects.base.client.constants import TRANSACTION_FINALISED_MESSAGE
+from hare.dialects.base.client.constants import (
+    TRANSACTION_FINALISED_MESSAGE,
+    TRANSACTION_ON_ANOTHER_EVENT_LOOP_MESSAGE,
+)
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
@@ -16,6 +19,7 @@ from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import Nes
 from hare.dialects.base.transactions.savepoints.savepoint_span import SavepointSpan, current_savepoint_span
 from hare.dialects.base.transactions.transaction_callback import TransactionCallback
 from hare.exceptions import (
+    ConfigurationError,
     QueryError,
     TransactionManagementError,
     UnSupportedError,
@@ -118,6 +122,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
         #: Why a commit of this top-level transaction is refused - set on a transaction isolating a
         #: test (``RollbackIsolation``), which only ever rolls back.
         self._commit_refusal: str | None = None
+        #: The event loop the transaction began on - set where the driver's connections belong to one.
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     def _in_transaction(self, options: TransactionOptions = TransactionOptions.DEFAULT) -> TransactionContext:
         self._check_nested_transaction_options(options)
@@ -264,6 +270,9 @@ class TransactionClient(DatabaseClient, abc.ABC):
             raise TransactionManagementError(
                 "Cannot execute query: the transaction is already being committed or rolled back"
             )
+        event_loop = top_level_transaction._event_loop
+        if event_loop is not None and asyncio.get_running_loop() is not event_loop:
+            raise ConfigurationError(TRANSACTION_ON_ANOTHER_EVENT_LOOP_MESSAGE.format(alias=self.connection_alias))
 
     def _mark_savepoint_operation_abandoned(self, task: asyncio.Future[Any]) -> None:
         """``on_timeout`` callback for a savepoint-level (RELEASE/ROLLBACK TO) shielded call -
@@ -478,6 +487,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
         """Begins the transaction - shielded from cancellation, so the connection never goes back to the
         pool inside it.
         """
+        if self.connections_bound_to_event_loop:
+            self._event_loop = asyncio.get_running_loop()
         # Shielded: the BEGIN can land after the awaiting task was cancelled, and the connection
         # would then go back to the pool mid-transaction.
         await TransactionEnding.run_shielded_from_cancellation(self._driver_begin(), on_landed=self._do_nothing)

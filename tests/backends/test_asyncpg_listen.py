@@ -12,6 +12,8 @@ from hare.contrib.test import requires_features
 from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import ConfigurationError, ValidationError
 
+REQUIRES = ("asyncpg",)
+
 
 def _asyncpg_client_or_skip() -> AsyncpgClient:
     client = Connections.get("models")

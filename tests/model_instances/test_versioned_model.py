@@ -385,3 +385,32 @@ async def test_get_new_version_of_an_instance_without_its_keys_names_them(db):
 
     with pytest.raises(IncompleteInstanceError, match=r"\['id', 'version'\] weren't fetched"):
         partial.get_new_version()
+
+
+@pytest.mark.asyncio
+async def test_get_last_visible_version_or_exception_skips_a_soft_deleted_latest_version(db):
+    v1 = await VersionedDocumentWithSoftDelete.objects.create(title="v1")
+    v2 = await v1.create_new_version(title="v2")
+    await v2.delete()
+
+    visible = await VersionedDocumentWithSoftDelete.get_last_visible_version_or_exception(id=v1.id)
+    assert (visible.version, visible.title) == (1, "v1")
+
+
+@pytest.mark.asyncio
+async def test_get_last_visible_version_or_exception_raises_when_every_version_is_hidden(db):
+    v1 = await VersionedDocumentWithSoftDelete.objects.create(title="v1")
+    await VersionedDocumentWithSoftDelete.objects.filter(id=v1.id).delete()
+
+    with pytest.raises(DoesNotExist):
+        await VersionedDocumentWithSoftDelete.get_last_visible_version_or_exception(id=v1.id)
+    with pytest.raises(LookupError):
+        await VersionedDocumentWithSoftDelete.get_last_visible_version_or_exception(id=v1.id, exception=LookupError)
+
+
+@pytest.mark.asyncio
+async def test_a_new_record_gets_a_version_7_id(db):
+    first = await VersionedDocumentWithSoftDelete.objects.create(title="a")
+    second = await VersionedDocumentWithSoftDelete.objects.create(title="b")
+    assert first.id.version == second.id.version == 7
+    assert first.id < second.id

@@ -115,7 +115,8 @@ writes the tenant scope active then into the tenant label of the event, so the t
 tenant, not in the relay's. It returns the event.
 
 The relay of `get_relay(**relay_options)` sends the tasks — the events of the delivery's `topic` only, so
-the table can hold other topics too. The delivery's wakeup — an `InProcessWakeup` of its own by default —
+the table can hold other topics too — a relay of the other events of the table takes
+`exclude_topics=[delivery.topic]`. The delivery's wakeup — an `InProcessWakeup` of its own by default —
 starts the relay right after the commit, so run the relay in the process sending the tasks; give a
 broker's wakeup (`RedisWakeup`, ...) to send from another one at once. A task the broker didn't take (it
 was down) is retried by the relay like any outbox event.
@@ -133,3 +134,7 @@ taskiq's `InMemoryBroker(await_inplace=True)` runs each task as it is sent, in t
 broker = InMemoryBroker(await_inplace=True)
 broker.add_middlewares(HareTaskiqMiddleware(atomic_tasks=True))
 ```
+
+`HareTaskiq` started in a test under hare's pytest plugin's `hare_app_db` takes the test's context instead
+of opening its configuration's databases — the tasks' writes are rolled back with the test's; see
+[Application tests](../testing/setup.md#application-tests).

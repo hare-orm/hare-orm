@@ -54,6 +54,7 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_NULLABLE_TYPE_MARK,
     CLICKHOUSE_ROW_RETURNING_KEYWORDS,
     CLICKHOUSE_ROW_WRITE_PATTERN,
+    CLICKHOUSE_SERIES_KEEPER_PATH_SQL,
     CLICKHOUSE_SERVER_FACTS_SQL,
     CLICKHOUSE_SHELL_PASSWORD_VARIABLE,
     CLICKHOUSE_SHELL_PROGRAM,
@@ -86,6 +87,7 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_UNKNOWN_DATABASE_ERROR_CODES,
 )
 from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
+from hare.dialects.clickhouse.keeper.clickhouse_database_keeper_nodes import ClickhouseDatabaseKeeperNodes
 from hare.dialects.clickhouse.keeper.clickhouse_migration_lock import ClickhouseMigrationLock
 from hare.dialects.clickhouse.literals.clickhouse_literals import ClickhouseLiterals
 from hare.dialects.clickhouse.query.declarations import ClickhouseQuery
@@ -144,8 +146,6 @@ class ClickhouseClient(DatabaseClient):
                     f"{self.connection_alias!r} asks for transactions (transactions=true), which the server doesn't "
                     f"run - it needs a ClickHouse Keeper and allow_experimental_transactions: {error}"
                 ) from error
-            # The transactions have no savepoints - a nested atomic() joins the one it is nested in.
-            self.features = self.features.replace(supports_transactions=True, supports_savepoints=False)
 
     features = CLICKHOUSE_DIALECT.features
     #: The driver's exception classes.
@@ -184,6 +184,11 @@ class ClickhouseClient(DatabaseClient):
         #: The checked connection settings, by name.
         self.options: dict[str, Any] = self.connection_options.read(settings, self.connection_option_defaults)
         self.connection_options.raise_for_unknown(settings, self.driver_name)
+        if self.options["transactions"]:
+            # Set before the connection opens - a transaction may begin first, on a new connection
+            # (autonomous()) always; the opening then checks the server runs them. They have no
+            # savepoints: a nested atomic() joins the one it is nested in.
+            self.features = self.features.replace(supports_transactions=True, supports_savepoints=False)
         self._connection: Any = None
         #: Held while the connection is opened - the statements starting together open one.
         self._connection_lock = asyncio.Lock()
@@ -256,6 +261,8 @@ class ClickhouseClient(DatabaseClient):
             await self.close()
 
     async def db_delete(self) -> None:
+        """Drops the connection's database - with ``keeper_hosts``, also its nodes of ClickHouse Keeper: the
+        series of its generated keys and the node of its migration lock."""
         await self.close()
         await self.create_connection(with_db=False)
         try:
@@ -267,6 +274,14 @@ class ClickhouseClient(DatabaseClient):
         except self.driver_errors.server as error:
             if self.get_error_code(error) not in CLICKHOUSE_UNKNOWN_DATABASE_ERROR_CODES:
                 raise
+        else:
+            if self.options["keeper_hosts"]:
+                series_keeper_path = (await self.execute_dicts(CLICKHOUSE_SERIES_KEEPER_PATH_SQL))[0]
+                await ClickhouseDatabaseKeeperNodes(
+                    ClickhouseMigrationLock.get_addresses(self.options["keeper_hosts"]),
+                    self.database or CLICKHOUSE_DEFAULT_DATABASE,
+                    self.options["connect_timeout"],
+                ).delete(series_keeper_path["series_keeper_path"] or "")
         finally:
             await self.close()
 

@@ -8,16 +8,11 @@ from hare import Connections
 from hare.contrib.test import requires_features
 from hare.dialects.postgresql.client.constants import POSTGRESQL_CURRENT_SEARCH_PATH_SQL
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
-from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 from hare.exceptions import ConfigurationError
+from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
+from tests.utils.driver_classes import DriverClasses
 
-POSTGRES_CLIENT_CLASSES = [AsyncpgClient]
-try:
-    from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
-except ImportError:
-    pass
-else:
-    POSTGRES_CLIENT_CLASSES.append(RustPgClient)
+POSTGRES_CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
 
 def make_client(client_class, **credentials):
@@ -31,8 +26,8 @@ def make_client(client_class, **credentials):
     )
 
 
-# The check is the clients' shared __init__: every value on the first client class, the first value
-# on each other one.
+# The check is the clients' shared __init__: every value on rust_pg's client class, the first value
+# on asyncpg's.
 INVALID_POOLER_OPTIONS = [
     ({"direct_host": "db.internal"}, "set transaction_pooling=true"),
     ({"direct_port": 5432}, "set transaction_pooling=true"),
@@ -45,9 +40,13 @@ INVALID_POOLER_OPTIONS = [
 @pytest.mark.parametrize(
     ("client_class", "credentials", "message"),
     [
-        *[(POSTGRES_CLIENT_CLASSES[0], *(credentials, message)) for (credentials, message) in INVALID_POOLER_OPTIONS],
-        *[(client_class, *INVALID_POOLER_OPTIONS[0]) for client_class in POSTGRES_CLIENT_CLASSES[1:]],
+        *[
+            DriverClasses.get_parameter(RUST_PG_CLIENT_PATH, credentials, message)
+            for (credentials, message) in INVALID_POOLER_OPTIONS
+        ],
+        DriverClasses.get_parameter(ASYNCPG_CLIENT_PATH, *INVALID_POOLER_OPTIONS[0]),
     ],
+    indirect=["client_class"],
 )
 def test_pooler_options_are_checked(client_class, credentials, message):
     with pytest.raises(ConfigurationError, match=message):
@@ -55,7 +54,7 @@ def test_pooler_options_are_checked(client_class, credentials, message):
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class):
     pooled = make_client(
         client_class, port=6432, transaction_pooling=True, direct_host="db.internal", direct_port=5433
@@ -82,7 +81,7 @@ def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class)
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES)
+@pytest.mark.parametrize("client_class", POSTGRES_CLIENT_CLASSES, indirect=True)
 @pytest.mark.asyncio
 async def test_listen_behind_the_pooler_needs_the_server_address(client_class):
     with pytest.raises(ConfigurationError, match="set direct_host"):

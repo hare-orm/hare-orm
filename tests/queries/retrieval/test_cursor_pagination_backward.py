@@ -329,7 +329,7 @@ async def test_aggregate_and_contains_honor_the_cursor(intfields_data):
 async def test_update_and_delete_honor_the_cursor(intfields_data):
     base = IntFields.objects.all().order_by("intnum")
     assert await base.after_cursor(7).update(intnum_null=100) == 2
-    assert await IntFields.objects.filter(intnum_null=100).values_list("intnum", flat=True) == [8, 9]
+    assert sorted(await IntFields.objects.filter(intnum_null=100).values_list("intnum", flat=True)) == [8, 9]
     assert await base.before_cursor(5).update(intnum_null=200) == 5
     assert sorted(await IntFields.objects.filter(intnum_null=200).values_list("intnum", flat=True)) == [0, 1, 2, 3, 4]
     assert await base.before_cursor(2).delete() == 2

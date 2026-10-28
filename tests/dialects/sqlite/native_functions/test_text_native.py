@@ -9,8 +9,9 @@ import pytest
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.dialects.sqlite.functions.text.sqlite_text_functions import SqliteTextFunctions
 
+REQUIRES = ("native",)
+
 pytestmark = [
-    pytest.mark.skipif(SqliteNativeFunctions.module is None, reason="rust.native isn't built"),
     pytest.mark.database_independent,
 ]
 
