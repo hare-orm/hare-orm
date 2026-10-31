@@ -4,8 +4,8 @@ from enum import StrEnum
 
 
 class ExclusionConstraintUsing(StrEnum):
-    """The index access method backing an ExclusionConstraint - part of the SQL grammar
-    (``EXCLUDE USING <using> (...)``), not a free-form string."""
+    """The index access method backing an ExclusionConstraint - a word of the constraint's SQL, not a
+    free-form string."""
 
     #: The only access method the range/geometry overlap operators (``&&`` etc) work with -
     #: almost always what you want.

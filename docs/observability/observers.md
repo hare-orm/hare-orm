@@ -282,9 +282,22 @@ A `RowsChanged`:
 |---|---|
 | `model` | The model whose rows changed. |
 | `operation` | `RowOperation.INSERT`, `UPDATE` or `DELETE` (`from hare.instrumentation import RowOperation`). |
-| `pks` | The primary keys of the changed rows. `None` when the ORM doesn't name them: a `QuerySet.update()`/`delete()` by a filter may leave them unnamed (an update of a model with `Meta.change_capture` names them), the rows `on_delete` reached, a model without a primary key. |
+| `pks` | The primary keys of the changed rows; `None` when the ORM doesn't name them — see [below](#unnamed-pks). |
 | `fields` | The fields written. `None` when it isn't known: an insert, a `save()` without `update_fields`. |
 | `connection_alias` | The connection the write ran on. |
+
+### <a id="unnamed-pks"></a>When pks is None
+
+`pks` is `None` when the ORM doesn't name the changed rows:
+
+- a `QuerySet.update()`/`delete()` by a filter may leave them unnamed — an update of a model with
+  `Meta.change_capture` names them;
+- the rows `on_delete` reached;
+- the related rows of a many-to-many `add()` that found some of the pairs linked already, on a database
+  skipping them by `ON CONFLICT`;
+- a model without a primary key.
+
+A row is named once, however many times it was given.
 
 ### <a id="which-models"></a>Which models an observer hears
 

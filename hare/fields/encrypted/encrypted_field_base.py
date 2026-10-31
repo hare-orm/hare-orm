@@ -7,6 +7,7 @@ from hare.fields.constants import (
     DB_DEFAULT_NOT_SET,
 )
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -68,6 +69,8 @@ class EncryptedFieldBase(Field[Any]):
         Raises:
             FieldError: ``field_object`` is an encrypted field.
         """
+        if isinstance(field_object, GeneratedField):
+            field_object = field_object.output_field
         if isinstance(field_object, EncryptedFieldBase):
             raise FieldError(field_object.get_unsupported_usage_message(usage))
 
@@ -91,6 +94,8 @@ class EncryptedFieldBase(Field[Any]):
 
         lookup_path = LookupPath.parse(model, filter_key, crosses_last=True)
         field_object = lookup_path.model._meta.fields_map.get(lookup_path.field_name or "")
+        if isinstance(field_object, GeneratedField):
+            field_object = field_object.output_field
         if isinstance(field_object, EncryptedFieldBase):
             raise FieldError(field_object.get_unsupported_lookup_message())
         EncryptedFieldBase.raise_if_encrypted(expression_field, "a filter comparison")
@@ -112,6 +117,9 @@ class EncryptedFieldBase(Field[Any]):
         """
         from hare.query.expressions import F
 
+        target_field = GeneratedField.get_effective_field(target_field)
+        if isinstance(source_field, GeneratedField):
+            source_field = source_field.output_field
         if isinstance(target_field, EncryptedFieldBase):
             if (
                 type(expression) is F

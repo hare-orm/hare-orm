@@ -14,13 +14,17 @@ from hare.query.expressions.expression_result import ExpressionResult, TableCrit
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.ordering import Ordering
 from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
+from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.lookup_info.value_paths import ValuePaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.term import Term
+from hare.sql.terms.tuple import Tuple
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from hare.fields.field import Field
 
 
@@ -131,6 +135,22 @@ class F(CombinableExpression):
 
         return Trunc(value_path, part) if part in DATETIME_CAST_SEGMENTS else Extract(value_path, part)
 
+    @staticmethod
+    def names_given_annotation(annotations: Mapping[str, Any], name: str) -> bool:
+        """Whether a name is an annotation the query was given - which a path of the same name
+        (``data__score``, ``author__score``) never stands in for - not the alias hare gives a path read
+        by name (``F(name)`` itself).
+
+        Args:
+            annotations: The query's annotations.
+            name: The name.
+
+        Returns:
+            True for an annotation of the name other than the reference to it.
+        """
+        annotation = annotations.get(name)
+        return annotation is not None and not (isinstance(annotation, F) and annotation.name == name)
+
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         term: Term
         joins: list[TableCriterionTuple] = []
@@ -148,7 +168,8 @@ class F(CombinableExpression):
         ):
             # A part of a date, time or datetime - F("created__year"), F("during__startswith__hour").
             return self.get_date_part_expression(*date_part_split).get_result(expression_context)
-        if main_name_part in expression_context.model._meta.fetch_fields:
+        names_annotation = F.names_given_annotation(expression_context.annotations, self.name)
+        if main_name_part in expression_context.model._meta.fetch_fields and not names_annotation:
             # field in the format of "related_field__field" or "related_field__another_rel_field__field"
             if (tracker := AggregatedMultiValuedPaths.get_from(expression_context)) is not None:
                 tracker.record_lookup(
@@ -163,7 +184,11 @@ class F(CombinableExpression):
                 dialect=expression_context.dialect,
                 connection=expression_context.connection,
             )
-        elif rest_name_parts and (path_split := ValuePaths.get_value_path_split(expression_context.model, self.name)):
+        elif (
+            rest_name_parts
+            and not names_annotation
+            and (path_split := ValuePaths.get_value_path_split(expression_context.model, self.name))
+        ):
             # A path inside a JSON, array or range field's value, e.g. F("data__a__b"), F("tags__0")
             # or F("during__startswith") - a JSON path reads the JSON value itself, not its text,
             # so it's decoded, compared and ordered as JSON.
@@ -216,8 +241,13 @@ class F(CombinableExpression):
             return type_expression.get_result(expression_context)
         else:
             # a regular model field, e.g. F("id")
+            meta = expression_context.model._meta
+            if self.name == "pk" and meta.has_composite_primary_key:
+                # A composite key is the row of its columns - a filter or an ordering reads its fields.
+                table = expression_context.table
+                term = Tuple(*(table[column] for column in KeyColumns.get_source_columns(meta)))
+                return ExpressionResult(term=term, output_field=None, joins=joins)
             try:
-                meta = expression_context.model._meta
                 field_name = (
                     meta.primary_key_attribute
                     if self.name == "pk" and isinstance(meta.primary_key_attribute, str)

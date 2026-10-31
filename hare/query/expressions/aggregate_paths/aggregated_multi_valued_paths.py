@@ -413,7 +413,9 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
         meta = model._meta
         read_field_names = set(field_names)
         known_non_null_field_names = set(non_null_field_names)
-        if "pk" in read_field_names or set(meta.primary_key_attribute_names) <= read_field_names:
+        if meta.has_primary_key and (
+            "pk" in read_field_names or set(meta.primary_key_attribute_names) <= read_field_names
+        ):
             return True
         unique_field_sets: list[tuple[str, ...]] = [
             (field_name,) for field_name, field in meta.fields_map.items() if field.unique and not field.pk

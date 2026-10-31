@@ -22,7 +22,7 @@ class Prefetch:
             attribute of the model.
 
     Raises:
-        QueryError: ``queryset`` isn't a queryset of model instances.
+        QueryError: ``queryset`` isn't a queryset of model instances, or ``to_attribute`` is empty.
     """
 
     __slots__ = ("relation", "queryset", "to_attribute")
@@ -40,6 +40,8 @@ class Prefetch:
                 f"Prefetch({relation!r}, queryset=...) needs a model QuerySet, got a {method} query - "
                 "it yields no model instances to attach."
             )
+        if to_attribute == "":
+            raise QueryError(f"Prefetch({relation!r}, to_attribute='') - name the attribute, or leave it None")
         self.to_attribute = to_attribute
         self.relation = relation
         self.queryset = queryset
@@ -96,7 +98,8 @@ class Prefetch:
         Raises:
             FieldError: The path starts with neither a relation of the model nor a ``to_attribute``,
                 or has an empty part.
-            QueryError: A ``Prefetch`` of another queryset sets an attribute one given before sets.
+            QueryError: A ``Prefetch`` of another queryset sets an attribute one given before sets, or
+                its queryset is of another model than the relation's.
         """
         relation_path = lookup.relation if isinstance(lookup, Prefetch) else lookup
         if "" in relation_path.split("__"):
@@ -126,6 +129,7 @@ class Prefetch:
         if isinstance(lookup, Prefetch):
             lookup.check_to_attribute(model)
             if not nested_path:
+                lookup.check_queryset_model(model, first_name)
                 if Prefetch.is_attribute_set_before(prefetch_queries, first_name, lookup):
                     return
                 prefetch_queries[first_name] = [
@@ -168,6 +172,24 @@ class Prefetch:
                     "already - give each a different to_attribute"
                 )
         return False
+
+    def check_queryset_model(self, model: type[Model], relation_name: str) -> None:
+        """Checks the queryset reads rows of the relation's model - rows of another model would be set
+        on the instances by a matching key value, or fail late as a wrong value of the relation.
+
+        Args:
+            model: The model owning the relation.
+            relation_name: The relation's name.
+
+        Raises:
+            QueryError: The queryset is of another model.
+        """
+        related_model = getattr(model._meta.fields_map[relation_name], "related_model", None)
+        if related_model is not None and not issubclass(self.queryset.model, related_model):
+            raise QueryError(
+                f"Prefetch({self.relation!r}, queryset=...) reads {self.queryset.model.__name__} rows - the "
+                f"relation {model.__name__}.{relation_name} holds {related_model.__name__} rows"
+            )
 
     def check_to_attribute(self, model: type[Model]) -> None:
         """Checks ``to_attribute`` doesn't name a field, relation, key column or other attribute of

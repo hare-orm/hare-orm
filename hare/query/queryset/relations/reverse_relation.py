@@ -10,10 +10,12 @@ from hare.exceptions import (
     QueryError,
     ValidationError,
 )
+from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.relations.relation_values import RelationValues
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.instances.instance_connections import InstanceConnections
+from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.write_steps import WriteSteps
 from hare.query.constants import UNSAVED_OWNER_MESSAGE
 from hare.query.queryset.relations.related_queryset.related_query_set import RelatedQuerySet
@@ -21,6 +23,7 @@ from hare.query.queryset.relations.related_queryset.related_query_set import Rel
 if TYPE_CHECKING:
     from hare.ddl.raw_sql_term import RawSQLTerm
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.fields.relations.fields.relational_field import RelationalField
     from hare.models import Model
     from hare.query.expressions import Q
     from hare.query.statements.write.bulk.create.bulk_create_query import BulkCreateQuery
@@ -407,6 +410,20 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             if saved and not instance._saved_in_db:
                 raise QueryError(f"You should first call .save() on {instance!r}, or pass bulk=False to save it here")
 
+    def _get_relation_cache_names(self) -> tuple[str, ...]:
+        """The attributes holding the related row of the related model's relations keyed by
+        ``relation_fields`` - the parent instance as each related instance caches it.
+
+        Returns:
+            The attribute names.
+        """
+        meta = self.model._meta
+        return tuple(
+            f"_{name}"
+            for name in meta.foreign_key_fields | meta.one_to_one_fields
+            if tuple(cast("RelationalField[Any]", meta.fields_map[name]).source_fields) == tuple(self.relation_fields)
+        )
+
     async def _set_relation_key_values(
         self,
         instances: tuple[TModel, ...],
@@ -438,14 +455,22 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         connection = self._get_write_connection(using)
         async with connection._in_transaction() as transaction_connection:
             pk_values = list(dict.fromkeys(instance.pk for instance in instances))
-            if current_filter and not bulk:
+            # A database reporting no count of the rows an UPDATE changed is asked for the rows first - a
+            # row the default scope hides would go unwritten unnoticed.
+            counts_first = bulk and not transaction_connection.features.reports_written_row_count
+            if (current_filter and not bulk) or counts_first:
                 related_count = (
                     await self._get_model_queryset(transaction_connection)
                     .filter(pk__in=pk_values, **current_filter)
                     .count()
                 )
-                if related_count != len(pk_values):
+                if related_count != len(pk_values) and current_filter:
                     raise DoesNotExist(self.get_not_related_message())
+                if related_count != len(pk_values):
+                    raise IntegrityError(
+                        f"Can't write the relation to {type(self.instance).__name__} - one of the "
+                        f"{self.model.__name__} rows isn't shown by its default scope"
+                    )
             if bulk:
                 # Reported below with the rows it names - the UPDATE itself names none.
                 with ChangeEvents.reporting_as_a_whole():
@@ -464,6 +489,19 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                     )
                 await WriteSteps.report(
                     transaction_connection, self.model, RowOperation.UPDATE, pks=pk_values, fields=self.relation_fields
+                )
+            # A rollback reverts the rows, not the instances - the keys set on them are put back with it, and
+            # then the related rows they held, which setting a key drops. The keys of one UPDATE are set once it
+            # ran: only an enclosing transaction rolls them back then.
+            if not bulk or connection.is_transaction_client:
+                cache_names = self._get_relation_cache_names()
+                RollbackRestores.register_rollback_restores(
+                    transaction_connection,
+                    [
+                        (instance, name, instance.__dict__.get(name, ROLLBACK_RESTORE_UNSET))
+                        for instance in instances
+                        for name in (*relation_values, *cache_names)
+                    ],
                 )
             for instance in instances:
                 for field_name, value in relation_values.items():

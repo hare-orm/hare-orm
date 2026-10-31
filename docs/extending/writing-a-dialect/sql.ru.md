@@ -111,6 +111,13 @@ def build_types(self):
 DialectRegistry.get_dialect("colstore").types.register(MoneyField, TypeMapping(column_type="Decimal(18, 2)"))
 ```
 
+База, драйверы которой выводят SQL в нескольких объектах диалекта, — ClickHouse, где clickhouse-connect
+пишет `JSONField` колонкой `JSON`, — называет остальные в `variants` зарегистрированного диалекта
+(`ClickhouseDialect(variants=(...))`): тип, способ вывода (`register()`, `register_function()`,
+`register_name()`) или оператор фильтра (`register_operator()`), зарегистрированные на нём,
+регистрируются и на каждом варианте — одна регистрация доходит до всех драйверов базы. Собственные
+регистрации варианта остаются на нём.
+
 ## <a id="functions-and-lookups"></a>5. Выражения и операторы фильтров: `TermRenderers`, `FilterOperators`
 
 По умолчанию каждое выражение выводится стандартным SQL. `build_renderers()` возвращает `TermRenderers` —
@@ -156,9 +163,10 @@ SQL нужно другое:
 | `get_window_ordering_clause_sql(function, term, term_sql, order, sql_context)` | Один ключ `ORDER BY` окна — по умолчанию `get_window_ordering_sql()`. |
 | `get_window_ordering_sql(function, term_sql, order)` | SQL одного упорядочения окна — по умолчанию выражение и его направление. |
 | `get_result_branch_term(term, output_field)` | Ветвь `CASE` или `COALESCE` в том виде, какой нужен типу всего результата. |
+| `get_null_if_result(term, field)` | Вызов `NULLIF` либо отказ до выполнения, если тип аргумента не может представить nullable-результат. По умолчанию возвращает терм без изменений. |
 | `get_assigned_integer_term(term)` | Что `UPDATE` записывает в целочисленную колонку для выражения с дробью — с приведением там, где тип колонки её не округляет. |
 | `get_assigned_enum_term(term, member_numbers)` | Что `UPDATE` записывает в колонку целочисленного перечисления для выражения — там, где колонка отклоняет число, не принадлежащее ни одному члену. |
-| `get_scaled_duration(term)` | Микросекунды длительности, умноженной или делённой на число. |
+| `get_scaled_duration(term)` | Микросекунды длительности, умноженной или делённой на число, — целые микросекунды, половина к чётному, чтобы следующая арифметика и фильтр брали прочитанное значение; по умолчанию сам терм — для базы, арифметика которой уже даёт целые микросекунды. |
 | `get_duration_quotient(dividend, divisor)` | Микросекунды длительности, делённой на целое, — округлённые до ближайшего, половина — к чётному, как Python делит `timedelta`. |
 | `get_composite_distinct_key()` | По чему `COUNT(DISTINCT ...)` считает составной ключ. |
 | `get_never_null_column_count_argument(term)` | Что `COUNT` получает для колонки запрашиваемой таблицы, в которой нет NULL, — по умолчанию саму колонку; `*` там, где посчитать строки дешевле, чем читать колонку. |
@@ -194,6 +202,13 @@ PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite) и
 пространственные функции PostgreSQL) объявляет в `plan_parts`, как его атрибуты входят в план, и
 разрешает аргументы через `ExpressionArguments.get_result()`, как любое [своё
 выражение](../custom-functions-and-expressions.ru.md#writing-a-custom-expression).
+
+Пакет, объявляющий такие выражения, при импорте регистрирует их за своим диалектом —
+`DialectExpressions.register(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`);
+подкласс зарегистрированного класса зарегистрирован вместе с ним. Запрос к другой базе отвергает каждое из
+них с `UnSupportedError` до построения SQL: `Function.get_result()` проверяет это для любой функции, а
+выражение со своим `get_result()` первым делом вызывает
+`DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)`.
 
 ## <a id="query-class"></a>6. Части команд: `QueryClauses`
 

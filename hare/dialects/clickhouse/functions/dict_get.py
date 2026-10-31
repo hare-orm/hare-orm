@@ -15,6 +15,7 @@ from hare.dialects.clickhouse.schema_objects.clickhouse_dictionary import Clickh
 from hare.exceptions import QueryError
 from hare.fields.field import Field
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, F, Value
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.functions.function import Function
@@ -197,6 +198,7 @@ class DictGet(Expression):
         return self.dictionary if database is None else f"{database}.{self.dictionary}"
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         literals = expression_context.dialect.literals
         attribute_column = self.get_attribute_column(expression_context.dialect.types)
         key_results = [key.get_result(expression_context) for key in self.keys]

@@ -79,6 +79,9 @@ class ClickhouseDatetimeField(DatetimeField[TDatetime]):
             return f"DateTime({timezone_argument})" if timezone_argument else "DateTime"
         return f"DateTime64({self.precision}{', ' + timezone_argument if timezone_argument else ''})"
 
+    def get_column_type_options(self) -> tuple[Any, ...]:
+        return self.precision, self.timezone
+
     def get_moment_bounds(self) -> tuple[datetime.datetime, datetime.datetime, int]:
         """The first and the last moment the column holds, and its digits after the second.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from hashlib import sha256
 from typing import ClassVar
 
@@ -59,3 +60,26 @@ class Identifiers:
             prefix = encoded_name[: limit - IDENTIFIER_DIGEST_LENGTH - 1].decode(errors="ignore")
             shortened_name = Identifiers.SHORTENED_NAMES[key] = f"{prefix}_{digest}"
         return shortened_name
+
+    @staticmethod
+    def get_free_name(name: str, taken_names: Collection[str]) -> str:
+        """A generated name none of ``taken_names`` holds - ``name`` itself, else the first free one of
+        ``<name> 2``, ``<name> 3``, ... - within ``IDENTIFIER_LENGTH_LIMIT`` bytes, and told apart from the
+        taken names regardless of letter case, as a database may read identifiers.
+
+        Args:
+            name: The name.
+            taken_names: The names it may not be.
+
+        Returns:
+            The free name.
+        """
+        candidate = Identifiers.get_within_limit(name)
+        if not taken_names:
+            return candidate
+        folded_taken_names = {taken_name.casefold() for taken_name in taken_names}
+        number = 2
+        while candidate.casefold() in folded_taken_names:
+            candidate = Identifiers.get_within_limit(f"{name} {number}")
+            number += 1
+        return candidate

@@ -47,6 +47,7 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
         topic: The outbox topic of the tasks - the relay delivers only these events.
         using: The connection the tasks are written on - the model's when None.
         wakeup: The wakeup of the relay - an ``InProcessWakeup`` of its own by default.
+
     """
 
     def __init__(

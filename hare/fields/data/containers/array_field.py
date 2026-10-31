@@ -133,7 +133,9 @@ class ArrayField(ContainerField):
         """Equality and the containment lookups take a list of elements, ``item`` an
         ``(index, value)`` pair."""
         if lookup in ARRAY_LIST_LOOKUPS:
-            return LookupValueShape.LIST, self.base_field.field_type
+            # An element of a field holding NULL may be None in the list too.
+            element_type = self.base_field.field_type
+            return LookupValueShape.LIST, element_type | None if self.base_field.null else element_type
         if lookup == Lookup.ITEM:
             return LookupValueShape.VALUE, tuple
         return None

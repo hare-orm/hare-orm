@@ -15,6 +15,7 @@ from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
 from hare.query.expressions.value_references.row_list_value_reference import RowListValueReference
+from hare.query.filters.lookups.value_encoders import ValueEncoders
 from hare.query.key_columns import KeyColumns
 from hare.sql.terms.criteria.contains_criterion import ContainsCriterion
 from hare.sql.terms.criteria.criterion import Criterion
@@ -66,7 +67,8 @@ class CompositeKeyFilters:
             lookup, value = Lookup.ISNULL, lookup == Lookup.EXACT
         if lookup in {Lookup.ISNULL, Lookup.NOT_ISNULL}:
             # A composite key is null exactly when every key column is.
-            is_null = bool(value) if lookup == Lookup.ISNULL else not bool(value)
+            value = ValueEncoders.encode_bool(value, None, field_object, expression_context.dialect)
+            is_null = value if lookup == Lookup.ISNULL else not value
             null_kwargs: list[dict[str, Any]] = [
                 {f"{source_field}__isnull": is_null} for source_field in source_fields
             ]
@@ -367,12 +369,15 @@ class CompositeKeyFilters:
         """
         # Local import: Q's module imports this module, and the query statements import Q.
         from hare.query.expressions.subqueries.declarations import KeyRowsQuery
+        from hare.query.filters.resolution.filter_values import FilterValues
         from hare.query.queryset import QuerySet
         from hare.query.queryset.selection.statement_selection import StatementSelection
         from hare.query.statements.select.combined.combined_derived_queries import CombinedDerivedQueries
         from hare.query.statements.select.combined_query import CombinedQuery
 
         pk_column_count = len(columns)
+        if type(value) is Subquery:
+            value = FilterValues.get_subquery_filter_value(value, expression_context.value_wrapper_references)
         if isinstance(value, QuerySet):
             value = (
                 value._get_compiler()

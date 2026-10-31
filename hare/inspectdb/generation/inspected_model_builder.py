@@ -136,7 +136,7 @@ class InspectedModelBuilder:
     @staticmethod
     def has_unique_constraint_options(index: IndexInfo) -> bool:
         """Whether a unique index has what only a UniqueConstraint declares - a deferral, non-key
-        columns, ``NULLS NOT DISTINCT`` or ``WITHOUT OVERLAPS``."""
+        columns, NULLs compared as equal or ``WITHOUT OVERLAPS``."""
         return bool(index.deferrable or index.include or index.nulls_not_distinct or index.without_overlaps)
 
     def is_default_index_name(

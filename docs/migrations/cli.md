@@ -37,7 +37,8 @@ an added one is asked about in the terminal — `Was field 'title' of shop.Item 
 `--rename blog.Tag=catalog.Tag` for a model moved keeping its table — see
 [Renames](migrations.md#renames)); `--no-input`, or input not from a terminal, asks nothing — only the
 `--rename` answers rename anything. An answer that renames nothing — a misspelt name, a model renamed while
-its fields change — is printed as a warning. Without an explicit `migrations` module, an app
+its fields change — fails the command, and nothing is written: the field or model it meant would be removed
+and added, its rows dropped. Without an explicit `migrations` module, an app
 whose models live in a top-level `models.py` (no package) gets a top-level `migrations` package next to
 it. Two apps that would end up with the same migrations package (two such single-file apps in one
 directory, or the same explicit `migrations` value) are refused with an error by every migration command

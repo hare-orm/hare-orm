@@ -32,8 +32,8 @@ nearby = await Store.objects.filter(location__dwithin=(Point(37.62, 55.75), 0.01
 
 Spatial lookups use an index only when the column has one — declare a `GistIndex` (PostgreSQL) or a
 [`SpatialiteIndex`](#spatial-index) (SQLite) for every geometry column you filter on. Each is an index of
-its own database: on the other one it raises `UnSupportedError` before any SQL, whether the schema is
-generated or a migration adds or drops it.
+its own database: a model declaring it on a connection of the other one raises `ConfigurationError` in
+`Hare.init()`, and a migration adding or dropping it there raises `UnSupportedError` before any SQL.
 
 ## <a id="geometries"></a>Geometry values
 
@@ -358,8 +358,9 @@ class Store(Model):
 - **The drift check and `inspectdb`** read it from the spatial metadata (an enabled spatial index of the
   column); its R*Tree tables and SpatiaLite's triggers are no model's.
 - It needs `features.supports_spatial_index` — SpatiaLite loaded with its metadata — and the field's SRID
-  in the metadata; otherwise `UnSupportedError` before any SQL. On PostgreSQL it raises
-  `UnSupportedError` — declare a `GistIndex` there.
+  in the metadata; otherwise `UnSupportedError` before any SQL. On PostgreSQL a model declaring it
+  raises `ConfigurationError` in `Hare.init()`, a migration of it `UnSupportedError` — declare a
+  `GistIndex` there.
 
 ## <a id="integrations"></a>Pydantic and inspectdb
 

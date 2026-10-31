@@ -293,7 +293,7 @@ class InsertFromQuery:
         """
         combination = source._combination
         if combination is None:
-            return source.annotate(**constants)
+            return source._annotate(constants)
         combined_source = source._clone()
         combined_source._combination = dataclasses.replace(
             combination,

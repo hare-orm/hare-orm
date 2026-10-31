@@ -76,9 +76,14 @@ class Cast(Function):
         return self.get_target_parameters(self.cast_output_field, self.target)
 
     def get_plan_options(self) -> tuple[Any, ...]:
-        return (self.target, type(self.cast_output_field), self.get_parameters())
+        return (
+            self.target,
+            type(self.cast_output_field),
+            self.get_parameters(),
+            self.cast_output_field.get_column_type_options(),
+        )
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> CastTo:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> CastTo:
         return CastTo(term, self.cast_output_field, self.target, CastType.UNKNOWN)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

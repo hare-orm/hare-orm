@@ -130,4 +130,6 @@ class CombinedValuesRows:
         """Streams the rows off a server-side cursor, a batch at a time."""
         async with contextlib.aclosing(connection.stream_batches(sql, parameters, chunk_size=chunk_size)) as batches:
             async for batch in batches:
-                yield [self.first_leaf._convert_row(dict(row), self.column_converters) for row in batch]
+                yield [
+                    self.first_leaf._convert_row(connection.row_to_dict(row), self.column_converters) for row in batch
+                ]

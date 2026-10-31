@@ -66,12 +66,14 @@ given as the scope (or as a model's entry) raises `QueryError` — several value
 
 ### <a id="scope-by-model"></a>A scope by model
 
-The keys of the dict are model classes with `Meta.tenant_field`; anything else, and `None` as an entry,
-raises `QueryError` when the scope is entered. A model takes:
+The keys of the dict are model classes with `Meta.tenant_field` or
+[`Meta.tenant_schema`](schema-per-tenant.md); anything else, and `None` as an entry, raises `QueryError`
+when the scope is entered. A model takes:
 
 1. the entry of its own class;
-2. else the entry of its nearest base class with the same `Meta.tenant_field` — one entry for an abstract
-   base covers every model built on it, and a model's own entry overrides it;
+2. else the entry of its nearest base class with the same `Meta.tenant_field` (a `Meta.tenant_schema`
+   model without one: with `Meta.tenant_schema`) — one entry for an abstract base covers every model
+   built on it, and a model's own entry overrides it;
 3. else it has **no scope**: it behaves exactly as outside any `Tenancy.scope()` — a query raises
    `QueryError` (see [below](#no-active-scope)), a write trusts the tenant it names. Give a model
    `Tenancy.ALL` to leave it unlimited on purpose.
@@ -86,6 +88,23 @@ the second query of `prefetch_related()`, a many-to-many's through table and tar
 with Tenancy.scope({Order: Tenancy.any_of("msk", "kzn"), Customer: "north"}):
     # orders of two stores, joined to the customers of the north only
     await Order.objects.filter(customer__name__startswith="A")
+```
+
+A `Meta.tenant_schema` model's entry is one tenant value: its tables are read in one tenant's schema, so
+`Tenancy.any_of(...)` of several values and `Tenancy.ALL` raise `QueryError` when the scope is entered. A
+connection works in the schema of the tenant the scope gives its `Meta.tenant_schema` models — see
+[Queries](schema-per-tenant.md#queries).
+
+Registering or unregistering live models updates the connection's tenant schema selection and the
+table tenants used when a new row-level-security transaction begins, even inside an existing scope.
+A transaction already in progress keeps the tenant settings it began with.
+Reusing a model scope in another `HareContext` selects that context's models, including when both
+contexts use the same connection alias.
+
+```python
+with Tenancy.scope({Invoice: "acme", Order: Tenancy.any_of("msk", "kzn"), Faq: Tenancy.ALL}):
+    await Invoice.objects.count()      # tenant_acme.invoice
+    await Order.objects.count()        # public.order, two stores
 ```
 
 `Tenancy.get_scope(model)` gives a model's scope in the current task: the value, the
@@ -177,7 +196,10 @@ scope's value" below is the one value of that scope, and "inside the scope" mean
   with no scope at all (seed data, trusted like an explicit `tenant_field` there). The writes of objects —
   `create()`, `bulk_create()`, `bulk_update()` and the rest — are checked under the active scope even
   through `.all_tenants()`, which widens the rows a query reads, not the rows an object points at. A key
-  naming no row is left to the database. On ClickHouse, which keeps no key unique, two tenants' rows may
+  naming no row is left to the database — except a key into a table of a `TenantCondition` policy on a
+  connection with [`tenant_row_level_security`](#row-level-security): the policy hides the other
+  tenants' rows from the check while the database's foreign key still accepts them, so a key whose row
+  the scope doesn't show raises `QueryError`. On ClickHouse, which keeps no key unique, two tenants' rows may
   share a key: a key passes when one of its rows is in the scope, M2M `add()` alike, and a delete under a
   scope cascades to the rows of the scope only.
 - **M2M `add()` fills a through model's own `tenant_field`** with the value of the through model's scope,
@@ -346,17 +368,22 @@ config = {**HARE_CONFIG, "connections": {"default": "postgresql://app@localhost/
 - **The transaction's tenants.** Every transaction on the connection sets its tenants right after
   `BEGIN`, from the `Tenancy.scope()` active when it began —
   `SELECT set_config('hare.tenant', ..., true)`, a JSON array of the tenant values as text: one value,
-  `Tenancy.any_of(...)`'s values, or every tenant under `Tenancy.ALL`. The setting is local to the
+  `Tenancy.any_of(...)`'s values, or every tenant under `Tenancy.ALL`. Under a
+  [scope by model](#scope-by-model) it is a JSON object of each table's tenants, by the table's name
+  (after its `Meta.schema`, when it has one: `{"order": ["msk", "kzn"], "shop.faq": "*"}`) — every table of
+  the connection's models with a `TenantCondition` policy the scope names. The setting is local to the
   transaction — it ends with it, and a pooled connection never carries it into the next one.
 - **The policy.** `TenantCondition()` is written as "the row's tenant column is one of the transaction's
-  tenants" (every row under `Tenancy.ALL`); as the `using` of an `ALL` policy it also checks every row
-  written. The setting is read with the column's own type, so the condition uses the column's index.
-- **No tenant, no rows.** A transaction begun under no scope, or under a scope given model by model, sets
-  no tenant — the policy lets it see and write none of the model's rows, raw SQL included.
+  tenants" — of its own table's entry under a scope by model (every row under `Tenancy.ALL`); as the
+  `using` of an `ALL` policy it also checks every row written. The tenants are read once for a
+  statement, not for each row.
+- **No tenant, no rows.** A transaction begun under no scope sets no tenant, and a scope by model gives
+  none to a table of a model it doesn't name — the policy lets the transaction see and write none of
+  those rows, raw SQL included.
 - **Queries through the ORM** of such a model run inside a transaction that set its tenants — outside a
-  transaction, or in one begun with no tenant, they raise `QueryError` before any SQL instead of
-  returning nothing. A query under another scope than the one the transaction began in raises
-  `QueryError` too: the transaction's setting can't follow it.
+  transaction, in one begun with no tenant, or under a scope by model not naming the model, they raise
+  `QueryError` before any SQL instead of returning nothing. A query under another scope than the one the
+  transaction began in raises `QueryError` too: the transaction's setting can't follow it.
 - A model with a `TenantCondition` policy on a connection without `tenant_row_level_security` raises
   `ConfigurationError` on its first query; one without `Meta.tenant_field` when it is declared.
 - **Roles.** PostgreSQL doesn't apply row level security to a superuser or a role with `BYPASSRLS`, and

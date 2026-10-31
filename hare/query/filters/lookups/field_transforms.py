@@ -16,7 +16,7 @@ TermTransform = Callable[[Term], Term]
 
 class FieldTransforms:
     """Reads a path of transforms inside a field's value (``tags__0``, ``tags__len``,
-    ``during__startswith``, ``name__unaccent``, ``attributes__color``), chained. A field reads
+    ``during__startswith``, ``attributes__color``), chained. A field reads
     inside its own value through ``Field.get_path_transform()``; a dialect adds a segment to a field
     class with ``Field.register_transform()``.
     """

@@ -70,7 +70,7 @@ class Extract(Function):
     def get_plan_options(self) -> tuple[Any, ...]:
         return (self.date_part, self.zone_name)
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> ExtractTerm:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> ExtractTerm:
         return ExtractTerm(self.date_part, term, as_integer=True, zone_as_literal=True)  # type: ignore[arg-type]
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

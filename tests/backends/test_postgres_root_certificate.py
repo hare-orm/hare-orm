@@ -19,6 +19,20 @@ CLIENTS = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(RUST_PG_CLIENT_PATH), indirect=True)
+async def test_rust_tls_setup_failures_are_configuration_errors(client_class, monkeypatch):
+    from rust.native import pg
+
+    async def missing_roots(**kwargs):
+        raise ValueError("no root trust anchors were provided")
+
+    monkeypatch.setattr(pg, "connect", missing_roots)
+    client = make_client(client_class, "postgresql://orders@127.0.0.1:1/orders?sslmode=verify-full")
+    with pytest.raises(ConfigurationError, match="no root trust anchors"):
+        await client.create_connection(with_db=True)
+
+
 def make_client(client_class, url):
     credentials = DbUrlConfigGenerator.expand(url)["credentials"]
     return client_class(connection_alias="default", **credentials)

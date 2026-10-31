@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.exceptions import FieldError, UnSupportedError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.fields.generated_field import GeneratedField
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.query.expressions import Expression
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.lookup_info.lookup_path import LookupPath
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.statements.building.query_annotations import QueryAnnotations
@@ -77,7 +79,10 @@ class QueryOrdering:
 
         for ordering in orderings:
             field_name = ordering[0]
-            key_field_names = QueryOrdering.get_relation_ordering_key_names(model, field_name)
+            # An annotation of a relation's path name is ordered by itself, not by the relation's key.
+            key_field_names = (
+                None if field_name in annotations else QueryOrdering.get_relation_ordering_key_names(model, field_name)
+            )
             if key_field_names is not None:
                 QueryOrdering.get_ordering(
                     query,
@@ -146,6 +151,13 @@ class QueryOrdering:
                 else:
                     term = QueryAnnotations.get_annotation_expression_term(query, field_name, annotations, table)
                 value_field = QueryAnnotations.get_annotation_value_field(query, field_name, annotations, table)
+                if value_field is not None:
+                    value_field = GeneratedField.get_effective_field(value_field)
+                    if not value_field.is_orderable:
+                        raise UnSupportedError(
+                            f"{model.__name__}.{field_name} is a {type(value_field).__name__} - the database orders "
+                            "no rows by it; order by a path of it"
+                        )
                 if isinstance(value_field, JSONField):
                     # A JSON value orders in the form its database orders it - by the expression
                     # itself, as a SELECT DISTINCT copies the ordering into SELECT, where no alias
@@ -180,9 +192,10 @@ class QueryOrdering:
                         f"Unknown field {full_name} for ordering: {model.__name__} has no field {field_name}"
                     )
                 EncryptedFieldBase.raise_if_encrypted(field_object, "ORDER BY")
-                if not field_object.is_orderable:
+                value_field = GeneratedField.get_effective_field(field_object)
+                if not value_field.is_orderable:
                     raise UnSupportedError(
-                        f"{model.__name__}.{field_name} is a {type(field_object).__name__} - the database orders "
+                        f"{model.__name__}.{field_name} is a {type(value_field).__name__} - the database orders "
                         "no rows by it; order by a path of it"
                     )
                 field_name = field_object.source_field or field_name
@@ -191,7 +204,7 @@ class QueryOrdering:
                 function_cast = field_object.get_function_cast(query.dialect)
                 if function_cast:
                     field = function_cast(field_object, field)
-                if isinstance(field_object, JSONField):
+                if isinstance(value_field, JSONField):
                     # A JSON value in the form its database orders it.
                     field = JsonSortKey(field)
                 field = query.dialect.types.get_ordering_key(field_object, field)
@@ -220,8 +233,11 @@ class QueryOrdering:
         """
         namespaced_context = query.query._sql_context_with_namespace(query.query.query_class.SQL_CONTEXT)
         selected_sql = set()
+        selected_names: set[str] = set()
         for select_term in query.query._selects:
             selected_sql.add(select_term.get_sql(namespaced_context))
+            if (selected_name := select_term.alias or getattr(select_term, "name", None)) is not None:
+                selected_names.add(selected_name)
             # An annotation selected under an alias is ordered by a bare reference to the alias -
             # recognized as selected already, not appended again.
             if select_term.alias:
@@ -236,7 +252,11 @@ class QueryOrdering:
                     query.query = query.query.select(
                         value_term
                         if isinstance(value_term, Field)
-                        else value_term.as_(f"{DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX}{index}")
+                        else value_term.as_(
+                            HareColumnNames.get_free_name(
+                                f"{DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX}{index}", (), selected_names
+                            )
+                        )
                     )
                     selected_sql.add(value_term.get_sql(namespaced_context))
                 orderbys.append((term, direction))
@@ -244,7 +264,11 @@ class QueryOrdering:
             term_sql = term.get_sql(namespaced_context)
             if term_sql not in selected_sql:
                 if not isinstance(term, Field) and term.alias is None:
-                    term = term.as_(f"{DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX}{index}")
+                    term = term.as_(
+                        HareColumnNames.get_free_name(
+                            f"{DISTINCT_ORDERING_COLUMN_ALIAS_PREFIX}{index}", (), selected_names
+                        )
+                    )
                 query.query = query.query.select(term)
                 selected_sql.add(term_sql)
             orderbys.append((term, direction))

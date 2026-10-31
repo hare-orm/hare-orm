@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Mapping
 from copy import deepcopy
+from decimal import Decimal
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -55,10 +57,22 @@ class FieldSnapshot(Mapping[str, Any]):
         ):
             return old_value is not new_value
         if old_value != new_value:
-            return True
+            # A NaN equals no value, not even a NaN - and is the same stored value as another NaN.
+            return not (FieldSnapshot.is_nan(old_value) and FieldSnapshot.is_nan(new_value))
         if compare_types or isinstance(old_value, (dict, list)):
             return not FieldSnapshot.is_same_typed_value(old_value, new_value)
         return False
+
+    @staticmethod
+    def is_nan(value: Any) -> bool:
+        """Whether a value is a float or ``Decimal`` NaN.
+
+        Args:
+            value: A value.
+        """
+        if isinstance(value, float):
+            return math.isnan(value)
+        return isinstance(value, Decimal) and value.is_nan()
 
     @staticmethod
     def is_same_typed_value(first_value: Any, second_value: Any) -> bool:

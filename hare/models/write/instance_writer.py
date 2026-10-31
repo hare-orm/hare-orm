@@ -367,7 +367,7 @@ class InstanceWriter:
             if pk_field is not None and pk_field.generated and getattr(obj, primary_key_attribute) is None:
                 setattr(obj, primary_key_attribute, self.connection.dialect.types.get_python_value(pk_field, results))
             return
-        ReturnedValues.apply_row(self.model, self.connection.dialect.types, obj, results)
+        ReturnedValues.apply_row(self.model, self.connection.dialect.types, obj, results, connection=self.connection)
 
     def _get_insert_omitting_defaults(
         self, obj: Model, field_names: list[str], primary_key_given: bool
@@ -447,7 +447,9 @@ class InstanceWriter:
                 stamped_values.keep(self.connection)
                 self._process_insert_result(obj, insert_result)
                 if not features.supports_returning:
-                    ReturnedValues.leave_unloaded(self.model, (obj,), self._get_defaulted_columns(obj))
+                    ReturnedValues.leave_unloaded(
+                        self.model, (obj,), self._get_defaulted_columns(obj), connection=self.connection
+                    )
                 return
             insert_values = self._get_insert_values(obj, field_names)
             if self.model._meta.sensitive_fields:
@@ -465,7 +467,9 @@ class InstanceWriter:
         rows = result[1]
         self._process_insert_result(obj, rows[0] if rows else result.inserted_id)
         if not features.supports_returning and self.model._meta.recomputed_db_fields:
-            ReturnedValues.leave_unloaded(self.model, (obj,), self.model._meta.recomputed_db_fields)
+            ReturnedValues.leave_unloaded(
+                self.model, (obj,), self.model._meta.recomputed_db_fields, connection=self.connection
+            )
 
     def raise_if_key_left_to_database(self, obj: Model) -> None:
         """Refuses an obj whose primary key takes a field's ``db_default`` on a database returning no
@@ -864,9 +868,12 @@ class InstanceWriter:
                     cast("Model", instance),
                     returned_rows[0],
                     generated_fields,
+                    connection=self.connection,
                 )
             elif not self.connection.features.supports_returning:
-                ReturnedValues.leave_unloaded(self.model, (cast("Model", instance),), generated_fields)
+                ReturnedValues.leave_unloaded(
+                    self.model, (cast("Model", instance),), generated_fields, connection=self.connection
+                )
         return rows
 
     def _get_update_values(self, instance: type[Model] | Model, field_names: list[str]) -> list[Any]:

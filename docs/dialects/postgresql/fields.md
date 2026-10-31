@@ -390,8 +390,9 @@ documentation](https://www.postgresql.org/docs/current/ltree.html).
 `path__depth` is the number of labels (an int) in filters, `values()`, `F()` and `order_by()`:
 `filter(path__depth=2)`. `Subpath(field, offset, length=None)` reads a part of the path as a path — the
 labels from the 0-based `offset` (negative from the end), `length` of them or up to the end. A position
-past the path is PostgreSQL's own `subpath()`: a positive one raises `OperationalError`, a negative one
-gives a part of the path rather than an error:
+past the path is PostgreSQL's own `subpath()`: a positive one raises `OperationalError`; a negative one
+past the start counts from the end once more (`-4` on a path of three labels reads as `-1`), and one past
+twice the path's length raises `OperationalError`:
 
 ```python
 from hare.dialects.postgresql.functions import Subpath
@@ -468,6 +469,9 @@ and a range with no values becomes the empty range. A lower bound greater than t
 `ValidationError`, and so does a bound of an integer range outside its type or with a fraction
 (`Range(1.9, 3)`, `span__contains=1.5`) or a `bool` one, as an `IntField` refuses it, and a NaN bound of
 a `DecimalRangeField`, which orders against no other.
+
+A `Range` as a field's `default` — and a list of them for a multirange — is written into a migration
+as the call building it (`default=Range(1, 5)`).
 
 A migration changing a range field to a range of another type (`IntRangeField` to `BigIntRangeField` or
 `DecimalRangeField`, the same for a multirange or an array of ranges) converts the column through each

@@ -69,7 +69,7 @@ class OutboxEvent(Model):
     """
 
     sequence = fields.BigIntField(primary_key=True)
-    id = fields.UUIDField(default=Uuid7.new, unique=True)
+    id = fields.UUIDField(default=Uuid7.new, unique=True, version=7)
     topic = fields.CharField(max_length=OUTBOX_KEY_MAX_LENGTH)
     payload = JSONTextField(encoder=OutboxJsonEncoding.dumps)
     headers = JSONTextField(encoder=OutboxJsonEncoding.dumps, default=dict)
@@ -154,7 +154,7 @@ class OutboxEvent(Model):
                 transaction and another connection has one - the event would commit on its own
                 instead of with that transaction's write. Pass ``using=`` if this is intended. Or the
                 wakeup can't signal on the connection's database (``ListenNotifyWakeup`` without
-                ``LISTEN``/``NOTIFY``) - refused before the event is written.
+                listen/notify) - refused before the event is written.
         """
         cls.validate_enqueue_options(topic, idempotency_key, ordering_key, headers, extra_field_values)
         field_values = dict(extra_field_values or {})

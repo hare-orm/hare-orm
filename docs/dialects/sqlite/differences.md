@@ -19,6 +19,10 @@ of at all — `MERGE`, `LATERAL`, sequences, row level security and the rest —
 
 ## <a id="values"></a>Values
 
+Quoted identifiers ignore ASCII letter case: `Name` and `name` name the same column. Non-ASCII letters
+remain distinct, so `É` and `é` may name separate columns. Hare applies this comparison when checking
+table, column and index declarations for conflicting spellings.
+
 | SQLite | hare |
 |---|---|
 | An exact decimal type | A `DecimalField` has no column on SQLite, and a `Decimal` value in a query run on SQLite is refused before any SQL — see [`DecimalField` (SQLite)](../../models/field-types.md#decimal-field-sqlite). |
@@ -99,6 +103,7 @@ of an empty key (`has_key=""` — *JSON path error*). A value read as text, a `C
 | Statement triggers, deferrable triggers and constraints, a disabled trigger | `TriggerForEach.STATEMENT`, `deferrable=True` and `enabled=False` raise `UnSupportedError` — see [Triggers](../../models/constraints-and-triggers.md#triggers). |
 | `NULLS NOT DISTINCT` | `UniqueConstraint(nulls_distinct=False)` raises `ConfigurationError` when the model is bound. |
 | `INCLUDE` columns, `NULL` placement of an index key | An index is created without its `include` columns; a key setting where `NULL`s sort raises `UnSupportedError` — see [Indexes](../../models/indexes.md). |
+| Names differing only in letter case | Two tables of one schema, two columns of a model, two named constraints or indexes spelled so (`"Note"` and `"note"`) raise `ConfigurationError` when the models are bound — SQLite takes them for one name. |
 | `LIKE` in a constraint or an index condition | A text lookup is written as `GLOB`, matching the same rows case-sensitively — see [Constraints](../../models/constraints-and-triggers.md#constraints). |
 | hare's functions outside hare | A constraint or an index needing one raises `UnSupportedError` — see [In constraints and indexes](functions.md#in-constraints-and-indexes). |
 | Collation and extension DDL | `CreateCollation`/`RemoveCollation` and `CreateExtension`/`RemoveExtension` are skipped with a warning — see [Collations](../../migrations/operations.md#raw-operations). |

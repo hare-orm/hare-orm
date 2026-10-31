@@ -284,7 +284,7 @@ def test_answers_given_beforehand_pair_several_models_declared_alike() -> None:
         ("Item", "Product"),
         ("Part", "Piece"),
     ]
-    assert rename_questions.get_unapplied_rename_warnings() == []
+    rename_questions.raise_if_renames_unapplied()
 
 
 def test_answers_given_beforehand_pair_several_fields_declared_alike() -> None:

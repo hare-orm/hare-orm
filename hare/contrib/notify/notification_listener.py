@@ -21,10 +21,10 @@ from hare.exceptions import ConfigurationError, UnSupportedError
 
 
 class NotificationListener:
-    """A ``LISTEN`` subscription that reconnects with backoff whenever its dedicated
-    connection dies. NOTIFY isn't persistent - a notification sent while disconnected is lost - so
-    it only speeds up a durable source of truth such as polling. On a database without LISTEN
-    ``start()``/``run()`` refuse.
+    """A subscription to a notification channel that reconnects with backoff whenever its dedicated
+    connection dies. A notification isn't persistent - one sent while disconnected is lost - so
+    it only speeds up a durable source of truth such as polling. On a database without listen/notify
+    (``Features.supports_listen_notify``) ``start()``/``run()`` refuse.
 
     Args:
         connection_alias: The connection alias, resolved when listening starts.
@@ -75,7 +75,7 @@ class NotificationListener:
         #: Whether start() created the task run() executes in - stop() cancels only a task of its
         #: own, never the task of a caller awaiting run() itself.
         self._owns_run_task = False
-        #: Set once the first LISTEN attempt has finished (either way) - start() waits on it.
+        #: Set once the first listening attempt has finished (either way) - start() waits on it.
         self._first_attempt_finished = asyncio.Event()
         self._connection: Any = None
         self._callback_context: contextvars.Context | None = None
@@ -84,17 +84,17 @@ class NotificationListener:
 
     @property
     def is_listening(self) -> bool:
-        """Whether a LISTEN connection is currently open and alive."""
+        """Whether a listening connection is currently open and alive."""
         return self._connection is not None and not self._connection.is_closed()
 
     async def start(self) -> None:
-        """Starts listening in a background task and returns once the first LISTEN attempt has
+        """Starts listening in a background task and returns once the first listening attempt has
         finished (connected or failed - a failure keeps retrying in the background). Idempotent.
 
         Raises:
-            UnSupportedError: The database has no LISTEN.
+            UnSupportedError: The database has no listen/notify.
             ConfigurationError: The channel's name is longer than the database's names, or the
-                connection's configuration takes no LISTEN - behind a transaction pooler without
+                connection's configuration can't listen - behind a transaction pooler without
                 ``direct_host``.
         """
         if self._run_task is not None and not self._run_task.done():
@@ -113,11 +113,11 @@ class NotificationListener:
         finally:
             waiter.cancel()
         if task.done():
-            # Raises what ended the loop at once - a configuration no LISTEN runs on.
+            # Raises what ended the loop at once - a configuration no listening runs on.
             task.result()
 
     async def stop(self) -> None:
-        """Stops listening: ends the listening loop, closes the LISTEN connection and cancels
+        """Stops listening: ends the listening loop, closes the listening connection and cancels
         still-running async callbacks, waiting for all of it. The task ``start()`` created is
         cancelled; a ``run()`` a caller awaits itself returns, at once from a pause between
         checks or reconnects. Idempotent."""
@@ -153,7 +153,7 @@ class NotificationListener:
         """The connection's ``listen()`` method.
 
         Raises:
-            UnSupportedError: The database has no LISTEN.
+            UnSupportedError: The database has no listen/notify.
             ConfigurationError: The channel's name is longer than the database's names.
         """
         connection = Connections.current().get_non_transactional(self.connection_alias)
@@ -187,8 +187,8 @@ class NotificationListener:
         background task; await it directly to own the task yourself.
 
         Raises:
-            UnSupportedError: The database has no LISTEN.
-            ConfigurationError: The connection's configuration takes no LISTEN.
+            UnSupportedError: The database has no listen/notify.
+            ConfigurationError: The connection's configuration can't listen.
         """
         listen = self._get_listen_method()
         self._run_task = asyncio.current_task()
@@ -272,7 +272,7 @@ class NotificationListener:
 
     @staticmethod
     async def _close_connection(connection: Any) -> None:
-        """Closes a LISTEN connection, logging instead of raising if it is already broken."""
+        """Closes a listening connection, logging instead of raising if it is already broken."""
         try:
             await connection.close()
         except Exception:

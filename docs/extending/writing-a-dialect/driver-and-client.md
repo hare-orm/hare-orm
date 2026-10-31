@@ -87,7 +87,9 @@ driver may then give its cheapest rows read by position — plain tuples — wit
 no description is given). hare passes it for its own reads and for `UPDATE`/`DELETE` statements counting
 their rows. Every read and write of the ORM goes through it — there is no separate insert or
 dict-returning method to implement (`execute_dicts()` is built on it; set `row_to_dict` when the driver's
-rows convert faster than `dict(row)`).
+rows need a conversion other than `dict(row)` for correctness or speed). This conversion preserves
+each column's exact name and value: SQLite pairs names with positional values because its named-row
+lookup treats `a` and `A` as the same name. Combined-query streams use this conversion too.
 
 A statement's `values` are a `list`, or its subclass `QueryParameters`
 (`hare.sql.terms.parameters.query_parameters`) when some of them hold a `sensitive=True` field's value:

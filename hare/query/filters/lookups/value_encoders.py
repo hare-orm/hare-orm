@@ -172,7 +172,7 @@ class ValueEncoders:
         return [ValueEncoders.encode_composite_pk(element, obj, field, dialect) for element in values]
 
     @staticmethod
-    def encode_bool(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> bool:
+    def encode_bool(value: Any, obj: Model | None, field: Field[Any], dialect: Dialect) -> bool:
         """Returns ``value`` when it is a bool - a truthy string like "false" would invert the filter.
 
         Raises:

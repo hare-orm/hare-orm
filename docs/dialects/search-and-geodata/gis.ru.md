@@ -33,8 +33,9 @@ nearby = await Store.objects.filter(location__dwithin=(Point(37.62, 55.75), 0.01
 
 Пространственные операторы используют индекс, только если он у колонки есть, — объявите `GistIndex`
 (PostgreSQL) или [`SpatialiteIndex`](#spatial-index) (SQLite) для каждой геометрической колонки, по
-которой фильтруете. Каждый из них — индекс своей базы: на другой он даёт `UnSupportedError` до отправки
-SQL — и при генерации схемы, и в миграции, которая его добавляет или удаляет.
+которой фильтруете. Каждый из них — индекс своей базы: модель, объявившая его на подключении другой,
+даёт `ConfigurationError` в `Hare.init()`, а миграция, которая добавляет или удаляет его там, —
+`UnSupportedError` до отправки SQL.
 
 ## <a id="geometries"></a>Значения-геометрии
 
@@ -360,8 +361,8 @@ class Store(Model):
 - **Проверка расхождений и `inspectdb`** читают его из пространственных метаданных (включённый
   пространственный индекс колонки); его таблицы R*Tree и триггеры SpatiaLite моделям не принадлежат.
 - Ему нужны `features.supports_spatial_index` — SpatiaLite, загруженный с метаданными, — и SRID поля в
-  метаданных; иначе `UnSupportedError` до отправки SQL. На PostgreSQL он даёт `UnSupportedError` — там
-  объявите `GistIndex`.
+  метаданных; иначе `UnSupportedError` до отправки SQL. На PostgreSQL модель с ним даёт
+  `ConfigurationError` в `Hare.init()`, миграция с ним — `UnSupportedError`; там объявите `GistIndex`.
 
 ## <a id="integrations"></a>Pydantic и inspectdb
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from decimal import Decimal
+from uuid import UUID, uuid4
 
+from hare.fields.uuid7 import Uuid7
 from hare.query.enums import Lookup
 from hare.sql.types.sql_types import SqlTypes
 
@@ -129,3 +132,6 @@ PHONE_FIELD_MAX_LENGTH = 16
 
 #: The hour a time text starts with at the end of a day (24:00) - no time of day holds it.
 END_OF_DAY_HOUR_TEXT = "24"
+
+#: The default of a UUIDField primary key by the field's version - none for another version.
+UUID_VERSION_DEFAULTS: dict[int | None, Callable[[], UUID]] = {None: uuid4, 4: uuid4, 7: Uuid7.new}

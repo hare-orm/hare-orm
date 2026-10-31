@@ -48,7 +48,7 @@ class Parameterizer:
             source: The term the value comes from - kept by a ``RecordingParameterizer``.
             reuse: Whether a term rendered again binds as the parameter it bound as the first time -
                 for numbered placeholders (``$1``), where the database then sees both places as one
-                expression (``DISTINCT ON`` matching ``ORDER BY``).
+                expression (distinct fields matching ``ORDER BY``).
 
         Returns:
             The parameter placeholder.

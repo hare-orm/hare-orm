@@ -48,6 +48,8 @@ class Lateral(NamedColumns):
                 f"Lateral() takes a values()/values_list() queryset - the columns its name reads, got {query!r}"
             )
         self.query = query
+        # A row comes once for each row the subquery returns - several unless it is sliced to one.
+        self.repeats_rows = query._limit is None or query._limit > 1
 
     def get_path_result(self, path: str, expression_context: ExpressionContext) -> ExpressionResult:
         """The column ``path`` names, read from the subquery joined under the name.

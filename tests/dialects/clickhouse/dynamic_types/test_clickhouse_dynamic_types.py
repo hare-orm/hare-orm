@@ -13,6 +13,8 @@ import pytest_asyncio
 from hare import fields
 from hare.dialects.clickhouse.fields import DynamicField, VariantField
 from hare.exceptions import ConfigurationError, UnSupportedError, ValidationError
+from hare.query.expressions import Window
+from hare.query.functions.window import Lag, Lead, NthValue
 from tests.dialects.clickhouse.dynamic_types.models import Sample
 from tests.utils.operations import apply_operations
 
@@ -313,3 +315,29 @@ async def test_a_variant_value_keeps_its_type_on_every_write(clickhouse_dynamic_
 
     assert await get_variant_types() == ["String", "String", "String", "String", "Int32"]
     assert await Sample.objects.order_by("id").values_list("reading", flat=True) == ["3", "3", "3", "3", 7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["anything", "reading"])
+async def test_lag_lead_and_nth_value_of_a_type_holding_null_itself(clickhouse_dynamic_types_db, field_name):
+    """A Dynamic and a Variant hold NULL themselves - made Nullable, they failed: "Nested type Dynamic cannot
+    be inside Nullable type"."""
+    for sample_id, value in enumerate((5, "ab", None), start=1):
+        await Sample.objects.create(id=sample_id, **{field_name: value})
+    rows = Sample.objects.order_by("id")
+    assert await rows.annotate(value=Window(Lag(field_name), order_by=["id"])).values_list("value", flat=True) == [
+        None,
+        5,
+        "ab",
+    ]
+    assert await rows.annotate(value=Window(Lead(field_name), order_by=["id"])).values_list("value", flat=True) == [
+        "ab",
+        None,
+        None,
+    ]
+    assert await rows.annotate(value=Window(NthValue(field_name, 1), order_by=["id"])).values_list(
+        "value", flat=True
+    ) == [5, 5, 5]
+    assert await rows.annotate(value=Window(NthValue(field_name, 9), order_by=["id"])).values_list(
+        "value", flat=True
+    ) == [None, None, None]

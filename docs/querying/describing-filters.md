@@ -6,7 +6,7 @@ field it compares, the lookup and the value the lookup takes — without buildin
 every lookup of a field that a dialect runs.
 
 It is meant for code that turns outside input into filters: an API layer checking the filters it declares
-at startup and parsing each query parameter into the right type, a form builder, an admin. Such code
+at startup and parsing each query parameter into the right type, a form builder, a table browser. Such code
 doesn't keep its own copy of hare's lookup lists — it asks the model.
 
 hare uses the same descriptions itself: `.filter()`, `.exclude()` and `.order_by()` check every key

@@ -468,7 +468,7 @@ class QueryBuilder(PaginationSql, Selectable, Term):
         ``VALUES``; ``ON CONFLICT`` and ``RETURNING`` apply as to ``insert()``.
 
         Args:
-            rows_source_sql: The SQL of the rows, e.g. ``SELECT * FROM unnest(...)``.
+            rows_source_sql: The SQL of the rows - a ``SELECT`` of the dialect.
         """
         if self._insert_table is None:
             raise AttributeError(QUERY_WITHOUT_INSERT_MESSAGE)

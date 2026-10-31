@@ -6,6 +6,11 @@ Transactions and generated keys exist only on a server with a ClickHouse Keeper.
 hare does: where ClickHouse has another form of the same SQL, hare writes it; where the language has none,
 the call is refused before any SQL is sent.
 
+`NullIf()` needs a result type that ClickHouse can wrap in `Nullable`. It raises `UnSupportedError`
+before SQL for arrays, tuples, maps, nested values, Dynamic, Variant and other types that cannot be
+wrapped this way. Dynamic and Variant can contain null values themselves, but ClickHouse's `NULLIF`
+still requires the unsupported `Nullable` wrapper.
+
 | ClickHouse lacks | hare |
 |---|---|
 | Transactions, by default | `atomic()` raises `UnSupportedError` unless the connection asks for them with `transactions=true` — see [Transactions and locks](transactions-and-locks.md). Without, hare's own multi-statement writes run one statement after another, a failure leaving the statements before it written. |
@@ -72,6 +77,10 @@ a count:
   unnoticed;
 - a `bulk_update()` counts every object as written, and applies its version, its snapshot of changed
   fields and its `auto_now` values to all of them.
+
+A reverse relation's `add()`/`set()` reads the rows first instead — a row the related model's default
+scope hides (another tenant's, a soft-deleted one) is refused with `IntegrityError` before the write, as
+on the other databases.
 
 ## <a id="returning"></a>`RETURNING`
 
@@ -159,6 +168,9 @@ ClickHouse's own, and differs from PostgreSQL's:
   first — a `uuid7` key doesn't sort by time, so order by a date column) and of an `IPv6` address. An enum
   orders by its label, which hare stores that way. A time of day orders and compares as its stored text:
   `10:00:00+03:00` sorts after `08:00:00+00:00`, though it is the earlier moment.
+- **`Lag`/`Lead` with a JSON `default`** of an array holding values of different types
+  (`[1, 2.5, None, "x"]`) fail over the HTTP driver with `NO_COMMON_TYPE`, though a `CAST` of the same JSON
+  passes — the server's own window functions do so (checked on ClickHouse 25.8.33.6).
 - **A NaN in a `FloatField`** is stored. **A null byte** in a text raises `ValidationError` — the value is
   written into SQL text, which can't hold one; inside a JSON object it is stored as ClickHouse stores it.
 - **Errors.** Making a column `NOT NULL` while it holds `NULL` raises `column X of table Y holds NULL`.
@@ -190,6 +202,9 @@ table options, views and dictionaries from the `system` tables.
 
 ClickHouse runs correlated subqueries, but computes some of them wrongly or refuses them:
 
+- **A correlated subquery inside `IN`/`NOT IN`** is refused by ClickHouse
+  25.8, 25.10, 25.12, 26.3, 26.7, 26.8 and 26.9 with `UnSupportedError` from the server,
+  even where a correlated scalar subquery runs.
 - **`EXISTS`** correlated by equal columns — of a composite key's row of them too — is written as
   `(columns) IN (SELECT ...)` — the server refuses its own correlated `EXISTS` in a join's `ON` and over
   a `UNION DISTINCT` (25.8). An `EXISTS` of a `union()` is written as the `EXISTS` of either part, each

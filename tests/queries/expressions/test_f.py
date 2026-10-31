@@ -9,7 +9,7 @@ from hare.exceptions import (
     FieldError,
     QueryError,
 )
-from hare.query.expressions import ArithmeticOperator, Case, F, OuterReference, Q, Subquery, When
+from hare.query.expressions import ArithmeticOperator, Case, F, OuterReference, Q, Subquery, Value, When
 from hare.query.functions import Coalesce, Count, Length, Lower, Sum
 from tests.shared_models import testmodels, testmodels_postgres
 from tests.shared_models.testmodels import Currency, Event, JSONFields, Tournament
@@ -589,3 +589,55 @@ async def test_computed_numbers_combine_with_any_numeric_column(db):
         datetime.timedelta(seconds=1)
     ]
     assert str(values[0]["length_plus_decimal"]) == "4.10"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("microseconds", [1, 3, 5, -1, -3, -5, 82_800_000_001])
+async def test_a_scaled_timedelta_is_whole_microseconds_for_the_next_arithmetic_and_a_filter(db, microseconds):
+    """The scaled microseconds stayed a fraction in SQL - read rounded, but (duration * 1.5) / 3 failed on
+    PostgreSQL (mod(double precision, ...)) and lost a microsecond on SQLite, and a filter by the value read
+    found no row."""
+    duration = datetime.timedelta(microseconds=microseconds)
+    await testmodels.TimeDeltaFields.objects.create(id=1, timedelta=duration)
+    await testmodels.TimeDeltaFields.objects.create(id=2, timedelta=duration, timedelta_null=None)
+    for expression, expected in (
+        (F("timedelta") * 1.5, duration * 1.5),
+        (F("timedelta") * 0.5, duration * 0.5),
+        (F("timedelta") / 2, duration / 2),
+        ((F("timedelta") * 1.5) / 3, (duration * 1.5) / 3),
+        ((F("timedelta") / 1.5) / 2, (duration / 1.5) / 2),
+        ((F("timedelta") * 0.5) * 3, (duration * 0.5) * 3),
+    ):
+        annotated = testmodels.TimeDeltaFields.objects.filter(id=1).annotate(result=expression)
+        assert await annotated.values_list("result", flat=True) == [expected]
+        assert await annotated.filter(result=expected).values_list("id", flat=True) == [1]
+        assert await annotated.filter(result__in=[expected]).values_list("id", flat=True) == [1]
+    nulls = testmodels.TimeDeltaFields.objects.filter(id=2).annotate(result=(F("timedelta_null") * 1.5) / 3)
+    assert await nulls.values_list("result", flat=True) == [None]
+
+
+@pytest.mark.asyncio
+async def test_an_annotation_named_like_a_path_is_read_as_itself(db):
+    """A JSON path or a relation path of the annotation's name was read in its place - the filter compared
+    the JSON key, F() of it raised "arithmetic on a JSON value" or joined the related row."""
+    await JSONFields.objects.create(id=1, data={"score": 10})
+    scored = JSONFields.objects.annotate(data__score=Value(999))
+    assert await scored.filter(data__score=999).values_list("id", flat=True) == [1]
+    assert await scored.values_list(x=F("data__score") + 1, flat=True) == [1000]
+    # The path itself, without an annotation of its name.
+    assert await JSONFields.objects.filter(data__score=10).values_list("id", flat=True) == [1]
+    tournament = await Tournament.objects.create(id=1, name="cup")
+    await Event.objects.create(event_id=1, name="final", tournament=tournament)
+    named = Event.objects.annotate(tournament__id=Value(999))
+    assert await named.values_list(x=F("tournament__id") + 1, flat=True) == [1000]
+
+
+@pytest.mark.asyncio
+async def test_arithmetic_of_a_literal_annotation_and_a_literal(db):
+    """Both operands were bare parameters - PostgreSQL types neither: "operator is not unique: unknown + unknown"."""
+    await Tournament.objects.create(id=1, name="cup")
+    scored = Tournament.objects.annotate(score=Value(999))
+    assert await scored.values_list(x=F("score") + 1, flat=True) == [1000]
+    assert await scored.annotate(x=F("score") + F("score")).values_list("x", flat=True) == [1998]
+    assert await scored.filter(id=F("score") - 998).values_list("id", flat=True) == [1]
+    assert await Tournament.objects.annotate(half=Value(2.5)).values_list(x=F("half") * 2, flat=True) == [5.0]

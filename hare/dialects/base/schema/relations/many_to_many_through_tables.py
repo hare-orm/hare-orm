@@ -251,6 +251,15 @@ class ManyToManyThroughTables(SchemaEditorPart):
                 if column_name not in new_column_names:
                     new_column_names.append(column_name)
                     default_values.append(default_value)
+            # A key the database doesn't generate as it writes the row is taken from the model's series.
+            through_model = new_field.through_model_class
+            key_field = None if through_model is None else through_model._meta.pk
+            if through_model is not None and key_field is not None and key_field.generated:
+                key_sql = await self.editor.client.get_generated_key_sql(through_model)
+                key_column = through_model._meta.fields_db_projection[key_field.model_field_name]
+                if key_sql is not None and key_column not in new_column_names:
+                    new_column_names.append(key_column)
+                    default_values.append(key_sql)
         new_columns = ", ".join(self.editor.quote(column_name) for column_name in new_column_names)
         selected_values = ", ".join([old_columns, *default_values])
         # The automatic table holds each pair once - a through model may repeat one.

@@ -111,6 +111,13 @@ A package adding a field can register its storage on any dialect:
 DialectRegistry.get_dialect("colstore").types.register(MoneyField, TypeMapping(column_type="Decimal(18, 2)"))
 ```
 
+A database whose drivers render in more than one dialect object — ClickHouse's, where clickhouse-connect
+writes a `JSONField` as a `JSON` column — names the others in the registered one's `variants`
+(`ClickhouseDialect(variants=(...))`): a type, a renderer (`register()`, `register_function()`,
+`register_name()`) or a lookup operator (`register_operator()`) registered on the registered dialect is
+registered on each variant too, so one registration reaches every driver of the database. A variant's
+own registrations stay on it.
+
 ## <a id="functions-and-lookups"></a>5. Expressions and lookups: `TermRenderers`, `FilterOperators`
 
 Every expression renders standard SQL by default. `build_renderers()` returns the `TermRenderers` that
@@ -155,9 +162,10 @@ SQL needs another:
 | `get_window_ordering_clause_sql(function, term, term_sql, order, sql_context)` | One key of a window's `ORDER BY` — `get_window_ordering_sql()` by default. |
 | `get_window_ordering_sql(function, term_sql, order)` | The SQL of one ordering of a window — the term and its direction by default. |
 | `get_result_branch_term(term, output_field)` | A branch of a `CASE` or a `COALESCE` as the type of the whole result needs it. |
+| `get_null_if_result(term, field)` | The `NULLIF` call, or a refusal before execution when its argument's type cannot represent the nullable result. The default returns the term unchanged. |
 | `get_assigned_integer_term(term)` | What an `UPDATE` sets an integer column to for an expression of a fraction — converted where the column type doesn't round it. |
 | `get_assigned_enum_term(term, member_numbers)` | What an `UPDATE` sets an integer enum column to for an expression — where the column refuses a number of no member. |
-| `get_scaled_duration(term)` | The microseconds of a duration multiplied or divided by a number. |
+| `get_scaled_duration(term)` | The microseconds of a duration multiplied or divided by a number — whole microseconds, a half to the even one, as the next arithmetic and a filter take the value read; the term itself by default, for a database whose arithmetic gives whole microseconds already. |
 | `get_duration_quotient(dividend, divisor)` | The microseconds of a duration divided by an integer — rounded to the nearest, a half to the even one, as Python divides a `timedelta`. |
 | `get_composite_distinct_key()` | What `COUNT(DISTINCT ...)` counts a composite key by. |
 | `get_never_null_column_count_argument(term)` | What `COUNT` takes for a column of the queried table that holds no NULL — the column by default; `*` where counting rows is cheaper than reading the column. |
@@ -191,6 +199,13 @@ part of every plan key. An expression class of the dialect's own (PostgreSQL's a
 functions) declares how its attributes meet the plan in `plan_parts` and resolves its arguments with
 `ExpressionArguments.get_result()`, as any [custom
 expression](../custom-functions-and-expressions.md#writing-a-custom-expression) does.
+
+The package declaring such expressions registers them for its dialect when it is imported —
+`DialectExpressions.register(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`),
+a subclass of a registered class registered with it. A query on another database refuses each of them
+with `UnSupportedError` before any SQL is built: `Function.get_result()` checks it for every function,
+and an expression with a `get_result()` of its own calls
+`DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)` first.
 
 ## <a id="query-class"></a>6. Statement clauses: `QueryClauses`
 

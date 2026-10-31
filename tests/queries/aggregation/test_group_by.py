@@ -1,10 +1,12 @@
+import datetime
+
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import requires_features
 from hare.query.expressions import F, RawSQL, Subquery
 from hare.query.functions import Avg, Count, Sum, Upper
-from tests.shared_models.testmodels import Author, Book, Event, Team, Tournament
+from tests.shared_models.testmodels import Author, Book, DateFields, Event, JSONFields, Team, Tournament
 
 
 @pytest_asyncio.fixture
@@ -312,3 +314,27 @@ async def test_columns_of_a_grouped_primary_key_are_read(db, group_by_data):
     rows = await Book.objects.annotate(count=Count("id")).group_by("id").order_by("id").values_list("name", "count")
 
     assert rows == [(book.name, 1) for book in (*group_by_data["books1"], *group_by_data["books2"])]
+
+
+@pytest.mark.asyncio
+async def test_group_by_and_values_again_take_a_path_inside_a_value(db):
+    """group_by() of a date part or a JSON path, and values() again over rows grouped by one, raised
+    "Unknown field 'date__year'"."""
+    for row_id, date in (
+        (1, datetime.date(2020, 1, 1)),
+        (2, datetime.date(2020, 6, 1)),
+        (3, datetime.date(2021, 1, 1)),
+    ):
+        await DateFields.objects.create(id=row_id, date=date)
+    by_year = DateFields.objects.values("date__year").annotate(count=Count("id")).order_by("date__year")
+    assert await by_year.values_list("count", flat=True) == [2, 1]
+    assert await DateFields.objects.group_by("date__year").annotate(count=Count("id")).order_by("count").values_list(
+        "count", flat=True
+    ) == [1, 2]
+    for row_id, key in ((1, "a"), (2, "a"), (3, "b")):
+        await JSONFields.objects.create(id=row_id, data={"k": key})
+    by_key = JSONFields.objects.group_by("data__k").annotate(count=Count("id")).order_by("count")
+    assert await by_key.values_list("count", flat=True) == [1, 2]
+    assert await JSONFields.objects.values("data__k").annotate(count=Count("id")).order_by("data__k").values_list(
+        "count", flat=True
+    ) == [2, 1]

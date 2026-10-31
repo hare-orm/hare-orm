@@ -311,7 +311,7 @@ class LookupInfoBuilder:
         model: type[Model], name: str, field_object: Field[Any], path: list[str], label: str
     ) -> None:
         """Rejects a path inside a field whose value has none - only a JSON value has keys, and an
-        array, range, text or hstore value its transforms.
+        array, range, text or key-value value its transforms.
 
         Raises:
             FieldError: The field's value has no such path.
@@ -497,7 +497,7 @@ class LookupInfoBuilder:
             else:
                 lookup_name = suffix
         else:
-            # A path through an array, range, text or hstore value, then the lookup of what it reads.
+            # A path through an array, range, text or key-value value, then the lookup of what it reads.
             term_transforms, output_field, remaining = FieldTransforms.get_path(field_object, rest)
             if not term_transforms or len(remaining) > 1:
                 raise FieldError(f"{position.label}: {position.owner_model.__name__}.{name} has no lookup {suffix!r}")

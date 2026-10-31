@@ -7,7 +7,7 @@ from types import ModuleType
 from typing import Any
 
 from hare.core.constants import DEFAULT_CONNECTION_NAME
-from hare.dialects.base.connection.constants import DB_URL_AUTHORITY_HOST_PATTERN
+from hare.dialects.base.connection.constants import DB_URL_AUTHORITY_HOST_PATTERN, DB_URL_QUERY_PATTERN
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 
@@ -16,6 +16,7 @@ class DbUrlConfigGenerator:
     """Parses a DB_URL string into the hare-style connections/apps config dict."""
 
     authority_host_regex = re.compile(DB_URL_AUTHORITY_HOST_PATTERN)
+    query_regex = re.compile(DB_URL_QUERY_PATTERN)
 
     @staticmethod
     def _quote_userinfo_component(component: str) -> str:
@@ -66,7 +67,7 @@ class DbUrlConfigGenerator:
 
         The userinfo may itself contain literal "@", "/", "?" and "#", and the query may contain
         "@" - so the separator is the first "@" followed by a well-formed host[:port] whose
-        remaining path holds no further "@" outside the query.
+        remaining path holds no further "@" and whose query, if any, is ``name=value`` pairs.
 
         Args:
             url_rest: The DB_URL after "scheme://".
@@ -80,8 +81,10 @@ class DbUrlConfigGenerator:
             if host_match is None:
                 continue
             path_and_query = url_rest[host_match.end() :]
-            path = path_and_query.split("?", 1)[0].split("#", 1)[0]
-            if "@" not in path:
+            path, _, query = path_and_query.partition("?")
+            if "@" in path or "#" in path_and_query:
+                continue
+            if not query or DbUrlConfigGenerator.query_regex.fullmatch(query):
                 return at_position
         return at_positions[-1] if at_positions else -1
 

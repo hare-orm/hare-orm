@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 class ArrayJoin(NamedJoin):
     """The elements of an array, each joined to its row under the name ``alias()``/``annotate()`` gives
-    it - the row repeated with each element (``ARRAY JOIN``)::
+    it - the row repeated with each element::
 
         Shipment.objects.alias(tag=ArrayJoin("tags")).filter(tag__startswith="a").values("id", "tag")
 
@@ -144,5 +144,5 @@ class ArrayJoin(NamedJoin):
         return QueryModifier(joins=result.joins) & modifier
 
     def is_multi_valued(self, model: Any) -> bool:
-        """An ``ARRAY JOIN`` repeats each row with each element."""
+        """An array join repeats each row with each element."""
         return True

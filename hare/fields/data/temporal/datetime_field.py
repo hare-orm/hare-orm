@@ -366,10 +366,15 @@ class DatetimeField(Field[TDatetime]):
         # use_timezone=False: a wall-clock column stores the system's local time, as from_db_value()
         # reads it back; a UTC-instant column gets the instant itself.
         if Timezone.is_aware(value):
+            if value.utcoffset() == datetime.timedelta(0) and value.replace(tzinfo=None) in NAIVE_INFINITY_DATETIMES:
+                # The naive extreme an assignment of it keeps - not a local time past the range.
+                return value if stores_utc_instants else value.replace(tzinfo=None)
             local_value = Timezone.get_system_local_naive(value)
             return value if stores_utc_instants else local_value
         if value in NAIVE_INFINITY_DATETIMES:
-            return value
+            # datetime.min/datetime.max is the moment it is in UTC - a driver binding a naive value as a local
+            # wall clock would move it past the range, a row no read could convert.
+            return value.replace(tzinfo=datetime.UTC) if stores_utc_instants else value
         if value.year in (datetime.MINYEAR, datetime.MAXYEAR):
             Timezone.make_system_local_aware(value).astimezone(datetime.UTC)
         if stores_utc_instants:

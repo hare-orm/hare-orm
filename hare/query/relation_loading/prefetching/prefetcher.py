@@ -12,6 +12,7 @@ from hare.query.queryset.lazy_relation_names import LazyRelationNames
 from hare.query.relation_loading.prefetching.direct_relation_prefetch import DirectRelationPrefetch
 from hare.query.relation_loading.prefetching.many_to_many_prefetch import ManyToManyPrefetch
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
+from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
 from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
 from hare.query.relation_loading.prefetching.reverse_relation_prefetch import ReverseRelationPrefetch
 from hare.query.relation_loading.prefetching.sliced_prefetch import SlicedPrefetch
@@ -231,10 +232,14 @@ class Prefetcher:
             if not forwarded or field_name not in forward_relation_names or field_name in prefetch.prefetch_queries:
                 continue
             source_fields = cast("RelationalField[Any]", meta.fields_map[field_name]).source_fields
-            if all(
-                f"_{field_name}" in vars(obj) or all(getattr(obj, name) is None for name in source_fields)
-                for obj in objs
-            ):
+            for obj in objs:
+                if f"_{field_name}" in vars(obj):
+                    continue
+                if obj._partial:
+                    PrefetchChecks.reject_unloaded_relation_keys((obj,), source_fields, field_name)
+                if any(getattr(obj, name) is not None for name in source_fields):
+                    break
+            else:
                 loaded_names.append(field_name)
         return loaded_names
 
@@ -249,9 +254,14 @@ class Prefetcher:
             field: The relation's name.
             prefetch: The request.
         """
-        related_objs = list(
-            {id(related): related for obj in objs if (related := vars(obj).get(f"_{field}")) is not None}.values()
-        )
+        related_by_id: dict[int, Model] = {}
+        for obj in objs:
+            if f"_{field}" not in vars(obj):
+                # A key of no related row - loaded as None, like a prefetch of the relation itself.
+                DirectRelationPrefetch.set_prefetched_foreign_key_object(obj, field, None)
+            elif (related := vars(obj)[f"_{field}"]) is not None:
+                related_by_id[id(related)] = related
+        related_objs = list(related_by_id.values())
         if not related_objs:
             return
         related_model = cast("RelationalField[Any]", self.model._meta.fields_map[field]).related_model

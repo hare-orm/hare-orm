@@ -44,7 +44,9 @@ class PrimaryKeyDeclaration:
             if field.pk:
                 raise ConfigurationError(
                     f"CompositePrimaryKey field {field_name!r} on model {name} must not itself be "
-                    "primary_key=True - the composite declaration is what makes it part of the PK"
+                    "primary_key=True - the composite declaration is what makes it part of the PK. If it comes "
+                    "from a base class declaring it as its own primary key, that base goes after the class "
+                    "declaring the composite key: class Document(VersionedModel, YourBaseModel)"
                 )
             if field.generated:
                 raise ConfigurationError(

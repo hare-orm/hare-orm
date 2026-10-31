@@ -90,11 +90,44 @@ class SqliteClient(DatabaseClient):
 
     #: The exception classes of the driver.
     driver_errors: ClassVar[SqliteDriverErrors]
+
     #: The connections whose foreign keys a migration switched off in the current task - a delete in
     #: its ``RunPython`` cascades in Python there.
     foreign_keys_switched_off: ClassVar[contextvars.ContextVar[frozenset[str]]] = contextvars.ContextVar(
         "hare_sqlite_foreign_keys_switched_off", default=frozenset()
     )
+
+    @staticmethod
+    def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        """Preserves each result column's exact name and positional value.
+
+        ``sqlite3.Row`` looks up names without regard to ASCII case; ``dict(row)`` therefore
+        reads the first value twice when the result contains both ``a`` and ``A``.
+
+        Args:
+            row: A named row returned by the driver.
+
+        Returns:
+            The result names paired with the values at their positions.
+        """
+        return dict(zip(row.keys(), row, strict=True))
+
+    async def execute_dicts(self, query: str, values: list[Any] | None = None) -> list[dict[str, Any]]:
+        """Reads dictionaries from positional rows, preserving case-distinct output names.
+
+        The cursor supplies the names once for the batch. Reading plain tuples avoids building
+        a named row and fetching its keys again for every returned row.
+
+        Args:
+            query: The SQL statement.
+            values: Its bound parameters.
+
+        Returns:
+            The rows keyed by their exact output names.
+        """
+        result = await self.execute(query, values, returns_rows=True, rows_by_position=True)
+        columns = result.column_names
+        return [dict(zip(columns, row, strict=True)) for row in result.rows]
 
     def enforces_foreign_keys(self) -> bool:
         return super().enforces_foreign_keys() and (

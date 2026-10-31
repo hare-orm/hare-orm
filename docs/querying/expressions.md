@@ -357,12 +357,19 @@ await Author.objects.annotate(
 ```
 
 `OuterReference` resolves its name like `F` would on the outer query: a direct field, `pk`, a
-`related__field` path, a forward FK/O2O name (`OuterReference("author")` is the `author_id` column; a
-composite-key relation raises `FieldError`) or an annotation of the outer query:
+`related__field` path, a forward FK/O2O name (`OuterReference("author")` is the `author_id` column),
+a path into a JSON value or a part of a date
+(`OuterReference("data__k")`, `OuterReference("created__year")`), a field of a named JOIN
+(`FilteredRelation`) or an annotation of the outer query — always qualified by the outer table. A field
+compared with a JSON path of the outer query compares JSON values, as with `F()`:
 
 ```python
 Author.objects.annotate(n=Length("name")).annotate(x=Exists(Book.objects.filter(rating__lt=OuterReference("n"))))
 ```
+
+In a comparison with a composite key or a relation to it, `OuterReference("relation")` names all the
+relation's key columns. Used as a single scalar expression, that composite reference raises `FieldError`;
+name an individual key column there.
 
 `OuterReference("pk")` of a model with a composite primary key compares with all of its fields at once:
 with `pk` of the same model or with a relation to it

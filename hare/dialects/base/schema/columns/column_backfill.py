@@ -261,7 +261,7 @@ class ColumnBackfill(SchemaEditorPart):
         dialect = self.editor.client.dialect
         selected_keys = ", ".join(quoted_key_columns)
         key = quoted_key_columns[0] if len(quoted_key_columns) == 1 else f"({selected_keys})"
-        # The outer NULL check too: a row name unique only within a partition (ctid) never picks a
+        # The outer NULL check too: a row address unique only within a partition never picks a
         # row already filled.
         return self.editor.UPDATE_ROWS_TEMPLATE.format(
             table=qualified_table,

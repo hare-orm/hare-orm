@@ -1,6 +1,6 @@
 # Migrations without files
 
-An application that changes a table's schema while it runs — a content type edited in an admin panel —
+An application that changes a table's schema while it runs — a table whose columns its users configure —
 builds its migrations in memory, keeps them where it likes (as text in its own database, say) and applies
 them itself. Everything below is imported from `hare.migrations`: `Migration`, `State`,
 `MigrationRunner`, `MigrationRecorder`, `MigrationWriter`, `OperationEffect`, `OperationPlan`.

@@ -211,6 +211,26 @@ async def test_select_extra_condition_combined_with_only(db):
     assert fetched_no_match.tournament is None
 
 
+@pytest.mark.parametrize(("condition_name", "matches"), [("middle", True), ("other", False)])
+@pytest.mark.asyncio
+async def test_only_of_a_nested_field_keeps_the_condition_of_the_relation_on_the_way(db, condition_name, matches):
+    """only() built the JOIN of the intermediate relation without its Select condition - the JOIN
+    select_related() built after it was dropped, and the relation was read though its condition failed."""
+    leaf = await DoubleFK.objects.create(name="leaf", left=None)
+    middle = await DoubleFK.objects.create(name="middle", left=leaf)
+    root = await DoubleFK.objects.create(name="root", left=middle)
+    query = DoubleFK.objects.filter(pk=root.pk).select_related(
+        Select("left", extra_condition=Q(name=condition_name)), "left__left"
+    )
+
+    for fetched in (await query.first(), await query.only("name", "left__left__name").first()):
+        if matches:
+            assert fetched.left is not None
+            assert fetched.left.left.name == "leaf"
+        else:
+            assert fetched.left is None
+
+
 # ============================================================================
 # Further combinations: Window()/annotate(), values()/values_list(), OuterReference as the
 # extra_condition value

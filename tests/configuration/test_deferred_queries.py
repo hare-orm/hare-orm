@@ -10,7 +10,7 @@ import pytest_asyncio
 
 from hare import fields
 from hare.core.hare_context import HareContext
-from hare.exceptions import ConfigurationError, FieldError
+from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.models import Model
 from hare.query.expressions import OuterReference, Q, Subquery
 from hare.query.functions import Count
@@ -25,6 +25,7 @@ MODULE_NAME = "tests._deferred_query_models"
 class DeferredAuthor(Model):
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=40)
+    mentor = fields.ForeignKeyField("deferred_queries.DeferredAuthor", related_name="mentees", null=True)
 
     class Meta:
         app = "deferred_queries"
@@ -64,6 +65,7 @@ QUERIES_BUILT_BEFORE_INIT = {
     ),
     "book count": lambda: DeferredBook.objects.filter(author__name="Ann").count(),
     "union": lambda: DeferredBook.objects.filter(title="B1").union(DeferredBook.objects.filter(author__name="Bob")),
+    "recursive authors": lambda: DeferredAuthor.objects.filter(name="Ann").with_recursive("mentees").order_by("name"),
 }
 MODULE_LEVEL_QUERIES = {name: build() for name, build in QUERIES_BUILT_BEFORE_INIT.items()}
 MODULE_LEVEL_MODEL_SHORTCUTS = {
@@ -93,7 +95,7 @@ async def deferred_context():
         await context.init(config=get_context_config())
         await context.generate_schemas()
         ann = await DeferredAuthor.objects.create(id=1, name="Ann")
-        bob = await DeferredAuthor.objects.create(id=2, name="Bob")
+        bob = await DeferredAuthor.objects.create(id=2, name="Bob", mentor=ann)
         await DeferredBook.objects.create(id=1, title="B1", author=ann)
         await DeferredBook.objects.create(id=2, title="B2", author=ann)
         await DeferredBook.objects.create(id=3, title="B3", author=bob)
@@ -133,6 +135,7 @@ async def test_queries_built_before_init_run_like_queries_built_after(deferred_c
     assert [author.first_title for author in first_titles] == ["B1", "B3"]
     assert await MODULE_LEVEL_QUERIES["book count"] == 2
     assert sorted(book.title for book in await MODULE_LEVEL_QUERIES["union"]) == ["B1", "B3"]
+    assert [author.name for author in await MODULE_LEVEL_QUERIES["recursive authors"]] == ["Ann", "Bob"]
 
 
 @pytest.mark.asyncio
@@ -158,6 +161,11 @@ class DeferredErrorAuthor(Model):
 async def test_init_reports_every_invalid_query_built_before_it():
     misspelled_filter = DeferredErrorAuthor.objects.filter(no_such_name="Ann")
     misspelled_ordering = DeferredErrorAuthor.objects.all().order_by("no_such_name")
+    recursive_union = (
+        DeferredErrorAuthor.objects.filter(name="Ann")
+        .union(DeferredErrorAuthor.objects.filter(name="Bob"))
+        .with_recursive("children")
+    )
     valid = DeferredErrorAuthor.objects.filter(name="Ann")
     with pytest.raises(ConfigurationError, match="Hare ORM is not initialized"):
         valid.sql()
@@ -183,10 +191,13 @@ async def test_init_reports_every_invalid_query_built_before_it():
             in message
         )
         assert "Unknown field no_such_name for ordering: DeferredErrorAuthor has no field 'no_such_name'" in message
+        assert "with_recursive() can't be used on a union()" in message
         with pytest.raises(FieldError, match="has no field 'no_such_name'"):
             misspelled_filter.sql()
         with pytest.raises(FieldError, match="Unknown field no_such_name"):
             misspelled_ordering.sql()
+        with pytest.raises(QueryError, match="with_recursive"):
+            recursive_union.sql()
     finally:
         await context.__aexit__(None, None, None)
         sys.modules.pop(module_name, None)

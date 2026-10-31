@@ -33,7 +33,7 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | Column | Meaning |
 |---|---|
 | `sequence` | The primary key, a `BIGINT` the database generates — the order the relay delivers in |
-| `id` | The event's `UUID` — what a receiver deduplicates on; a version 7 UUID (`Uuid7.new`), time-ordered |
+| `id` | The event's `UUID` — what a receiver deduplicates on; a version 7 UUID (`Uuid7.new`), time-ordered — `UUIDField(version=7)`: one of another version given in `extra_field_values` is refused |
 | `topic` | Up to 255 characters — deliveries route on it |
 | `payload` | A JSON value |
 | `headers` | A JSON object — metadata besides the payload (a trace context, the author of a change), carried into the headers of a Kafka, RabbitMQ or HTTP message |
@@ -331,11 +331,13 @@ version the write adds itself; `null` when not known and for an insert or delete
 
 Each value of `before` and `after` is its field's JSON form - `Field.get_json_value()`:
 
+A `GeneratedField` uses the JSON form of its `output_field`, including ranges and named containers.
+
 | Field | In the event |
 |---|---|
 | `FloatField`, `Float32Field`, a float inside any container or `VectorField` | a number; NaN or infinity as its text, `"NaN"`, `"Infinity"`, `"-Infinity"` |
 | `DecimalField`, `UUIDField`, dates and times, `TimeDeltaField`, IP fields, `BinaryField`, enum fields | as in the table above |
-| `ArrayField`, `TupleField` | a list, each element in its element field's form |
+| `ArrayField`, `TupleField` | a list, each element in its element field's form; a named tuple uses its values in field declaration order |
 | `NestedField` | a list of objects, each value in its element field's form |
 | `MapField` | a list of `[key, value]` pairs - a key needn't be text (`UUID`, a date, a tuple) |
 | `JSONField` with `field_type` | the value as pydantic writes it as JSON (`model_dump(mode="json")`) |
@@ -557,6 +559,9 @@ row, given up with an ERROR — the relay keeps polling.
 | `RedisWakeup(url, channel=...)` or `RedisWakeup(client=...)` | `redis` | pub/sub |
 | `KafkaWakeup(bootstrap_servers, topic=..., create_topic=True, replication_factor=1)` | `kafka` | a topic of signals each relay reads from the end, outside any consumer group; created keeping signals for a minute |
 | `RabbitMQWakeup(url, exchange=...)` | `rabbitmq` | a fanout exchange, an exclusive auto-deleted queue per relay |
+
+When relays share a wakeup across running event loops, removing the last subscription stops the
+listener and closes its transport on the loop that opened them, even if that relay uses another loop.
 
 On a connection without `LISTEN`/`NOTIFY` (`Features.supports_listen_notify` off) a write signalling a
 `ListenNotifyWakeup` raises `ConfigurationError` before any event is written, and a relay listening

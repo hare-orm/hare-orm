@@ -58,6 +58,10 @@ class Lookups:
         if not value:
             return BasicCriterion.always_false()
         if not isinstance(value, (list, tuple, set)):
+            from hare.query.expressions.subqueries.subquery import Subquery
+
+            if type(value) is Subquery:
+                return term.isin(value) | (term.isnull() & value.get_null_rows_criterion())
             # A raw subquery/RawSQL/Term used as field__in=<subquery> - not a literal value list at
             # all, so there's no embedded None to strip; mirrors Term.isin()'s own dispatch (which
             # this eventually calls into) between a real value collection and a bare Term.
@@ -88,7 +92,7 @@ class Lookups:
         if not isinstance(value, (list, tuple, set)):
             # A subquery or term, not a list. `x NOT IN (...)` is UNKNOWN when the subquery yields a
             # NULL, so the positive IN is wrapped in IS NOT TRUE - true for both FALSE and UNKNOWN.
-            return term.isin(value).is_not_true()
+            return Lookups.is_in(term, value).is_not_true()
         # A None in the list means NULL rows are excluded (`None not in [1, None]` is False) - no IS
         # NULL check is added then.
         non_null_values = [item for item in value if item is not None]

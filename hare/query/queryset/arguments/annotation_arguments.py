@@ -76,10 +76,8 @@ class AnnotationArguments:
         Raises:
             FieldError: A name is a field or a relation of the model, ``pk``, an attribute of the
                 model's class or starts with ``_``.
-            QueryError: A name is empty, or contains quotes, a semicolon, whitespace or an SQL comment.
         """
         annotation_names = list(annotation_names)
-        queryset._raise_if_annotation_names_are_unsafe(annotation_names)
         model = queryset.model
         meta = model._meta
         colliding_names = sorted(

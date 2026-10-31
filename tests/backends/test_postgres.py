@@ -152,6 +152,8 @@ async def test_ssl_true(db_isolated_no_schema):
             assert False, "Expected ConnectionError or SSLError"
     except (ConnectionError, ssl.SSLError):
         pass
+    except ConfigurationError as error:
+        assert is_rust_pg and "no root trust anchors" in str(error)
 
 
 @requires_features(dialect="postgresql")
@@ -880,9 +882,9 @@ async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
     landing mid-network-round-trip could leave the connection genuinely open-and-uncommitted at
     the server while this wrapper's own bookkeeping never learned it happened, the same class of
     bug already fixed for rust_pg's own begin()/savepoint() (hare/backends/rust_pg/client.py).
-    Confirms the wiring: begin() now genuinely routes through _run_shielded_from_cancellation,
-    not just that the shared shielding mechanism itself works (already covered by
-    tests/backends/test_transactional_client_shielding.py)."""
+    Confirms the wiring: the real BEGIN - deferred until the transaction's first statement - is
+    sent through run_shielded_from_cancellation, not just that the shared shielding mechanism
+    itself works (already covered by tests/backends/test_transactional_client_shielding.py)."""
     _, is_asyncpg, _, _ = _get_db_config()
     if not is_asyncpg:
         pytest.skip("asyncpg-specific begin() shielding")
@@ -897,12 +899,12 @@ async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
         return await real_shield(coroutine, **kwargs)
 
     with mock.patch.object(TransactionEnding, "run_shielded_from_cancellation", staticmethod(spying_shield)):
-        async with Transactions.atomic():
-            pass
+        async with Transactions.atomic() as connection:
+            await connection.execute("SELECT 1")
 
-    # commit() alone already accounts for 1 shielded call even before this fix - begin() must
-    # add a SECOND one of its own, not just ride along on commit()'s pre-existing shielding.
-    assert len(shielded_calls) >= 2, "begin() must route its real BEGIN through _run_shielded_from_cancellation too"
+    # commit() alone accounts for 1 shielded call - the BEGIN sent before the statement must add a
+    # SECOND one of its own, not just ride along on commit()'s shielding.
+    assert len(shielded_calls) >= 2, "the real BEGIN must be sent through run_shielded_from_cancellation too"
 
 
 @pytest.mark.requires("asyncpg")

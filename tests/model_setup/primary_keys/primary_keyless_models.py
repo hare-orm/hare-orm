@@ -35,3 +35,24 @@ class VisitNote(Model):
 
     class Meta:
         primary_key = None
+
+
+class GuestEntry(Model):
+    """A guest book entry - deleted softly."""
+
+    name = fields.CharField(max_length=50)
+    deleted_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        primary_key = None
+        soft_delete_field = "deleted_at"
+
+
+class NumberedEntry(Model):
+    """Rows told apart by a unique number - without a primary key."""
+
+    number = fields.IntField(unique=True)
+    name = fields.CharField(max_length=50)
+
+    class Meta:
+        primary_key = None

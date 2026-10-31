@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.fields.enums import ValueComputation
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 
 if TYPE_CHECKING:
@@ -15,7 +16,10 @@ class StatisticResultWindowFunction(FieldWindowFunction):
     sample statistics: of integers or Decimals an exact Decimal where the database computes one, else a
     float."""
 
+    #: What it computes - the database may compute an average in a wider type than another statistic.
+    computation: ClassVar[ValueComputation] = ValueComputation.STATISTIC
+
     def _coerce_output_field(
         self, field_object: Field[Any] | None, expression_context: ExpressionContext
     ) -> Field[Any] | None:
-        return NumericTyping.get_statistic_output_field(field_object, expression_context.dialect)
+        return NumericTyping.get_statistic_output_field(field_object, expression_context.dialect, self.computation)

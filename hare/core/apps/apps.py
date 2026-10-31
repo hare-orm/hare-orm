@@ -128,6 +128,9 @@ class Apps:
         for app in self.apps.values():
             for model in app.values():
                 ModelConnectionChecks.check_model_writes(model)
+        ModelConnectionChecks.raise_if_names_differ_only_in_case(
+            [model for app in self.apps.values() for model in app.values() if model._meta.swapped is None]
+        )
         self.bind_base_queries()
 
     def bind_base_queries(self) -> None:

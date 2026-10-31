@@ -132,6 +132,24 @@ class MigrationSafetyContext:
         row_count = self.table_row_counts.get(lowercase_name, 0)
         return row_count is None or row_count >= self.large_table_rows
 
+    def may_hold_rows(self, model_name: str) -> bool:
+        """Whether the model's table may hold rows - never for a table the migration creates; always when
+        the database wasn't read or can't tell.
+
+        Args:
+            model_name: The model's name in the migration's app.
+
+        Returns:
+            Whether an operation failing on a table with rows may fail.
+        """
+        lowercase_name = model_name.lower()
+        if lowercase_name in self.created_model_names:
+            return False
+        if self.table_row_counts is None:
+            return True
+        row_count = self.table_row_counts.get(lowercase_name, 0)
+        return row_count is None or row_count > 0
+
     def get_risk(self, code: MigrationRiskCode, message: str, safe_alternative: str) -> MigrationRisk:
         """A risk of the checked operation.
 

@@ -29,11 +29,11 @@ every operation of the load before the timing starts.
 
 | | |
 |---|---|
-| Date | 2026-10-26 |
+| Date | 2026-10-30 |
 | Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| hare-orm release | 0.10.0 |
-| Runs | 3, median |
+| hare-orm release | 0.12.0 |
+| Runs | 5, median |
 
 - On PostgreSQL every ORM gets a pool of 50 connections, all opened before anything is timed.
 - On PostgreSQL every table gets a `VACUUM (FULL, ANALYZE)`, untimed, before each group of scenarios

@@ -46,6 +46,12 @@ class PydanticModel(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    #: The model the schema was made of - set by ``pydantic_model_creator()``; None for a schema written by
+    #: hand.
+    source_model: ClassVar[type[Any] | None] = None
+    #: The paths of the related values the schema shows (``"author.name"``) - their relations are fetched.
+    related_value_paths: ClassVar[tuple[str, ...]] = ()
+
     #: The checks of a schema's fields, kept on the schema class itself - the column checks, every
     #: relation check and those of the relations its own fetch fields don't prefetch
     #: (``_get_fetched_field_checks()``).
@@ -124,7 +130,7 @@ class PydanticModel(BaseModel):
         # Read off the class's own namespace - a subclass schema has checks of its own.
         checks: FetchedFieldChecks | None = cls.__dict__.get(FETCHED_FIELD_CHECKS_ATTRIBUTE)
         if checks is None:
-            model_class: type[Model] = cast("Any", cls.model_config)["orig_model"]
+            model_class: type[Model] = cast("type[Model]", cls.source_model)
             prefetched_names = {fetch_field.split("__", 1)[0] for fetch_field in cls._get_fetch_fields()}
             column_names: list[str] = []
             relation_checks: list[tuple[str, FetchedFieldCheck]] = []
@@ -166,7 +172,7 @@ class PydanticModel(BaseModel):
     @classmethod
     def _get_fetch_fields(cls) -> list[str]:
         """Recursively collects fields needed to fetch, based on cls's own annotations and the
-        Hare model recorded on cls.model_config["orig_model"].
+        Hare model recorded on ``cls.source_model``.
 
         Returns:
             The list of fields to be fetched.
@@ -175,7 +181,7 @@ class PydanticModel(BaseModel):
         known_fetch_fields = PydanticModel.fetch_fields.get(key)
         if known_fetch_fields is not None:
             return list(known_fetch_fields)
-        model_class: type[Model] = cast("Any", cls.model_config)["orig_model"]
+        model_class: type[Model] = cast("type[Model]", cls.source_model)
         fetch_fields = []
         # get_type_hints() - __annotations__ holds only the class's own annotations, without its
         # bases'.
@@ -210,6 +216,12 @@ class PydanticModel(BaseModel):
                 else:
                     fetch_fields.append(field_name)
 
+        # A related value reads through its relations - "author.name" fetches author.
+        for value_path in cls.related_value_paths:
+            relation_path = "__".join(value_path.split(".")[:-1])
+            if relation_path not in fetch_fields:
+                fetch_fields.append(relation_path)
+
         PydanticModel.fetch_fields[key] = fetch_fields
         return list(fetch_fields)
 
@@ -231,7 +243,11 @@ class PydanticModel(BaseModel):
         while pending_types:
             candidate = pending_types.pop()
             if isinstance(candidate, type) and issubclass(candidate, PydanticModel):
-                branch_name = generic_field.branch_by_model.get(cast("Any", candidate.model_config).get("orig_model"))
+                branch_name = (
+                    None
+                    if candidate.source_model is None
+                    else generic_field.branch_by_model.get(candidate.source_model)
+                )
                 if branch_name is not None:
                     nested_fields = candidate._get_fetch_fields()
                     fetch_fields.extend(f"{branch_name}__{name}" for name in nested_fields)
@@ -274,7 +290,7 @@ class PydanticModel(BaseModel):
                 "of many: from_queryset() takes that"
             )
         if obj is None:
-            model_class: type[Model] = cast("Any", cls.model_config)["orig_model"]
+            model_class: type[Model] = cast("type[Model]", cls.source_model)
             raise DoesNotExist(f"from_queryset_single(): the query reads no {model_class.__name__} row")
         return cls._validate_prefetched([obj])[0]
 

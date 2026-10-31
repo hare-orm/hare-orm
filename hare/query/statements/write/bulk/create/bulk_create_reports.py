@@ -4,10 +4,14 @@ from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import HareError, UnSupportedError
+from hare.fields.database_default import DatabaseDefault
+from hare.fields.encrypted.blind_index_field import BlindIndexField
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
+from hare.models.write.returned_values import ReturnedValues
 from hare.models.write.write_steps import WriteSteps
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.statements.constants import UPSERT_INSERTED_FLAG_ALIAS
 from hare.query.statements.write.bulk.create.conflict_clause import ConflictClause
 from hare.sql.terms.values.literal_value import LiteralValue
@@ -54,7 +58,11 @@ class BulkCreateReports:
         if bulk_create._update_fields:
             flag_sql = bulk_create._connection.dialect.clauses.get_upsert_inserted_flag_sql()
             if flag_sql is not None:
-                terms.append(LiteralValue(flag_sql, alias=UPSERT_INSERTED_FLAG_ALIAS))
+                terms.append(
+                    LiteralValue(
+                        flag_sql, alias=HareColumnNames.get_free_name(UPSERT_INSERTED_FLAG_ALIAS, (bulk_create.model,))
+                    )
+                )
         return terms
 
     @staticmethod
@@ -70,16 +78,31 @@ class BulkCreateReports:
 
         meta = bulk_create.model._meta
         conflict_names = ConflictClause.get_conflict_update_key_field_names(bulk_create)
-        keys = {tuple(getattr(obj, name) for name in conflict_names) for obj in bulk_create._objects}
-        existing = await (
-            QuerySet(bulk_create.model)
-            .using(bulk_create._connection)
-            .filter(**{f"{conflict_names[0]}__in": [key[0] for key in keys]})
-            .values_list(*meta.primary_key_attribute_names, *conflict_names)
+        objects = list(bulk_create._objects)
+        bulk_create._objects = objects
+        queryset = QuerySet(bulk_create.model).using(bulk_create._connection)
+        if any(isinstance(getattr(obj, name), DatabaseDefault) for obj in objects for name in conflict_names):
+            # The conflict key isn't known until the database writes it. Its returned PK is compared
+            # against the existing rows instead, including when a default is an SQL expression.
+            existing_keys = await queryset.values_list(*meta.primary_key_attribute_names)
+            bulk_create._existing_primary_keys = {tuple(row) for row in existing_keys}
+            return
+        key_fields = [meta.fields_map[name] for name in conflict_names]
+        types = bulk_create._connection.dialect.types
+        keys = set(ReturnedValues.get_stored_keys(types, key_fields, conflict_names, objects))
+        # A blind index is filtered by the plaintext it indexes, which the filter indexes itself.
+        filtered_field = meta.fields_map[conflict_names[0]]
+        filtered_attribute = (
+            filtered_field.blind_index_source_field_name
+            if isinstance(filtered_field, BlindIndexField)
+            else conflict_names[0]
         )
+        existing = await queryset.filter(
+            **{f"{conflict_names[0]}__in": [getattr(obj, filtered_attribute) for obj in objects]}
+        ).values_list(*meta.primary_key_attribute_names, *conflict_names)
         pk_count = len(meta.primary_key_attribute_names)
         bulk_create._existing_primary_keys = {
-            tuple(row[:pk_count]) for row in existing if tuple(row[pk_count:]) in keys
+            tuple(row[:pk_count]) for row in existing if ReturnedValues.get_hashable(row[pk_count:]) in keys
         }
 
     @staticmethod
@@ -99,6 +122,7 @@ class BulkCreateReports:
         """
         listened = ChangeEvents.is_observed(bulk_create.model)
         capture_needs = bulk_create.model._meta.change_capture_needs
+        reads_existing_keys = False
         if (
             (listened and (bulk_create._ignore_conflicts or bulk_create._update_fields) or capture_needs is not None)
             and bulk_create._connection.features.supports_returning
@@ -106,11 +130,10 @@ class BulkCreateReports:
             and bulk_create.model._meta.has_primary_key
         ):
             bulk_create._reported_rows = []
-            if bulk_create._update_fields and (
+            reads_existing_keys = bool(bulk_create._update_fields) and (
                 bulk_create._connection.dialect.clauses.get_upsert_inserted_flag_sql() is None
                 or (capture_needs is not None and capture_needs.reads_before)
-            ):
-                await BulkCreateReports.read_existing_primary_keys(bulk_create)
+            )
         captured = (
             None
             if capture_needs is None
@@ -122,7 +145,17 @@ class BulkCreateReports:
                 changed=bulk_create._update_fields,
             )
         )
-        before_by_pk = await BulkCreateReports.read_values_before(bulk_create, captured) if captured else None
+        values_before: dict[str, Any] = {}
+
+        async def read_before_write() -> None:
+            # Read once the insert has given the objects the values it writes - a tenant, an async default,
+            # a blind index of a conflict key.
+            if reads_existing_keys:
+                await BulkCreateReports.read_existing_primary_keys(bulk_create)
+            if captured is not None:
+                values_before["by_pk"] = await BulkCreateReports.read_values_before(bulk_create, captured)
+
+        bulk_create._read_before_write = read_before_write
         try:
             objects = await create
         except BaseException:
@@ -136,7 +169,7 @@ class BulkCreateReports:
             raise
         if captured is not None:
             inserted_pks, updated_pks = BulkCreateReports.get_written_keys(bulk_create)
-            await BulkCreateReports.capture_keys(captured, before_by_pk, inserted_pks, updated_pks)
+            await BulkCreateReports.capture_keys(captured, values_before.get("by_pk"), inserted_pks, updated_pks)
         if bulk_create._reported_rows is None:
             await BulkCreateReports.report_inserted_objects(bulk_create, list(bulk_create._objects))
             if bulk_create._update_fields and listened and bulk_create._objects:
@@ -210,7 +243,7 @@ class BulkCreateReports:
             The keys of the rows inserted, and of those an upsert updated.
 
         Raises:
-            UnSupportedError: The rows can't be named - a ``COPY`` of objects whose keys the database
+            UnSupportedError: The rows can't be named - a bulk load of objects whose keys the database
                 generates.
         """
         if bulk_create._reported_rows is None:
@@ -230,13 +263,14 @@ class BulkCreateReports:
         existing_primary_keys = bulk_create._existing_primary_keys
         # A key an earlier row of the call inserted - a later object of that key updates the row.
         inserted_keys: set[tuple[Any, ...]] = set()
+        inserted_flag_column = HareColumnNames.get_free_name(UPSERT_INSERTED_FLAG_ALIAS, (bulk_create.model,))
         for row in bulk_create._reported_rows or ():
             key = tuple(
                 types.get_python_value(field, row[column]) for field, column in zip(pk_fields, pk_columns, strict=True)
             )
             pk = key if len(key) > 1 else key[0]
-            if UPSERT_INSERTED_FLAG_ALIAS in row:
-                inserted = bool(row[UPSERT_INSERTED_FLAG_ALIAS])
+            if inserted_flag_column in row:
+                inserted = bool(row[inserted_flag_column])
             else:
                 inserted = (existing_primary_keys is None or key not in existing_primary_keys) and (
                     key not in inserted_keys

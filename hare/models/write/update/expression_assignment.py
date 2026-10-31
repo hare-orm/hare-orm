@@ -58,8 +58,7 @@ class ExpressionAssignment:
     def raise_if_literal_refused(field_name: str, field: Field[Any], expression: Expression, dialect: Dialect) -> None:
         """Refuses a literal the expression may set the field to (``Expression.get_result_literals()``)
         which the field refuses as a plain value - a number of no member of an enum, a text past
-        ``max_length``. A NULL is the column's to refuse, and a literal of another type the check of
-        the expression's type.
+        ``max_length``, a number whose text is past it. A NULL is the column's to refuse.
 
         Args:
             field_name: The field's name.
@@ -72,12 +71,8 @@ class ExpressionAssignment:
             ValidationError: The field refuses the literal.
         """
         field_branch = ResultBranch(None, field, is_literal=False)
-        field_value_type = OutputFieldCompatibility.get_value_type(field_branch)
         for literal in expression.get_result_literals():
             if literal is None:
-                continue
-            literal_value_type = OutputFieldCompatibility.get_value_type(ResultBranch(literal, None, is_literal=True))
-            if field_value_type is not None and literal_value_type not in {None, field_value_type}:
                 continue
             OutputFieldCompatibility.raise_if_wall_clocks_mix_with_moments(
                 [field_branch, ResultBranch(literal, None, is_literal=True)], f"update({field_name}=...)", "sets"

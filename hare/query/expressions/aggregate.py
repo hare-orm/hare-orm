@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import copy
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.exceptions import FieldError, QueryError
+from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.arithmetic.combined_expression import CombinedExpression
 from hare.query.expressions.conditions.q import Q
@@ -33,6 +34,9 @@ from hare.sql.terms.functions.analytic_function import AnalyticFunction
 from hare.sql.terms.functions.function import Function as HareSqlFunction
 from hare.sql.terms.functions.window_frame_analytic_function import WindowFrameAnalyticFunction
 
+if TYPE_CHECKING:
+    from hare.dialects.base.dialect import Dialect
+
 
 class Aggregate(Function):
     """The base of the aggregate functions: one value over the rows of a group.
@@ -49,7 +53,7 @@ class Aggregate(Function):
     #: The result doesn't change when a row repeats (MAX/MIN/BOOL_AND/BOOL_OR), so another
     #: to-many JOIN of the query can't inflate it.
     ignores_repeated_rows = False
-    #: The result depends on the order the rows are read in (ARRAY_AGG/STRING_AGG/JSONB_AGG), so
+    #: The result depends on the order the rows are read in (an array, a text or a JSON array of them), so
     #: ``order_by=`` is accepted.
     allows_order_by = False
     #: Whether ``Window(...)`` computes the aggregate itself over the window - its own function, its
@@ -289,20 +293,43 @@ class Aggregate(Function):
             return term
         return cast("AggregateFunction", term).filter(function_arg.aggregate_filter)
 
-    def _get_function_field(  # type:ignore[override]
+    def get_function_term(  # type:ignore[override]
         self, field: ArithmeticExpression | HareSqlField | str, *default_values: Any
     ) -> DistinctOptionFunction:
-        function = cast("DistinctOptionFunction", super()._get_function_field(field, *default_values))
+        function = cast("DistinctOptionFunction", super().get_function_term(field, *default_values))
         if self.distinct:
             function = function.distinct()
         return function
+
+    def raise_if_values_not_ordered(self, dialect: Dialect, output_field: Field[Any]) -> None:
+        """Refuses ``Min()``/``Max()`` of a value the database orders none of - before any SQL.
+
+        Args:
+            dialect: The dialect the query runs on.
+            output_field: The field of the argument's value.
+
+        Raises:
+            UnSupportedError: The value's field isn't orderable, or the database has no ``MIN``/``MAX`` of
+                its column type.
+        """
+        value_field = GeneratedField.get_effective_field(output_field)
+        if not value_field.is_orderable or not dialect.has_min_max_of(value_field.get_column_type(dialect)):
+            raise UnSupportedError(
+                f"{type(self).__name__}() of a {type(value_field).__name__} - the {dialect.name} database has no "
+                f"{self.function_name} of its values"
+            )
 
     def _wrap_argument(
         self, expression_context: ExpressionContext, function_arg: ExpressionResult
     ) -> ExpressionResult:
         if (
             self.keyed_function_name is not None
-            and isinstance(function_arg.output_field, JSONField)
+            and isinstance(
+                GeneratedField.get_effective_field(function_arg.output_field)
+                if function_arg.output_field is not None
+                else None,
+                JSONField,
+            )
             and not expression_context.dialect.features.orders_json_values_in_aggregates
         ):
             # An aggregate comparing values would compare the JSON text (Features.orders_json_values_in_aggregates).
@@ -310,6 +337,8 @@ class Aggregate(Function):
                 f"{type(self).__name__}() of a JSON value would compare its text on "
                 f"{expression_context.dialect.name} - convert it with Cast()"
             )
+        if self.keyed_function_name is not None and function_arg.output_field is not None:
+            self.raise_if_values_not_ordered(expression_context.dialect, function_arg.output_field)
         function_arg = self._with_argument_orderings(expression_context, function_arg)
         missing_row_guard = self.get_missing_row_guard(expression_context, function_arg)
         if not self.filter:
@@ -325,7 +354,7 @@ class Aggregate(Function):
                 modifier &= self.filter.get_result(expression_context)
         self.raise_if_filter_reads_aggregate(type(self).__name__, modifier)
         # Applied as `FILTER (WHERE ...)` - rows failing it are left
-        # out of the aggregate, not fed to it as NULL (ARRAY_AGG/JSONB_AGG would collect those).
+        # out of the aggregate, not fed to it as NULL (one collecting values would collect those).
         function_arg.aggregate_filter = modifier.where_criterion
         if missing_row_guard is not None:
             function_arg.aggregate_filter = (

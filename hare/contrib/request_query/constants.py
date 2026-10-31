@@ -46,6 +46,22 @@ EMPTY_TEXT_MATCHING_LOOKUPS = frozenset(
 #: are added.
 PARAMETER_OPTION_NAMES = ("search", "ordering", "fields", "include", "deleted", "pagination")
 
+#: The methods used for every option adding request parameters.
+PARAMETER_OPTION_METHODS = ("get_parameter_fields", "get_parameters", "check_request")
+
+#: Methods and attributes read by the declaration builder and request executor. Compatible
+#: objects need these members, without inheriting the built-in option classes.
+META_OPTION_MEMBERS = {
+    "queryset": ((), ("model",)),
+    "search": ((*PARAMETER_OPTION_METHODS, "get_filter_key", "get_condition"), ("fields",)),
+    "ordering": ((*PARAMETER_OPTION_METHODS, "get_requested"), ("fields", "default")),
+    "fields": ((*PARAMETER_OPTION_METHODS, "get_requested_names", "apply"), ("fields",)),
+    "include": ((*PARAMETER_OPTION_METHODS, "apply"), ("relations", "parameter")),
+    "deleted": ((*PARAMETER_OPTION_METHODS, "get_requested", "apply", "check_model"), ("parameter",)),
+    "pagination": ((*PARAMETER_OPTION_METHODS, "check_model", "check_ordering", "get_page"), ()),
+    "versions": (("check_model", "get_condition"), ()),
+}
+
 
 #: The annotation ``count_by()`` counts the rows of each value into - named so no model field
 #: collides with it.

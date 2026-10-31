@@ -16,5 +16,5 @@ class BaseManager:
     """What ``Model.objects`` is declared as: read off a model class, it gives a queryset of that
     model's rows."""
 
-    def __get__(self, obj: None, owner: type[TModel]) -> QuerySet[TModel]:
+    def __get__(self, obj: None, owner: type[TModel]) -> QuerySet[TModel, TModel]:
         raise NotImplementedError()

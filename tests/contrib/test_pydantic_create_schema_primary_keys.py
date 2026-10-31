@@ -3,7 +3,8 @@
 import uuid
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
+from pydantic import ConfigDict, ValidationError as PydanticValidationError
+from pydantic.alias_generators import to_camel
 
 from hare import fields
 from hare.contrib.pydantic import pydantic_model_creator
@@ -75,3 +76,33 @@ def test_one_to_one_primary_key_appears_once_through_its_relation(db, relations_
 
     relation_field_name = "account_id" if relations_as_ids else "account"
     assert required_by_field_name(ProfileCreate) == {relation_field_name: True, "bio": True}
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("serialize_by_alias", [False, True])
+@pytest.mark.parametrize("by_alias", [None, False, True])
+def test_unset_database_values_are_omitted_with_serialization_aliases(serialize_by_alias, by_alias):
+    if serialize_by_alias and "serialize_by_alias" not in ConfigDict.__annotations__:
+        pytest.skip("Installed pydantic has no serialize_by_alias setting")
+
+    class FilledValues(Model):
+        id = fields.IntField(primary_key=True)
+        stored_count = fields.IntField(db_default=7)
+        optional_count = fields.IntField(null=True)
+
+    schema = pydantic_model_creator(
+        FilledValues,
+        include=("stored_count", "optional_count"),
+        model_config=ConfigDict(
+            alias_generator=to_camel, populate_by_name=True, serialize_by_alias=serialize_by_alias
+        ),
+    )
+    uses_alias = serialize_by_alias if by_alias is None else by_alias
+    stored_key = "storedCount" if uses_alias else "stored_count"
+    optional_key = "optionalCount" if uses_alias else "optional_count"
+    dump_options = {} if by_alias is None else {"by_alias": by_alias}
+    assert schema.model_validate({}).model_dump(**dump_options) == {optional_key: None}
+    assert schema.model_validate({"stored_count": 9}).model_dump(**dump_options) == {
+        stored_key: 9,
+        optional_key: None,
+    }

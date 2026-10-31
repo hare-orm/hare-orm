@@ -266,3 +266,20 @@ async def test_the_name_alone_of_a_composite_key_is_refused(db):
         await queryset.filter(titled=document)
     assert await queryset.values_list("titled__title", flat=True) == ["v1"]
     assert await queryset.filter(titled__isnull=False).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_filter_through_a_filtered_relation_reads_its_value_on_the_filtered_model(db):
+    """The value F("name") was read on the joined model - each event compared with itself - and an
+    annotation of the joined model's field name stood for that field."""
+    first = await Tournament.objects.create(id=1, name="cup")
+    second = await Tournament.objects.create(id=2, name="league")
+    await Event.objects.create(event_id=1, tournament=first, name="cup")
+    await Event.objects.create(event_id=2, tournament=second, name="final")
+    named = Tournament.objects.annotate(matches=FilteredRelation("events"))
+    assert await named.filter(matches__name=F("name")).values_list("id", flat=True) == [1]
+    assert await named.filter(matches__name=Upper("name")).values_list("id", flat=True) == []
+    shadowed = Tournament.objects.annotate(matches=FilteredRelation("events"), event_id=F("id"))
+    assert await shadowed.filter(matches__event_id=2).values_list("id", flat=True) == [2]
+    # A value reading the filtered relation itself.
+    assert await named.filter(matches__name=F("matches__name")).order_by("id").values_list("id", flat=True) == [1, 2]

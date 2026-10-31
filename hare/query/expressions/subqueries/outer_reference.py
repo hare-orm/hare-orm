@@ -69,7 +69,12 @@ class OuterReference(CombinableExpression):
                 "OuterReference() can only be used inside a queryset wrapped in Exists(...), Subquery(...) or "
                 "AsofJoin(on=...)"
             )
-        if "__" in self.field:
+        outer_meta = outer_context.model._meta
+        if (
+            "__" in self.field
+            and self.field not in outer_context.annotations
+            and self.field.partition("__")[0] in outer_meta.fetch_fields
+        ):
             term, joins, nested_output_field = LookupPaths.get_nested_field(
                 outer_context.model,
                 outer_context.table,
@@ -91,7 +96,6 @@ class OuterReference(CombinableExpression):
         # A term that always qualifies its column: the reference crosses a query boundary, and the
         # child query computes its own namespacing - an unqualified "id" would bind to the child's
         # table.
-        outer_meta = outer_context.model._meta
         field_name = (
             outer_meta.primary_key_attribute
             if self.field == "pk" and isinstance(outer_meta.primary_key_attribute, str)
@@ -118,9 +122,10 @@ class OuterReference(CombinableExpression):
             )
             self._record_outer_reference_terms([outer_field_term])
             return ExpressionResult(term=outer_field_term, output_field=field_object)
-        if field_name in outer_context.annotations:
-            # The enclosing query's annotation is resolved again here, its values recorded where
-            # the reference stands.
+        if field_name in outer_context.annotations or "__" in field_name:
+            # The enclosing query's annotation - or a path F() reads there: into a JSON value, a part of a
+            # date, a named JOIN's field - is resolved again here, its values recorded where the reference
+            # stands.
             annotation_result = F(field_name).get_result(
                 dataclasses.replace(
                     outer_context, value_wrapper_references=expression_context.value_wrapper_references
@@ -145,6 +150,9 @@ class OuterReference(CombinableExpression):
                 qualified_outer_table = copy(outer_table)
                 qualified_outer_table.alias = outer_table.get_table_name()
                 annotation_term = annotation_term.replace_table(outer_table, qualified_outer_table)
+            if annotation_result.joins and (extra_joins := OuterScope.current_extra_joins.get()) is not None:
+                # A named JOIN's field is read through the JOIN, joined into the outer query.
+                extra_joins.extend(annotation_result.joins)
             self._record_outer_reference_terms(annotation_term.get_group_by_column_terms())
             return ExpressionResult(term=annotation_term, output_field=annotation_result.output_field)
         if self.field == "pk" and outer_meta.has_composite_primary_key:

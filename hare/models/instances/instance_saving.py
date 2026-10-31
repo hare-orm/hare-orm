@@ -297,7 +297,8 @@ class InstanceSaving:
         if connection.is_transaction_client:
             if was_insert:
                 RollbackRestores.register_rollback_restore(obj, connection, "_saved_in_db", saved_in_db_before)
-                RollbackRestores.register_rollback_restore(obj, connection, "pk", pk_before)
+                if meta.has_primary_key:
+                    RollbackRestores.register_rollback_restore(obj, connection, "pk", pk_before)
             if meta.track_dirty_fields:
                 RollbackRestores.register_rollback_restore(obj, connection, "_dirty_snapshot", dirty_snapshot_before)
 

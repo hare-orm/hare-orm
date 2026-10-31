@@ -16,12 +16,12 @@ GET_FETCH_LIMIT_FOR_MULTIPLICITY_CHECK = 2
 
 #: The columns a union()/intersection()/difference() of model querysets selects to tell which
 #: model each row is of - the model's app and class name.
-COMBINED_QUERY_APP_COLUMN = "hare_app"
-COMBINED_QUERY_MODEL_COLUMN = "hare_model"
+COMBINED_QUERY_APP_COLUMN = "hare app"
+COMBINED_QUERY_MODEL_COLUMN = "hare model"
 
 
 #: The RETURNING alias of a column's value before the write - the column with this prefix.
-RETURNING_OLD_COLUMN_ALIAS_PREFIX = "hare_old_"
+RETURNING_OLD_COLUMN_ALIAS_PREFIX = "hare old "
 
 
 #: The name ``merge()``'s source rows are read under, the name of the ``VALUES`` table a list of rows

@@ -351,11 +351,20 @@ POSTGRESQL_SEQUENCE_NO_OWNER_SQL = "NONE"
 POSTGRESQL_ROW_LEVEL_SECURITY_TEMPLATE = "ALTER TABLE {table} {action} ROW LEVEL SECURITY;"
 
 #: The predicate of a ``TenantCondition`` policy: every row under ``Tenancy.ALL``, else a row whose
-#: tenant column is one of the transaction's tenants - none without a tenant.
+#: tenant column is one of the transaction's tenants - none without a tenant. The setting holds the
+#: tenants of every table, or - under a scope given model by model - an object of each table's
+#: (``{table}`` - its key, a string literal), a table it leaves out having none. The tenants are read by
+#: subqueries of no row of the table, which the database runs once for the statement.
 POSTGRESQL_TENANT_CONDITION_TEMPLATE = (
-    "CASE current_setting('{setting}', true) WHEN '{all_tenants}' THEN true ELSE {column} = ANY "
-    "(ARRAY(SELECT jsonb_array_elements_text(NULLIF(current_setting('{setting}', true), '')::jsonb))"
-    "::{column_type}[]) END"
+    "CASE current_setting('{setting}', true) WHEN '{all_tenants}' THEN true ELSE CASE {tenants} "
+    "WHEN '\"{all_tenants}\"'::jsonb THEN true ELSE {column} = ANY "
+    "(ARRAY(SELECT jsonb_array_elements_text({tenants}))::{column_type}[]) END END"
+)
+#: The tenants of one table in the setting - its entry of an object, else the setting itself.
+POSTGRESQL_TENANT_CONDITION_TABLE_TENANTS_TEMPLATE = (
+    "(SELECT CASE jsonb_typeof(hare_tenants.setting) WHEN 'object' THEN hare_tenants.setting -> {table} "
+    "ELSE hare_tenants.setting END FROM (SELECT NULLIF(current_setting('{setting}', true), '')::jsonb "
+    "AS setting) AS hare_tenants)"
 )
 
 POSTGRESQL_POLICY_CREATE_TEMPLATE = (

@@ -4,7 +4,9 @@ target (Finding 3) - previously get_m2m_filters() returned {} for one, so only b
 
 import pytest
 
+from hare import Prefetch
 from hare.exceptions import UnSupportedError
+from hare.query.relation_loading.prefetching import related_rows_fetch
 from tests.shared_models.testmodels import CompositePkM2MFilterOwner, CompositePkM2MFilterTarget
 
 
@@ -157,3 +159,19 @@ async def test_composite_pk_m2m_is_prefetched_past_only_and_defer(db):
     ):
         rows = await queryset.prefetch_related("owners").order_by("a")
         assert [[found.id for found in row.owners] for row in rows] == [[owner.id], []]
+
+
+@pytest.mark.asyncio
+async def test_composite_pk_m2m_prefetch_preserves_order_across_key_batches(db, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(related_rows_fetch, "PREFETCH_MAX_COMPOSITE_ROWS", 2)
+    owner = await CompositePkM2MFilterOwner.objects.create(name="Owner")
+    targets = [
+        await CompositePkM2MFilterTarget.objects.create(a=number, b=1, name=f"T{number}") for number in range(1, 6)
+    ]
+    await owner.peers.add(*targets)
+
+    fetched = await CompositePkM2MFilterOwner.objects.prefetch_related(
+        Prefetch("peers", CompositePkM2MFilterTarget.objects.order_by("-a"))
+    ).get(pk=owner.pk)
+
+    assert [target.a for target in fetched.peers] == [5, 4, 3, 2, 1]

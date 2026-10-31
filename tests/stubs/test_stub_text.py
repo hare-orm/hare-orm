@@ -3,13 +3,18 @@ of its filters and the values of its writes, its managers and the methods of its
 
 from __future__ import annotations
 
+from enum import StrEnum
+from typing import Annotated, Literal
+
 import pytest
 
 from hare import fields
 from hare.core.config import HareConfig
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
+from hare.models import Model
 from hare.query.queryset.extensions import QuerySetExtensions
+from hare.stubs.model_stub import ModelStub
 from hare.stubs.stub_imports import StubImports
 from hare.stubs.stub_writer import StubWriter
 from hare.stubs.value_type_text import ValueTypeText
@@ -17,6 +22,29 @@ from hare.typing_info.bound_models import BoundModels
 from tests.stubs.stub_configs import CONFIG, MANAGERS_STUB_PATH, STUB_PATH, write_stubs
 
 pytestmark = pytest.mark.database_independent
+
+
+class StubStatus(StrEnum):
+    ACTIVE = "active"
+
+
+@pytest.mark.parametrize(
+    ("annotation", "expected"),
+    [
+        (list[None], "list[None]"),
+        (Literal["draft", "published", None], "Literal['draft', 'published', None]"),
+        (list[Literal["draft", "published"]], "list[Literal['draft', 'published']]"),
+        (Annotated[list[Literal[1, 2]], "metadata"], "list[Literal[1, 2]]"),
+        (Literal[StubStatus.ACTIVE], "Literal[StubStatus.ACTIVE]"),
+    ],
+)
+def test_typed_json_field_stubs_keep_literal_and_annotated_types(annotation, expected):
+    class TypedRow(Model):
+        id = fields.IntField(primary_key=True)
+        document = fields.JSONField(field_type=annotation)
+
+    imports = StubImports(__name__)
+    assert ModelStub.get_field_annotations(TypedRow, imports)["document"] == f"Field[{expected}]"
 
 
 def test_a_stub_types_the_fields_and_the_queryset(stubs_path):

@@ -60,7 +60,15 @@ class ValueAnnotation:
         alternatives = cls.get_alternatives(annotation)
         if not alternatives:
             return False
-        return all(cls.accepts_single_type(alternative, expected_type) for alternative in alternatives)
+        # Unlike an optional parameter, None in a lookup's item type is an actual array element.
+        expected_type = cls.strip(expected_type)
+        expected_types = (
+            get_args(expected_type) if get_origin(expected_type) in {Union, UnionType} else (expected_type,)
+        )
+        return all(
+            any(cls.accepts_single_type(alternative, expected) for expected in expected_types)
+            for alternative in alternatives
+        )
 
     @classmethod
     def accepts_single_type(cls, annotation: Any, expected_type: Any) -> bool:
@@ -71,10 +79,14 @@ class ValueAnnotation:
             expected_type: The type the lookup takes.
 
         Returns:
-            True for the type itself, a subclass (except ``bool`` for ``int``), an enum whose
-            values are of the type, a ``Literal`` of such values, and a tuple matching a
-            composite key item by item.
+            True for the type itself, a subclass (except ``bool`` for ``int``), a parametrized
+            type of such a class (``dict[str, str]``), an enum whose values are of the type, a
+            ``Literal`` of such values, and a tuple matching a composite key item by item.
         """
+        if annotation is None:
+            annotation = NoneType
+        if expected_type is None:
+            expected_type = NoneType
         if isinstance(expected_type, tuple):
             arguments = get_args(annotation)
             return (
@@ -87,6 +99,10 @@ class ValueAnnotation:
             )
         if get_origin(annotation) is Literal:
             return all(cls.is_instance(value, expected_type) for value in get_args(annotation))
+        origin = get_origin(annotation)
+        if isinstance(origin, type) and isinstance(expected_type, type):
+            # A parametrized type (``dict[str, str]``) takes values of its class.
+            return issubclass(origin, expected_type)
         if not isinstance(annotation, type) or not isinstance(expected_type, type):
             return False
         if annotation is bool and expected_type is not bool:
@@ -211,6 +227,10 @@ class ValueAnnotation:
         """
         if isinstance(expected_type, tuple):
             return f"tuple[{', '.join(cls.describe_type(item) for item in expected_type)}]"
+        if get_origin(expected_type) in {Union, UnionType}:
+            return " | ".join(
+                "None" if item is NoneType else cls.describe_type(item) for item in get_args(expected_type)
+            )
         if expected_type is None or expected_type is object:
             return "any value"
         return getattr(expected_type, "__name__", repr(expected_type))

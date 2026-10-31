@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar, cast
 
+from hare.fields.enums import ValueComputation
 from hare.fields.field import Field
 from hare.query.expressions import Aggregate
 from hare.query.expressions.expression_context import ExpressionContext
@@ -23,6 +24,8 @@ class StatisticResultAggregate(Aggregate):
         ("aggregated_field", PlanPartType.NONE),
     )
     populate_field_object = True
+    #: What it computes - the database may compute an average in a wider type than another statistic.
+    computation: ClassVar[ValueComputation] = ValueComputation.STATISTIC
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         """Resolves the statistic - of integers or Decimals the database's own decimal or float.
@@ -40,4 +43,7 @@ class StatisticResultAggregate(Aggregate):
 
     def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
         self.aggregated_field = field_object
-        return cast("Field[Any]", NumericTyping.get_statistic_output_field(field_object, expression_context.dialect))
+        return cast(
+            "Field[Any]",
+            NumericTyping.get_statistic_output_field(field_object, expression_context.dialect, self.computation),
+        )

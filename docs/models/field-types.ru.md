@@ -193,7 +193,7 @@ class Review(Model):
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
 | `JSONField[T]` | `dict` / `list` (или класс модели Pydantic) | `encoder`, `decoder`, `field_type` (для документации OpenAPI) | `JSON` (PostgreSQL: `JSONB`); обычный индекс-дерево (btree: `unique=True`/`db_index=True`/`Index(fields=...)`) не допускается, но индекс другого вида в `Meta.indexes`, например `GinIndex(fields=[...])`, принимается |
 | `JSONTextField` | `dict` / `list` / любое значение JSON | как у `JSONField` | колонка `JSONField`, но на ClickHouse — `String` с текстом JSON: его тип `JSON` теряет null у ключа и список на верхнем уровне; любое значение читается таким, каким записано (`payload` и `headers` outbox) |
-| `UUIDField` | `uuid.UUID` | — (`primary_key=True` без явного `default` сам задаёт `default=uuid4`) | `CHAR(36)` (PostgreSQL: `UUID`); читается как обычный `uuid.UUID` на любом драйвере |
+| `UUIDField` | `uuid.UUID` | `version` (UUID другой версии RFC 9562 отклоняется везде, где hare передаёт его в базу, — в записи, в фильтре, в ключе существующей строки и в ссылке на неё, `ValidationError` — значение, которое вычисляет сама база, например `F(...)` или `db_default`, не проверяется; `primary_key=True` без явного `default` сам задаёт `default=uuid4`, а с `version=7` — `Uuid7.new`) | `CHAR(36)` (PostgreSQL: `UUID`); читается как обычный `uuid.UUID` на любом драйвере |
 | `BinaryField` | `bytes` (и `bytearray`, `memoryview`; иное даёт `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); фильтруется по равенству, `__in`, `__isnull` и сравнениям (порядок байтов) — текстовый lookup (`__contains`, ...) даёт `FieldError`, — обновляется через `update()`, принимает `unique=True`/`db_index=True` (индекс B-tree — в PostgreSQL значение больше примерно 2,7 КБ проиндексировать нельзя) |
 
 ```python
@@ -292,6 +292,9 @@ hare, где действует пояс UTC.
 читаются как те же крайние значения Python: `date.max`/`date.min`, `datetime.max`/`datetime.min`. В поясе
 восточнее UTC `datetime.max` (UTC) при показе в нём выходит за диапазон datetime и отклоняется с
 `ValidationError`.
+При `use_timezone=False` naive `datetime.min`/`datetime.max` — этот момент в UTC, как и aware, и читается
+обратно как naive крайнее значение, а не как местное время, которое восточнее или западнее UTC вышло бы
+за диапазон.
 
 ### <a id="json-values"></a>Значения JSON
 
@@ -370,6 +373,9 @@ class Book(Model):
   меняет колонку под вычисляемой.
 - `output_field` — поле, задающее тип колонки и то, как её значение читается, сравнивается, фильтруется и
   описывается в схеме.
+  Его JSON-форма и правила сравнения тоже сохраняются, в том числе сортировка JSON-значений и
+  запрет сортировки колонок `DynamicField` и `VariantField` в ClickHouse. Сортировка аннотации `F()`
+  этой колонки следует тем же правилам, что и сортировка самой колонки.
 - `stored=True` вычисляет значение при записи; `stored=False` — колонка `VIRTUAL`, вычисляемая при
   чтении, — работает в SQLite и PostgreSQL 18, а более старый сервер PostgreSQL даёт `UnSupportedError`
   (`Features.supports_virtual_generated_columns`).

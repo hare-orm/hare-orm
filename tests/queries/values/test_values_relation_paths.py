@@ -7,10 +7,12 @@ import pytest
 import pytest_asyncio
 
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.expressions import F
+from hare.query.expressions import F, Value
 from hare.query.functions import Count, Max
 from tests.shared_models.testmodels import (
     CompositePkOwningFK,
+    Event,
+    RecursiveSoftNode,
     RowPinDepartment,
     RowPinEmployee,
     RowPinLabel,
@@ -290,3 +292,23 @@ async def test_foreign_key_column_ignores_target_scope(db):
             (2, 2),
         ]
         assert await TenantActiveAuthor.objects.all().values_list("id", "books") == [(2, 2)]
+
+
+@pytest.mark.asyncio
+async def test_a_related_field_is_read_as_its_own_field_beside_an_annotation_of_its_name(db):
+    """The rest of a path past a relation was looked up among the query's annotations - a related value
+    read through the annotation's field: a datetime as an integer, raw text as it is stored."""
+    tournament = await Tournament.objects.create(id=1, name="cup", desc="about")
+    await Event.objects.create(event_id=1, name="final", tournament=tournament)
+    rows = await Event.objects.annotate(created=Value(1), desc=Value("x")).values(
+        "created", "tournament__created", "tournament__desc"
+    )
+    assert rows == [{"created": 1, "tournament__created": tournament.created, "tournament__desc": "about"}]
+    root = await RecursiveSoftNode.objects.create(id=1, name="root")
+    await root.delete()
+    await RecursiveSoftNode.objects.create(id=2, name="leaf", parent=root)
+    # A name selected under another key is no annotation of the related model either.
+    leaf = RecursiveSoftNode.objects.include_deleted().filter(id=2)
+    assert await leaf.values(deleted_at="name", parent_deleted_at="parent__deleted_at") == [
+        {"deleted_at": "leaf", "parent_deleted_at": root.deleted_at}
+    ]

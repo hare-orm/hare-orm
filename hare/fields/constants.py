@@ -132,3 +132,6 @@ UUID7_FACTORY = getattr(uuid, "uuid7", None)
 #: The 74 random bits of a version 7 UUID, and the 62 of them after its variant.
 UUID7_RANDOM_MASK = (1 << 74) - 1
 UUID7_RANDOM_B_MASK = (1 << 62) - 1
+#: The bits of a UUID's integer holding its version and its variant, and the variant of RFC 9562 in them.
+UUID_VERSION_AND_VARIANT_MASK = 0xF << 76 | 0b11 << 62
+UUID_RFC_VARIANT_BITS = 0b10 << 62

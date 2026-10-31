@@ -56,12 +56,19 @@ async def test_items_are_rows(db):
 @pytest.mark.asyncio
 async def test_the_rows_are_repeated_when_nothing_reads_a_column(db):
     """A JSON_TABLE nothing read was left out - count(), the ids and an aggregate read one row per
-    document, not one per item."""
+    document, not one per item; an iterator paging by the key skipped a document's second item."""
     await create_orders()
     lines = JSONFields.objects.alias(line=LINES_TABLE)
     assert await lines.count() == 4
     assert await lines.order_by("id").values_list("id", flat=True) == [1, 1, 2, 3]
     assert await lines.aggregate(rows=Count("id")) == {"rows": 4}
+    assert [row.id async for row in lines.order_by("id").iterator(chunk_size=1)] == [1, 1, 2, 3]
+    assert [row async for row in lines.order_by("id").values_list("id", flat=True).iterator(chunk_size=1)] == [
+        1,
+        1,
+        2,
+        3,
+    ]
 
 
 @requires_features(supports_json_table=True)

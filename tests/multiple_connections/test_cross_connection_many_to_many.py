@@ -16,6 +16,7 @@ from hare.exceptions import QueryError
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
+from hare.query.relation_loading import Prefetch
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 OWNER_MODULE_NAME = "tests._cross_conn_m2m_owner_models"
@@ -174,6 +175,53 @@ async def test_writes_through_the_relation_read_each_model_on_its_own_connection
     # The relation's reverse side, of an owner with a soft delete field.
     await created.articles.add(await CrossConnArticle.objects.create(id=2))
     assert [obj.id for obj in await created.articles.order_by("id")] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_slice_of_each_owners_rows(cross_conn_m2m):
+    """The keys of each owner's slice were read joined to the through table of the other connection -
+    refused: "points at CrossConnArticle, which resolves to a different database connection"."""
+    CrossConnArticle, CrossConnLabel = cross_conn_m2m
+    target_models = sys.modules[TARGET_MODULE_NAME]
+    articles = [await CrossConnArticle.objects.create(id=article_id) for article_id in (1, 2, 3)]
+    labels = [await CrossConnLabel.objects.create(id=label_id, name=f"label {label_id}") for label_id in (1, 2, 3, 4)]
+    await articles[0].labels.add(*labels)
+    await articles[1].labels.add(labels[0], labels[2])
+    badges = [await target_models.CrossConnBadge.objects.create(series=1, number=number) for number in (1, 2, 3)]
+    await articles[0].badges.add(*badges)
+    await articles[1].badges.add(badges[1])
+    # A soft-deleted label is no row of the slice.
+    await labels[3].delete()
+
+    async def get_label_ids(queryset):
+        rows = await CrossConnArticle.objects.order_by("id").prefetch_related(
+            Prefetch("labels", queryset=queryset, to_attribute="picked")
+        )
+        return [[label.id for label in article.picked] for article in rows]
+
+    by_id_down = CrossConnLabel.objects.order_by("-id")
+    assert await get_label_ids(by_id_down) == [[3, 2, 1], [3, 1], []]
+    assert await get_label_ids(by_id_down[:1]) == [[3], [3], []]
+    assert await get_label_ids(by_id_down[1:]) == [[2, 1], [1], []]
+    assert await get_label_ids(by_id_down[1:2]) == [[2], [1], []]
+    assert await get_label_ids(by_id_down[5:]) == [[], [], []]
+    partial = await CrossConnArticle.objects.order_by("id").prefetch_related(
+        Prefetch("labels", queryset=CrossConnLabel.objects.only("id").order_by("id")[:1])
+    )
+    assert [[(label.id, label._partial) for label in article.labels] for article in partial] == [
+        [(1, True)],
+        [(1, True)],
+        [],
+    ]
+    rows = await CrossConnArticle.objects.order_by("id").prefetch_related(
+        Prefetch("badges", queryset=target_models.CrossConnBadge.objects.order_by("-number")[:2])
+    )
+    assert [[badge.pk for badge in article.badges] for article in rows] == [[(1, 3), (1, 2)], [(1, 2)], []]
+    # From the related side the through table is on the related rows' connection.
+    rows = await CrossConnLabel.objects.order_by("id").prefetch_related(
+        Prefetch("articles", queryset=CrossConnArticle.objects.order_by("-id")[:1])
+    )
+    assert [[article.id for article in label.articles] for label in rows] == [[2], [1], [2]]
 
 
 @pytest.mark.asyncio

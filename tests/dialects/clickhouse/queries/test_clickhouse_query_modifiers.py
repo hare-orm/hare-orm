@@ -148,6 +148,19 @@ async def test_limit_by_keeps_rows_per_group(readings):
             await Reading.objects.limit_by(*arguments)
 
 
+@pytest.mark.parametrize("offset", [0, 1])
+@pytest.mark.asyncio
+async def test_an_iterator_reads_the_rows_limit_by_keeps(readings, offset):
+    """The iterator paged by WHERE id > the last row's - the condition applied before LIMIT BY, which picked
+    the rows of each group anew on every page."""
+    queryset = Reading.objects.filter(id__lte=12).order_by("id").limit_by(2, "sensor", offset=offset)
+    expected = await queryset.values_list("id", flat=True)
+    assert len(expected) == 6
+    assert [row.id async for row in queryset.iterator(chunk_size=1)] == expected
+    assert [row["id"] async for row in queryset.values("id").iterator(chunk_size=2)] == expected
+    assert [row_id async for row_id in queryset.values_list("id", flat=True).iterator(chunk_size=4)] == expected
+
+
 @pytest.mark.asyncio
 async def test_how_rows_are_read_applies_to_a_distinct_ordered_by_a_field_it_doesnt_select(readings):
     """A distinct() ordered by a field it doesn't select runs over that field too, as Django runs it."""

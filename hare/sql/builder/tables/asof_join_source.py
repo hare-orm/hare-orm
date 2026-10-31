@@ -11,8 +11,8 @@ if TYPE_CHECKING:
 
 
 class AsofJoinSource(AliasedQuery):
-    """A table or subquery joined ``ASOF LEFT`` under ``name`` - ``ASOF LEFT JOIN "quote" "name" ON
-    ...``; equal to another of the same name, so it is joined once.
+    """A table or subquery left joined as of under ``name``; equal to another of the same name, so it is
+    joined once.
 
     Args:
         name: The name it is joined under.

@@ -31,7 +31,7 @@ class AddField(FieldAddRemoveOperation):
         name: The field's name.
         field: The field.
         not_valid: For a ``ForeignKeyField``/``OneToOneField`` with a database constraint: the
-            existing rows needn't satisfy the FOREIGN KEY yet (``NOT VALID``, where
+            existing rows needn't satisfy the FOREIGN KEY yet (where
             ``Features.supports_not_valid_constraints``) - adding it doesn't scan the table while both
             tables' writes wait; a later ``ValidateConstraint`` checks the rows. Another database checks
             them as it adds the column, or never.

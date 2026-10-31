@@ -389,8 +389,9 @@ ltree](https://www.postgresql.org/docs/current/ltree.html).
 `path__depth` — число меток (целое) в фильтрах, `values()`, `F()` и `order_by()`:
 `filter(path__depth=2)`. `Subpath(field, offset, length=None)` читает часть пути как путь — метки с
 позиции `offset` (с 0, отрицательная — с конца), `length` штук или до конца. Позиция за пределами пути —
-дело самого `subpath()` PostgreSQL: положительная даёт `OperationalError`, отрицательная — часть пути, а не
-ошибку:
+дело самого `subpath()` PostgreSQL: положительная даёт `OperationalError`; отрицательная за началом пути
+отсчитывается с конца ещё раз (`-4` у пути из трёх меток читается как `-1`), а за удвоенной длиной пути
+даёт `OperationalError`:
 
 ```python
 from hare.dialects.postgresql.functions import Subpath
@@ -468,6 +469,9 @@ class Range(Generic[T]):
 `ValidationError`, как и граница целочисленного диапазона вне его типа или с дробной частью
 (`Range(1.9, 3)`, `span__contains=1.5`) или типа `bool` — так же её отклоняет `IntField`, — и граница NaN
 у `DecimalRangeField`, которая не упорядочивается ни с какой другой.
+
+`Range` в `default` поля — и список таких значений у мультидиапазона — записывается в миграцию вызовом,
+который его строит (`default=Range(1, 5)`).
 
 Миграция, которая меняет поле диапазона на диапазон другого типа (`IntRangeField` на `BigIntRangeField`
 или `DecimalRangeField`, так же мультидиапазон или массив диапазонов), преобразует колонку через текст

@@ -189,10 +189,13 @@ def test_iter_never_yields_a_key_the_cache_would_not_serve() -> None:
         for key in cache:
             cache[key]  # must never raise KeyError for a key __iter__ itself just yielded
         assert list(cache) == [(Book, "shape")]
+        assert len(cache) == 1
 
         cache.forget_model(Book)
         assert list(cache) == []
         assert list(cache.keys()) == []
+        assert len(cache) == 0
+        assert not cache
     finally:
         cache.clear()
 

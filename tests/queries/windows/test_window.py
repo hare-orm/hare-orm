@@ -23,6 +23,7 @@ from hare.query.functions.window import (
     Sum,
 )
 from hare.sql import Table
+from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import (
     Author,
     Book,
@@ -843,3 +844,28 @@ async def test_a_window_takes_arithmetic(db, intfields_data):
         .values_list("next_number", "doubled", "spread")
     )
     assert rows == [(2, 2, 0), (3, 4, 0), (4, 6, 1), (5, 8, 11), (6, 10, 22), (7, 12, 42)]
+
+
+@pytest.mark.parametrize("read_method", ["values", "values_list", "stream", "union_stream"])
+@pytest.mark.asyncio
+async def test_a_window_filter_keeps_annotations_named_apart_by_letter_case(db, intfields_data, read_method):
+    """Both the derived table and the row reader preserve annotations differing only by case."""
+    if read_method in {"stream", "union_stream"} and not IntFields._meta.connection.features.supports_streaming:
+        pytest.skip("The database has no cursor streaming")
+    query = (
+        IntFields.objects.filter(intnum_null=0)
+        .annotate(a=F("intnum") + 1, A=F("intnum") + 100, position=Window(RowNumber(), order_by=["intnum"]))
+        .filter(position=1)
+    )
+    if read_method == "values_list":
+        assert await query.values_list("a", "A") == [(1, 100)]
+        return
+    query = query.values("intnum", "a", "A")
+    if read_method == "values":
+        rows = await query
+    else:
+        if read_method == "union_stream":
+            query = query.union(query, all=True)
+        async with Transactions.atomic():
+            rows = [row async for row in query.stream(chunk_size=1)]
+    assert rows == [{"intnum": 0, "a": 1, "A": 100}] * (2 if read_method == "union_stream" else 1), query.sql()

@@ -21,6 +21,14 @@ What you typically override:
   [OutboxJsonEncoding](../integrations/outbox.md#encoding), elements of lists and mappings too; a field
   whose values have no form there (an object of its own) returns one its consumers read — it raises
   `TypeError` otherwise, and the write fails instead of the event.
+- `get_computed_field(self, computation)` — the field a result computed from the field's values is read
+  as; `computation` is a `ValueComputation` (`hare.fields.enums`: `SUM`, `AVERAGE`, `STATISTIC`,
+  `ARITHMETIC`). The field itself by default; a field the database computes with in a wider type returns
+  a field of that type — ClickHouse's `Float32Field` gives a `FloatField` for a sum, an average and
+  arithmetic.
+- `get_column_type_options(self)` — what besides its class sets the field's column type, as a tuple: a
+  cast to the field (`Cast(value, field)`) keeps its plan per these options. `()` by default;
+  ClickHouse's `ClickhouseDatetimeField` gives its precision and zone.
 - `deconstruct()` — returns `(path, args, kwargs)`: what a migration file writes and the autodetector
   compares. Extend it if your field takes constructor args beyond the base ones.
 - `migration_import_path` — a stable dotted path, if the field's module might move.

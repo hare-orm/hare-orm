@@ -82,6 +82,9 @@ def test_text_types_are_marked_for_framework_adapters():
         (tuple[int, int], (int, str), False),
         (tuple[int, ...], (int, int), False),
         (int, (int, int), False),
+        (dict[str, str], dict, True),
+        (dict[str, str | None] | None, dict, True),
+        (list[str], dict, False),
     ],
 )
 def test_a_single_value(annotation, expected_type, accepted):

@@ -213,6 +213,47 @@ async def change_book(book_id: int, data: DTOData[Book]) -> Book:
     return book
 ```
 
+### <a id="extra-fields"></a>Values that are no fields of the model
+
+A response often carries values the model doesn't store: a count the query annotated, a flag the handler
+worked out, a property, a field of a related row put next to the row's own. A `HareDTO` subclass declares
+them, and each is read-only and `null` where a row has no value for it:
+
+```python
+class BookDTO(HareDTO[Book]):
+    config = DTOConfig(exclude={"author.books"})
+    extra_fields = {"reviews_count": int, "is_new": bool}  # read from the row by name, with the type
+    computed = ("title_length", "author.initials")          # properties and methods, typed by their return
+    related_values = {"author_name": "author.name"}         # a related row's field, flattened
+
+
+@get("/books", return_dto=BookDTO)
+async def list_books() -> list[Book]:
+    books = await Book.objects.select_related("author").annotate(reviews_count=Count("reviews"))
+    for book in books:
+        book.is_new = book.added_at > last_visit
+    return books
+# [{"id": 1, "title": "...", "author": {"id": 3, "name": "Anna", "initials": "A"}, ...,
+#   "reviews_count": 4, "is_new": true, "title_length": 11, "author_name": "Anna"}]
+```
+
+- `extra_fields` — a query's annotation, or an attribute the handler (or a request query's `api_getter`) set
+  on the row after reading it, with its type: a query builds it, so the DTO can't learn it from the model.
+  A row without it — a query that didn't annotate it — answers `null`.
+- `computed` — a property or method of the model, typed by its return annotation. A field the query didn't
+  select (`only()`, a request query's `fields=`) read inside it answers `null`; any other `AttributeError`
+  raised inside it fails the request (500) instead of answering `null`. That includes such a field read by
+  another property it reads: Python reports a property failing with an `AttributeError` as a missing
+  property, so select the fields the properties it reads need.
+- `related_values` — a field of a related row through relations to one row; `null` when the query didn't
+  load the relation.
+
+A name written as a path through the relations (`"author.initials"`) belongs to the related model: its rows
+get the value wherever the response holds them. The OpenAPI schema lists each value with its type. A name
+of a model field, one declared twice, a path through what is no relation, a computed name that is no
+property or method (or has no return annotation) and a related value through a relation to many rows or
+ending at a relation raise `ConfigurationError` when the handler's DTO is built.
+
 ## <a id="atomic-requests"></a>A transaction per request: `atomic_requests`
 
 `HarePlugin(..., atomic_requests=True)` runs each HTTP request in a transaction; a route handler with

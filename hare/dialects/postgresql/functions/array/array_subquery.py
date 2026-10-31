@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 from hare.exceptions import QueryError, UnSupportedError
 from hare.fields.data.containers.array_field import ArrayField
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.subqueries.subquery import Subquery
@@ -29,6 +30,7 @@ class ArraySubquery(Subquery):
     """
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         selected_names = self.get_selected_names()
         if selected_names is None or len(selected_names) != 1:
             raise QueryError(

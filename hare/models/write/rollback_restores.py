@@ -206,8 +206,14 @@ class RollbackRestores:
                 loaded at all (a ``.only()``/``.defer()`` obj) - it goes back to unloaded
                 instead of gaining a made-up value.
         """
+        # Local import: the fields' package imports the models' package.
+        from hare.fields.database_default import DatabaseDefault
+
         if old_value is ROLLBACK_RESTORE_UNSET:
             if hasattr(obj, field_name):
                 object.__delattr__(obj, field_name)
+        elif isinstance(old_value, DatabaseDefault):
+            # The marker of a field left to its db_default - no value a field takes through its setter.
+            obj.__dict__[field_name] = old_value
         else:
             setattr(obj, field_name, old_value)
