@@ -22,6 +22,8 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-01
+
 ### Breaking changes
 
 - `VersionedModel.id` и `OutboxEvent.id` требуют UUID7, в том числе в фильтрах и ссылках через связи.
@@ -246,7 +248,8 @@
 - **Документация** на английском и русском и бенчмарки против SQLAlchemy, Tortoise ORM, yara-orm и
   Django — см. [Бенчмарки](https://hare-orm.github.io/hare-orm/ru/benchmarks/).
 
-[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...dev
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.12.0...dev
+[0.12.0]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/hare-orm/hare-orm/releases/tag/v0.9.0
