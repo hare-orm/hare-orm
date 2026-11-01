@@ -22,6 +22,8 @@ renames that section to its version and date.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-01
+
 ### Breaking changes
 
 - `VersionedModel.id` and `OutboxEvent.id` require UUID7, including values passed through filters and
@@ -242,7 +244,8 @@ Wheels with the Rust extension are built for Linux (glibc and musl), macOS and W
 - **Documentation** in English and Russian, and benchmarks against SQLAlchemy, Tortoise ORM,
   yara-orm and Django - see [Benchmarks](https://hare-orm.github.io/hare-orm/benchmarks/).
 
-[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...dev
+[Unreleased]: https://github.com/hare-orm/hare-orm/compare/v0.12.0...dev
+[0.12.0]: https://github.com/hare-orm/hare-orm/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hare-orm/hare-orm/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hare-orm/hare-orm/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/hare-orm/hare-orm/releases/tag/v0.9.0
