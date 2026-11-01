@@ -169,7 +169,7 @@ class AnnotationFilters:
         annotation_output_field = annotation_info.output_field
         value_field = annotation.get_value_field(annotation_info) if isinstance(annotation, Expression) else None
         if annotation_info.term.contains_aggregate:
-            # An aggregate collecting values into an array/JSON/range value (ArrayAgg, JSONBAgg)
+            # An aggregate collecting values into an array/JSON/range value
             # is filtered with that value's own lookups (`__contains`, `__overlap`, `__len`, ...);
             # one giving a number, a text or a date compares values of that field.
             return value_field
@@ -213,8 +213,8 @@ class AnnotationFilters:
                 expression_context.dialect,
             ), encoder_field
         if FilterValues.is_container_field(annotation_output_field):
-            # An array/JSON/range lookup with no value_encoder of its own (`__contains` of a
-            # JSONBAgg) binds the value in the field's stored form, as the plain-field branch does.
+            # An array/JSON/range lookup with no value_encoder of its own (`__contains` of an aggregate
+            # collecting JSON) binds the value in the field's stored form, as the plain-field branch does.
             return partial(
                 expression_context.dialect.types.get_lookup_value,
                 annotation_output_field,

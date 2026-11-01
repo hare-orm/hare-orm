@@ -89,3 +89,15 @@ class NarrowedValueSource(StrEnum):
     TEXT = "text"
     BOOLEAN = "boolean"
     OTHER = "other"
+
+
+class ValueComputation(StrEnum):
+    """What a value computed from a field's values is - the database may compute it in a wider type than
+    the column keeps (``Field.get_computed_field()``)."""
+
+    SUM = "sum"
+    AVERAGE = "average"
+    #: A standard deviation, a variance, a quantile.
+    STATISTIC = "statistic"
+    #: Arithmetic of the values with another number.
+    ARITHMETIC = "arithmetic"

@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.base.client.constants import (
     SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS,
@@ -25,6 +25,9 @@ class TransactionEnding:
     """How a top-level transaction ends: its resources released and its callbacks run, after a rejected
     commit or a lost connection too, held against a cancellation until the end is complete, and the
     end recorded for the observers."""
+
+    #: The operations left running past the wait after a cancellation - kept until they end, their errors read.
+    abandoned_operations: ClassVar[set[asyncio.Future[Any]]] = set()
 
     @staticmethod
     async def end_top_level(client: TransactionClient, event: TransactionEventType) -> None:
@@ -334,6 +337,8 @@ class TransactionEnding:
         while not task.done():
             remaining_seconds = deadline - loop.time()
             if remaining_seconds <= 0:
+                TransactionEnding.abandoned_operations.add(task)
+                task.add_done_callback(TransactionEnding._finish_abandoned_operation)
                 if on_timeout is not None:
                     on_timeout(task)
                 return
@@ -341,6 +346,12 @@ class TransactionEnding:
                 await asyncio.wait([task], timeout=remaining_seconds)
             except asyncio.CancelledError:
                 continue
+
+    @staticmethod
+    def _finish_abandoned_operation(task: asyncio.Future[Any]) -> None:
+        TransactionEnding.abandoned_operations.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     @staticmethod
     def record_transaction_end(

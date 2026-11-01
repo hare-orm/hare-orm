@@ -16,6 +16,7 @@ from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.subqueries.declarations import KeyRowsQuery
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -97,6 +98,7 @@ class RecursiveRows(KeyRowsQuery):
                 f"with_recursive({self.relation_name!r}): it isn't a relation of {model.__name__} to itself"
             )
         key_columns = KeyColumns.get_source_columns(meta)
+        depth_column = HareColumnNames.get_free_name(RECURSIVE_ROWS_DEPTH_COLUMN, (), key_columns)
         has_depth = self.max_depth is not None
         walk = Table(RECURSIVE_ROWS_CTE_NAME)
 
@@ -149,11 +151,11 @@ class RecursiveRows(KeyRowsQuery):
             step = step.join(joined_table).on(join_criterion)
         step = step.select(
             *(next_table[column] for column in key_columns),
-            *([walk[RECURSIVE_ROWS_DEPTH_COLUMN] + ValueWrapper(1, allow_parametrize=False)] if has_depth else []),
+            *([walk[depth_column] + ValueWrapper(1, allow_parametrize=False)] if has_depth else []),
         )
         if has_depth:
             max_depth = ExpressionArguments.get_result(self, "max_depth", self.max_depth, expression_context).term
-            step = step.where(walk[RECURSIVE_ROWS_DEPTH_COLUMN] < max_depth)
+            step = step.where(walk[depth_column] < max_depth)
 
         if connection.features.supports_recursive_union_distinct:
             # UNION: a row reached twice comes once, so a cycle ends.
@@ -168,7 +170,7 @@ class RecursiveRows(KeyRowsQuery):
                 f"with_recursive({self.relation_name!r}) needs max_depth on {connection.dialect}: its recursive "
                 "query adds rows by UNION ALL alone, which no cycle in the rows would end"
             )
-        column_names = [*key_columns, *([RECURSIVE_ROWS_DEPTH_COLUMN] if has_depth else [])]
+        column_names = [*key_columns, *([depth_column] if has_depth else [])]
         rows = (
             query_class.with_(walked_rows, RECURSIVE_ROWS_CTE_NAME, *(Field(name) for name in column_names))
             .from_(walk)

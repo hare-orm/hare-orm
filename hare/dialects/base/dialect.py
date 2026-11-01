@@ -43,6 +43,8 @@ class Dialect:
         minimum_server_version: The oldest server version hare runs on, as ``(major, minor,
             ...)``; empty for any version. A connection to an older server is refused when it
             connects (``check_server_version()``).
+        variants: Other dialects of the same database a driver's connections render in - each type,
+            renderer and lookup operator registered on this dialect is registered on them too.
     """
 
     name: str
@@ -50,6 +52,7 @@ class Dialect:
     features: Features = Features()
     default_table_options: TableOptions | None = None
     minimum_server_version: tuple[int, ...] = ()
+    variants: tuple[Dialect, ...] = ()
 
     def check_server_version(self, server_version: tuple[int, ...]) -> None:
         """Refuses a server older than ``minimum_server_version``.
@@ -90,9 +93,20 @@ class Dialect:
         """
         return variants.get(self.name)
 
+    def has_min_max_of(self, column_type: str) -> bool:
+        """Whether the database has the ``MIN``/``MAX`` aggregates of a column type - every type by default.
+
+        Args:
+            column_type: The column type, as the dialect writes it.
+
+        Returns:
+            Whether it has them.
+        """
+        return True
+
     def install(self) -> None:
         """Adds what the dialect brings to hare's own field types - a path transform reading
-        inside a core field's value (``name__unaccent``) - once, when the dialect is
+        inside a core field's value (a text transform of the database) - once, when the dialect is
         registered. Does nothing by default.
         """
 
@@ -166,6 +180,7 @@ class Dialect:
         """How the dialect stores hare's fields - built on first use."""
         types = self.build_types()
         types.in_use = True
+        types.mirrors = [variant.types for variant in self.variants]
         return types
 
     def build_types(self) -> TypeRegistry:
@@ -179,7 +194,9 @@ class Dialect:
     @cached_property
     def filter_operators(self) -> FilterOperators:
         """The operators the dialect runs lookups with - built on first use."""
-        return self.build_filter_operators()
+        filter_operators = self.build_filter_operators()
+        filter_operators.mirrors = [variant.filter_operators for variant in self.variants]
+        return filter_operators
 
     def build_filter_operators(self) -> FilterOperators:
         """Builds the dialect's lookup operators.
@@ -343,7 +360,9 @@ class Dialect:
     @cached_property
     def renderers(self) -> TermRenderers:
         """How the dialect renders the terms whose SQL differs between dialects - built on first use."""
-        return self.build_renderers()
+        renderers = self.build_renderers()
+        renderers.mirrors = [variant.renderers for variant in self.variants]
+        return renderers
 
     def build_renderers(self) -> TermRenderers:
         """Builds the dialect's term renderers.

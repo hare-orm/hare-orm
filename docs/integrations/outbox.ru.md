@@ -33,7 +33,7 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | Колонка | Значение |
 |---|---|
 | `sequence` | Первичный ключ, `BIGINT`, который выдаёт база, — порядок доставки |
-| `id` | `UUID` события — по нему получатель отбрасывает повторы; UUID версии 7 (`Uuid7.new`), упорядоченный по времени |
+| `id` | `UUID` события — по нему получатель отбрасывает повторы; UUID версии 7 (`Uuid7.new`), упорядоченный по времени, — `UUIDField(version=7)`: UUID другой версии в `extra_field_values` отклоняется |
 | `topic` | До 255 символов — по нему доставки выбирают получателя |
 | `payload` | Значение JSON |
 | `headers` | Объект JSON — метаданные помимо payload (контекст трассировки, автор изменения), переходят в заголовки сообщения Kafka, RabbitMQ или HTTP |
@@ -331,11 +331,14 @@ Payload события — конверт:
 
 Каждое значение `before` и `after` — JSON-форма его поля, `Field.get_json_value()`:
 
+`GeneratedField` использует JSON-форму своего `output_field`, в том числе для диапазонов и именованных
+контейнеров.
+
 | Поле | В событии |
 |---|---|
 | `FloatField`, `Float32Field`, число с плавающей точкой в любом контейнере или `VectorField` | число; NaN или бесконечность — текстом, `"NaN"`, `"Infinity"`, `"-Infinity"` |
 | `DecimalField`, `UUIDField`, даты и время, `TimeDeltaField`, поля IP, `BinaryField`, поля перечислений | как в таблице выше |
-| `ArrayField`, `TupleField` | список, каждый элемент — в форме своего поля элемента |
+| `ArrayField`, `TupleField` | список, каждый элемент — в форме своего поля элемента; именованный tuple использует значения в порядке объявления полей |
 | `NestedField` | список объектов, каждое значение — в форме своего поля элемента |
 | `MapField` | список пар `[ключ, значение]` — ключ не обязан быть текстом (`UUID`, дата, кортеж) |
 | `JSONField` с `field_type` | значение так, как pydantic пишет его в JSON (`model_dump(mode="json")`) |
@@ -557,6 +560,9 @@ Observers.observe(OutboxDeadLettered, alert_on_call)
 | `RedisWakeup(url, channel=...)` или `RedisWakeup(client=...)` | `redis` | pub/sub |
 | `KafkaWakeup(bootstrap_servers, topic=..., create_topic=True, replication_factor=1)` | `kafka` | тема сигналов, которую каждый relay читает с конца, вне групп потребителей; создаётся с хранением сигналов в течение минуты |
 | `RabbitMQWakeup(url, exchange=...)` | `rabbitmq` | fanout exchange, у каждого relay своя эксклюзивная автоудаляемая очередь |
+
+Если relay делят будильник между работающими циклами событий, удаление последней подписки останавливает
+слушатель и закрывает его транспорт на цикле, где они открыты, даже если этот relay использует другой цикл.
 
 На соединении без `LISTEN`/`NOTIFY` (`Features.supports_listen_notify` выключен) запись, подающая сигнал
 `ListenNotifyWakeup`, даёт `ConfigurationError` до записи событий, а relay, который слушает, —

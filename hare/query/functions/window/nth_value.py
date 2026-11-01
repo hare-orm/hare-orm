@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.exceptions import UnSupportedError
 from hare.query.expressions import Expression
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -45,9 +46,15 @@ class NthValue(WindowFunction):
         self, expression_context: ExpressionContext
     ) -> tuple[AnalyticFunction, list[TableCriterionTuple], Field[Any] | None]:
         field_result, value_field = self._get_field_result(expression_context)
+        if value_field is not None and not expression_context.dialect.types.holds_null(value_field):
+            raise UnSupportedError(
+                f"NthValue({self.field!r}) is NULL past the partition's rows, which a column of "
+                f"{type(value_field).__name__} on {expression_context.dialect.name} doesn't hold"
+            )
         term = WindowFrameAnalyticFunction(
             AnalyticFunctionName.NTH_VALUE, field_result.term, ValueWrapper(self.nth, allow_parametrize=False)
         )
+        term.value_field = value_field
         return term, field_result.joins, value_field
 
     def get_plan_options(self) -> tuple[Any, ...]:

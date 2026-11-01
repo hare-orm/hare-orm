@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 class QueryAnnotations:
     """The annotations of a query: each resolved into its term and joins, selected under its key or
-    kept as an alias, and the annotations a GROUP BY, ORDER BY or DISTINCT ON renders again."""
+    kept as an alias, and the annotations a GROUP BY, ORDER BY or distinct by fields renders again."""
 
     @staticmethod
     def get_annotation_term(query: AwaitableQuery[Any], annotation: Expression | Term) -> Term:
@@ -92,6 +92,15 @@ class QueryAnnotations:
             # An .alias() key isn't selected - unless .values()/.values_list() names it. Without
             # them every ordinary annotation is.
             should_select = key in fields_for_select if fields_for_select is not None else key not in query._alias_keys
+            if type(annotation) is F and (
+                not should_select or (query._selection is not None and key not in query._get_selected_field_names())
+            ):
+                from hare.query.key_columns import KeyColumns
+
+                if KeyColumns.get_primary_key_name(query.model, query._annotations, key) != key:
+                    # Composite aliases are read through their individual columns by selections,
+                    # filters and ordering; there is no scalar annotation to build here.
+                    continue
             # A named JOIN not selected is read through its paths - resolved for its JOINs alone.
             resolves_joins_only = isinstance(annotation, NamedJoin) and not should_select
             earlier_info = results_by_annotation_id.get(id(annotation))
@@ -222,7 +231,7 @@ class QueryAnnotations:
 
     @staticmethod
     def get_expression_term_names(query: AwaitableQuery[Any]) -> list[str]:
-        """The annotations a GROUP BY, ORDER BY or DISTINCT ON names - each may be resolved again
+        """The annotations a GROUP BY, ORDER BY or distinct by fields names - each may be resolved again
         into its full expression there (``QueryAnnotations.get_annotation_expression_term()``).
 
         Args:
@@ -239,7 +248,7 @@ class QueryAnnotations:
 
     @staticmethod
     def get_expression_term_value_references(query: AwaitableQuery[Any]) -> RecordedValueReferences:
-        """The value references of the annotations a GROUP BY, ORDER BY or DISTINCT ON names, in
+        """The value references of the annotations a GROUP BY, ORDER BY or distinct by fields names, in
         the order of their names - one the build didn't resolve again (selected under its alias)
         is resolved now, its references then binding nothing: the text doesn't hold its terms.
 

@@ -116,7 +116,9 @@ another to-many relation is correct next to it), and it combines with `.distinct
 (`Tag.objects.filter(id__in=Book.objects.filter(...).values("tags"))`). A composite primary key (or a
 relation to one) is read as a tuple of its components — `values("pk")`, `values_list("shelf", flat=True)`
 give `(1, 2)`, and `None` when every component is `NULL`; `group_by()`, `order_by()` (`"pk"`/`"-pk"` and
-`Meta.ordering` too) and `distinct(<fields>)` use every component. `Count("shelf")` counts the rows with
+`Meta.ordering` too) and `distinct(<fields>)` use every component. Renamed (`values(key="pk")`), it is the
+same key under the new name: `filter(key=(1, 2))`, `filter(key__in=[...])`, `order_by("-key")` and
+`values("key")` read its components as `pk` does. `Count("shelf")` counts the rows with
 a key, `Count("shelf", distinct=True)` the distinct keys, never a `NULL` one. `F()` of such a relation
 raises `QueryError` naming its components.
 

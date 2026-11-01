@@ -19,6 +19,7 @@ from hare.fields import (
     DatetimeField,
     ForeignKeyField,
     IntField,
+    ManyToManyField,
     Now,
     SqlDefault,
     UUIDField,
@@ -115,6 +116,28 @@ OPERATION_CASES: list[tuple[str, Callable[[], list[Operation]], dict, list, list
         [R.ADD_FIELD_BACKFILLS_ROWS],
         [R.ADD_FIELD_BACKFILLS_ROWS],
     ),
+    (
+        "NOT NULL field with no default",
+        lambda: [AddField("Book", "isbn", CharField(max_length=13))],
+        {},
+        [R.ADD_FIELD_WITHOUT_DEFAULT],
+        [R.ADD_FIELD_WITHOUT_DEFAULT],
+    ),
+    (
+        "NOT NULL foreign key with no default",
+        lambda: [AddField("Book", "editor", ForeignKeyField("models.Author", db_index=False, db_constraint=False))],
+        {},
+        [R.ADD_FIELD_WITHOUT_DEFAULT],
+        [R.ADD_FIELD_WITHOUT_DEFAULT],
+    ),
+    (
+        "nullable field with no default",
+        lambda: [AddField("Book", "isbn", CharField(max_length=13, null=True))],
+        {},
+        [],
+        [],
+    ),
+    ("many-to-many relation", lambda: [AddField("Book", "authors", ManyToManyField("models.Author"))], {}, [], []),
     ("constant database default", lambda: [AddField("Book", "rating", IntField(db_default=0))], {}, [], []),
     (
         "volatile database default",
@@ -396,6 +419,34 @@ async def test_the_database_tells_a_small_table_from_a_large_one(db_simple):
             await connection.dialect.migration_safety_rules.count_table_rows(connection, "safety_missing", None, 10)
             == 0
         )
+    finally:
+        for table in (BOOK_TABLE, AUTHOR_TABLE):
+            await connection.execute_script(
+                f"DROP TABLE IF EXISTS {connection.dialect.literals.quote_identifier(table)}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_column_with_no_default_is_a_risk_only_on_a_table_holding_rows(db_simple):
+    """makemigrations wrote ADD COLUMN ... NOT NULL without a default and reported nothing - migrate failed on
+    any table holding a row."""
+    connection = Connections.get("models")
+    editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    state = State()
+    initial = Migration("0001_initial", "models", operations=get_initial_operations())
+    operations = [AddField("Book", "isbn", CharField(max_length=13))]
+    try:
+        state = await initial.apply(state, schema_editor=editor)
+        for insert_sql, expected_codes in [
+            (None, []),
+            (f"INSERT INTO {BOOK_TABLE} (id, title) VALUES (1, 'a')", [MigrationRiskCode.ADD_FIELD_WITHOUT_DEFAULT]),
+        ]:
+            if insert_sql is not None:
+                await connection.execute_script(insert_sql)
+            risks = await MigrationSafetyChecker().check(
+                make_migration(operations), state, dialect=connection.dialect, client=connection
+            )
+            assert [risk.code for risk in risks] == expected_codes
     finally:
         for table in (BOOK_TABLE, AUTHOR_TABLE):
             await connection.execute_script(

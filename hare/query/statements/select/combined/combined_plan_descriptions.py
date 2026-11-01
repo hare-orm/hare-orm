@@ -30,8 +30,11 @@ class CombinedPlanDescriptions:
         branch_structures: list[tuple[Any, ...]] = []
         values: list[Any] = []
         origins: list[Any] | None = [] if PlanOrigins.records else None
+        model_column_names = CombinedBranches.get_model_column_names(CombinedBranches.get_models(query))
         for branch in query._branches:
-            branch_description = CombinedBranches.get_prepared_branch(branch).get_plan_description(PlanContext.EMPTY)
+            branch_description = CombinedBranches.get_prepared_branch(branch, model_column_names).get_plan_description(
+                PlanContext.EMPTY
+            )
             if branch_description is None:
                 return None
             branch_structures.append(

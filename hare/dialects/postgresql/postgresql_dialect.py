@@ -29,6 +29,7 @@ from hare.dialects.postgresql.server_versions import (
 )
 from hare.dialects.postgresql.transactions.postgresql_transaction_statements import PostgresqlTransactionStatements
 from hare.dialects.postgresql.transactions.postgresql_two_phase_commit import PostgresqlTwoPhaseCommit
+from hare.dialects.postgresql.types.constants import POSTGRESQL_TYPES_WITHOUT_MIN_MAX
 
 if TYPE_CHECKING:
     from hare.ddl.table_options import TableOptions
@@ -177,6 +178,12 @@ class PostgresqlDialect(Dialect):
         from hare.dialects.postgresql.types.postgresql_types import PostgresqlTypes
 
         return PostgresqlTypes.build()
+
+    def has_min_max_of(self, column_type: str) -> bool:
+        # An array is ordered by its elements - min()/max() of anyarray.
+        if column_type.endswith("]"):
+            return True
+        return column_type.partition("(")[0].strip().lower() not in POSTGRESQL_TYPES_WITHOUT_MIN_MAX
 
     def install(self) -> None:
         # Local import: the transform names hare's fields, whose modules import this one.

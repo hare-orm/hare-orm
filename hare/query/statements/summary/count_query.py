@@ -79,7 +79,8 @@ class CountQuery(RowsSummaryQuery):
         """``COUNT(DISTINCT <pk>)`` for a ``.distinct()`` queryset - the rows a JOIN multiplies are
         counted once. Only where a row's identity is its primary key; anything else raises.
         """
-        if self._distinct_on or self.model._meta.has_composite_primary_key:
+        meta = self.model._meta
+        if self._distinct_on or meta.has_composite_primary_key or not meta.has_primary_key:
             raise QueryError(
                 "count() on a .distinct() queryset is only supported for a single-column primary key "
                 "with no .distinct(<fields>) - its result would be silently wrong."

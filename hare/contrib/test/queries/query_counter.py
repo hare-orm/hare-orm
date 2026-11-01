@@ -15,8 +15,8 @@ class QueryCounter:
     Attributes:
         connection_alias: The connection whose queries count.
         count: How many queries ran.
-        queries: Their SQL text, in order - query tags included; ``COPY <table> (<columns>) FROM
-            STDIN`` for a bulk load.
+        queries: Their SQL text, in order - query tags included; the dialect's text of a bulk load for
+            one.
     """
 
     connection_alias: str

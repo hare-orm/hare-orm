@@ -4,10 +4,11 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import FieldError
 from hare.models.write.rules.constants import RETURNING_METHOD_NAME
 from hare.models.write.rules.row_write_rules import RowWriteRules
-from hare.query.constants import RETURNING_OLD_COLUMN_ALIAS_PREFIX
+from hare.query.hare_column_names import HareColumnNames
 from hare.query.statements.constants import RETURNING_OLD_VALUES_KEY
 from hare.sql.terms.values.old_row_value import OldRowValue
 
@@ -92,7 +93,8 @@ class ReturnedRows:
             for source_names in self.old_source_names_by_name.values()
             for source_name in source_names
         )
-        return [OldRowValue(column, alias=f"{RETURNING_OLD_COLUMN_ALIAS_PREFIX}{column}") for column in columns]
+        old_value_names = HareColumnNames.get_old_value_names(self.model)
+        return [OldRowValue(column, alias=old_value_names[column]) for column in columns]
 
     @staticmethod
     def get_source_names(model: type[Model], name: Any) -> tuple[str, ...]:
@@ -117,20 +119,44 @@ class ReturnedRows:
         """Whether the write returns its model instances - no field is named."""
         return not self.field_names
 
+    @property
+    def builds_instances_from_rows(self) -> bool:
+        """Whether the instances are built from the ``RETURNING`` rows themselves - a model without a
+        primary key has no key to read them back by."""
+        return not self.field_names and not self.model._meta.has_primary_key
+
     def get_returning_columns(self) -> list[str]:
-        """The columns the write's ``RETURNING`` returns - the named fields', or the primary key's for
-        the instances.
+        """The columns the write's ``RETURNING`` returns - the named fields', or for the instances the
+        primary key's, every column of a model without one.
 
         Returns:
             The columns, each once.
         """
         meta = self.model._meta
+        if self.builds_instances_from_rows:
+            return list(meta.db_fields)
         source_names = (
             meta.primary_key_attribute_names
             if self.returns_instances
             else [source_name for names in self.source_names_by_name.values() for source_name in names]
         )
         return list(dict.fromkeys(meta.fields_db_projection[source_name] for source_name in source_names))
+
+    async def get_instances(self, connection: DatabaseClient, raw_rows: Sequence[Any]) -> list[Any]:
+        """The instances of ``RETURNING`` rows holding every column of the model.
+
+        Args:
+            connection: The connection the rows were written on.
+            raw_rows: The rows, by column name.
+
+        Returns:
+            An instance per row.
+        """
+        from hare.query.rows.model_rows.model_rows import ModelRows
+
+        if not raw_rows:
+            return []
+        return await ModelRows(self.model, connection).read_all(StatementResult(len(raw_rows), raw_rows))
 
     def get_rows(self, types: TypeRegistry, raw_rows: Sequence[Any]) -> list[dict[str, Any]]:
         """The named fields of ``RETURNING`` rows.
@@ -145,6 +171,7 @@ class ReturnedRows:
         meta = self.model._meta
         fields_map = meta.fields_map
         projection = meta.fields_db_projection
+        old_value_names = HareColumnNames.get_old_value_names(self.model) if self.old_source_names_by_name else {}
         rows: list[dict[str, Any]] = []
         for raw_row in raw_rows:
             # A driver's row may have no .items()/.get() - read as a dict.
@@ -164,7 +191,7 @@ class ReturnedRows:
                         [
                             types.get_python_value(
                                 fields_map[source_name],
-                                row[f"{RETURNING_OLD_COLUMN_ALIAS_PREFIX}{projection[source_name]}"],
+                                row[old_value_names[projection[source_name]]],
                             )
                             for source_name in source_names
                         ]

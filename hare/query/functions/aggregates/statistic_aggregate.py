@@ -44,7 +44,7 @@ class StatisticAggregate(StatisticResultAggregate):
     def get_plan_options(self) -> tuple[Any, ...]:
         return (*super().get_plan_options(), self.sample)
 
-    def _get_function_field(self, field: Any, *default_values: Any) -> functions.Statistic:
+    def get_function_term(self, field: Any, *default_values: Any) -> functions.Statistic:
         function = functions.Statistic(self.function_names[self.sample], field)
         if self.distinct:
             function = function.distinct()

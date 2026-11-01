@@ -541,6 +541,28 @@ async def test_filter_by_composite_target_fk_none_matches_isnull():
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
+async def test_prefetch_of_a_composite_target_fk_with_a_null_part_keeps_the_set_part():
+    """A key with a NULL part references no row - the prefetch set the relation through its setter,
+    which cleared the set part too, and save() then wrote NULL over it."""
+    from hare.contrib.test.isolated_contexts import hare_test_context
+
+    async with hare_test_context(["tests.composite_primary_keys.foreign_key_target_models"]):
+        from tests.composite_primary_keys.foreign_key_target_models import FkTargetNoConstraint
+
+        child = await FkTargetNoConstraint.objects.create(other=None, name="half")
+        await FkTargetNoConstraint.objects.filter(id=child.id).update(other_a=1)
+
+        loaded = await FkTargetNoConstraint.objects.prefetch_related("other").get(id=child.id)
+        assert (loaded.other_a, loaded.other_b, loaded.other) == (1, None, None)
+        loaded.name = "renamed"
+        await loaded.save()
+
+        stored = await FkTargetNoConstraint.objects.get(id=child.id)
+        assert (stored.other_a, stored.other_b, stored.name) == (1, None, "renamed")
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
 async def test_select_related_on_composite_target_fk_uses_row_value_join():
     """.select_related() over a composite-target FK joins on every shadow column at once (a
     `(a,b) = (x,y)` row-value comparison via hare.sql.terms.Tuple), not just the first - exercises

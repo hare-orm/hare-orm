@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+import decimal
 import functools
 import sys
 import textwrap
@@ -14,6 +16,7 @@ from hare.ddl.enums import TriggerEvent
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.trigger import Trigger
+from hare.dialects.postgresql.fields import Range
 from hare.exceptions import ConfigurationError
 from hare.migrations.operations import (
     AddConstraint,
@@ -1004,3 +1007,43 @@ def test_a_migration_name_is_cut_to_a_file_name_any_file_system_takes():
     name = MigrationWriter.format_name(2, "a b " * 50)
     assert len(name) <= len("0002_") + MIGRATION_SLUG_MAX_LENGTH
     assert not name.endswith("_")
+
+
+def test_functions_of_one_name_from_two_modules_stay_two_values(tmp_path, monkeypatch):
+    """Two defaults named alike were imported under one name - the second import hid the first, and both
+    fields got the second module's function."""
+    for package, code in (("defaults_shop_a", "a"), ("defaults_shop_b", "b")):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / package / "defaults.py").write_text(f"def make_code():\n    return {code!r}\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from defaults_shop_a.defaults import make_code as make_a
+    from defaults_shop_b.defaults import make_code as make_b
+
+    imports = ImportManager()
+    first = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_a), imports)
+    second = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_b), imports)
+    namespace: dict[str, object] = {}
+    exec("\n".join([*imports.render(), f"first = {first}", f"second = {second}"]), namespace)  # noqa: S102
+
+    assert namespace["first"].default is make_a
+    assert namespace["second"].default is make_b
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Range(1, 5),
+        Range(None, datetime.date(2026, 1, 1), lower_inc=False, upper_inc=True),
+        Range(decimal.Decimal("1.5"), decimal.Decimal("Infinity")),
+        Range(is_empty=True),
+        [Range(1, 3), Range(7, None)],
+    ],
+)
+def test_a_range_default_is_written_as_the_call_building_it(value) -> None:
+    """A Range had no deconstruct() - makemigrations refused a range field's default."""
+    imports = ImportManager()
+    rendered = MigrationWriter.render_value(value, imports)
+    namespace: dict[str, object] = {}
+    exec("\n".join([*imports.render(), f"value = {rendered}"]), namespace)  # noqa: S102
+    assert namespace["value"] == value

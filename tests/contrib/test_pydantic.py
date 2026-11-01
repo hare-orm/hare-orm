@@ -1396,7 +1396,7 @@ def test_two_distinct_classes_from_the_same_factory_get_distinct_schemas(db):
     SchemaB = pydantic_model_creator(WidgetB)
 
     assert SchemaA is not SchemaB
-    assert SchemaB.model_config["orig_model"] is WidgetB
+    assert SchemaB.source_model is WidgetB
 
 
 @pytest.mark.parametrize(
@@ -2541,11 +2541,11 @@ async def test_pydantic_from_hare_orm_composite_pk_model(db):
 def test_pydantic_validates_composite_pk_model_from_plain_dict(db):
     """Validation (not just generation) works for a composite-PK model - a plain dict payload
     (not an ORM instance) with explicit values for every PK component validates cleanly."""
-    from uuid import uuid4
+    from hare.fields.uuid7 import Uuid7
 
     VersionedDocument_Pydantic = pydantic_model_creator(VersionedDocument, exclude=("revision_notes",))
 
-    validated = VersionedDocument_Pydantic.model_validate({"id": uuid4(), "version": 3, "title": "from dict"})
+    validated = VersionedDocument_Pydantic.model_validate({"id": Uuid7.new(), "version": 3, "title": "from dict"})
 
     assert validated.version == 3
     assert validated.title == "from dict"

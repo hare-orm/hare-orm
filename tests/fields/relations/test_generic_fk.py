@@ -200,6 +200,53 @@ async def test_filters(db_generic_fk):
 
 
 @pytest.mark.asyncio
+async def test_a_key_given_as_a_dict_is_compared_on_its_branch_as_an_object(db_generic_fk):
+    """The key columns holding None were dropped from the dict's condition - {"type": "post", "id": None}
+    matched every row, {"type": "article_version", "article": 7, "version": None} the row of article 7."""
+    await make_comments()
+    objects = Comment.objects
+    assert await ids(objects.filter(target={"type": "post", "id": 2})) == [2]
+    assert await ids(objects.filter(target={"type": "article_version", "article": 7, "version": 2})) == [4]
+    assert await ids(objects.filter(target={"type": "post", "id": None})) == []
+    assert await ids(objects.filter(target={"type": "article_version", "article": 7, "version": None})) == []
+    assert await ids(objects.filter(target__in=[{"type": "post", "id": None}, {"type": "photo", "id": 1}])) == [3]
+    # Nothing is deleted by a key no row holds.
+    assert await objects.filter(target={"type": "post", "id": None}).delete() == 0
+    assert await objects.count() == 4
+
+
+@pytest.mark.asyncio
+async def test_the_type_is_named_by_a_reference_an_ordering_a_values_keyword_latest_and_group_by(db_generic_fk):
+    """Only a plain name in order_by()/values() read the type - F("target__type"), its asc()/desc(),
+    values(branch="target__type"), latest(), earliest() and group_by() raised FieldError."""
+    await make_comments()
+    objects = Comment.objects
+    assert await objects.order_by(F("target__type"), "id").values_list("id", flat=True) == [4, 3, 1, 2]
+    assert await objects.order_by(F("target__type").desc(nulls_last=True), "id").values_list("id", flat=True) == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert await objects.order_by("id").values("id", branch="target__type") == [
+        {"id": 1, "branch": "post"},
+        {"id": 2, "branch": "post"},
+        {"id": 3, "branch": "photo"},
+        {"id": 4, "branch": "article_version"},
+    ]
+    assert await objects.order_by("id").values_list("id", branch=F("target__type")) == [
+        (1, "post"),
+        (2, "post"),
+        (3, "photo"),
+        (4, "article_version"),
+    ]
+    assert (await objects.latest("target__type", "id")).id == 2
+    assert (await objects.earliest(F("target__type").asc(), "id")).id == 4
+    groups = objects.group_by("target__type").annotate(count=Count("id")).order_by("target__type")
+    assert await groups.values_list("target__type", "count") == [("article_version", 1), ("photo", 1), ("post", 2)]
+
+
+@pytest.mark.asyncio
 async def test_filters_through_relations_and_inside_expressions(db_generic_fk):
     first_post, _second_post, photo, _version = await make_comments()
     assert await ids(Post.objects.filter(comments__target__type="post")) == [1, 2]

@@ -9,7 +9,6 @@ from hare.ddl.indexes import Index
 from hare.exceptions import (
     ConfigurationError,
     DoesNotExist,
-    OperationalError,
     UnSupportedError,
     ValidationError,
 )
@@ -627,17 +626,16 @@ def test_deconstruct_writes_no_field_type_when_undeclared():
 
 @pytest.mark.asyncio
 async def test_min_and_max_of_json_are_the_databases(db):
-    """SQLite takes the least and the greatest stored text; PostgreSQL has no min()/max() of jsonb and
-    refuses them itself."""
+    """SQLite takes the least and the greatest stored text; PostgreSQL has no min()/max() of jsonb - refused
+    before any SQL."""
     await testmodels.JSONFields.objects.create(data={"a": 1})
     await testmodels.JSONFields.objects.create(data={"b": 2})
     if testmodels.JSONFields._meta.connection.dialect.name == "sqlite":
         assert await testmodels.JSONFields.objects.aggregate(value=Max("data")) == {"value": {"b": 2}}
         assert await testmodels.JSONFields.objects.aggregate(value=Min("data")) == {"value": {"a": 1}}
         return
-    with pytest.raises(OperationalError):
-        async with Transactions.atomic():
-            await testmodels.JSONFields.objects.aggregate(value=Max("data"))
+    with pytest.raises(UnSupportedError, match="JSONField - the postgresql database has no MAX"):
+        await testmodels.JSONFields.objects.aggregate(value=Max("data"))
 
 
 class JsonFloat(float):

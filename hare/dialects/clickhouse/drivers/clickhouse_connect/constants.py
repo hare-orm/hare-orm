@@ -33,6 +33,11 @@ CLICKHOUSE_CONNECT_UNREADABLE_SERVER_ERROR_MARK = "unrecognized data found in st
 #: not with a response broken off after the status of the servers that succeeded.
 CLICKHOUSE_CONNECT_COMMAND_SETTINGS = {"wait_end_of_query": 1}
 
+#: The server's error of a statement sent under the id of one still running - hare gives no statement an
+#: id, so it is clickhouse-connect sending a read again after its connection broke off (it does so once
+#: whatever its retries): the broken connection is the error.
+CLICKHOUSE_CONNECT_REPEATED_QUERY_ERROR_CODE = 216
+
 #: The response header naming the time zone the server read the moments of the response in.
 CLICKHOUSE_CONNECT_TIME_ZONE_HEADER = "X-ClickHouse-Timezone"
 #: The response header naming the compression of the body.

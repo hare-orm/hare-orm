@@ -32,7 +32,7 @@ Operations per second, the write load:
 ## <a id="by-scenario"></a>By scenario
 
 Each scenario is drawn on its own scale: compare the bars within one scenario, not across scenarios.
-The fastest time is in bold. A bar is the median of 3 runs, and the thin line over it spans the best
+The fastest time is in bold. A bar is the median of 5 runs, and the thin line over it spans the best
 run to the worst.
 
 ### <a id="reads"></a>Reads
@@ -64,14 +64,14 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-10-26 |
+| Date | 2026-10-30 |
 | Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| hare-orm release | 0.10.0 |
-| Runs | 3, median |
+| hare-orm release | 0.12.0 |
+| Runs | 5, median |
 | SQLite | 3.50.4 |
 | aiosqlite | 0.22.1 |
-| hare-orm | 0.10.0 |
+| hare-orm | 0.12.0 |
 | SQLAlchemy | 2.1.1 |
 | tortoise-orm | 1.1.8 |
 | yara-orm | 1.17.0 |

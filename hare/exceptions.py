@@ -151,14 +151,14 @@ class TransactionManagementError(HareError):
 
 class DistributedTransactionPartiallyCommittedError(TransactionManagementError):
     """``Transactions.distributed()`` committed - the coordinator's COMMIT succeeded - but some
-    participants didn't finish ``COMMIT PREPARED``. Their writes stay prepared until ``hare
+    participants didn't commit their prepared transactions. Their writes stay prepared until ``hare
     distributed-recover`` resolves them.
 
     Args:
         message: The error message.
         xid: The distributed transaction's GID.
         coordinator_alias: The coordinator's alias.
-        pending_participant_aliases: The participants still needing ``COMMIT PREPARED``.
+        pending_participant_aliases: The participants whose prepared transactions still need committing.
     """
 
     def __init__(

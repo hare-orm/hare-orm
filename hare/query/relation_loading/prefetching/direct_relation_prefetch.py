@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.relations.fields.relational_field import RelationalField
+from hare.query.enums import Connector
 from hare.query.expressions import Q
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
 from hare.query.relation_loading.prefetching.related_rows_fetch import RelatedRowsFetch
@@ -53,6 +54,7 @@ class DirectRelationPrefetch:
             if obj.__class__ not in source_fields_by_class:
                 related_field = cast("RelationalField[Any]", obj._meta.fields_map[field])
                 source_fields_by_class[obj.__class__] = related_field.source_fields
+            PrefetchChecks.reject_unloaded_relation_keys((obj,), source_fields_by_class[obj.__class__], field)
         if all(len(names) == 1 for names in source_fields_by_class.values()):
             await DirectRelationPrefetch.prefetch_by_single_column(objs, field, to_attribute, related_queryset)
         else:
@@ -100,7 +102,11 @@ class DirectRelationPrefetch:
             else:
                 conditions[f"{target_field}__in"] = list(key_values)
         related_queryset = PrefetchChecks.ensure_only_includes_fields(related_queryset, *key_values_by_target_field)
-        related_objects = await related_queryset.filter(**conditions)
+        related_objects = await (
+            related_queryset.filter(**conditions)
+            if len(conditions) == 1
+            else related_queryset.filter(Q.with_connector(Connector.OR, **conditions))
+        )
         if len(target_field_by_class) > 1:
             DirectRelationPrefetch.set_objects_of_several_classes(
                 objs, field, to_attribute, related_objects, target_field_by_class
@@ -177,8 +183,12 @@ class DirectRelationPrefetch:
             model_class = obj.__class__
             row = tuple(getattr(obj, source_field) for source_field in source_fields_by_class[model_class])
             if any(component is None for component in row):
-                # No related row - set here, the fetched rows never reach this obj's attribute.
-                setattr(obj, to_attribute or field, None)
+                # No related row - set here, the fetched rows never reach this obj's attribute. Not through
+                # the relation's setter: it would clear the key columns that are set too.
+                if to_attribute:
+                    setattr(obj, to_attribute, None)
+                else:
+                    DirectRelationPrefetch.set_prefetched_foreign_key_object(obj, field, None)
                 continue
             if model_class not in to_field_names_by_class:
                 related_field = cast("RelationalField[Any]", model_class._meta.fields_map[field])

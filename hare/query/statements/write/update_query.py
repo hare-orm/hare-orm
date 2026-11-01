@@ -851,6 +851,8 @@ class UpdateQuery(MatchingRowsQuery):
             column_type = meta.fields_map[key_field_name].get_column_type(dialect)
             selected_terms.append(Cast(assigned_term, column_type).as_(key_field_name))
         values_query = self._connection.query_class.from_(table).select(*selected_terms)
+        # The conditions and the values may read the CTEs of the update.
+        values_query._with = list(self.query._with)
         if self.query._wheres is not None:
             values_query = values_query.where(self.query._wheres)
         _row_count, raw_rows = await self._connection.execute(*values_query.get_parameterized_sql(), returns_rows=True)

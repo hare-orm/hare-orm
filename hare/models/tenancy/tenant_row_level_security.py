@@ -30,21 +30,41 @@ class TenantRowLevelSecurity:
             client: The transaction's client.
 
         Returns:
-            The scope, and the statement - None under no scope or a scope given model by model,
-            which leave the transaction with no tenant.
+            The scope, and the statement - None under no scope, which leaves the transaction with no
+            tenant. A scope given model by model sets the tenants of each table of the connection's
+            models with a ``TenantCondition`` policy it names.
         """
         scope = RowVisibility.active_tenant.get()
-        scope_class = type(scope)
-        if scope is None or scope_class is ModelTenants:
+        if scope is None:
             return scope, None
-        tenant_texts: list[str] | None
+        if type(scope) is ModelTenants:
+            table_tenants = scope.get_policy_tenants(client.connection_alias)
+            return scope, client.dialect.transactions.get_table_tenants_setting_sql(
+                {
+                    table_key: TenantRowLevelSecurity.get_tenant_texts(table_scope)
+                    for table_key, table_scope in table_tenants.items()
+                }
+            )
+        return scope, client.dialect.transactions.get_tenant_setting_sql(
+            TenantRowLevelSecurity.get_tenant_texts(scope)
+        )
+
+    @staticmethod
+    def get_tenant_texts(scope: Any) -> list[str] | None:
+        """The tenant values of a scope as text.
+
+        Args:
+            scope: A tenant value, a ``TenantValues`` or ``Tenancy.ALL``.
+
+        Returns:
+            The texts; None for every tenant.
+        """
+        scope_class = type(scope)
         if scope_class is AllTenants:
-            tenant_texts = None
-        elif scope_class is TenantValues:
-            tenant_texts = [str(value) for value in scope.values]
-        else:
-            tenant_texts = [str(scope)]
-        return scope, client.dialect.transactions.get_tenant_setting_sql(tenant_texts)
+            return None
+        if scope_class is TenantValues:
+            return [str(value) for value in scope.values]
+        return [str(scope)]
 
     @staticmethod
     def get_missing_tenants_error(model: type[Model], client: DatabaseClient) -> HareError:
@@ -72,5 +92,5 @@ class TenantRowLevelSecurity:
             )
         return QueryError(
             f"{model.__name__} has a TenantCondition policy - the transaction began with no tenant scope "
-            "(or a scope given model by model) and sees none of its rows; begin it inside Tenancy.scope()"
+            "and sees none of its rows; begin it inside Tenancy.scope()"
         )

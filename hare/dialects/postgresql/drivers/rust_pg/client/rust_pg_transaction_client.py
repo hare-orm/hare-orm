@@ -35,6 +35,8 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
     statements under a name of its own.
     """
 
+    begins_without_suspending = True
+
     #: The client the transaction is opened on - the outer transaction's for a savepoint.
     _parent: RustPgClient
 

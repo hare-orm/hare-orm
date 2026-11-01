@@ -2,6 +2,7 @@
 aggregating, bulk_create() and QuerySet.update()/delete() work; what identifies one row by its key
 fails with a ConfigurationError naming the model."""
 
+import datetime
 import os
 import sys
 import types
@@ -19,10 +20,18 @@ from hare.exceptions import ConfigurationError, FieldError
 from hare.migrations.operations import AddField, CreateModel
 from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
-from hare.query.expressions import Q
+from hare.query.expressions import F, Q
 from hare.query.functions import Count, Sum
+from hare.query.relation_loading import Prefetch
+from hare.transactions.transactions import Transactions
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip
-from tests.model_setup.primary_keys.primary_keyless_models import Venue, VisitLog, VisitNote
+from tests.model_setup.primary_keys.primary_keyless_models import (
+    GuestEntry,
+    NumberedEntry,
+    Venue,
+    VisitLog,
+    VisitNote,
+)
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -105,6 +114,60 @@ async def test_queryset_update_and_delete_by_condition(visits):
     assert await VisitLog.objects.get(visitor="ann").values_list("duration", flat=True) == 10
     assert await VisitLog.objects.filter(venue__name="Yard").delete() == 2
     assert await VisitLog.objects.all().values_list("visitor", flat=True) == ["ann", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_update_and_delete_return_the_rows_they_wrote(visits):
+    """With no key to read them back by, update().returning() gave no instances and delete().returning()
+    was refused: "VisitLog has no primary key"."""
+    updated = await VisitLog.objects.filter(venue__name="Hall").update(duration=F("duration") + 1).returning()
+    assert sorted((visit.visitor, visit.duration, visit.venue_id) for visit in updated) == [
+        ("ann", 6, 1),
+        ("bob", 8, 1),
+    ]
+    assert all(isinstance(visit.visited_at, datetime.datetime) and visit._saved_in_db for visit in updated)
+    assert await VisitLog.objects.filter(visitor="ann").update(duration=2).returning("visitor", "duration") == [
+        {"visitor": "ann", "duration": 2}
+    ]
+    assert await VisitLog.objects.filter(visitor="nobody").update(duration=1).returning() == []
+    deleted = await VisitLog.objects.filter(venue__name="Yard").delete().returning()
+    assert sorted((visit.visitor, visit.duration, visit.venue_id) for visit in deleted) == [
+        ("cid", 3, 2),
+        ("dan", 1, 2),
+    ]
+    assert await VisitLog.objects.filter(visitor="bob").delete().returning("visitor") == [{"visitor": "bob"}]
+    assert await VisitLog.objects.filter(visitor="nobody").delete().returning() == []
+    assert await VisitLog.objects.all().values_list("visitor", "duration") == [("ann", 2)]
+
+
+@pytest.mark.asyncio
+async def test_a_soft_delete_picks_and_returns_the_rows_without_a_key(visits):
+    """include_deleted().delete() and delete().returning() of a soft delete picked the rows by their keys:
+    "GuestEntry has no primary key"."""
+    await GuestEntry.objects.bulk_create([GuestEntry(name=name) for name in ("ann", "bob", "cid")])
+    deleted = await GuestEntry.objects.filter(name="ann").delete().returning()
+    assert [(entry.name, isinstance(entry.deleted_at, datetime.datetime)) for entry in deleted] == [("ann", True)]
+    assert await GuestEntry.objects.filter(name="ann").delete().returning() == []
+    assert await GuestEntry.objects.include_deleted().filter(name__in=["ann", "bob"]).delete().returning("name") == [
+        {"name": "bob"}
+    ]
+    assert await GuestEntry.objects.include_deleted().delete() == 1
+    assert await GuestEntry.objects.all().count() == 0
+    assert await GuestEntry.objects.include_deleted().count() == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunk_size", [1, 2, 3])
+async def test_an_iterator_uses_a_unique_ordering_without_a_primary_key(visits, chunk_size):
+    """A unique field's ordering tells the rows apart without a primary key."""
+    await NumberedEntry.objects.bulk_create([NumberedEntry(number=number, name="same") for number in (3, 1, 2)])
+    numbered = NumberedEntry.objects.order_by("-number")
+    assert [entry.number async for entry in numbered.iterator(chunk_size=chunk_size)] == [3, 2, 1]
+    assert [row async for row in numbered.values_list("number", flat=True).iterator(chunk_size=chunk_size)] == [
+        3,
+        2,
+        1,
+    ]
 
 
 @pytest.mark.asyncio
@@ -306,3 +369,37 @@ async def test_migrations_refuse_to_add_or_remove_a_primary_key(db_isolated_no_s
     await round_trip.migrate_to(without_key)
     with pytest.raises(ConfigurationError, match=r"PkLessReading \(no primary key -> 'sensor'\)"):
         round_trip.get_pending_operations(with_key)
+
+
+@pytest.mark.asyncio
+async def test_a_rolled_back_create_restores_the_object_without_a_key(visits, caplog):
+    """The rollback restored the object's pk - which a model without a primary key refuses - so the restore
+    callback failed and left the object counted as saved."""
+    hall = await Venue.objects.get(id=1)
+    visit = VisitLog(venue=hall, visitor="eve", duration=2)
+    with pytest.raises(RuntimeError, match="undo"):
+        async with Transactions.atomic():
+            await visit.save()
+            raise RuntimeError("undo")
+    assert not visit._saved_in_db
+    assert "callback failed" not in caplog.text
+    assert await VisitLog.objects.filter(visitor="eve").count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_slice_of_each_parents_rows_without_a_key(visits):
+    """The rows of each parent's slice were picked by their primary key - none: IndexError."""
+    await Venue.objects.create(id=3, name="Empty")
+
+    async def get_visitors(queryset):
+        venues = await Venue.objects.order_by("id").prefetch_related(Prefetch("visits", queryset=queryset))
+        return [[visit.visitor for visit in venue.visits] for venue in venues]
+
+    by_duration = VisitLog.objects.order_by("-duration")
+    assert await get_visitors(by_duration) == [["bob", "ann"], ["cid", "dan"], []]
+    assert await get_visitors(by_duration[:1]) == [["bob"], ["cid"], []]
+    assert await get_visitors(by_duration[1:2]) == [["ann"], ["dan"], []]
+    assert await get_visitors(VisitLog.objects.order_by("duration")[:1]) == [["ann"], ["dan"], []]
+    assert await get_visitors(by_duration[5:]) == [[], [], []]
+    partial = await get_visitors(VisitLog.objects.only("visitor", "venue_id").order_by("-duration")[:1])
+    assert partial == [["bob"], ["cid"], []]

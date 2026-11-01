@@ -12,8 +12,8 @@ from hare.exceptions import ConfigurationError
 from tests.contrib.request_query.models import Article, Book, BookStatus
 from tests.contrib.request_query.queries import ArticleQuery, PublishedArticleQuery, VisibleArticleQuery
 
-FIRST_RECORD = uuid.UUID(int=1)
-SECOND_RECORD = uuid.UUID(int=2)
+FIRST_RECORD = uuid.UUID("00000000-0000-7000-8000-000000000001")
+SECOND_RECORD = uuid.UUID("00000000-0000-7000-8000-000000000002")
 
 
 @pytest_asyncio.fixture

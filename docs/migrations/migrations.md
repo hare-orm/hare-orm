@@ -204,6 +204,11 @@ after the first one it replaces (`0005_accounts_rework`; `0001_squashed_0012_<na
 `--squashed-name`), depends on what the replaced ones depend on outside the run, and is `atomic = False`
 when any of them is. Squashing a run holding a squashed migration replaces that one's originals.
 
+Imports used by a copied function's decorators, defaults and annotations are emitted before its
+declaration. Their references use the generated import aliases, including a default or annotation
+consisting of a single imported name; imports used only by the function body stay inside it.
+Parameters of a lambda in such an expression keep their scope and can shadow an imported name.
+
 A run can't be squashed into one migration when another app's migration sits inside it — a migration of
 the run depends on it, and it depends on an earlier migration of the run: the squashed migration would
 depend on a migration depending on itself. `squashmigrations` raises `ConfigurationError` naming the
@@ -304,12 +309,16 @@ behind; targets that would both apply and unapply the same migration raise `Quer
 Migration files are re-read on every load: a file edited after it was first imported is picked up by the
 next `migrate`/`plan` in the same process.
 
+Generated migration imports use distinct aliases when a custom default or field shares a name with
+another imported object, a module, or a Python builtin. This preserves each serialized value regardless
+of the order the operations introduce it.
+
 ## <a id="runtime-enums"></a>Enums of enum fields
 
 A migration keeps the members of a `CharEnumField`/`IntEnumField` enum as they are when it is written: the
 column's enum type (`Enum8`/`Enum16` on ClickHouse) or its `CHECK` holds them, so a member added to the
 class later is a change the next `makemigrations` sees and the migration after it applies. The enum may
-also be one built while the application runs — from choices set in an admin panel:
+also be one built while the application runs — from choices kept in the database:
 
 ```python
 Status = StrEnum("Status", {"NEW": "new", "DONE": "done"})

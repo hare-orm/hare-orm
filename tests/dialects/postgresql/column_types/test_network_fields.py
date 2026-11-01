@@ -10,10 +10,9 @@ import pytest
 
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.fields.network import CidrField, InetField, MacAddressField
-from hare.exceptions import OperationalError, UnSupportedError, ValidationError
+from hare.exceptions import UnSupportedError, ValidationError
 from hare.query.expressions import F
 from hare.query.functions import Max, Min
-from hare.transactions.transactions import Transactions
 from tests.dialects.postgresql.column_types.models_network import NetworkHost
 
 
@@ -123,13 +122,11 @@ def test_a_database_without_the_types_refuses_the_fields():
 
 
 @pytest.mark.asyncio
-async def test_min_and_max_of_a_mac_address_are_refused_by_postgresql(db_network):
-    """PostgreSQL has no min()/max() of macaddr and refuses them itself."""
+async def test_min_and_max_of_a_mac_address_are_refused_before_the_query(db_network):
+    """PostgreSQL has no min()/max() of macaddr - refused before any SQL, as everything its SQL lacks."""
     await create_hosts()
-    with pytest.raises(OperationalError, match="macaddr"):
-        async with Transactions.atomic():
-            await NetworkHost.objects.aggregate(value=Min("mac"))
-    with pytest.raises(OperationalError, match="macaddr"):
-        async with Transactions.atomic():
-            await NetworkHost.objects.aggregate(value=Max("mac"))
+    with pytest.raises(UnSupportedError, match="MacAddressField - the postgresql database has no MIN"):
+        await NetworkHost.objects.aggregate(value=Min("mac"))
+    with pytest.raises(UnSupportedError, match="MacAddressField - the postgresql database has no MAX"):
+        await NetworkHost.objects.aggregate(value=Max("mac"))
     assert await NetworkHost.objects.aggregate(value=Max("address")) == {"value": ipaddress.IPv6Address("2001:db8::1")}

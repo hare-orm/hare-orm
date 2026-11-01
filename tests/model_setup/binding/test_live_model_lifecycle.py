@@ -271,13 +271,13 @@ async def test_pydantic_model_of_reregistered_class_points_at_the_new_class(db, 
     first_parent, _ = build_parent_and_child_classes()
     Hare.register_live_models([first_parent], app_label="live", connection_alias=alias)
     first_schema = pydantic_model_creator(first_parent)
-    assert first_schema.model_config["orig_model"] is first_parent
+    assert first_schema.source_model is first_parent
     Hare.unregister_live_models([first_parent])
 
     second_parent, _ = build_parent_and_child_classes()
     Hare.register_live_models([second_parent], app_label="live", connection_alias=alias)
     try:
-        assert pydantic_model_creator(second_parent).model_config["orig_model"] is second_parent
+        assert pydantic_model_creator(second_parent).source_model is second_parent
     finally:
         Hare.unregister_live_models([second_parent])
 

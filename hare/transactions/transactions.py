@@ -187,10 +187,10 @@ class Transactions:
     def distributed(
         coordinator: str, participants: Sequence[str]
     ) -> AbstractAsyncContextManager[DistributedTransactions]:
-        """Two-phase commit across several databases: every participant is prepared (``PREPARE
-        TRANSACTION``) before anything commits, and the coordinator's commit of a row into
+        """Two-phase commit across several databases: every participant is prepared before anything
+        commits, and the coordinator's commit of a row into
         ``hare_distributed_decisions`` is the instant the transaction happens - participants then
-        only need ``COMMIT PREPARED``, which ``hare distributed-recover`` can finish later. Every
+        only need their prepared transactions committed, which ``hare distributed-recover`` can finish later. Every
         connection needs ``Features.supports_two_phase_commit``.
 
         Example::
@@ -213,7 +213,7 @@ class Transactions:
             DistributedTransactionCommitAmbiguousError: The coordinator's commit failed with an
                 unknown outcome - run ``hare distributed-recover``.
             DistributedTransactionPartiallyCommittedError: The transaction committed but some
-                participants didn't finish ``COMMIT PREPARED`` - run ``hare distributed-recover``.
+                participants didn't commit their prepared transactions - run ``hare distributed-recover``.
                 Their ``on_commit()`` callbacks don't run.
             BaseExceptionGroup: Everything committed but several ``on_commit()`` callbacks raised -
                 one failure is raised as is.

@@ -15,9 +15,10 @@ class AlterModelSchema(HareOperation):
     """Moves a model's table to another schema (``Meta.schema``), keeping its data - the partitions of a
     partitioned table, its automatic through tables and the objects it declares in its schema (views,
     materialized views, functions, sequences, the functions of its triggers) with it - as the dialect moves
-    them: a database of schemas with ``ALTER ... SET SCHEMA``; a database whose schemas are the databases
-    of its server with ``RENAME TABLE``, refusing a model whose objects name the table by its database; a
-    database whose schemas are attached databases moves no table and refuses the move. A refusal comes before any
+    them: a database of schemas moves each object into the new schema; a database whose schemas are the
+    databases of its server renames the table into the other database, refusing a model whose objects name
+    the table by its database; a database whose schemas are attached databases moves no table and refuses
+    the move. A refusal comes before any
     statement (``Schemas.raise_if_model_unmovable()``). ``CreateSchema`` creates the schema itself.
     """
 

@@ -40,11 +40,11 @@ class DuplicateModelClassNameError(ConfigurationError):
 
 
 class SchemaNotFoundError(ConfigurationError):
-    """A schema to inspect that the database doesn't have."""
+    """A schema to inspect or compare that the database doesn't have."""
 
     def __init__(self, schema: str) -> None:
         self.schema = schema
-        super().__init__(f"inspectdb: schema {schema!r} doesn't exist")
+        super().__init__(f"The schema {schema!r} doesn't exist")
 
     def __reduce__(self) -> tuple[type[SchemaNotFoundError], tuple[Any, ...]]:
         return self.__class__, (self.schema,)

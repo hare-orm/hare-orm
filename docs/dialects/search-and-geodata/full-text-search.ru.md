@@ -206,7 +206,8 @@ hare, — а при создании она заполняется уже име
 
 Модели нужен целочисленный первичный ключ (rowid FTS5); модель без него, пустой список полей, ключ по
 убыванию или пустой токенизатор дают `ConfigurationError`. На соединении без
-`Features.supports_full_text_index` создание и удаление индекса дают `UnSupportedError` до отправки SQL.
+`Features.supports_full_text_index` модель с этим индексом даёт `ConfigurationError` в `Hare.init()`, а
+миграция, которая создаёт или удаляет его, — `UnSupportedError` до отправки SQL.
 
 ## <a id="query-plans"></a>Планы запросов
 

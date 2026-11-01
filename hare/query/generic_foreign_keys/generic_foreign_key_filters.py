@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
+from hare.fields.constants import GENERIC_FOREIGN_KEY_TYPE_FIELD
 from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.query.enums import Connector, Lookup
 from hare.query.expressions.conditions.q import Q
@@ -129,17 +130,15 @@ class GenericForeignKeyFilters:
             if value is None:
                 continue
             if isinstance(value, dict):
-                # {"type": "post", "id": 1} - the key columns of its branch.
+                # {"type": "post", "id": 1} - the key columns of its branch; a key with a None part, like
+                # an object's, is no row's.
                 column_values = generic_field.get_column_values(value)
-                conditions.append(
-                    Q(
-                        **{
-                            f"{prefix}{column}": column_value
-                            for column, column_value in column_values.items()
-                            if column_value is not None
-                        }
+                branch = generic_field.model._meta.fields_map[value[GENERIC_FOREIGN_KEY_TYPE_FIELD]]
+                key_values = {column: column_values[column] for column in branch.source_fields}  # type: ignore[attr-defined]
+                if None not in key_values.values():
+                    conditions.append(
+                        Q(**{f"{prefix}{column}": key_value for column, key_value in key_values.items()})
                     )
-                )
                 continue
             values_by_branch.setdefault(generic_field.get_branch_of(value), []).append(value)
         conditions.extend(

@@ -188,7 +188,13 @@ key column. A composite primary key's `pk__in=[(a, b), ...]` is one row-value ch
 `(a, b) IN ((1, 2), ...)`; a long list is bound as one array per column on PostgreSQL
 (`IN (SELECT * FROM unnest($1::int[], $2::int[]))`, from 20 rows) and as one JSON array of rows on SQLite
 (`IN (SELECT json_extract(value, '$[0]'), ... FROM json_each(?))`, from 20 values), so its length isn't
-limited either. A composite many-to-many target's `__in`/`__not_in` works the same way. Many-to-many
+limited either. A list of a relation's keys holding a key with a `None` part (a nullable relation's
+`(None, None)`) or an expression is compared key by key instead — one condition per key, joined with
+`OR` — and its values are bound one by one: a long one is a long statement, which a database bounding the
+depth of an expression (SQLite) may refuse. Within a composite relation's membership list, name every
+component: use `(None, None)` for a two-column NULL key; a bare `None` raises `QueryError`.
+A composite many-to-many target's `__in`/`__not_in` works the
+same way. Many-to-many
 `add()`/`remove()` and the `on_delete=PROTECT` check of a bulk delete handle any number of objects too —
 `add()` splits its `INSERT` into as many statements as the bind-parameter ceiling needs, in one
 transaction.
@@ -301,6 +307,7 @@ LEFT OUTER JOIN LATERAL (
 - A row comes once for each row the subquery returns — slice it (`[:1]`) for one; `[:3]` gives the three
   best books of each author as three rows, as a `JOIN` of a to-many relation would. With an aggregate
   inside (`values("author").annotate(books=Count("id")).values("books")`) the subquery returns one row.
+  An unsliced `Lateral` or one of more rows repeats the rows even when nothing reads its name.
 - Several `Lateral`s, and a `Lateral` beside a `FilteredRelation`, join side by side.
 - `queryset` has to be a `values()`/`values_list()` queryset — another value raises `QueryError` when the
   `Lateral` is made.
@@ -598,7 +605,9 @@ The same "treat NULL like Python's `not in`/`!=` would" principle extends to two
   subquery's own result doesn't empty the whole result (as SQL's own `NOT IN (..., NULL)`, which is
   always `UNKNOWN`, would) — a value that genuinely isn't in the subquery's non-NULL results is kept,
   matching `x not in [1, None]` in plain Python. `field__in`/`.filter()` with a literal Python list
-  handle an embedded `None` the same way.
+  handle an embedded `None` the same way. A NULL value matches `__in` exactly when the subquery
+  contains a NULL; `__not_in`, `exclude(__in=...)` and `~Q(...__in=...)` then exclude it.
+  A model queryset wrapped in `Subquery(...)` is narrowed to its primary key just like a bare queryset.
 - `field__not=F(other_field)` (or any other expression on the right-hand side): compared via SQL's
   `IS DISTINCT FROM` (`IS NOT` on SQLite, same semantics) instead of a plain `<>` — NULL-safe in both
   directions, so a row is kept whenever the two sides genuinely differ, including when only one of them

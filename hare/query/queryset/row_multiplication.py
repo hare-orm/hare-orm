@@ -21,11 +21,34 @@ class RowMultiplication:
     function - and which a GROUP BY may hold."""
 
     @staticmethod
+    def ordering_joins_multi_valued_relation(specification: QuerySpecification[Any]) -> bool:
+        """Whether removing the effective ordering would remove a join that repeats rows.
+
+        Reads explicit and default orderings, including expressions registered as annotations.
+        Such a join must survive when a summary or a set operation embeds the query.
+        """
+        for name, _order in specification._apply_default_ordering(specification._orderings):
+            annotation = specification._annotations.get(name)
+            if annotation is None:
+                annotation = specification.model._meta.ordering_expressions.get(name)
+            if annotation is None:
+                if AggregatedMultiValuedPaths.get_multi_valued_paths(specification.model, name):
+                    return True
+            elif isinstance(annotation, Expression):
+                paths = AggregatedMultiValuedPaths()
+                paths.is_recording_row_joins = True
+                annotation.get_result(specification._get_probe_expression_context(specification._annotations, paths))
+                if paths.row_paths:
+                    return True
+        return False
+
+    @staticmethod
     def get_row_multiplying_annotation_names(
         specification: QuerySpecification[Any], *, selected_only: bool
     ) -> list[str]:
         """Names of the annotations reading a to-many relation outside any aggregate - the query
-        returns a row per related row for each of them.
+        returns a row per related row for each of them - and of the named JOINs repeating the rows
+        (``NamedJoin.repeats_rows``: a ``Lateral`` of several rows, an ``ArrayJoin``).
 
         Args:
             specification: The query specification - a queryset or a query made from one.
@@ -42,6 +65,9 @@ class RowMultiplication:
             ):
                 continue
             if annotation_name in unused_alias_keys:
+                continue
+            if getattr(annotation, "repeats_rows", False):
+                annotation_names.append(annotation_name)
                 continue
             multi_valued_paths = AggregatedMultiValuedPaths()
             multi_valued_paths.is_recording_row_joins = True

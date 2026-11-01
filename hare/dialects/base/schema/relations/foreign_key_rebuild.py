@@ -148,7 +148,7 @@ class ForeignKeyRebuild(SchemaEditorPart):
 
     async def drop_relation_foreign_keys(self, model: type[Model], relation_field: Field[Any]) -> None:
         """Drops the database FK constraint(s) behind a relation field, if any. No-op by default -
-        SqliteSchemaEditor rebuilds whole tables instead of altering constraints in place."""
+        a schema editor rebuilding whole tables instead of altering constraints in place has nothing to drop."""
 
     async def drop_composite_relation_index_for_key_change(
         self,

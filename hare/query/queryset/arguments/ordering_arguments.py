@@ -9,6 +9,7 @@ from hare.fields.relations.fields.backward_foreign_key_relation import BackwardF
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.query.expressions import Expression, F, Ordering
+from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
 from hare.query.queryset.constants import EXPRESSION_ORDERING_ALIAS_PREFIX, PLAIN_ORDERINGS_CACHE_SIZE
@@ -118,6 +119,8 @@ class OrderingArguments:
         new_ordering = []
         for ordering in orderings:
             field_name, order_type = queryset._get_ordering_name(ordering, reverse=reverse)
+            if queryset._annotations:
+                field_name = KeyColumns.get_primary_key_name(queryset.model, queryset._annotations, field_name)
             # "pk" orders by every primary key field, a forward relation by its own key column(s).
             if field_name in queryset._annotations or field_name.partition("__")[0] in queryset._annotations:
                 ordering_info = AnnotationArguments.get_annotation_description(

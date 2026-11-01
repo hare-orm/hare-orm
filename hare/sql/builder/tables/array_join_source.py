@@ -11,8 +11,8 @@ if TYPE_CHECKING:
 
 
 class ArrayJoinSource(Selectable):
-    """The elements of an array joined to their row under ``name`` - ``[LEFT] ARRAY JOIN "t"."tags" AS
-    "name"``, with no condition; equal to another of the same name, so it is joined once.
+    """The elements of an array joined to their row under ``name``, with no condition - left or not; equal to
+    another of the same name, so it is joined once.
 
     Args:
         name: The name the elements are read by.

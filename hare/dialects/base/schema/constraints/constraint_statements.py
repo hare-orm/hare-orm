@@ -169,7 +169,7 @@ class ConstraintStatements(SchemaEditorPart):
 
     async def validate_constraint(self, model: type[Model], name: str) -> None:
         """Checks the existing rows against a constraint added without checking them; nothing by
-        default - a database without ``NOT VALID`` checked the rows as it added the constraint, or
+        default - a database adding no constraint unchecked checked the rows as it added it, or
         checks only the rows written later.
 
         Args:
@@ -184,8 +184,8 @@ class ConstraintStatements(SchemaEditorPart):
         new_constraint: UniqueConstraint | CheckConstraint | ExclusionConstraint,
     ) -> None:
         """Renames the unique index a unique constraint with a condition is - a partial unique
-        constraint has no table constraint to rename (see ``add_constraint()``). Without
-        ``ALTER INDEX ... RENAME`` the index is dropped and created again under the new name.
+        constraint has no table constraint to rename (see ``add_constraint()``). A database
+        renaming no index drops it and creates it again under the new name.
 
         Args:
             model: The constrained model.

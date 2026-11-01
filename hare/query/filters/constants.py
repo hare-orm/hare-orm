@@ -62,7 +62,7 @@ TEXT_VALUE_LOOKUPS = frozenset(
     }
 )
 
-#: Lookups of a JSON or hstore value naming keys - ``has_keys``/``has_any_keys`` take a list of them.
+#: Lookups of a JSON or key-value value naming keys - ``has_keys``/``has_any_keys`` take a list of them.
 KEY_LIST_LOOKUPS = frozenset({Lookup.HAS_KEYS, Lookup.HAS_ANY_KEYS})
 
 #: The type of the value a date transform reads - a date part is an integer, ``date``/``time``

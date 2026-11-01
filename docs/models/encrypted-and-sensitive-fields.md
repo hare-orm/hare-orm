@@ -77,6 +77,9 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
   `from_db_value()`. `to_dict()`, `values()`/`values_list()`, an `annotate(x=F("secret"))` annotation and
   Pydantic schemas all see the plaintext. A JSON path into an `EncryptedJSONField` (`F("config__url")`)
   raises `FieldError` — the key's stored value is a Fernet token.
+- A `GeneratedField` with an encrypted `output_field` follows the same comparison and update rules.
+  A generated copy of ciphertext can be copied to a compatible encrypted field, and cannot be copied
+  to a plaintext field through `F()`.
 - Validators run against the plaintext; their error messages never include it (see
   [Sensitive fields](#sensitive-fields)).
 - **Filtering by value is impossible**: a Fernet token embeds a random IV, so the same plaintext encrypts
@@ -94,7 +97,7 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
   `.values()`/`.values_list()` selecting an encrypted field (unless the primary key is selected too), an
   aggregate annotated after `.values()`/`.values_list()` selecting one (it groups by them — through a
   relation or a bare `F()` annotation too), `union()` (but `union(all=True)`), `intersection()` and
-  `difference()` of values selecting one, and
+  `difference()` of values selecting one (including `values()`/`values_list()` without arguments), and
   an encrypted field inside any function, `Case`/`When`, arithmetic, aggregate or `Window`
   (`partition_by`/`order_by` included). Still allowed: `Count("field")` (without `distinct=True`), a bare
   `F("field")` annotation, and the `FirstValue`/`LastValue`/`Count`/ `Lag`/`Lead` window functions

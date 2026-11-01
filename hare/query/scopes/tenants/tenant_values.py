@@ -29,10 +29,10 @@ class TenantValues:
         self.values: tuple[Any, ...] = tuple(dict.fromkeys(values))
 
     def __eq__(self, other: object) -> bool:
-        return type(other) is TenantValues and other.values == self.values
+        return type(other) is TenantValues and frozenset(other.values) == frozenset(self.values)
 
     def __hash__(self) -> int:
-        return hash(self.values)
+        return hash(frozenset(self.values))
 
     def __repr__(self) -> str:
         return f"Tenancy.any_of({', '.join(repr(value) for value in self.values)})"

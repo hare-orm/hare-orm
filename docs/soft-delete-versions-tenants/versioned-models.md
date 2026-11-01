@@ -5,7 +5,7 @@ new row sharing the same `id` but a higher `version`, instead of mutating a row 
 
 ```python
 class VersionedModel(Model):
-    id = fields.UUIDField(default=Uuid7.new, db_index=True)
+    id = fields.UUIDField(default=Uuid7.new, db_index=True, version=7)
     version = fields.PositiveSmallIntField(default=1)
     pk = CompositePrimaryKey("id", "version")
 
@@ -27,7 +27,9 @@ class VersionedModel(Model):
 
 A new record's `id` is a version 7 UUID (`hare.fields.uuid7.Uuid7.new`): time-ordered, and increasing
 within a process even within one millisecond — an index over the ids grows at its end. It is Python's
-own `uuid.uuid7` on 3.14 and newer, and the same layout made by hare on 3.12 and 3.13.
+own `uuid.uuid7` on 3.14 and newer, and the same layout made by hare on 3.12 and 3.13. The field is
+`UUIDField(version=7)`: an `id` of another version is refused (`ValidationError`) wherever hare passes it
+to the database — in a write, a filter, the key of an existing row and a reference to it.
 
 `id` and `version` together are the table's real primary key, not a surrogate one with a bolted-on
 uniqueness constraint — which means a foreign key can target a specific version with a real, enforced
@@ -93,13 +95,18 @@ record from one task at a time there.
 
 ## <a id="base-model"></a>With a project base model
 
-Combine `VersionedModel` with your project's base model through multiple inheritance:
+Combine `VersionedModel` with your project's base model through multiple inheritance, `VersionedModel`
+first:
 
 ```python
-class AppVersionedModel(YourBaseModel, VersionedModel):
+class AppVersionedModel(VersionedModel, YourBaseModel):
     class Meta(YourBaseModel.Meta, VersionedModel.Meta):
-        pass
+        abstract = True
 ```
+
+The first base gives the fields both declare: `id` is then `VersionedModel`'s, a part of the key
+`id` + `version`. A base model declaring its own primary key `id` (`UUIDField(primary_key=True)`) listed
+first raises `ConfigurationError` - a field of a composite key can't be a primary key itself.
 
 ## <a id="unique-fields"></a>Unique fields
 

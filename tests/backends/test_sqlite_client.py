@@ -51,6 +51,19 @@ def test_pragmas_include_actual_pragma_kwargs():
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
+async def test_dict_rows_preserve_column_name_case():
+    client = AiosqliteClient(file_path=":memory:", connection_alias="default")
+    await client.create_connection(with_db=True)
+    try:
+        assert await client.execute_dicts('SELECT 1 AS "a", 100 AS "A", 3 AS "other"') == [
+            {"a": 1, "A": 100, "other": 3}
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
 async def test_a_double_quoted_name_of_no_column_is_refused_not_read_as_a_string():
     """SQLite reads a double-quoted name that is no column as a string literal unless its DQS
     options are off - an index or a condition on a misspelled or dropped column then silently

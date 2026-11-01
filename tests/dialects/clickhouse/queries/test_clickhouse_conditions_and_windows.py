@@ -6,10 +6,24 @@ import decimal
 
 import pytest
 
+from hare.contrib.test import capture_queries
+from hare.exceptions import UnSupportedError
 from hare.query.expressions import Case, F, Value, When, Window
-from hare.query.functions import Coalesce, NullIf, Sum
-from hare.query.functions.window import Count, CumeDist, DenseRank, Lag, Lead, NTile, Rank, RowNumber
-from tests.dialects.clickhouse.models import Member, Player, Revision, Team
+from hare.query.functions import Abs, Coalesce, NullIf, Sum
+from hare.query.functions.window import Count, CumeDist, DenseRank, Lag, Lead, NthValue, NTile, Rank, RowNumber
+from tests.dialects.clickhouse.column_types.test_clickhouse_containers import make_shipment
+from tests.dialects.clickhouse.models import (
+    Device,
+    DeviceStatus,
+    EscapedLabel,
+    Labelled,
+    Member,
+    Player,
+    Revision,
+    Shipment,
+    StatusArray,
+    Team,
+)
 
 
 async def get_values(expression, **filters):
@@ -187,3 +201,122 @@ async def test_distinct_models_are_ordered_by_a_collation(clickhouse_db):
     )
     players = await Player.objects.order_by(Collate("name", "en").asc(), "id").distinct()
     assert [player.name for player in players] == ["A", "b"]
+
+
+@pytest.mark.asyncio
+async def test_lag_and_lead_of_a_container_take_a_default_of_its_type(clickhouse_db):
+    """The value was made nullable - lagInFrame(toNullable("tags"), ...) failed: "Nested type Array(String)
+    cannot be inside Nullable type"."""
+    for shipment_id, tag, currency in ((1, "a", "eur"), (2, "b", "usd"), (3, "c", "gbp")):
+        await make_shipment(
+            shipment_id,
+            tags=[tag],
+            prices={currency: decimal.Decimal(shipment_id)},
+            point={"lon": float(shipment_id), "lat": 0.0},
+        ).save()
+    shipments = Shipment.objects.order_by("id")
+    rows = await shipments.annotate(
+        previous_tags=Window(Lag("tags", 1, []), order_by=["id"]),
+        next_prices=Window(Lead("prices", 1, {}), order_by=["id"]),
+        previous_point=Window(Lag("point", 2, {"lon": 0.0, "lat": 0.0}), order_by=["id"]),
+        same_tags=Window(Lag("tags", 0), order_by=["id"]),
+    ).values_list("previous_tags", "next_prices", "previous_point", "same_tags")
+    assert rows == [
+        ([], {"usd": decimal.Decimal("2.00")}, {"lon": 0.0, "lat": 0.0}, ["a"]),
+        (["a"], {"gbp": decimal.Decimal("3.00")}, {"lon": 0.0, "lat": 0.0}, ["b"]),
+        (["b"], {}, {"lon": 1.0, "lat": 0.0}, ["c"]),
+    ]
+    await StatusArray.objects.create(id=1, statuses=[DeviceStatus.ONLINE])
+    await StatusArray.objects.create(id=2, statuses=[])
+    copies = StatusArray.objects.order_by("id").annotate(previous=Window(Lag("statuses_copy", 1, []), order_by=["id"]))
+    assert await copies.values_list("previous", flat=True) == [[], [DeviceStatus.ONLINE]]
+
+
+@pytest.mark.asyncio
+async def test_a_null_past_the_partition_of_a_container_is_refused_before_any_sql(clickhouse_db):
+    """A container holds no NULL - the value past the partition's edge has nothing to be."""
+    for expression in (Lag("tags"), Lead("prices", 2), NthValue("tags", 2)):
+        async with capture_queries() as counter:
+            with pytest.raises(UnSupportedError, match="past the partition"):
+                await Shipment.objects.annotate(value=Window(expression, order_by=["id"])).values_list("value")
+        assert counter.count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["label", "label_copy"])
+async def test_lag_and_lead_of_an_enum_take_a_default_label(clickhouse_db, field_name):
+    """The default was written as the enum's number the column stores, beside the label the window
+    reads - Lag("label", 1, State.RED) gave "-8305"."""
+    await Labelled.objects.bulk_create(
+        [Labelled(id=1, label=EscapedLabel.PLAIN), Labelled(id=2, label=EscapedLabel.NEW_LINE)]
+    )
+    rows = Labelled.objects.order_by("id")
+    for default in (EscapedLabel.QUOTE, EscapedLabel.BACKSLASH, "it's"):
+        assert await rows.annotate(previous=Window(Lag(field_name, 1, default), order_by=["id"])).values_list(
+            "previous", flat=True
+        ) == [EscapedLabel(default), EscapedLabel.PLAIN]
+    following = rows.annotate(following=Window(Lead(field_name, 1, EscapedLabel.TAB), order_by=["id"]))
+    values = await following.values_list("following", flat=True)
+    assert values == [EscapedLabel.NEW_LINE, EscapedLabel.TAB]
+    assert all(type(value) is EscapedLabel for value in values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "first", "default"),
+    [
+        ("huge", 1, -(2**200)),
+        ("huge", 1, 2**255 - 1),
+        ("huge", 1, -(2**255)),
+        ("huge", 1, 2**127),
+        ("big", 1, 2**64 - 1),
+        ("big", 1, 2**63),
+    ],
+)
+async def test_lag_of_a_wide_integer_takes_its_default_unchanged(clickhouse_db, field_name, first, default):
+    """A default past 64 bits was cast to a NUMERIC - toDecimal256(value, 38) - keeping 38 digits of it."""
+    for device_id, value in ((1, first), (2, default)):
+        await Device.objects.create(
+            id=device_id,
+            tiny=1,
+            big=value if field_name == "big" else 1,
+            huge=value if field_name == "huge" else None,
+            ratio=1.0,
+            code="abcd",
+            country="DE",
+            status="online",
+            address="10.0.0.1",
+            labels=[],
+        )
+    rows = Device.objects.order_by("id")
+    for given in (default, Value(default)):
+        assert await rows.annotate(previous=Window(Lag(field_name, 1, given), order_by=["id"])).values_list(
+            "previous", flat=True
+        ) == [default, first]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wide", [-(2**200), 2**200, 2**127, -(2**255)])
+async def test_a_wide_integer_literal_keeps_its_width_in_a_function(clickhouse_db, wide):
+    """A bare literal was cast to toDecimal256(..., 38) - no common type with an Int256 in Coalesce() - and
+    Abs() of one converted back to the literal's shared Int64 field: 0."""
+    for device_id, huge in ((1, None), (2, wide), (3, 1)):
+        await Device.objects.create(
+            id=device_id,
+            tiny=1,
+            big=1,
+            huge=huge,
+            ratio=1.0,
+            code="abcd",
+            country="DE",
+            status="online",
+            address="10.0.0.1",
+            labels=[],
+        )
+    rows = Device.objects.order_by("id")
+    for given in (wide, Value(wide)):
+        assert await rows.annotate(value=Coalesce("huge", given)).values_list("value", flat=True) == [wide, wide, 1]
+    if wide != -(2**255):
+        # The absolute value of Int256's minimum is past Int256 - as abs() of the column gives it.
+        for given in (wide, Value(wide)):
+            assert await rows.annotate(value=Abs(given)).values_list("value", flat=True) == [abs(wide)] * 3

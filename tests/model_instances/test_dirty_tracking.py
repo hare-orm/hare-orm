@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 import pytest_asyncio
 
@@ -529,3 +531,20 @@ async def test_rolled_back_delete_and_restore_restore_the_dirty_baseline(db):
             raise RuntimeError("roll back")
     assert thing.deleted_at is not None
     assert thing.get_dirty_fields() == {}
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("old_value", "new_value", "differ"),
+    [
+        (float("nan"), float("nan"), False),
+        (Decimal("NaN"), Decimal("NaN"), False),
+        (float("nan"), 1.0, True),
+        (1.0, float("nan"), True),
+        (float("nan"), None, True),
+    ],
+)
+def test_a_nan_read_back_is_not_a_change(old_value, new_value, differ):
+    """A NaN equals no value, itself too - a FloatField holding NaN was dirty right after it was read, and
+    save() wrote it again with every field changed."""
+    assert FieldSnapshot.values_differ(old_value, new_value) is differ

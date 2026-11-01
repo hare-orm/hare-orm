@@ -96,7 +96,7 @@ class JsonValueType(StrEnum):
 
 
 class TruncType(StrEnum):
-    """What ``Trunc()`` keeps of a date/time - a ``DATE_TRUNC`` unit, the part of hare's function where
+    """What ``Trunc()`` keeps of a date/time - a truncation unit, the part of hare's function where
     the dialect has one; ``date``/``time`` take a datetime's date or time of day."""
 
     YEAR = "year"

@@ -13,10 +13,11 @@ from hare.exceptions import (
     FieldError,
     OperationalError,
     QueryError,
+    ValidationError,
 )
 from hare.models.write.instance_writer import InstanceWriter
-from hare.query.expressions import Case, F, Function, OuterReference, Q, Subquery, When
-from hare.query.functions import Sum, Upper
+from hare.query.expressions import Case, F, Function, OuterReference, Q, Subquery, Value, When
+from hare.query.functions import Coalesce, Sum, Upper
 from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
@@ -27,6 +28,7 @@ from tests.shared_models.testmodels import (
     Author,
     BinaryFields,
     Book,
+    CharFields,
     CompositePkThing,
     CompositePkTriple,
     Currency,
@@ -848,6 +850,19 @@ async def test_a_field_set_to_a_value_of_another_family_is_refused(db):
     await JSONFields.objects.filter(id=1).update(data_null=F("data"))
     assert await BinaryFields.objects.values_list("binary_null", flat=True) == [b"ab"]
     assert await JSONFields.objects.values_list("data_null", flat=True) == [{"a": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_literal_of_another_type_an_expression_sets_is_refused_like_a_plain_value(db):
+    """A literal of another type than the field's was left to the check of the expression's type, which let a
+    number into a text column - written as a text past max_length."""
+    await CharFields.objects.create(id=1, char="old")
+
+    with pytest.raises(ValidationError):
+        await CharFields.objects.filter(id=1).update(char=123456)
+    with pytest.raises(ValidationError):
+        await CharFields.objects.filter(id=1).update(char=Coalesce(Value(123456), Value(234567)))
+    assert await CharFields.objects.values_list("char", flat=True) == ["old"]
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,9 @@ from hare.contrib.request_query.paginations.constants import DEFAULT_CURSOR_PARA
 from hare.contrib.request_query.paginations.cursor import Cursor
 from hare.contrib.request_query.results.cursor_page import CursorPage
 from hare.exceptions import ConfigurationError
+from hare.fields.data.containers.container_field import ContainerField
+from hare.fields.data.json.json_field import JSONField
+from hare.fields.generated_field import GeneratedField
 from hare.query.expressions.ordering import Ordering
 
 if TYPE_CHECKING:
@@ -173,7 +176,13 @@ class CursorPagination(Pagination):
             # A relation crossed or a path read inside the value can give NULL for a NOT NULL field.
             reads_value_directly = not ordering_info.relations and not ordering_info.transforms
             for field in ordering_info.fields:
-                value_types.append(None if field is None else field.field_type)
+                value_type = None if field is None else field.field_type
+                value_field = None if field is None else GeneratedField.get_effective_field(field)
+                if isinstance(value_field, JSONField) and value_field.declared_value_type is None:
+                    value_type = None
+                elif isinstance(value_field, ContainerField):
+                    value_type = value_field.get_python_type()
+                value_types.append(value_type)
                 accepts_null.append(field is None or field.null or not reads_value_directly)
         try:
             cursor = Cursor.decode(cursor_text, tuple(value_types), tuple(accepts_null))

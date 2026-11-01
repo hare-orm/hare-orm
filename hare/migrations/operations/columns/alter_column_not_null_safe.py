@@ -24,7 +24,7 @@ class AlterColumnNotNullSafe(ModelBoundOperation):
 
     In a migration with ``atomic = False`` on a database adding a check without scanning
     (``Features.supports_not_valid_constraints``) the table is never scanned while it is locked: a
-    ``CHECK (col IS NOT NULL)`` is added ``NOT VALID``, validated with a lock that doesn't block writes,
+    ``CHECK (col IS NOT NULL)`` is added unchecked, validated with a lock that doesn't block writes,
     the column set NOT NULL and the check dropped. Inside an atomic migration the NULL check and the
     ALTER run under the dialect's table lock (``get_lock_table_sql()``), so no NULL slips in between -
     writes wait while the table is scanned.

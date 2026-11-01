@@ -9,7 +9,9 @@ from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.exceptions import FieldError, UnSupportedError
 from hare.query.expressions import F
-from tests.shared_models.testmodels import IntFields, MergeStock
+from hare.query.hare_column_names import HareColumnNames
+from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
+from tests.shared_models.testmodels import IntFields, LongColumnNames, MergeStock
 
 
 async def create_int_rows() -> None:
@@ -74,3 +76,34 @@ def test_wrong_old_values_are_refused():
         query.returning("id", old=("intnum", "intnum"))
     with pytest.raises(FieldError, match="Unknown field .nothing. in returning.. for model IntFields"):
         query.returning("id", old=("nothing",))
+
+
+@pytest.mark.database_independent
+def test_the_old_values_of_long_columns_come_under_names_within_the_limit():
+    old_value_names = HareColumnNames.get_old_value_names(LongColumnNames)
+    assert all(len(name.encode()) <= IDENTIFIER_LENGTH_LIMIT for name in old_value_names.values())
+    assert len(set(old_value_names.values())) == len(old_value_names)
+
+
+@requires_features(supports_returning_old_new=True)
+@pytest.mark.asyncio
+async def test_update_returns_the_old_values_of_columns_named_up_to_the_limit(db):
+    """ "hare old " before a column of 61 bytes made 70 - PostgreSQL cut the names to 63, and the two old
+    values came under one name the rows were then read by in full: KeyError."""
+    await LongColumnNames.objects.create(a=1, b=2, first="f0", second="s0", third="t0")
+    for step in (1, 2):
+        rows = (
+            await LongColumnNames.objects.filter(pk=(1, 2))
+            .update(first=f"f{step}", second=f"s{step}", third=f"t{step}")
+            .returning("pk", "first", "second", "third", old=("first", "second", "third"))
+        )
+        previous = step - 1
+        assert rows == [
+            {
+                "pk": (1, 2),
+                "first": f"f{step}",
+                "second": f"s{step}",
+                "third": f"t{step}",
+                "old": {"first": f"f{previous}", "second": f"s{previous}", "third": f"t{previous}"},
+            }
+        ]

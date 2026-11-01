@@ -3,6 +3,7 @@ ORM's descriptions of their filters once the models are bound."""
 
 from __future__ import annotations
 
+import types
 from enum import Enum
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -11,6 +12,7 @@ from pydantic.fields import FieldInfo
 
 from hare.contrib.request_query.declaration.constants import ENUM_VALUE_LOOKUPS
 from hare.contrib.request_query.declaration.declaration_builder import DeclarationBuilder
+from hare.contrib.request_query.declaration.meta_option_checks import MetaOptionChecks
 from hare.contrib.request_query.options.filter import Filter
 from hare.contrib.request_query.options.filter_field import FilterField
 from hare.contrib.request_query.types.generic_target import GenericTarget
@@ -30,7 +32,7 @@ class FilterParameterBuilder:
     """Builds the parameters of one request query class from its ``Meta.filters``, and describes
     its filter parameters for the API schema.
 
-    ``Meta.filters`` is a tuple of ``FilterField`` - a field, a path through relations too, and
+    ``Meta.filters`` is an iterable of ``FilterField`` - a field, a path through relations too, and
     the lookups a request may filter it by: ``FilterField("status", lookups=(Lookup.EXACT,
     Lookup.IN))`` makes the parameters ``status`` and ``status__in``, each typed by the value its
     filter takes; one named otherwise (``parameter="city"``) filters by its path all the same.
@@ -105,13 +107,17 @@ class FilterParameterBuilder:
             Each parameter's ``.filter()`` key and the ``FilterField`` declaring it, by parameter.
 
         Raises:
-            ConfigurationError: Two of ``Meta.filters`` make the same parameter.
+            ConfigurationError: An item lacks the filter declaration's members, or two items
+                make the same parameter.
         """
         filters = self.request_query_class.get_meta_option("filters")
         if filters is None:
             return {}
         filter_fields: dict[str, tuple[str, FilterField]] = {}
         for filter_field in filters:
+            MetaOptionChecks.check_members(
+                f"{self.class_name}.Meta.filters item", filter_field, ("get_filter_keys",), ("description",)
+            )
             for parameter, filter_key in filter_field.get_filter_keys().items():
                 if parameter in filter_fields:
                     raise ConfigurationError(f"{self.class_name}.Meta.filters makes the parameter {parameter!r} twice")
@@ -163,7 +169,8 @@ class FilterParameterBuilder:
             return GenericTarget.get_annotation(generic_field)
         if isinstance(value_type, tuple):
             return KeyColumns.__class_getitem__(value_type)
-        if value_type is None or value_type is object or not isinstance(value_type, type):
+        # A type, or one of several (an element of an array that may be NULL: ``int | None``).
+        if value_type is None or value_type is object or not isinstance(value_type, (type, types.UnionType)):
             raise ConfigurationError(
                 f"The filter {lookup_info.key!r} takes {ValueAnnotation.describe_type(value_type)} - declare its "
                 "parameter with the type it takes instead of listing it in Meta.filters"

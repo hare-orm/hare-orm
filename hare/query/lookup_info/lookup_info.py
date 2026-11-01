@@ -33,17 +33,16 @@ class LookupInfo:
             type is only known once the query runs.
         transforms: The path read inside the field's value before the lookup - a date part
             (``year``), a datetime's ``date``/``time``, a JSON key path, an array index, slice or
-            ``len``, a range bound or flag, ``unaccent``, an hstore key.
+            ``len``, a range bound or flag, a text transform of the database, a key of a key-value value.
         lookup: The lookup - a ``Lookup``, or the name of a lookup registered with
             ``Field.register_lookup()``.
         value_shape: Whether the filter value is one value, a list or a two-item range.
         value_type: The type of the value - of each item of a list or range. A tuple of types for
             a composite key; ``bool`` for ``isnull``; ``int`` for a date part or ``len``; ``str``
-            for a text lookup or a JSON/hstore key; ``object`` for any JSON value.
+            for a text lookup or a key of a JSON or key-value value; ``object`` for any JSON value.
         crosses_to_many: Whether a relation the key crosses holds many rows for one row
             (a reverse FK or a many-to-many relation) - the filter joins it.
-        requires_extension: The database extension the lookup needs (``pg_trgm`` for a trigram
-            lookup, ``unaccent``), None for none.
+        requires_extension: The database extension the lookup needs, None for none.
     """
 
     key: str

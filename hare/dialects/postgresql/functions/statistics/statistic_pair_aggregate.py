@@ -43,7 +43,7 @@ class StatisticPairAggregate(Aggregate):
         """The Postgres aggregate this call computes."""
         return self.function_name
 
-    def _get_function_field(self, field: Any, *default_values: Any) -> DistinctOptionFunction:
+    def get_function_term(self, field: Any, *default_values: Any) -> DistinctOptionFunction:
         function = DistinctOptionFunction(self.get_function_name(), field, *default_values)
         if self.distinct:
             function = function.distinct()

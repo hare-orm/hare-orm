@@ -8,7 +8,7 @@ DISTRIBUTED_TRANSACTION_XID_PREFIX = "hare_dtx_"
 DISTRIBUTED_TRANSACTION_XID_UNIQUE_PART_LENGTH = 32
 
 #: The table Transactions.distributed() records its commit decisions in on the coordinator - created
-#: on first use, outside migrations. participant_aliases is comma-joined text.
+#: on first use, outside migrations. participant_aliases is a JSON array - an alias may hold a comma.
 DISTRIBUTED_DECISIONS_TABLE_NAME = "hare_distributed_decisions"
 
 #: `hare distributed-recover`'s default `--older-than`, in seconds - a younger entry may belong to a

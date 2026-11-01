@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.exceptions import UnSupportedError
+from hare.fields.database_default import DatabaseDefault
 from hare.models.write.insert.insert_conflict import InsertConflict
+from hare.models.write.returned_values import ReturnedValues
 
 TModel = TypeVar("TModel", bound="Model")
 
@@ -116,22 +118,48 @@ class ConflictClause:
         key_field_names = ConflictClause.get_conflict_update_key_field_names(bulk_create)
         if not key_field_names:
             return [objects]
+        types = bulk_create.dialect.types
+        key_fields = [bulk_create.model._meta.fields_map[name] for name in key_field_names]
+        field_native_types = [types.get_native_key_type(field) for field in key_fields]
+        native_key_types = tuple(field_native_types) if None not in field_native_types else ()
+        single_field_name = key_field_names[0] if len(key_field_names) == 1 else None
+        has_database_defaults = any(field.has_db_default() for field in key_fields)
         groups: list[list[TModel]] = [[]]
         seen_keys: set[Any] = set()
         for obj in objects:
-            key: Any = tuple(getattr(obj, field_name, None) for field_name in key_field_names)
-            if any(value is None for value in key):
+            key: Any = (
+                getattr(obj, single_field_name, None)
+                if single_field_name is not None
+                else tuple(getattr(obj, field_name, None) for field_name in key_field_names)
+            )
+            if has_database_defaults and (
+                isinstance(key, DatabaseDefault)
+                if single_field_name is not None
+                else any(isinstance(value, DatabaseDefault) for value in key)
+            ):
+                # The database chooses this key - no other row can safely share its statement.
+                if groups[-1]:
+                    groups.append([])
+                groups[-1].append(obj)
+                groups.append([])
+                seen_keys = set()
+                continue
+            if key is None or (single_field_name is None and any(value is None for value in key)):
                 # A NULL never conflicts with anything.
                 key = None
+            elif native_key_types and (
+                type(key) is native_key_types[0]
+                if single_field_name is not None
+                else all(type(value) is expected for value, expected in zip(key, native_key_types, strict=True))
+            ):
+                # The real write validates these values; comparing their native form needs no codec.
+                pass
             else:
-                try:
-                    hash(key)
-                except TypeError:
-                    key = repr(key)
+                key = ReturnedValues.get_stored_key(types, key_fields, key_field_names, obj)
             if key is not None and key in seen_keys:
                 groups.append([])
                 seen_keys = set()
             groups[-1].append(obj)
             if key is not None:
                 seen_keys.add(key)
-        return groups
+        return groups if groups[-1] else groups[:-1]

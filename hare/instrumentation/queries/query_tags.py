@@ -1,5 +1,5 @@
-"""Sqlcommenter-style tags appended to the SQL as a comment - pg_stat_statements, auto_explain and
-slow-query logs can tell the call site.
+"""Sqlcommenter-style tags appended to the SQL as a comment - a database's statement statistics, plan
+logs and slow-query logs can tell the call site.
 """
 
 from __future__ import annotations

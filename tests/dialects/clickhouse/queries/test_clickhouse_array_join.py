@@ -77,6 +77,13 @@ async def test_the_rows_are_repeated_when_nothing_reads_the_element(shipments):
     assert await tagged.order_by("id").values_list("id", flat=True) == [1, 1, 2]
     assert await tagged.aggregate(rows=Count("id")) == {"rows": 3}
     assert await Shipment.objects.annotate(tag=ArrayJoin("tags")).count() == 3
+    # An iterator paging by the key skipped the row's second element.
+    assert [row.id async for row in tagged.order_by("id").iterator(chunk_size=1)] == [1, 1, 2]
+    assert [row async for row in tagged.order_by("id").values_list("id", flat=True).iterator(chunk_size=1)] == [
+        1,
+        1,
+        2,
+    ]
 
 
 @pytest.mark.asyncio

@@ -8,9 +8,9 @@ which counts operations per second.
 
 ## <a id="summary"></a>Summary
 
-How many times slower than hare-orm on clickhouse-driver over the native TCP protocol (its faster
-driver in this run) each library is, on average: the ratio of geometric means of the times over
-every scenario both run, except the cold start.
+How many times slower than hare-orm on clickhouse-connect over HTTP (its faster driver in this run)
+each library is, on average: the ratio of geometric means of the times over every scenario both run,
+except the cold start.
 
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-light.svg#gh-light-mode-only)
 ![Times slower than hare-orm, on average](../assets/benchmarks/clickhouse-summary-slower-en-dark.svg#gh-dark-mode-only)
@@ -27,7 +27,7 @@ Operations per second:
 ## <a id="by-scenario"></a>By scenario
 
 Each scenario is drawn on its own scale: compare the bars within one scenario, not across scenarios.
-The fastest time is in bold. A bar is the median of 3 runs, and the thin line over it spans the best
+The fastest time is in bold. A bar is the median of 5 runs, and the thin line over it spans the best
 run to the worst.
 
 ### <a id="reads"></a>Reads
@@ -44,16 +44,16 @@ run to the worst.
 
 | | |
 |---|---|
-| Date | 2026-10-26 |
+| Date | 2026-10-30 |
 | Machine | Windows 11, 13th Gen Intel(R) Core(TM) i5-13400, 16 CPU |
 | Python | 3.14.3 |
-| hare-orm release | 0.10.0 |
-| Runs | 3, median |
+| hare-orm release | 0.12.0 |
+| Runs | 5, median |
 | ClickHouse | 25.8.33.6 |
 | asynch | 0.2.5 |
 | clickhouse-connect | 1.10.0 |
 | clickhouse-driver | 0.2.11 |
-| hare-orm | 0.10.0 |
+| hare-orm | 0.12.0 |
 | clickhouse-sqlalchemy | 0.3.2, Python 3.12.3 |
 | django-clickhouse-backend | 2.0 |
 | Rows in the table | 1,000,000 |

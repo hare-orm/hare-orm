@@ -234,7 +234,9 @@ class ShadowDrift:
 
     @staticmethod
     def get_table_only(model_state: ModelState) -> ModelState:
-        """An unmanaged model's state without the objects it declares beside its table.
+        """An unmanaged model's state without objects beside its table. An identity outside the primary
+        key becomes an ordinary column in the shadow: relations may target it, but its generation is
+        unnecessary for a table standing in for the target.
 
         Args:
             model_state: The model's state.
@@ -246,6 +248,9 @@ class ShadowDrift:
         table_state.options = {
             name: value for name, value in model_state.options.items() if name not in DRIFT_UNMANAGED_LEFT_OUT_OPTIONS
         }
+        for field in table_state.fields.values():
+            if field.generated and not field.pk and field.generated_requires_primary_key:
+                field.generated = False
         return table_state
 
     async def read_parts(

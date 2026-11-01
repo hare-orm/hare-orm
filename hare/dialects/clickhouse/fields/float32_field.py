@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import math
 import struct
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.dialects.clickhouse.fields.constants import FLOAT32_MAX
 from hare.exceptions import ValidationError
 from hare.fields.data.numeric.float_field import FloatField
+from hare.fields.enums import ValueComputation
 from hare.fields.narrowing.constants import FLOAT32_MANTISSA_BITS
 
 if TYPE_CHECKING:
+    from hare.fields.field import Field
     from hare.models import Model
 
 TFloat = TypeVar("TFloat", float, float | None)
@@ -25,6 +27,16 @@ class Float32Field(FloatField[TFloat]):
     EXACT_DECIMAL_DIGITS = 6
     COLUMN_TYPE_FROM_DIALECT = True
     keeps_native_db_values = False
+
+    #: The field of a sum, an average and arithmetic of float32 values - ClickHouse computes each as a
+    #: Float64, which a float32 would round.
+    FLOAT64_RESULT_FIELD: ClassVar[FloatField[float]] = FloatField()
+
+    def get_computed_field(self, computation: ValueComputation) -> Field[Any]:
+        if computation is ValueComputation.STATISTIC:
+            # A standard deviation or a variance of float32 values is a Float32.
+            return self
+        return Float32Field.FLOAT64_RESULT_FIELD
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         value = super().to_db_value(value, instance)

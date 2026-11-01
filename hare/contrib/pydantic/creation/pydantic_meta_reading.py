@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict
 
@@ -38,6 +38,8 @@ class PydanticMetaReading:
                     include=accumulated.include + klass_meta.include,
                     exclude=accumulated.exclude + klass_meta.exclude,
                     computed=accumulated.computed + klass_meta.computed,
+                    extra_fields={**accumulated.extra_fields, **klass_meta.extra_fields},
+                    related_values={**accumulated.related_values, **klass_meta.related_values},
                 )
         return accumulated if accumulated is not None else PydanticMetaData()
 
@@ -52,6 +54,8 @@ class PydanticMetaReading:
         sort_alphabetically: bool | None,
         max_recursion: int | None,
         model_config: ConfigDict | None,
+        extra_fields: dict[str, Any] | None = None,
+        related_values: dict[str, str] | None = None,
     ) -> PydanticMetaData:
         """The options of a model's schema: its ``PydanticMeta``, an override's, then the call's arguments.
 
@@ -65,6 +69,8 @@ class PydanticMetaReading:
             sort_alphabetically: Whether the fields are sorted by name.
             max_recursion: How deep relations are followed.
             model_config: The Pydantic config of the schema.
+            extra_fields: The extra fields.
+            related_values: The related values.
 
         Returns:
             The options.
@@ -76,6 +82,8 @@ class PydanticMetaReading:
             exclude=exclude,
             include=include,
             computed=computed,
+            extra_fields=extra_fields,
+            related_values=related_values,
             allow_cycles=allow_cycles,
             sort_alphabetically=sort_alphabetically,
             max_recursion=max_recursion,

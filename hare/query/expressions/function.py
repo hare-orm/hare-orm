@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, ClassVar
 
 from hare.dialects.enums import ParameterPosition
-from hare.exceptions import FieldError, QueryError
+from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.field import Field
@@ -17,6 +17,7 @@ from hare.query.expressions.compatibility.constants import TEXT_VALUE_TYPE
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.constants import FIELD_TYPED_LITERAL_TYPES, NO_CAST_SQL_TYPES
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
@@ -102,9 +103,28 @@ class Function(CombinableExpression):
         arguments = self.default_values if isinstance(self.field, str) else (self.field, *self.default_values)
         return [literal for argument in arguments for literal in self.get_literals_of(argument)]
 
-    def _get_function_field(self, term: Term | str, *default_values: Any) -> HareSqlFunction:
+    def get_function_term(self, term: Term | str, *default_values: Any) -> HareSqlFunction:
+        """The SQL term of the call - ``NAME(arguments...)`` of ``function_name``, else the term
+        ``database_function`` builds. A function writing its SQL otherwise overrides it.
+
+        Args:
+            term: The term of the first argument.
+            default_values: The terms of the arguments after it.
+
+        Returns:
+            The term.
+
+        Raises:
+            ConfigurationError: The class sets neither ``function_name`` nor ``database_function`` - no
+                SQL function is named.
+        """
         if self.function_name is not None:
             return self.database_function(self.function_name, term, *default_values)
+        if self.database_function is HareSqlFunction:
+            raise ConfigurationError(
+                f"{type(self).__name__} names no SQL function: set function_name, set database_function to a "
+                "term class building its SQL, or override get_function_term()"
+            )
         return self.database_function(term, *default_values)  # type:ignore[arg-type]
 
     def _get_nested_field(self, expression_context: ExpressionContext, field: str) -> ExpressionResult:
@@ -309,7 +329,7 @@ class Function(CombinableExpression):
         Returns:
             The SQL function term.
         """
-        return self._get_function_field(function_arg.term, *default_terms)
+        return self.get_function_term(function_arg.term, *default_terms)
 
     def _get_result_term(
         self,
@@ -349,6 +369,7 @@ class Function(CombinableExpression):
             The term, the joins and the output field.
         """
 
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         function_arg = self._get_collation_argument(
             self._get_argument(expression_context, self.field, treat_str_as_field=True)
         )

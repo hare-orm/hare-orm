@@ -239,6 +239,13 @@ class DeleteQuery(MatchingRowsQuery):
         ):
             # Fast path: no incoming relations at all, so no PROTECT/CASCADE/SET_NULL is possible
             # - one UPDATE with this DeleteQuery's own filters, no extra SELECT needed.
+            if live_only and not self.model._meta.has_primary_key:
+                return await UpdateQuery(
+                    self._get_live_rows(),
+                    {soft_delete_field: CascadeDeletion.get_deleted_at()},
+                    WriteType.SOFT_DELETE,
+                    "delete",
+                )
             if live_only:
                 live_pks = await self._get_matching_pks(live_only=True)
                 if not live_pks:
@@ -263,6 +270,19 @@ class DeleteQuery(MatchingRowsQuery):
                 self, {soft_delete_field: CascadeDeletion.get_deleted_at()}, WriteType.SOFT_DELETE, "delete"
             )
         return await self._delete_matching_rows_with_cascade(live_only=live_only)
+
+    def _get_live_rows(self) -> MatchingRowsQuery:
+        """The rows of a soft delete seeing deleted rows too - ``include_deleted()`` - that aren't deleted
+        yet: its own filters and the condition of a live row, for a model without a primary key to pick
+        them by.
+
+        Returns:
+            The rows.
+        """
+        soft_delete_field = cast("str", self.model._meta.soft_delete_field)
+        live_rows = MatchingRowsQuery(self)
+        live_rows._q_objects = [*self._q_objects, Q(**{f"{soft_delete_field}__isnull": True})]
+        return live_rows
 
     def __await__(self) -> Generator[Any, None, int | None]:
         # .limit(0) matches no rows - nothing to write.

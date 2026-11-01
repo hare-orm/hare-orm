@@ -1,9 +1,9 @@
 import asyncio
-from uuid import uuid4
 
 import pytest
 
 from hare.exceptions import DoesNotExist, IncompleteInstanceError, IntegrityError, QueryError
+from hare.fields.uuid7 import Uuid7
 from tests.shared_models.testmodels import (
     Author,
     DocumentRevisionNote,
@@ -57,7 +57,7 @@ async def test_get_new_version_rejects_id_and_version_overrides(db):
     v1 = await VersionedDocument.objects.create(title="Draft")
 
     with pytest.raises(QueryError):
-        v1.get_new_version(id=uuid4(), title="Revised")
+        v1.get_new_version(id=Uuid7.new(), title="Revised")
 
     with pytest.raises(QueryError):
         v1.get_new_version(version=99, title="Revised")
@@ -131,7 +131,7 @@ async def test_get_last_version_or_exception_raises_when_missing(db):
     which SQLite's weakly-typed columns accept but Postgres's native UUID column rejects at the
     driver level before the query even runs, masking the actual not-found behavior being tested."""
     with pytest.raises(DoesNotExist):
-        await VersionedDocument.get_last_version_or_exception(id=uuid4())
+        await VersionedDocument.get_last_version_or_exception(id=Uuid7.new())
 
 
 @pytest.mark.asyncio
@@ -140,7 +140,7 @@ async def test_get_last_version_or_exception_custom_exception(db):
         pass
 
     with pytest.raises(CustomNotFound):
-        await VersionedDocument.get_last_version_or_exception(id=uuid4(), exception=CustomNotFound)
+        await VersionedDocument.get_last_version_or_exception(id=Uuid7.new(), exception=CustomNotFound)
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,10 @@ SQLite — библиотека, которая пишет один файл: у
 
 ## <a id="values"></a>Значения
 
+Имена в кавычках не различают регистр букв ASCII: `Name` и `name` обозначают одну колонку. Буквы вне ASCII
+различаются, поэтому `É` и `é` могут обозначать разные колонки. При проверке объявлений таблиц, колонок и
+индексов hare использует это правило сравнения имён.
+
 | SQLite | hare |
 |---|---|
 | Точный десятичный тип | У `DecimalField` в SQLite нет колонки, а значение `Decimal` в запросе к SQLite отклоняется до любого SQL — см. [`DecimalField` (SQLite)](../../models/field-types.ru.md#decimal-field-sqlite). |
@@ -101,6 +105,7 @@ hare не заставляет SQLite давать результат PostgreSQL
 | Триггеры на команду, отложенные триггеры и ограничения, выключенный триггер | `TriggerForEach.STATEMENT`, `deferrable=True` и `enabled=False` бросают `UnSupportedError` — см. [Триггеры](../../models/constraints-and-triggers.ru.md#triggers). |
 | `NULLS NOT DISTINCT` | `UniqueConstraint(nulls_distinct=False)` бросает `ConfigurationError` при привязке модели. |
 | Колонки `INCLUDE`, место `NULL` в ключе индекса | Индекс создаётся без колонок `include`; ключ, задающий место `NULL`, бросает `UnSupportedError` — см. [Индексы](../../models/indexes.ru.md). |
+| Имена, отличающиеся только регистром букв | Две таблицы одной схемы, две колонки модели, два именованных ограничения или индекса с такими именами (`"Note"` и `"note"`) дают `ConfigurationError` при привязке моделей — SQLite считает их одним именем. |
 | `LIKE` в условии ограничения или индекса | Текстовый оператор фильтра записывается как `GLOB` и находит те же строки с учётом регистра — см. [Ограничения](../../models/constraints-and-triggers.ru.md#constraints). |
 | Функции hare вне hare | Ограничение или индекс, которым нужна такая функция, бросают `UnSupportedError` — см. [В ограничениях и индексах](functions.ru.md#in-constraints-and-indexes). |
 | DDL правил сравнения и расширений | `CreateCollation`/`RemoveCollation` и `CreateExtension`/`RemoveExtension` пропускаются с предупреждением — см. [Правила сравнения](../../migrations/operations.ru.md#raw-operations). |

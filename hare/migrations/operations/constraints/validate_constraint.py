@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ValidateConstraint(ModelBoundOperation):
-    """Checks the existing rows against a constraint added ``NOT VALID`` (``VALIDATE CONSTRAINT``) - with
+    """Checks the existing rows against a constraint added unchecked (``not_valid=True``) - with
     a lock that doesn't block writes. Nothing to do without ``Features.supports_not_valid_constraints``,
     or going back.
 

@@ -552,3 +552,17 @@ async def test_distinct_on_a_field_with_a_filter_across_many_rows(db):
     queryset = Tournament.objects.filter(events__name__in=["one", "two", "three"]).order_by("name", "desc")
     assert await queryset.distinct("name").values_list("id", flat=True) == [first.id]
     assert await queryset.distinct("name").count() == 1
+
+
+@pytest.mark.asyncio
+async def test_an_iterator_of_unordered_distinct_values_reads_the_rows_of_the_query(db):
+    """The pages of an unordered distinct() were ordered by the primary key - a column added to
+    SELECT DISTINCT: the iterator repeated a value the query reads once."""
+    for tournament_id, name in ((1, "X"), (2, "Y"), (3, "X")):
+        await Tournament.objects.create(id=tournament_id, name=name)
+    names = Tournament.objects.values_list("name", flat=True).distinct()
+    assert sorted(await names) == ["X", "Y"]
+    for chunk_size in (1, 2):
+        assert sorted([name async for name in names.iterator(chunk_size=chunk_size)]) == ["X", "Y"]
+    rows = Tournament.objects.values("name").distinct()
+    assert sorted([row["name"] async for row in rows.iterator(chunk_size=1)]) == ["X", "Y"]

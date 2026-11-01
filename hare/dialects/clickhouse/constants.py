@@ -207,9 +207,10 @@ CLICKHOUSE_CONNECTION_OPTIONS = ConnectionOptions(
     ConnectionOption("transactions", ConnectionOptionType.BOOLEAN),
     ConnectionOption("keeper_hosts", ConnectionOptionType.TEXT),
 )
-CLICKHOUSE_DIALECT = ClickhouseDialect()
 #: The dialect of a connection to a server with the JSON type - a JSONField is a JSON column there.
 CLICKHOUSE_NATIVE_JSON_DIALECT = ClickhouseDialect(stores_json_natively=True)
+#: The registered "clickhouse" dialect - an extension registered on it reaches the JSON type's dialect too.
+CLICKHOUSE_DIALECT = ClickhouseDialect(variants=(CLICKHOUSE_NATIVE_JSON_DIALECT,))
 #: The functions reading a value of a dictionary by its key - with the attribute's own default for a
 #: key the dictionary doesn't hold, and with a given one.
 CLICKHOUSE_DICTIONARY_FUNCTION = "dictGet"

@@ -5,8 +5,8 @@ a response, with its OpenAPI schema."""
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from collections.abc import Callable, Generator, Mapping
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
 from litestar.dto import DTOField, Mark, _codegen_backend as codegen_backend
 from litestar.dto.base_dto import AbstractDTO
@@ -20,6 +20,7 @@ from hare.contrib.frameworks.litestar.constants import (
     DTO_READ_ONLY_CONSTRAINT,
     TO_MANY_RELATION_TYPES,
 )
+from hare.contrib.frameworks.litestar.hare_dto_extra_fields import HareDTOExtraFields
 from hare.contrib.frameworks.litestar.hare_transfer_function_factory import HareTransferFunctionFactory
 from hare.exceptions import NoValuesFetched
 from hare.models import Model
@@ -56,7 +57,27 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     ``rename_strategy``, ``max_nested_depth`` (1 by default: the related rows without their own
     relations). A field of related rows is named by its path through the relations:
     ``exclude={"author.books", "tags.id"}``.
+
+    Besides the model's fields it answers with what a subclass declares - read-only, ``null`` where a row
+    has no value for it, and named by a path through the relations for the related rows' (``"author.age"``):
+    ``extra_fields`` (a query's annotation, an attribute set on the row after it was read, with its type),
+    ``computed`` (a property or method of the model, typed by its return annotation) and
+    ``related_values`` (a value of a related row, flattened)::
+
+        class BookDTO(HareDTO[Book]):
+            extra_fields = {"reviews_count": int}
+            computed = ("title_length",)
+            related_values = {"author_name": "author.name"}
     """
+
+    #: Values read from a row by name, with their types - a query's annotation, an attribute set on the row.
+    extra_fields: ClassVar[Mapping[str, Any]] = {}
+    #: Properties and methods of the model, typed by their return annotations.
+    computed: ClassVar[tuple[str, ...]] = ()
+    #: Values of related rows, flattened: a name to the path of the related field.
+    related_values: ClassVar[Mapping[str, str]] = {}
+    #: The declarations above by the model they belong to - set as the DTO is built for a handler.
+    declared_extra_fields: ClassVar[HareDTOExtraFields | None] = None
 
     @classmethod
     def create_for_field_definition(
@@ -70,6 +91,16 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
                 cls.get_litestar_path(cls.model_type, path): name for path, name in cls.config.rename_fields.items()
             },
         )
+        if cls.extra_fields or cls.computed or cls.related_values:
+            cls.declared_extra_fields = HareDTOExtraFields(
+                cls.model_type, cls.extra_fields, cls.computed, cls.related_values, HareDTO.read_attribute
+            )
+            cls.attribute_accessor = cls.read_with_extra_fields  # type: ignore[method-assign]
+        else:
+            # Every field of every row is read through the accessor - a DTO declaring nothing reads them as
+            # they are, with no look for an extra field.
+            cls.declared_extra_fields = None
+            cls.attribute_accessor = staticmethod(HareDTO.read_attribute)  # type: ignore[method-assign]
         # Litestar's generated transfer code - a nested row's functions too - comes from the factory its module
         # names: the calls of HareDTO.attribute_accessor() need hare's.
         codegen_backend.TransferFunctionFactory = HareTransferFunctionFactory  # type: ignore[misc]
@@ -121,10 +152,42 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
 
     @staticmethod
     def attribute_accessor(row: object, name: str) -> Any:
-        """Reads a row's attribute for Litestar - ``None`` for a relation the query didn't load.
+        """Reads a row's attribute for Litestar - the DTO's own reader, set as it is built for a handler:
+        ``read_attribute()``, or ``read_with_extra_fields()`` for a DTO declaring extra fields.
 
         Args:
-            row: A model instance.
+            row: A model instance - or the page holding the rows.
+            name: The attribute.
+
+        Returns:
+            The attribute's value.
+        """
+        return HareDTO.read_attribute(row, name)
+
+    @classmethod
+    def read_with_extra_fields(cls, row: object, name: str) -> Any:
+        """Reads a row's attribute for Litestar - a declared extra field's value, else the attribute.
+
+        Args:
+            row: A model instance - or the page holding the rows.
+            name: The attribute.
+
+        Returns:
+            The attribute's value; the related row, the list of related rows, or None for a
+            relation; None for a field the query didn't select (``fields=...``), not its default;
+            a declared extra field's value.
+        """
+        extra_field = cast("HareDTOExtraFields", cls.declared_extra_fields).find(row, name)
+        if extra_field is not None:
+            return extra_field.read(row)
+        return HareDTO.read_attribute(row, name)
+
+    @staticmethod
+    def read_attribute(row: object, name: str) -> Any:
+        """Reads an attribute of a row - ``None`` for a relation the query didn't load.
+
+        Args:
+            row: A model instance - or the page holding the rows.
             name: The attribute.
 
         Returns:
@@ -150,6 +213,16 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     def generate_field_definitions(cls, model_type: type[Model]) -> Generator[DTOFieldDefinition]:
         for name, field in model_type._meta.fields_map.items():
             yield cls.get_field_definition(model_type, name, field)
+        if cls.declared_extra_fields is not None:
+            for name, extra_field in cls.declared_extra_fields.get_fields(model_type).items():
+                yield DTOFieldDefinition.from_field_definition(
+                    field_definition=FieldDefinition.from_kwarg(
+                        annotation=extra_field.annotation, name=name, default=None
+                    ),
+                    model_name=model_type.__name__,
+                    default_factory=None,
+                    dto_field=DTOField(mark=Mark.READ_ONLY),
+                )
 
     @classmethod
     def get_field_definition(cls, model_type: type[Model], name: str, field: Field[Any]) -> DTOFieldDefinition:

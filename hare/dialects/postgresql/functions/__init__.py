@@ -36,6 +36,8 @@ from hare.dialects.postgresql.functions.trigram import (
     TrigramWordDistance,
     TrigramWordSimilarity,
 )
+from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
+from hare.query.expressions.dialect_expressions import DialectExpressions
 
 __all__ = [
     "ArraySubquery",
@@ -70,3 +72,41 @@ __all__ = [
     "TrigramWordDistance",
     "TrigramWordSimilarity",
 ]
+
+# The functions only PostgreSQL has - a query on another database refuses each before any SQL.
+DialectExpressions.register(
+    PostgresqlDialect,
+    (
+        ArraySubquery,
+        BitAnd,
+        BitOr,
+        BitXor,
+        BoolAnd,
+        BoolOr,
+        Corr,
+        CovarPop,
+        JSONBAgg,
+        RandomUUID,
+        RangeAgg,
+        RegrAvgX,
+        RegrAvgY,
+        RegrCount,
+        RegrIntercept,
+        RegrR2,
+        RegrSXX,
+        RegrSXY,
+        RegrSYY,
+        RegrSlope,
+        STDWithin,
+        STDistance,
+        StringAgg,
+        Subpath,
+        TransactionNow,
+        TrigramDistance,
+        TrigramSimilarity,
+        TrigramStrictWordDistance,
+        TrigramStrictWordSimilarity,
+        TrigramWordDistance,
+        TrigramWordSimilarity,
+    ),
+)

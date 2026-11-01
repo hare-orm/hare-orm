@@ -22,6 +22,9 @@ PASSWORD_PROVIDER_OPTIONS = ConnectionOptions(
 #: Host (reg-name or bracketed IPv6) and optional port right after a DB_URL's userinfo "@",
 #: followed by the end of the authority.
 #: A bracketed IPv6 host may carry a percent-encoded zone id ("[fe80::1%25eth0]").
+#: A DB_URL's query - ``name=value`` pairs joined by "&", a name holding no "@", "/" or "?" and a value no
+#: "?": what follows a password's own "@" and "?" (``p@s?s@host/db?x=1``) is no query.
+DB_URL_QUERY_PATTERN = r"[^=&@/?#]+=[^&?]*(?:&[^=&@/?#]+=[^&?]*)*"
 DB_URL_AUTHORITY_HOST_PATTERN = (
     r"(?:\[[0-9A-Fa-f:.]*(?:%25[A-Za-z0-9._~%-]+)?\]|[A-Za-z0-9._~%!$&'()*+,;=-]*)(?::[0-9]*)?(?=[/?#]|$)"
 )

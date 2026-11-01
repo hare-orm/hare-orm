@@ -27,6 +27,10 @@ from task cancellation, refusing a statement after the transaction ended, and re
 | `_undo_failed_begin()` | End a transaction whose `BEGIN` raised but may have landed. Nothing by default. |
 | `_end_unfinished_transaction()` | End what a top-level transaction left open on the driver once its block exits. Nothing by default. |
 
+Set `begins_without_suspending = True` only when `_driver_begin()` initializes deferred state without
+ever suspending. That preparation runs directly; the actual deferred `BEGIN` must still use the
+protected `PendingStatements` path. The default is `False`, which shields `_driver_begin()` itself.
+
 The six `_driver_*` methods and `_get_new_savepoint_name()` are abstract; the rest have defaults. A
 nested transaction is a client of the same class sharing the connection — the base class makes it.
 

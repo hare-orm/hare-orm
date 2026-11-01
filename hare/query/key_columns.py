@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -108,6 +108,36 @@ class KeyColumns:
         if len(left_columns) == 1:
             return left_columns[0] == right_columns[0]
         return Tuple(*left_columns) == Tuple(*right_columns)
+
+    @staticmethod
+    def get_primary_key_name(model: type[Model], annotations: Mapping[str, Any], name: str) -> str:
+        """A name starting with an alias of a composite key as the same path through that key.
+
+        An alias of ``pk``, a relation or ``relation__pk`` retains the key's individual columns
+        when used by a filter, ordering or selection.
+
+        Args:
+            model: The queried model.
+            annotations: The query's annotations.
+            name: A filter key, an ordering or a selected name.
+
+        Returns:
+            The name, with such an alias replaced by the path it names.
+        """
+        head, separator, rest = name.partition("__")
+        annotation = annotations.get(head)
+        if annotation is None:
+            return name
+        # Local import: the query package imports this module.
+        from hare.query.expressions.f import F
+
+        if type(annotation) is not F:
+            return name
+        from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
+
+        if len(ConcreteFieldPaths.get_paths(model, annotation.name)) <= 1:
+            return name
+        return f"{annotation.name}{separator}{rest}"
 
     @staticmethod
     def get_primary_key_q(model: type[Model], key: str, value: Any) -> Q | None:

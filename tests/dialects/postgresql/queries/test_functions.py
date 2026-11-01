@@ -13,9 +13,9 @@ from hare.dialects.postgresql.fields.ranges import (
     Range,
 )
 from hare.dialects.postgresql.functions.aggregates import BoolAnd, BoolOr, JSONBAgg, StringAgg
-from hare.exceptions import FieldError, ValidationError
+from hare.exceptions import FieldError, UnSupportedError, ValidationError
 from hare.query.expressions import F, Q
-from hare.query.functions import ArrayAgg, ArrayItem, Count, Sum
+from hare.query.functions import ArrayAgg, ArrayItem, Count, Max, Min, Sum
 from hare.query.functions.datetime import (
     ExtractDay,
     ExtractMonth,
@@ -278,6 +278,21 @@ async def test_array_agg_of_no_rows_is_none(db_agg):
     assert (
         await AggEntry.objects.filter(label="missing").annotate(labels=ArrayAgg("label")).group_by("id").values() == []
     )
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("aggregate", [Min, Max])
+@pytest.mark.parametrize(
+    ("model", "field_name", "field_class"),
+    [(AggBook, "in_print", "BooleanField"), (AggEntry, "payload", "JSONField")],
+)
+@pytest.mark.asyncio
+async def test_min_and_max_of_a_type_postgresql_has_no_aggregate_of_are_refused(
+    db_agg, aggregate, model, field_name, field_class
+):
+    """min()/max() of boolean or jsonb went to PostgreSQL, which has neither - its own error came back."""
+    with pytest.raises(UnSupportedError, match=f"{field_class} - the postgresql database has no"):
+        await model.objects.aggregate(value=aggregate(field_name))
 
 
 @requires_features(dialect="postgresql")

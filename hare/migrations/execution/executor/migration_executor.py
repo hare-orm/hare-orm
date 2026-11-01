@@ -33,6 +33,7 @@ from hare.migrations.state.state import State
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.tenancy.tenant_schemas import TenantSchemas
 from hare.query.scopes.row_visibility import RowVisibility
+from hare.query.scopes.tenants.model_tenants import ModelTenants
 from hare.query.scopes.tenants.tenant_values import TenantValues
 
 
@@ -105,7 +106,8 @@ class MigrationExecutor:
 
         Args:
             targets: The migrations to reach - every app's latest when None; with ``steps``, what
-                the schema of each tenant, with a journal of its own, is migrated to.
+                the schema of each tenant, with a journal of its own, is migrated to. A one-shot
+                iterable is retained for every tenant's plan.
             steps: The steps to run in the shared schema instead of a plan of their own - those
                 ``ConnectionsPlan`` gives this connection.
             applied: The migrations applied when the steps run - of every connection; the journal's
@@ -179,7 +181,14 @@ class MigrationExecutor:
         has_tenant_schemas = (
             self.connection.tenant_schema_template is not None and self.connection.tenant_schema is None
         )
+        if has_tenant_schemas and targets is not None:
+            targets = tuple(targets)
         scope = RowVisibility.active_tenant.get()
+        if type(scope) is ModelTenants:
+            # A scope given model by model migrates as a scope of the one tenant it gives the connection's
+            # Meta.tenant_schema models - naming none of them, as no scope.
+            schema_tenant = scope.get_schema_tenant(self.connection.connection_alias) if has_tenant_schemas else None
+            scope = None if schema_tenant is None else TenantValues(schema_tenant)
         # A scope of several tenants migrates their schemas alone, as a scope of one tenant does its own.
         scoped_schema_names = (
             {TenantSchemas.get_schema_name(self.connection, tenant) for tenant in scope.values}

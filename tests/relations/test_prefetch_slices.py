@@ -12,9 +12,11 @@ import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.exceptions import QueryError
 from hare.query.expressions import Window
 from hare.query.functions.window import RowNumber, Sum
-from hare.query.relation_loading import Prefetch
+from hare.query.relation_loading import Prefetch, prefetch_related_objects
+from hare.sql.analytics import Count
 from tests.relations.prefetch_slices_models import Chapter, Label, Novel, Parcel, Shipment, Writer, WriterProfile
 
 
@@ -132,6 +134,169 @@ async def test_composite_keys():
     assert [[label.name for label in shipment.labels] for shipment in shipments] == [["c", "b"], [], []]
 
 
+def keys_of_partial(objs, unloaded_name: str) -> list:
+    """The keys of partial objects - their unloaded field left unread."""
+    assert all(obj._partial and unloaded_name not in vars(obj) for obj in objs)
+    return [obj.pk for obj in objs]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_slice_of_partial_rows():
+    """The keys of each parent's slice were read by values_list() off the only()/defer() queryset -
+    refused: ".values_list() cannot be used with .only()"."""
+    novels = await Novel.objects.order_by("id").prefetch_related(
+        Prefetch("labels", queryset=Label.objects.only("id").order_by("-name")[1:2], to_attribute="second"),
+        Prefetch("labels", queryset=Label.objects.defer("name")[:1], to_attribute="first"),
+    )
+    assert [keys_of_partial(novel.second, "name") for novel in novels] == [[2], [], [2], [1], []]
+    assert [keys_of_partial(novel.first, "name") for novel in novels] == [[1], [1], [2], [1], []]
+    shipments = await Shipment.objects.order_by("store", "number").prefetch_related(
+        Prefetch("labels", queryset=Label.objects.only("id").order_by("-name")[:2]),
+        Prefetch("parcels", queryset=Parcel.objects.defer("weight").order_by("weight")[1:]),
+    )
+    assert [keys_of_partial(shipment.labels, "name") for shipment in shipments] == [[4, 3], [3], []]
+    assert [keys_of_partial(shipment.parcels, "weight") for shipment in shipments] == [
+        [(11, 3), (11, 1)],
+        [(12, 3), (12, 1)],
+        [(21, 3), (21, 1)],
+    ]
+    writers = await Writer.objects.order_by("id").prefetch_related(
+        Prefetch("novels", queryset=Novel.objects.only("id", "rating").order_by("-rating")[:2])
+    )
+    assert [[novel.rating for novel in writer.novels] for writer in writers] == [[9, 7], [8, 3], []]
+    assert [keys_of_partial(writer.novels, "title") for writer in writers] == [[2, 3], [5, 4], []]
+    places = Label.objects.only("id").annotate(place=Window(RowNumber(), order_by=["-name"]))
+    novels = await Novel.objects.order_by("id").prefetch_related(Prefetch("labels", queryset=places[:1]))
+    assert [[(label.pk, label.place) for label in novel.labels] for novel in novels] == [
+        [(1, 4)],
+        [(1, 4)],
+        [(2, 3)],
+        [(1, 4)],
+        [],
+    ]
+    assert [keys_of_partial(novel.labels, "name") for novel in novels] == [[1], [1], [2], [1], []]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_slice_of_rows_with_their_related_rows_joined():
+    """The keys of each parent's slice were read by values()/values_list() off the select_related()
+    queryset - refused: ".values_list() cannot be used with select_related('writer')"."""
+    labels = await Label.objects.order_by("id").prefetch_related(
+        Prefetch("novels", queryset=Novel.objects.select_related("writer").order_by("-rating")[:1])
+    )
+    assert [[(novel.title, novel.writer.name) for novel in label.novels] for label in labels] == [
+        [("n2", "anna")],
+        [("n3", "anna")],
+        [("n1", "anna")],
+        [("n3", "anna")],
+    ]
+    novels = await Novel.objects.order_by("id").prefetch_related(
+        Prefetch("chapters", queryset=Chapter.objects.select_related("novel").order_by("-number")[1:])
+    )
+    assert [[(chapter.number, chapter.novel.title) for chapter in novel.chapters] for novel in novels] == [
+        [(2, f"n{novel_id}"), (1, f"n{novel_id}")] for novel_id in range(1, 6)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_slice_of_rows_a_to_many_filter_repeats():
+    """n1 and n4 have labels a and b, so the filter repeats them. Numbered before DISTINCT, a distinct
+    slice skipped rows (anna's [:2] was [n1]); without distinct, a key picked every repeat of its row
+    (anna's [:1] was [n1, n1])."""
+    labelled = Novel.objects.filter(labels__name__in=["a", "b"]).order_by("id")
+    distinct = labelled.distinct()
+
+    async def get_writer_titles(queryset):
+        writers = await Writer.objects.order_by("id").prefetch_related(Prefetch("novels", queryset=queryset))
+        return [titles(writer.novels) for writer in writers]
+
+    assert await get_writer_titles(distinct[:2]) == [["n1", "n2"], ["n4"], []]
+    assert await get_writer_titles(distinct[1:2]) == [["n2"], [], []]
+    assert await get_writer_titles(labelled[:1]) == [["n1"], ["n4"], []]
+    assert await get_writer_titles(labelled[:2]) == [["n1", "n1"], ["n4", "n4"], []]
+    assert await get_writer_titles(labelled[1:3]) == [["n1", "n2"], ["n4"], []]
+
+    async def get_label_titles(queryset):
+        labels = await Label.objects.order_by("id").prefetch_related(Prefetch("novels", queryset=queryset))
+        return [titles(label.novels) for label in labels]
+
+    assert await get_label_titles(distinct[:2]) == [["n1", "n2"], ["n1", "n3"], ["n1"], ["n3"]]
+    assert await get_label_titles(labelled[:2]) == [["n1", "n1"], ["n1", "n1"], ["n1", "n1"], ["n3"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_prefetch_through_a_relation_only_loads_reads_the_keys_it_needs():
+    """only() left out the key a nested prefetch reads on the relation it loads - NoValuesFetched; a
+    prefetch of a partial object missing its key raised NoValuesFetched, not QueryError."""
+    chapters = (
+        await Chapter.objects.filter(number=1)
+        .order_by("id")
+        .only("number", "novel__title")
+        .prefetch_related("novel__writer", "novel__labels")
+    )
+    assert [(chapter.novel.title, chapter.novel.writer.name) for chapter in chapters] == [
+        ("n1", "anna"),
+        ("n2", "anna"),
+        ("n3", "anna"),
+        ("n4", "boris"),
+        ("n5", "boris"),
+    ]
+    assert [[label.name for label in chapter.novel.labels] for chapter in chapters] == [
+        ["a", "b", "c"],
+        ["a"],
+        ["b", "d"],
+        ["a", "b"],
+        [],
+    ]
+    partial_chapter = await Chapter.objects.only("number").get(id=11)
+    with pytest.raises(QueryError, match="Fetching 'novel'"):
+        await prefetch_related_objects([partial_chapter], "novel")
+    partial_novel = await Novel.objects.only("title").get(id=1)
+    with pytest.raises(QueryError, match="Fetching 'labels'"):
+        await prefetch_related_objects([partial_novel], "labels")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_deep_only_keeps_the_keys_of_intermediate_prefetches():
+    """An explicit prefetch can replace a relation loaded by a deeper only() path."""
+    chapters = (
+        await Chapter.objects.filter(number=1)
+        .order_by("id")
+        .only("number", "novel__writer__name")
+        .prefetch_related(Prefetch("novel__writer", queryset=Writer.objects.filter(name="anna")))
+    )
+    assert [chapter.novel.writer.name if chapter.novel.writer is not None else None for chapter in chapters] == [
+        "anna",
+        "anna",
+        "anna",
+        None,
+        None,
+    ]
+    assert all(chapter.novel._partial and "title" not in vars(chapter.novel) for chapter in chapters)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+@pytest.mark.parametrize(
+    ("model", "selected_field", "path", "relation"),
+    [
+        (Chapter, "number", "novel__writer", "novel"),
+        (Parcel, "weight", "shipment__labels", "shipment"),
+    ],
+)
+async def test_a_nested_prefetch_requires_loaded_single_and_composite_relation_keys(
+    model, selected_field, path, relation
+):
+    partial = await model.objects.only(selected_field).first()
+    with pytest.raises(QueryError, match=f"Fetching '{relation}'"):
+        await prefetch_related_objects([partial], path)
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("library")
 async def test_single_row_relations():
@@ -183,6 +348,19 @@ async def test_a_window_reads_every_row_of_the_parents():
         [(10, 180)],
         [(10, 180)],
         [(10, 180)],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("library")
+async def test_a_sql_term_window_reads_every_row_before_slicing():
+    novels = Novel.objects.annotate(total=Count("*").over()).order_by("id")
+    assert [novel.total for novel in await novels] == [5] * 5
+    writers = await Writer.objects.order_by("id").prefetch_related(Prefetch("novels", queryset=novels[:1]))
+    assert [[(novel.id, novel.total) for novel in writer.novels] for writer in writers] == [
+        [(1, 5)],
+        [(4, 5)],
+        [],
     ]
 
 

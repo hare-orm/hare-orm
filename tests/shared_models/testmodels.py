@@ -331,6 +331,18 @@ class DatetimeFields(Model):
     datetime_add = fields.DatetimeField(auto_now_add=True)
 
 
+class GeneratedDates(Model):
+    """Generated copies of a date and a datetime column, under a composite key."""
+
+    a = fields.IntField()
+    b = fields.IntField()
+    day = fields.DateField(null=True)
+    moment = fields.DatetimeField(null=True)
+    generated_day = GeneratedField(expression=F("day"), output_field=fields.DateField(), null=True)
+    generated_moment = GeneratedField(expression=F("moment"), output_field=fields.DatetimeField(), null=True)
+    pk = fields.CompositePrimaryKey("a", "b")
+
+
 class TimeDeltaFields(Model):
     id = fields.IntField(primary_key=True)
     timedelta = fields.TimeDeltaField()
@@ -3965,6 +3977,24 @@ class RecursiveCompositeNode(Model):
     pk = fields.CompositePrimaryKey("a", "b")
 
 
+class RecursiveSoftCompositeNode(Model):
+    """A soft-deleted tree of rows with a composite primary key."""
+
+    a = fields.IntField()
+    b = fields.IntField()
+    name = fields.CharField(max_length=20)
+    deleted_at = fields.DatetimeField(null=True)
+    parent: fields.ForeignKeyNullableRelation[RecursiveSoftCompositeNode] = fields.ForeignKeyField(
+        "models.RecursiveSoftCompositeNode", related_name="children", null=True, on_delete=NO_ACTION
+    )
+    children: fields.ReverseRelation[RecursiveSoftCompositeNode]
+
+    pk = fields.CompositePrimaryKey("a", "b")
+
+    class Meta:
+        soft_delete_field = "deleted_at"
+
+
 class AuditedRestoreNote(Model):
     """Overrides restore() - QuerySet.restore() has to call it for each row."""
 
@@ -3983,6 +4013,17 @@ class AuditedRestoreNote(Model):
 class MergeSupplier(Model):
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=20)
+
+
+class LongColumnNames(Model):
+    """Columns named up to the identifier length limit - a name hare makes of one outgrows it."""
+
+    a = fields.IntField()
+    b = fields.IntField()
+    first = fields.TextField(source_field="long_" + "x" * 53 + "one")
+    second = fields.TextField(source_field="long_" + "x" * 53 + "two")
+    third = fields.TextField(source_field="ü" * 31 + "x")
+    pk = fields.CompositePrimaryKey("a", "b")
 
 
 class MergeStock(Model):

@@ -69,7 +69,7 @@ class SingleRow:
     def with_distinct_on_rows_as_subquery(queryset: SingleRowQuerySet) -> SingleRowQuerySet:
         """A clone restricted to the rows ``.distinct(<fields>)`` picks via a ``pk IN (subquery)``
         filter of the unsliced queryset, keeping its own slice - so a keyset boundary applies to
-        those rows, not to the rows ``DISTINCT ON`` picks from.
+        those rows, not to the rows the distinct picks from.
 
         Args:
             queryset: The queryset.

@@ -6,10 +6,58 @@ import asyncio
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.dialects.base.client.transaction_lifecycle import transaction_ending
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
+from tests.utils.waiting import WAIT_DEADLINE_SECONDS
 
 TEST_TIMEOUT_SECONDS = 60
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_asyncpg_discards_the_connection_of_an_abandoned_begin(db_truncate, monkeypatch):
+    if "hare.dialects.postgresql.drivers.asyncpg" not in type(Tournament.get_connection()).__module__:
+        pytest.skip("Only asyncpg sends its deferred BEGIN through PendingStatements")
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgTransactionClient
+
+    monkeypatch.setattr(transaction_ending, "SHIELDED_CANCELLATION_WAIT_TIMEOUT_SECONDS", 0)
+    started, released, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_begin = AsyncpgTransactionClient._driver_send_begin
+    physical_connections = []
+
+    async def delayed_begin(client):
+        physical_connections.append(client._connection._con)
+        started.set()
+        try:
+            await released.wait()
+            await original_begin(client)
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(AsyncpgTransactionClient, "_driver_send_begin", delayed_begin)
+
+    async def write():
+        async with Transactions.atomic():
+            await Tournament.objects.create(name="cancelled")
+
+    task = asyncio.create_task(write())
+    try:
+        await asyncio.wait_for(started.wait(), WAIT_DEADLINE_SECONDS)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, WAIT_DEADLINE_SECONDS)
+        assert physical_connections[0].is_closed()
+        released.set()
+        await asyncio.wait_for(completed.wait(), WAIT_DEADLINE_SECONDS)
+        await Tournament.objects.create(name="after cancellation")
+        assert await Tournament.objects.count() == 1
+    finally:
+        released.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await asyncio.wait_for(completed.wait(), WAIT_DEADLINE_SECONDS)
 
 
 @requires_features(dialect="postgresql")

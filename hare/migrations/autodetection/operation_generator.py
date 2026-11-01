@@ -849,7 +849,7 @@ class OperationGenerator:
         selected_new_schemas = self._collect_schemas(self.new_state, new_keys)
         operations.extend(CreateSchema(schema_name=schema) for schema in sorted(selected_new_schemas - old_schemas))
 
-        # Before any CreateModel: a column of a type an extension provides (CITEXT) can't be
+        # Before any CreateModel: a column of a type an extension provides can't be
         # created until its extension exists. An extension no model declares any more stays - the
         # database may use it elsewhere; a hand-written RemoveExtension drops it.
         old_extensions = self.old_state.extensions | self._collect_extensions(self.old_state)

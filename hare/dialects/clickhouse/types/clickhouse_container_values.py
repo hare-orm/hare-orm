@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.dialects.clickhouse.lookups.clickhouse_array_elements_key import ClickhouseArrayElementsKey
 from hare.dialects.clickhouse.lookups.constants import (
     CLICKHOUSE_ARRAY_ELEMENT_VARIABLE,
+    CLICKHOUSE_ARRAY_ZIP_FUNCTION_NAME,
     CLICKHOUSE_TUPLE_ELEMENT_FUNCTION_NAME,
     CLICKHOUSE_TUPLE_FUNCTION_NAME,
 )
@@ -18,6 +19,7 @@ from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.containers.declarations import MapValue, TupleValue
 from hare.fields.data.containers.map_field import MapField
 from hare.fields.data.containers.tuple_field import TupleField
+from hare.sql.terms.containers.declarations import MapKeysTerm, MapValuesTerm
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.values.literal_value import LiteralValue
 
@@ -96,7 +98,7 @@ class ClickhouseContainerValues:
 
     def get_ordering_key(self, field: Field[Any], term: Term) -> Term | None:
         """What a container column orders by - a key holding each ``CharEnumField`` value by its label,
-        which an ``Enum`` column orders otherwise; a map by itself.
+        which an ``Enum`` column orders otherwise; a map as the array of its key and value pairs.
 
         Args:
             field: The container field.
@@ -140,6 +142,29 @@ class ClickhouseContainerValues:
                     for element, element_key in zip(elements, element_keys, strict=True)
                 ),
             )
+        if isinstance(field, MapField):
+            # The pairs in the map's order, each keyed as a tuple of its key and value - the map's own
+            # comparison, an enum by its label.
+            variable = LiteralValue(CLICKHOUSE_ARRAY_ELEMENT_VARIABLE.format(depth=depth))
+            pair_elements = [
+                Function(CLICKHOUSE_TUPLE_ELEMENT_FUNCTION_NAME, variable, LiteralValue(str(position)))
+                for position in (1, 2)
+            ]
+            pair_keys = [
+                self.get_held_ordering_key(child_field, element, depth + 1)
+                for child_field, element in zip((field.key_field, field.value_field), pair_elements, strict=True)
+            ]
+            if all(pair_key is None for pair_key in pair_keys):
+                return None
+            pairs = Function(CLICKHOUSE_ARRAY_ZIP_FUNCTION_NAME, MapKeysTerm(term), MapValuesTerm(term))
+            pair_key = Function(
+                CLICKHOUSE_TUPLE_FUNCTION_NAME,
+                *(
+                    element if element_key is None else element_key
+                    for element, element_key in zip(pair_elements, pair_keys, strict=True)
+                ),
+            )
+            return ClickhouseArrayElementsKey(pairs, variable, pair_key)
         if isinstance(field, ContainerField):
             return None
         function_cast = self.types.get_function_cast(field)

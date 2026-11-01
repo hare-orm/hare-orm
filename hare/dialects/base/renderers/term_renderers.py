@@ -55,6 +55,8 @@ class TermRenderers:
             TermRenderers.found_name_renderers.get_owner_bucket(self)
         )
         self.function_renderers: dict[str, TermRenderer] = {}
+        #: The renderers of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
+        self.mirrors: list[TermRenderers] = []
 
     def register(self, term_class: type, renderer: TermRenderer) -> None:
         """Sets how the dialect renders ``term_class`` and its subclasses.
@@ -65,6 +67,8 @@ class TermRenderers:
         """
         self.renderers[term_class] = renderer
         TermRenderers.found_renderers.forget_owner(self)
+        for mirror in self.mirrors:
+            mirror.register(term_class, renderer)
         Registries.changed()
 
     def register_function(self, function_name: str, renderer: TermRenderer) -> None:
@@ -76,6 +80,8 @@ class TermRenderers:
             renderer: A ``(function, sql_context) -> sql``.
         """
         self.function_renderers[function_name] = renderer
+        for mirror in self.mirrors:
+            mirror.register_function(function_name, renderer)
         Registries.changed()
 
     def get_function_renderer(self, function_name: str) -> TermRenderer | None:
@@ -91,6 +97,8 @@ class TermRenderers:
         """
         self.name_renderers[function_class] = name_renderer
         TermRenderers.found_name_renderers.forget_owner(self)
+        for mirror in self.mirrors:
+            mirror.register_name(function_class, name_renderer)
         Registries.changed()
 
     def get(self, term_class: type) -> TermRenderer | None:
@@ -300,6 +308,18 @@ class TermRenderers:
         """
         return term
 
+    def get_null_if_result(self, term: Term, field: Field[Any] | None) -> Term:
+        """The NULLIF result, whose type must represent NULL.
+
+        Args:
+            term: The NULLIF call.
+            field: The field of its first argument, None when unknown.
+
+        Returns:
+            The call, unchanged on dialects supporting NULL for every argument type.
+        """
+        return term
+
     def get_same_type_math_result(self, term: Term, field: Field[Any] | None) -> Term:
         """The result of a math function of the argument's type (``Abs``, ``Ceil``, ``Floor``).
 
@@ -325,13 +345,16 @@ class TermRenderers:
         return term
 
     def get_scaled_duration(self, term: Term) -> Term:
-        """The microseconds of a duration multiplied or divided by a number.
+        """The microseconds of a duration multiplied or divided by a number - whole microseconds, a half
+        rounded to the even one, as Python makes a timedelta of a fraction of microseconds, so that the
+        next arithmetic and a filter take the value read.
 
         Args:
             term: The arithmetic.
 
         Returns:
-            The term itself by default - the database's number, read as a duration's microseconds.
+            The term itself by default - for a database whose arithmetic of a duration's microseconds
+            gives whole microseconds already.
         """
         return term
 

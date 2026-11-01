@@ -23,9 +23,10 @@ if TYPE_CHECKING:
 
 
 class ListenNotifyWakeup(OutboxWakeup):
-    """Wakes the relays through the database's ``LISTEN``/``NOTIFY`` - a ``NOTIFY`` per topic in the
+    """Wakes the relays through the database's notification channels - a notification per topic in the
     transaction of the events, which the database delivers once it commits, joining the same
-    notifications of one transaction. A database without ``LISTEN``/``NOTIFY`` is refused.
+    notifications of one transaction. A database without listen/notify (``Features.supports_listen_notify``)
+    is refused.
 
     Args:
         channel: The channel.
@@ -36,8 +37,9 @@ class ListenNotifyWakeup(OutboxWakeup):
         self.channel = channel
         #: The listener of the relays' subscription.
         self.listener: NotificationListener | None = None
-        #: The topics each open transaction sent a NOTIFY of, by the savepoint it ran in - one NOTIFY per
-        #: topic; the database drops the NOTIFY of a savepoint rolled back, so its topics are sent again.
+        #: The topics each open transaction sent a notification of, by the savepoint it ran in - one
+        #: notification per topic; the database drops the notifications of a savepoint rolled back, so its
+        #: topics are sent again.
         self.notified_topics: WeakKeyDictionary[TransactionClient, SavepointTopics] = WeakKeyDictionary()
 
     def raise_if_unsupported(self, connection: DatabaseClient) -> None:
@@ -73,7 +75,7 @@ class ListenNotifyWakeup(OutboxWakeup):
 
     def forget_notified(self, transaction: TransactionClient, savepoint_span: SavepointSpan | None) -> None:
         """Forgets the topics notified in a savepoint, or a transaction, that rolled back - the database
-        dropped their NOTIFY.
+        dropped their notifications.
 
         Args:
             transaction: The top-level transaction.
@@ -84,7 +86,7 @@ class ListenNotifyWakeup(OutboxWakeup):
             notified_by_savepoint.pop(savepoint_span, None)
 
     async def signal(self, topics: frozenset[str]) -> None:
-        # Every signal is a NOTIFY sent by signal_written() in the events' own transaction.
+        # Every signal is a notification sent by signal_written() in the events' own transaction.
         raise NotImplementedError
 
     async def listen(self, connection_alias: str) -> None:

@@ -109,8 +109,8 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         related_instances, inserts_through_rows = await ThroughRowInserting.add_links(
             self, objs, through_defaults, using
         )
-        # A pair linked already adds no link - nothing is reported.
-        if related_instances and ChangeEvents.is_observed():
+        # A pair linked already adds no link - nothing is reported; None names no related row.
+        if related_instances != [] and ChangeEvents.is_observed():
             await ThroughRows.report_links(
                 self,
                 connection,

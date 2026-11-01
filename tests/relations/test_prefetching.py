@@ -460,6 +460,20 @@ async def test_prefetch_direct_relation_to_attr_when_relation_is_null(db):
 
 
 @pytest.mark.asyncio
+async def test_a_nested_prefetch_through_a_null_relation_loads_it_as_none(db):
+    """A path through a relation of no related row left the relation unloaded - only its nested
+    prefetch was skipped, so reading it still gave an awaitable, not None."""
+    tournament = await Tournament.objects.create(name="tournament")
+    await Event.objects.create(name="First", tournament=tournament, reporter=None)
+    event = await Event.objects.get(name="First")
+    await prefetch_related_objects([event], "reporter__events")
+    assert vars(event)["_reporter"] is None
+    assert event.reporter is None
+    queried = await Event.objects.prefetch_related("reporter__events").get(name="First")
+    assert queried.reporter is None
+
+
+@pytest.mark.asyncio
 async def test_prefetch_direct_relation_to_attr_does_not_corrupt_bare_relation(db):
     """Sibling of test_prefetch_m2m_to_attr_does_not_corrupt_bare_relation for a direct FK."""
     tournament_one = await Tournament.objects.create(name="one")
@@ -1137,3 +1151,21 @@ async def test_a_prefetch_through_a_relation_select_related_loaded_reads_it_once
         events = await Event.objects.select_related("tournament").prefetch_related("tournament__events")
     assert queries.count == 2
     assert all(sorted(e.name for e in event.tournament.events) == ["a", "b"] for event in events)
+
+
+@pytest.mark.asyncio
+async def test_a_prefetch_of_another_models_rows_is_refused_before_sql(db):
+    """Rows of another model were set by a matching key value under a to_attribute, or failed late as a
+    wrong value of the relation."""
+    tournament = await Tournament.objects.create(name="tournament")
+    await Event.objects.create(name="First", tournament=tournament)
+    for prefetch in (
+        Prefetch("tournament", Team.objects.all()),
+        Prefetch("tournament", Team.objects.all(), to_attribute="team_rows"),
+        Prefetch("events", Team.objects.all()),
+    ):
+        queryset = Tournament.objects.all() if prefetch.relation == "events" else Event.objects.all()
+        with pytest.raises(QueryError, match="reads Team rows - the relation"):
+            await queryset.prefetch_related(prefetch)
+    with pytest.raises(QueryError, match="to_attribute=''"):
+        Prefetch("tournament", Tournament.objects.all(), to_attribute="")

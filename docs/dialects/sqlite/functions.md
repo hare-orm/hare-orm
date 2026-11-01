@@ -128,8 +128,10 @@ them in place of the Python ones; the results are the same.
 ## <a id="in-constraints-and-indexes"></a>In constraints and indexes
 
 The database checks a constraint and keeps an index up to date without hare, and any other program
-writing the file has none of these functions. A constraint condition or an index key whose SQL needs one
-raises `UnSupportedError`, naming the function, when it is created:
+writing the file has none of these functions. A constraint condition, an index key or a `GeneratedField`
+expression whose SQL needs one (`Greatest()` is `hare_greatest`) raises `UnSupportedError`, naming the
+function, when the model is bound (`Hare.init()`) — before `makemigrations` writes a migration no
+`migrate` could apply:
 
 ```python
 from hare.ddl import Index

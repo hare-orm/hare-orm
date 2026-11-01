@@ -163,7 +163,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     _extension_calls = QueryOption[tuple[QuerySetExtensionCall, ...]]("extension_calls")
     # Select(relation, extra_condition=Q(...))'s condition per relation path.
     _select_related_extra_conditions = QueryOption[Mapping[str, Q]]("select_related_extra_conditions")
-    # The fields of .distinct(*fields) (DISTINCT ON).
+    # The fields of .distinct(*fields).
     _distinct_on = QueryOption[tuple[str, ...]]("distinct_on")
     # The fields of .group_by().
     _group_bys = QueryOption[tuple[str, ...]]("group_bys")
@@ -785,7 +785,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     #: Whether the query takes the QuerySet methods dialects registered (QuerySetExtensions).
     accepts_extension_methods: ClassVar[bool] = False
 
-    #: Whether the query binds the values of an annotation a GROUP BY, ORDER BY or DISTINCT ON
+    #: Whether the query binds the values of an annotation a GROUP BY, ORDER BY or distinct by fields
     #: resolves again into its full expression (QueryAnnotations.get_expression_term_value_references()) - a query of
     #: another type ordering by such an annotation keeps no plan.
     binds_expression_term_values: ClassVar[bool] = False

@@ -17,7 +17,9 @@
   константа внутри него (`F("price") + 5`, `Case(When(..., then=Value("high")))`, `Concat(...)`)
   передаётся один раз.
 - Колонка, которую `HAVING` читает вне своих агрегатов (`Q(book_count__gte=2) | Q(city="Oslo")`,
-  `book_count__gt=F("limit")`), тоже попадает в группировку.
+  `book_count__gt=F("limit")`), тоже попадает в группировку, если агрегат считается для каждой строки
+  модели. При группировке по названным полям группы сохраняются: другие колонки в `HAVING` остаются
+  вне группировки и подчиняются описанным ниже правилам базы.
 - Связанный с внешним запросом `Exists(...)`/`Subquery(...)` рядом с агрегатом группируется целиком, по
   своему номеру в `SELECT`, а не по внешним колонкам, которые читает его `OuterReference(...)`: две
   внешние строки с разными значениями `OuterReference`, но одинаковым результатом подзапроса попадают в
@@ -64,6 +66,8 @@
 вычисляемого значения, поля `values()` или сортировки — даёт ту же `QueryError`;
 `Count("id", distinct=True)` допустим, как и `.distinct().aggregate(...)` или `aggregate()` по
 агрегатному вычисляемому значению — они работают по одной строке на строку основной таблицы.
+`aggregate()` у запроса моделей отбрасывает сортировку и аннотации, которые не читает, поэтому их
+неиспользуемые JOIN не приводят к этому отказу. Агрегат у запроса `values()` работает по выбранным им строкам.
 
 Поле связи «ко многим», использованное как ключ `GROUP BY`, делит строки на группы, а не повторяет их
 внутри одной: `.annotate(total=Sum("copies")).group_by("tags__name").values_list("tags__name", "total")`
@@ -204,7 +208,8 @@ await Book.objects.all().annotate(
 `1.71`, для `DecimalField(decimal_places=2)`), на ClickHouse — `float`
 (`Features.computes_decimal_statistics_exactly`), одинаково в `.aggregate()`,
 `.annotate()` и в окне; по пустому набору строк `Min`/`Max`/`Avg`/`StdDev`/ `Variance` дают `None` на любой
-базе, а `Sum` — `None` в PostgreSQL и SQLite, но собственный `0` в ClickHouse (`0.00` для `Decimal`,
+базе (но `Min`/`Max` массива, словаря или кортежа ClickHouse дают его [пустое
+значение](../dialects/clickhouse/types.ru.md#containers)), а `Sum` — `None` в PostgreSQL и SQLite, но собственный `0` в ClickHouse (`0.00` для `Decimal`,
 `None` для поля, допускающего NULL);
 `Sum`/`Max`/`Min`/`FirstValue`/`LastValue`/`Lag`/`Lead` сохраняют тип того, что агрегируют, в том числе
 выражения или вычисляемого значения-константы (`Sum(F("duration") * 2)` — `timedelta`, оконный `Sum` над
@@ -212,6 +217,8 @@ await Book.objects.all().annotate(
 него значение (`dict` для `JSONField`, `datetime`/`Decimal` для своего поля); значение, которое тип поля не
 может хранить без потерь (`Lag("pages", 1, 0.5)`), даёт `QueryError`. Тип результата `StdDev`/`Variance`
 определяется как у `Avg`; `CumeDist`/`PercentRank` — `float` от 0 до 1, `NthValue` сохраняет тип поля.
+
+Для `GeneratedField` значение `default` у `Lag`/`Lead` должно подходить его `output_field` по тем же правилам.
 
 > [!NOTE]
 > **`LastValue` всегда видит всю группу окна**

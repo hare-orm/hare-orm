@@ -205,8 +205,8 @@ with its triggers; changing the fields or the tokenizer replaces it.
 
 The model needs an integer primary key (FTS5's rowid); a model without one, no fields, a descending key
 or an empty tokenizer raise `ConfigurationError`. On a connection without
-`Features.supports_full_text_index` creating or dropping the index raises `UnSupportedError` before any
-SQL.
+`Features.supports_full_text_index` a model declaring the index raises `ConfigurationError` in
+`Hare.init()`, and a migration creating or dropping it raises `UnSupportedError` before any SQL.
 
 ## <a id="query-plans"></a>Query plans
 

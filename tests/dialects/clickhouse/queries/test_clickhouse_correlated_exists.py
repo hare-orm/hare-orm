@@ -3,11 +3,10 @@ composite key's row of columns too: a filter across a many-to-many relation to a
 keyed by two columns, under the tenant's scope. One correlated by a comparison is the server's own
 EXISTS where the server runs correlated subqueries."""
 
-import uuid
-
 import pytest
 
 from hare.exceptions import ConfigurationError, UnSupportedError
+from hare.fields.uuid7 import Uuid7
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import Exists, OuterReference, Subquery
 from hare.query.functions import Count
@@ -54,7 +53,7 @@ async def test_latest_versions_keep_the_latest_version_of_each_record(clickhouse
             queryset = PageVersion.objects.all()
             versions = LatestVersions()
 
-    first, second = uuid.UUID(int=1), uuid.UUID(int=2)
+    first, second = Uuid7.new(), Uuid7.new()
     await PageVersion.objects.bulk_create(
         [
             PageVersion(id=first, version=1, title="a1"),
