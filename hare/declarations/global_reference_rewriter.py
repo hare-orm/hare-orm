@@ -33,16 +33,28 @@ class GlobalReferenceRewriter(cst.CSTTransformer):
         MetadataWrapper(cst.parse_module(source)).visit(visitor)
         return frozenset(visitor.global_names)
 
-    @staticmethod
-    def get_local_names(source: str) -> frozenset[str]:
-        """Bindings that must not capture newly introduced module references."""
-        scopes = MetadataWrapper(cst.parse_module(source)).resolve(ScopeProvider).values()
-        return frozenset(
+    @classmethod
+    def get_names(cls, source: str) -> tuple[frozenset[str], frozenset[str]]:
+        """Read global references and local bindings from one scope analysis.
+
+        Args:
+            source: The Python declaration whose bindings are inspected.
+
+        Returns:
+            The global reference names and local binding names. Both are immutable;
+            locals include nested scopes so generated import aliases cannot capture them.
+        """
+        wrapper = MetadataWrapper(cst.parse_module(source))
+        visitor = cls({})
+        wrapper.visit(visitor)
+        scopes = wrapper.resolve(ScopeProvider).values()
+        local_names = frozenset(
             assignment.name
             for scope in set(scopes)
             if scope is not None and not isinstance(scope, (GlobalScope, BuiltinScope))
             for assignment in scope.assignments
         )
+        return frozenset(visitor.global_names), local_names
 
     def is_global_reference(self, node: cst.Name) -> bool:
         scope = self.get_metadata(ScopeProvider, node, None)

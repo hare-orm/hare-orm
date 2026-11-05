@@ -52,6 +52,14 @@ same fresh converted value, and sensitive parameter positions stay hidden on eve
 
 ## <a id="shape-key"></a>What's part of the shape (the cache key)
 
+The structural and call-signature indexes use the same connection settings: connection alias,
+dialect features, native Python types, parameter binding and SQL rendering context. Each index
+also includes the query dependencies it needs.
+
+Ordinary and named `values_list()` tuples can share a SQL plan and column converters. Each query
+retains its requested row reader, so sharing a plan preserves tuple names and decoded values.
+The plan does not accumulate a separate reader for every result shape.
+
 The model class, the dialect, the connection alias and declared native result types, the query builder
 the model is bound to, which columns/relations are selected
 (`select_related`/`.only()`/`.defer()`/`.values()`), ordering,

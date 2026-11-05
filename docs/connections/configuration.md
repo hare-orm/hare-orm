@@ -292,6 +292,9 @@ context it does nothing. How long it waits for the queries still running depends
 | SQLite | The connection waits up to 10 seconds for the transaction or query using it, then closes anyway |
 | ClickHouse | `clickhouse_driver` waits up to 10 seconds for the statements handed over already; one still running ends on its own. `clickhouse_connect` closes its HTTP client once the requests already sent are answered — they end with their results |
 
+PostgreSQL pool shutdown waits for its active connection tasks to stop. Once closing returns, a
+transaction retained by the caller cannot commit through one of those connections.
+
 A task still holding one of the dropped connection objects gets `DBConnectionError` on its next query instead
 of opening a new pool; a query through a model looks its connection up again — inside a transaction too — and
 gets `ConfigurationError`, as before `Hare.init()`. The context forgets its connections even when a close

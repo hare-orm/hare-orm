@@ -26,7 +26,7 @@ class ClickhouseCatalogParts:
     @staticmethod
     def get_objects(snapshot: CatalogSnapshot) -> list[SchemaPart]:
         """Compare requested schema objects independently of declaration reconstruction."""
-        records = snapshot.copy_records()
+        records = snapshot.records
         requested = records["requested"][0]["names"]
         parts = []
         for row in records["objects"]:

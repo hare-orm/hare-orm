@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
 use tokio_postgres::{AsyncMessage, NoTls, Socket};
+use tokio_util::task::TaskTracker;
 
 mod cancel_query_on_drop;
 mod cancel_target;
@@ -93,6 +94,7 @@ pub struct Client {
     cancel_target: CancelTarget,
     /// Set once the pool is closed for good - the connections still checked out end too.
     closed: Arc<watch::Sender<bool>>,
+    connection_tasks: TaskTracker,
 }
 
 /// Escapes one `-c key=value` term of libpq's `options` string, which is split on unescaped
@@ -132,13 +134,22 @@ fn close_unused_connections(pool: WeakPool<TimedManager>, lifetime: Duration, mu
 
 /// The deadpool-postgres manager opening the connections of `pg_config` - each ends once `closed`
 /// is set.
-fn build_manager(pg_config: &tokio_postgres::Config, tls: &PgTls, closed: watch::Receiver<bool>) -> Manager {
+fn build_manager(
+    pg_config: &tokio_postgres::Config,
+    tls: &PgTls,
+    closed: watch::Receiver<bool>,
+    connection_tasks: TaskTracker,
+) -> Manager {
     let mgr_config = ManagerConfig { recycling_method: RecyclingMethod::Fast };
     match tls {
-        PgTls::Disabled => Manager::from_connect(pg_config.clone(), ClosingConnect::new(NoTls, closed), mgr_config),
-        PgTls::Rustls(connector) => {
-            Manager::from_connect(pg_config.clone(), ClosingConnect::new(connector.clone(), closed), mgr_config)
+        PgTls::Disabled => {
+            Manager::from_connect(pg_config.clone(), ClosingConnect::new(NoTls, closed, connection_tasks), mgr_config)
         }
+        PgTls::Rustls(connector) => Manager::from_connect(
+            pg_config.clone(),
+            ClosingConnect::new(connector.clone(), closed, connection_tasks),
+            mgr_config,
+        ),
     }
 }
 
@@ -232,7 +243,8 @@ pub fn connect(
         // Cloned, not moved: the pool's manager (build_manager()) takes its own copy of both, and the
         // Client keeps its own - listen() reconnects later with the exact same settings.
         let (closed, closed_receiver) = watch::channel(false);
-        let mgr = build_manager(&pg_config, &tls, closed_receiver);
+        let connection_tasks = TaskTracker::new();
+        let mgr = build_manager(&pg_config, &tls, closed_receiver, connection_tasks.clone());
 
         let max_size = max_size.max(1);
         // Fallible conversion rejects negative/NaN durations without panicking across the Python boundary.
@@ -294,6 +306,7 @@ pub fn connect(
             tls,
             cancel_target,
             closed: Arc::new(closed),
+            connection_tasks,
         })
     })
 }
@@ -309,7 +322,12 @@ impl Client {
     /// connections stay; a `listen()` reconnects with it too.
     fn set_password(&mut self, password: &str) {
         self.pg_config.password(password);
-        self.pool.manager().replace(build_manager(&self.pg_config, &self.tls, self.closed.subscribe()));
+        self.pool.manager().replace(build_manager(
+            &self.pg_config,
+            &self.tls,
+            self.closed.subscribe(),
+            self.connection_tasks.clone(),
+        ));
     }
 
     fn execute<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
@@ -534,6 +552,7 @@ impl Client {
         })?;
         let pool = self.pool.clone();
         let closed = self.closed.clone();
+        let connection_tasks = self.connection_tasks.clone();
         future_into_py(py, async move {
             pool.close();
             let deadline = Instant::now() + wait;
@@ -547,6 +566,10 @@ impl Client {
                 tokio::time::sleep(POOL_CLOSE_POLL_INTERVAL).await;
             }
             closed.send_replace(true);
+            // Closing the watch alone only schedules driver shutdown. Wait for every active
+            // driver future to drop its socket before a former transaction can attempt COMMIT.
+            connection_tasks.close();
+            connection_tasks.wait().await;
             Ok(())
         })
     }

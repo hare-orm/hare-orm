@@ -301,11 +301,13 @@ class ReturnedValues:
         fields = [meta.fields_map[field_name] for field_name in field_names]
         columns = [meta.fields_db_projection[field_name] for field_name in field_names]
         instances = list(instances)
-        instances_by_stored_key: dict[tuple[Any, ...], collections.deque[TInstance]] = {}
+        instances_by_stored_key: collections.defaultdict[tuple[Any, ...], collections.deque[TInstance]] = (
+            collections.defaultdict(collections.deque)
+        )
         for stored_key, instance in zip(
             ReturnedValues.get_stored_keys(types, fields, field_names, instances), instances, strict=True
         ):
-            instances_by_stored_key.setdefault(stored_key, collections.deque()).append(instance)
+            instances_by_stored_key[stored_key].append(instance)
         for raw_row in rows:
             row = dict(raw_row)
             matching_instances = instances_by_stored_key.get(ReturnedValues.get_row_key(types, fields, columns, row))

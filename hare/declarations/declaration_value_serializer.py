@@ -659,7 +659,7 @@ class DeclarationValueSerializer:
         function_node = ast.parse(function_source).body[0]
         if not isinstance(function_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             raise ConfigurationError(f"{function.__module__}.{function.__qualname__} is not a plain function")
-        used_names = GlobalReferenceRewriter.get_global_names(function_source)
+        used_names, local_names = GlobalReferenceRewriter.get_names(function_source)
         postponed_annotations = bool(inspect.unwrap(function).__code__.co_flags & __future__.annotations.compiler_flag)
         runtime_names = (
             GlobalReferenceRewriter.get_global_names(
@@ -668,7 +668,6 @@ class DeclarationValueSerializer:
             if postponed_annotations
             else used_names
         )
-        local_names = GlobalReferenceRewriter.get_local_names(function_source)
         module_import_nodes: list[ast.Import | ast.ImportFrom] = []
         module_defined_names: set[str] = set()
         for statement in ast.parse(module_source).body:

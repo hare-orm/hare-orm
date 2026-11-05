@@ -16,6 +16,7 @@ from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.description.plannable import Plannable
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.query.plans.statement.query_key_compiler import QueryKeyCompiler
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.scopes.row_scopes import RowScopes
 from hare.time import Timezone
@@ -165,11 +166,7 @@ class CallSignaturePlans:
             "calls",
             query_class,
             connection.dialect,
-            connection.connection_alias,
-            connection.features.plan_key,
-            connection.native_python_types,
-            connection.parameter_binding_key,
-            connection.sql_context_key,
+            *QueryKeyCompiler.get_connection_structure(connection),
             Timezone.get_rendered_zone_key(),
             scope_description.structure,
             calls_structure,

@@ -12,7 +12,7 @@ from hare.query.enums import Connector
 from hare.query.expressions import F, Q
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plans import StatementPlans
-from tests.shared_models.testmodels import IntFields, SoftDeleteStandalone, TenantScopedFactory, Tournament
+from tests.shared_models.testmodels import IntFields, JSONFields, SoftDeleteStandalone, TenantScopedFactory, Tournament
 
 # Counts new SQL templates - plan verification compares after the body.
 pytestmark = pytest.mark.plan_verification_after_test
@@ -21,6 +21,30 @@ pytestmark = pytest.mark.plan_verification_after_test
 def spy_on_plan_preparations():
     """Count new SQL templates at the shared plan preparation boundary."""
     return patch.object(StatementPlan, "__init__", autospec=True, side_effect=StatementPlan.__init__)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_named", [False, True])
+async def test_tuple_row_shapes_share_sql_and_keep_their_decoded_results(db, first_named):
+    documents = {1: {"items": [1, None, True]}, 2: {"items": [2, {"title": "book"}]}}
+    for identifier, document in documents.items():
+        await JSONFields.objects.create(id=identifier, data=document)
+
+    def read(minimum, named):
+        return JSONFields.objects.filter(id__gte=minimum).order_by("id").values_list("id", "data", named=named)
+
+    assert list(await read(1, first_named)) == list(documents.items())
+    with spy_on_plan_preparations() as preparations:
+        for minimum, named in ((2, not first_named), (1, first_named), (1, not first_named)):
+            rows = await read(minimum, named)
+            assert list(rows) == [
+                (identifier, value) for identifier, value in documents.items() if identifier >= minimum
+            ]
+            if named:
+                assert [(row.id, row.data) for row in rows] == list(rows)
+            else:
+                assert all(type(row) is tuple for row in rows)
+    assert preparations.call_count == 0
 
 
 @pytest.mark.asyncio

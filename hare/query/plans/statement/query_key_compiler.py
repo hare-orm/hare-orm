@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from operator import attrgetter
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.query.plans.constants import KEY_ONLY_PLAN_KEY_FORMS
 from hare.query.plans.description.plan_context import PlanContext
@@ -11,6 +11,9 @@ from hare.query.plans.description.plan_parts import PlanParts
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.plan_origins import PlanOrigins
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class QueryKeyCompiler:
@@ -62,6 +65,24 @@ class QueryKeyCompiler:
         return describe
 
     @staticmethod
+    def get_connection_structure(connection: DatabaseClient | None) -> tuple[Any, ...]:
+        """Capture the ordered connection settings shared by both SQL-plan indexes.
+
+        Read the settings on every description so configuration changes select another
+        plan. An unbound query contributes the same five absent components. Dialect,
+        query structure, visibility and timezone remain the caller's responsibility.
+        """
+        if connection is None:
+            return (None,) * 5
+        return (
+            connection.connection_alias,
+            connection.features.plan_key,
+            connection.native_python_types,
+            connection.parameter_binding_key,
+            connection.sql_context_key,
+        )
+
+    @staticmethod
     def describe(
         query: Any, declaration_name: str, slots: DeclaredPlanSlots, built_into_another: bool
     ) -> PlanDescription | None:
@@ -87,20 +108,10 @@ class QueryKeyCompiler:
                 structure.append(None)
             elif form is PlanKeyForm.CONNECTION:
                 connection = query._connection
-                connection_alias = connection.connection_alias if connection is not None else None
-                features_key = connection.features.plan_key if connection is not None else None
                 if not built_into_another:
                     key_positions.append((len(structure), slot, form))
                     structure.append(None)
-                structure.extend(
-                    (
-                        connection_alias,
-                        features_key,
-                        connection.native_python_types if connection is not None else None,
-                        connection.parameter_binding_key if connection is not None else None,
-                        connection.sql_context_key if connection is not None else None,
-                    )
-                )
+                structure.extend(QueryKeyCompiler.get_connection_structure(connection))
             elif form is PlanKeyForm.DESCRIBED:
                 description = slot(query) if callable(slot) else attrgetter(slot)(query)()
                 if description is None:

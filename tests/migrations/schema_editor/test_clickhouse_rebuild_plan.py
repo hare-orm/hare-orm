@@ -158,7 +158,7 @@ async def test_storage_transition_copies_the_previous_logical_table_and_preserve
     assert 'FROM "book"' in copy
     companion_drop = f'DROP TABLE "book"{placement}'
     if previous is not None:
-        flush = 'SYSTEM FLUSH DISTRIBUTED "book" ON CLUSTER "alpha"'
+        flush = 'SYSTEM FLUSH DISTRIBUTED "default"."book" ON CLUSTER "alpha"'
         assert trace.index(flush) < trace.index(copy)
         assert trace.index(copy) < trace.index(companion_drop) < trace.index(exchange)
     else:
@@ -209,7 +209,7 @@ async def test_router_rebuild_drains_all_queues_without_copying_remote_rows(
     monkeypatch.setattr(client, "execute_dicts", catalog)
     monkeypatch.setattr(editor, "run_sql", execute)
     plan = editor.table_rebuild.get_rebuild_plan(model, model)
-    flush = 'SYSTEM FLUSH DISTRIBUTED "book"' + (' ON CLUSTER "alpha"' if cluster_name else "")
+    flush = 'SYSTEM FLUSH DISTRIBUTED "default"."book"' + (' ON CLUSTER "alpha"' if cluster_name else "")
     if failure is not None:
         with pytest.raises(ValueError, match=failure):
             await plan.execute(editor)

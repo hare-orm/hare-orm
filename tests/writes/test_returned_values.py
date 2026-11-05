@@ -10,7 +10,12 @@ pytestmark = pytest.mark.database_independent
 
 
 @pytest.mark.parametrize("key", [{"a": [1, {"b": 2}]}, [1, {"a": [2]}]])
-def test_returned_rows_match_container_keys_and_keep_the_first_instance(key):
+@pytest.mark.parametrize(
+    "match,expected_indices",
+    [(ReturnedValues.match_rows, [2, 0]), (ReturnedValues.match_rows_by_stored_values, [2, 0, 1])],
+    ids=["first_instance", "each_unmatched_instance"],
+)
+def test_returned_rows_match_container_keys_in_input_order(key, match, expected_indices):
     class Book(Model):
         key = fields.JSONField(source_field="book_key")
 
@@ -23,12 +28,8 @@ def test_returned_rows_match_container_keys_and_keep_the_first_instance(key):
         {"book_key": json.dumps(key)},
         {"book_key": json.dumps({"absent": 4})},
     ]
-    matched = list(
-        ReturnedValues.match_rows(
-            Book, DialectRegistry.get_dialect("sqlite").types, [first, repeated, second], rows, ["key"]
-        )
-    )
-    assert len(matched) == 2
-    assert matched[0][0] is second
-    assert matched[1][0] is first
-    assert [row for _, row in matched] == rows[:2]
+    instances = [first, repeated, second]
+    matched = list(match(Book, DialectRegistry.get_dialect("sqlite").types, instances, rows, ["key"]))
+    assert len(matched) == len(expected_indices)
+    assert all(obj is instances[index] for (obj, _row), index in zip(matched, expected_indices, strict=True))
+    assert [row for _, row in matched] == rows[: len(expected_indices)]

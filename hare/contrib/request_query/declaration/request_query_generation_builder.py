@@ -38,16 +38,18 @@ class RequestQueryGenerationBuilder:
         )
         schema.__qualname__ = query_class.__qualname__
         # Pydantic inherits annotated declarations, but option fields were added
-        # after class creation. Carry those fields into the unpublished schema.
-        RequestQueryParameters.add_parameter_fields(
-            schema,
-            {name: field for name, field in query_class.model_fields.items() if name not in schema.model_fields},
-        )
+        # after class creation. Merge them with filters before rebuilding the private schema.
+        parameter_fields = {
+            name: field for name, field in query_class.model_fields.items() if name not in schema.model_fields
+        }
         options = query_class.get_request_options()
         declaration = None
-        if queryset is not None:
+        if queryset is None:
+            RequestQueryParameters.add_parameter_fields(schema, parameter_fields)
+        else:
             parameter_builder = FilterParameterBuilder(query_class)
-            RequestQueryParameters.add_parameter_fields(schema, parameter_builder.build_fields(queryset))
+            parameter_fields.update(parameter_builder.build_fields(queryset))
+            RequestQueryParameters.add_parameter_fields(schema, parameter_fields)
             builder = DeclarationBuilder(schema)
             declaration = replace(
                 builder.build(),

@@ -44,7 +44,6 @@ from hare.query.statements.select.select_query import SelectQuery
 from hare.query.statements.select.values.values_distinct import ValuesDistinct
 from hare.query.statements.select.values.values_grouping import ValuesGrouping
 from hare.query.statements.select.values.values_output import ValuesOutput
-from hare.query.statements.select.values.values_reading import ValuesReading
 from hare.query.statements.select.values.window_filter_wrapping import WindowFilterWrapping
 from hare.sql import Order
 from hare.sql.terms.criteria.criterion import Criterion
@@ -158,9 +157,8 @@ class ValuesQuery(SelectQuery[Any]):
             )
             self._selected_fields_by_alias.update(zip(column_aliases, components, strict=True))
             output_column_aliases.append(column_aliases)
-        #: How the rows are read, taken from the plan the query runs on - None until then, or when
-        #: the plan hasn't read this row shape yet.
-        self._values_reading: ValuesReading | None = None
+        #: Prepared conversion shared by SQL-equivalent row shapes.
+        self._column_converters: list[tuple[str, Callable[[Any], Any] | None]] | None = None
         #: How a row is read - by the shape the call asked for.
         self._rows: ValuesRows = rows_class(
             tuple(output_name for output_name, _field_name in outputs), output_column_aliases
@@ -473,24 +471,19 @@ class ValuesQuery(SelectQuery[Any]):
         return self._rows.stream_batches(connection, *self._get_parameterized_sql(), column_converters, chunk_size)
 
     async def _execute(self) -> Any:
-        values_reading = self._values_reading
-        if values_reading is None:
-            values_reading = self.get_values_reading()
-            plan = self._statement_plan
-            if plan is not None and isinstance(plan.result_reading, dict):
-                # A plan another row shape recorded (the same SQL text) - read this shape's rows from
-                # it from now on too.
-                plan.result_reading.setdefault(cast("ValuesSelection", self._selection).shape, values_reading)
-        statement_result = await values_reading.rows.fetch_result(
+        column_converters = self._column_converters
+        if column_converters is None:
+            column_converters = ValuesOutput.get_column_converters(self)
+        statement_result = await self._rows.fetch_result(
             self._connection,
             *self._get_parameterized_sql(),
             retry_read=self.is_read_only,
         )
         reader = (
-            values_reading.rows.get_result_reader(
+            self._rows.get_result_reader(
                 self._connection,
                 statement_result,
-                values_reading.column_converters,
+                column_converters,
             )
             if statement_result.rows or statement_result.column_names
             else None
@@ -501,27 +494,16 @@ class ValuesQuery(SelectQuery[Any]):
             self._extension_result = QuerySetExtensionResult(result, statement_result, reader)
         return result
 
-    def get_values_reading(self) -> ValuesReading:
-        """How the rows of this query, built, are read.
-
-        Returns:
-            The reading.
-        """
-        value_fields = ValuesOutput.get_value_fields(self)
-        return ValuesReading(self._rows, ValuesOutput.get_column_converters(self, value_fields))
-
     def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
-        # The shape the rows are read in - the same calls read with another shape (named=True)
-        # build the same SQL text, but the plan keeps how its rows are read.
-        return (cast("ValuesSelection", self._selection).shape,), []
+        # SQL-equivalent row shapes share conversion metadata and choose their own reader.
+        return (self._rows.plan_shape,), []
 
     def _restore_from_plan(self, plan: StatementPlan) -> None:
-        # How each row shape the plan was run with reads its rows - another shape may share the SQL.
-        readings_by_shape = plan.result_reading
-        self._values_reading = readings_by_shape.get(cast("ValuesSelection", self._selection).shape)
+        self._column_converters = plan.result_reading
 
     def _get_plan_record(self) -> dict[str, Any]:
-        return {"result_reading": {cast("ValuesSelection", self._selection).shape: self.get_values_reading()}}
+        self._column_converters = ValuesOutput.get_column_converters(self)
+        return {"result_reading": self._column_converters}
 
     def _get_selected_field_names(self) -> Collection[str]:
         return ValuesOutput.get_output_field_names(self)

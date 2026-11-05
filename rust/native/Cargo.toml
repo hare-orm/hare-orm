@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.29", features = ["chrono"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "time", "io-util"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
 # array_to_sql/array_from_sql, which postgres-types uses internally but does not re-export.
 postgres-protocol = "0.6"
