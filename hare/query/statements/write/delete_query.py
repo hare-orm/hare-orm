@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Generator
+from collections.abc import Awaitable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -14,6 +14,7 @@ from hare.instrumentation.enums import RowOperation
 from hare.models.deletion.cascade.cascade_deletion import CascadeDeletion
 from hare.models.deletion.cascade.deletion_collector import DeletionCollector
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
+from hare.models.deletion.cascade.deletion_scope import DeletionScope
 from hare.models.deletion.cascade.protect_constraint_deferral import ProtectConstraintDeferral
 from hare.models.deletion.cascade.related_rows import RelatedRows
 from hare.models.deletion.instance_deletion import InstanceDeletion
@@ -22,10 +23,7 @@ from hare.models.write.write_steps import WriteSteps
 from hare.query.expressions import Q
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.queryset.options.query_options import QueryOptions
-from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.building.query_ctes import QueryCtes
-from hare.query.statements.building.query_grouping import QueryGrouping
-from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.write.matching_rows_query import MatchingRowsQuery
 from hare.query.statements.write.returning.returned_rows import ReturnedRows
 from hare.query.statements.write.update_query import UpdateQuery
@@ -67,21 +65,7 @@ class DeleteQuery(MatchingRowsQuery):
         self, value_wrapper_references: RecordedValueReferences | None, *, records_for_caller: bool
     ) -> bool:
         self._raise_if_rows_unwritable()
-        self.query = self._get_base_query()
-        if self._limit is not None:
-            self.query._limit = self._limit_term = self.query._wrapper_class(self._limit)
-            QueryOrdering.get_ordering(
-                self,
-                model=self.model,
-                table=self.model._meta.basetable,
-                orderings=self._get_slice_orderings(),
-                annotations=self._annotations,
-            )
-        QueryConditions.get_filters(self, value_wrapper_references=value_wrapper_references)
-        self._record_matching_rows_limit(value_wrapper_references)
-        # An aggregate annotation in the filters needs its GROUP BY, or the HAVING aggregates over
-        # the whole joined result.
-        QueryGrouping.apply_auto_group_by(self)
+        self._build_matching_rows(value_wrapper_references)
         if self._filters_need_primary_key_subquery():
             # A DELETE takes no JOINs - the rows are picked by a primary key subquery. The
             # annotation terms QueryConditions.get_filters() selected would become extra subquery columns.
@@ -196,11 +180,11 @@ class DeleteQuery(MatchingRowsQuery):
             objs: The matched rows.
             connection: Connection the deletes and their cascades run through.
         """
-        reached_keys: set[tuple[type[Model], Any]] = set()
+        reached_keys: set[tuple[Any, ...]] = set()
         token = DeletionCollector.reached_keys_collector.set(reached_keys)
         try:
             for instance in objs:
-                if (type(instance), instance.pk) in reached_keys:
+                if DeletionScope.get_row_identity(type(instance), instance.pk, connection) in reached_keys:
                     continue
                 await self._delete_matching_instance(instance, connection)
         finally:
@@ -261,7 +245,8 @@ class DeleteQuery(MatchingRowsQuery):
                 live_rows._distinct = False
                 # Exactly the rows found above - no default scope on top of them.
                 live_rows._uses_default_scope = False
-                live_rows._ambient_q_count = 0
+                live_rows._row_scope_provider = None
+                live_rows._ambient_conditions = ()
                 live_rows._visibility = replace(self._visibility, include_deleted=True, only_deleted=False)
                 return await UpdateQuery(
                     live_rows, {soft_delete_field: CascadeDeletion.get_deleted_at()}, WriteType.SOFT_DELETE, "delete"
@@ -284,29 +269,29 @@ class DeleteQuery(MatchingRowsQuery):
         live_rows._q_objects = [*self._q_objects, Q(**{f"{soft_delete_field}__isnull": True})]
         return live_rows
 
-    def __await__(self) -> Generator[Any, None, int | None]:
+    async def _execute_bound(self) -> int | None | list[Any]:
         # .limit(0) matches no rows - nothing to write.
         if self._is_none:
-            return self._execute_none().__await__()
+            return await self._execute_none()
         query = self._get_execution_query(True)
         if query._has_overridden_delete():
             # Each matched row goes through the model's override, one by one.
             live_only = query._deletes_softly() and query._visibility.include_deleted
-            return WriteSteps.run_whole(
+            return await WriteSteps.run_whole(
                 query._connection, query._report_delete(query._delete_each_matching_instance(live_only=live_only))
-            ).__await__()
+            )
         if self._deletes_softly():
-            return WriteSteps.get_whole_run(
+            return await WriteSteps.get_whole_run(
                 query._connection, query._report_delete(query._execute_soft_delete())
-            ).__await__()
+            )
         if DeletionGraph.needs_python_cascade(self.model):
             # A relation the database doesn't enforce, or rows of a captured model it reaches: its
             # on_delete is carried out in Python first, in batches.
-            return WriteSteps.run_whole(
+            return await WriteSteps.run_whole(
                 query._connection, query._report_delete(query._delete_matching_rows_with_cascade())
-            ).__await__()
+            )
         query._make_query_to_run()
-        return WriteSteps.get_whole_run(query._connection, query._report_delete(query._execute())).__await__()
+        return await WriteSteps.get_whole_run(query._connection, query._report_delete(query._execute()))
 
     async def _report_delete(self, delete: Awaitable[int | None]) -> int | None:
         """Runs the delete and reports the rows it removed and the rows their ``on_delete``
@@ -347,7 +332,8 @@ class DeleteQuery(MatchingRowsQuery):
 
         Raises:
             FieldError: A name isn't a field written in the model's table, or is given twice.
-            UnSupportedError: When run - the database has no ``RETURNING``.
+            UnSupportedError: When run, a direct SQL delete requires ``RETURNING`` that the database
+                lacks. Deletion through model methods, cascades or soft-delete can read rows instead.
         """
         from hare.query.statements.write.declarations import HardDeleteReturningQuery
         from hare.query.statements.write.returning.delete_returning_query import DeleteReturningQuery
@@ -370,7 +356,13 @@ class DeleteQuery(MatchingRowsQuery):
         capture_needs = query.model._meta.change_capture_needs
         if capture_needs is None or not capture_needs.captures(RowOperation.DELETE):
             query._make_query_to_run()
-            return (await query._connection.execute(*query._get_parameterized_sql(), returns_rows=False))[0]
+            return (
+                await query._connection.execute(
+                    *query._get_parameterized_sql(),
+                    returns_rows=False,
+                    recovery=query._connection.get_write_recovery(query.model._meta.basetable),
+                )
+            )[0]
         captured = CapturedWrite(query.model, capture_needs, query._connection, RowOperation.DELETE)
         async with captured.transaction() as connection:
             if connection is not query._connection:
@@ -380,7 +372,11 @@ class DeleteQuery(MatchingRowsQuery):
                 count, _pks = await query._run_captured_by_reading(captured, query._run_built_statement)
                 return count
             query._make_query_to_run()
-            count, raw_rows = await connection.execute(*query._get_parameterized_sql(), returns_rows=True)
+            count, raw_rows = await connection.execute(
+                *query._get_parameterized_sql(),
+                returns_rows=True,
+                recovery=connection.get_write_recovery(query.model._meta.basetable),
+            )
             await captured.capture_returned(raw_rows)
         return count
 
@@ -391,7 +387,13 @@ class DeleteQuery(MatchingRowsQuery):
             How many rows it deleted.
         """
         self._make_query_to_run()
-        return (await self._connection.execute(*self._get_parameterized_sql(), returns_rows=False))[0]
+        return (
+            await self._connection.execute(
+                *self._get_parameterized_sql(),
+                returns_rows=False,
+                recovery=self._connection.get_write_recovery(self.model._meta.basetable),
+            )
+        )[0]
 
     async def _execute(self) -> int | None:
         if self._has_protected_relations():
@@ -406,9 +408,13 @@ class DeleteQuery(MatchingRowsQuery):
                 # In a transaction: a DELETE stopped at the depth limit is half-done, and is rolled
                 # back before the retry.
                 async with self._connection._in_transaction() as transaction_connection:
-                    return (await transaction_connection.execute(*self._get_parameterized_sql(), returns_rows=False))[
-                        0
-                    ]
+                    return (
+                        await transaction_connection.execute(
+                            *self._get_parameterized_sql(),
+                            returns_rows=False,
+                            recovery=transaction_connection.get_write_recovery(self.model._meta.basetable),
+                        )
+                    )[0]
             except CascadeDepthLimitError:
                 # Row by row: each row's Model.delete() retries and falls back to a leaves-first
                 # cascade of its own chain.
@@ -418,5 +424,17 @@ class DeleteQuery(MatchingRowsQuery):
                 self._connection._in_transaction() as transaction_connection,
                 ProtectConstraintDeferral.defer(self.model, transaction_connection),
             ):
-                return (await transaction_connection.execute(*self._get_parameterized_sql(), returns_rows=False))[0]
-        return (await self._connection.execute(*self._get_parameterized_sql(), returns_rows=False))[0]
+                return (
+                    await transaction_connection.execute(
+                        *self._get_parameterized_sql(),
+                        returns_rows=False,
+                        recovery=transaction_connection.get_write_recovery(self.model._meta.basetable),
+                    )
+                )[0]
+        return (
+            await self._connection.execute(
+                *self._get_parameterized_sql(),
+                returns_rows=False,
+                recovery=self._connection.get_write_recovery(self.model._meta.basetable),
+            )
+        )[0]

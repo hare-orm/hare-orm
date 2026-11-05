@@ -4,10 +4,13 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.ddl.table_options import TableOptions
+from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.enums import RelationLoadStrategy
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_accessors import RelationAccessors
+from hare.models.constants import REFRESH_RESTORE_FAILURES_MESSAGE
 from hare.models.instances.dirty_fields import DirtyFields
+from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
 
@@ -85,27 +88,44 @@ class InstanceRefresh:
         """
         meta = obj._meta
         # Field names, not column names - what .only() takes.
-        refresh_fields = fields if fields is not None else meta.fields_db_projection.keys()
+        refresh_fields = tuple(fields if fields is not None else meta.fields_db_projection)
+        # Read every requested value before publication. A missing column is not a
+        # loaded NULL, and must fail before changing the existing object.
+        values = [(name, getattr(refreshed_obj, name)) for name in refresh_fields]
+        before = InstanceSnapshot.capture_persistence(obj, include_primary_key=False)
+        for name in ("_partial", "_await_when_save", "_allow_soft_delete_write"):
+            value = obj.__dict__.get(name, ROLLBACK_RESTORE_UNSET)
+            before.remember(name, dict(value) if name == "_await_when_save" and isinstance(value, dict) else value)
+        # Reverse undo restores key columns before the related objects their setters
+        # invalidate. No read participates in database rollback callbacks.
+        for name in meta.fetch_fields:
+            cache_name = f"_{name}"
+            before.remember(cache_name, obj.__dict__.get(cache_name, ROLLBACK_RESTORE_UNSET))
+        for name in refresh_fields:
+            before.remember(name, getattr(obj, name, ROLLBACK_RESTORE_UNSET))
         _setattr = object.__setattr__
         if meta.soft_delete_field is not None and meta.soft_delete_field in refresh_fields:
             _setattr(obj, "_allow_soft_delete_write", True)
         try:
-            for field in refresh_fields:
-                setattr(obj, field, getattr(refreshed_obj, field, None))
+            for name, value in values:
+                setattr(obj, name, value)
+            InstanceRefresh.carry_over_forward_relations(obj, refreshed_obj, set(refresh_fields))
+            if fields is None:
+                InstanceRefresh.reset_reverse_relations(obj, refreshed_obj)
+                _setattr(obj, "_partial", False)
+            if meta.track_dirty_fields:
+                if fields is not None:
+                    DirtyFields.sync_dirty_snapshot_fields(obj, refresh_fields)
+                else:
+                    DirtyFields.snapshot_dirty_fields(obj)
+        except BaseException as error:
+            try:
+                InstanceSnapshot.restore_all((before,))
+            except BaseException as restore_error:
+                raise BaseExceptionGroup(REFRESH_RESTORE_FAILURES_MESSAGE, [error, restore_error]) from None
+            raise
         finally:
-            _setattr(obj, "_allow_soft_delete_write", False)
-        InstanceRefresh.carry_over_forward_relations(obj, refreshed_obj, set(refresh_fields))
-        if not fields:
-            InstanceRefresh.reset_reverse_relations(obj, refreshed_obj)
-            # A refresh of every field makes a partially loaded obj complete; a refresh of some
-            # fields doesn't.
-            _setattr(obj, "_partial", False)
-        # The refreshed values are the new dirty-tracking baseline.
-        if meta.track_dirty_fields:
-            if fields:
-                DirtyFields.sync_dirty_snapshot_fields(obj, refresh_fields)
-            else:
-                DirtyFields.snapshot_dirty_fields(obj)
+            InstanceSnapshot.restore_value(obj, "_allow_soft_delete_write", before.values["_allow_soft_delete_write"])
 
     @staticmethod
     def carry_over_forward_relations(obj: Model, refreshed_obj: Model, refresh_fields: set[str]) -> None:

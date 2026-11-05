@@ -21,7 +21,10 @@ class Q(Plannable):
     def __init__(self, *conditions: Q | Exists, **filters: Any) -> None: ...
 
     @classmethod
-    def with_connector(cls, connector: Connector, *conditions: Q | Exists, **filters: Any) -> Q: ...
+    def with_connector(cls, connector: Connector, /, *conditions: Q | Exists, **filters: Any) -> Q: ...
+
+    @classmethod
+    def from_expression(cls, expression: Expression) -> Q: ...
 ```
 
 ```python
@@ -36,9 +39,24 @@ Book.objects.filter(Q.with_connector(Connector.OR, title__icontains="wizard", au
 (`get(does_not_exist_exception=...)`, `When(then=...)`), фильтруется через `Q`:
 `Model.objects.get(Q(does_not_exist_exception="timeout"))`.
 
+`Q.from_expression(expression)` использует логическое выражение как условие. Выражение должно
+строить SQL-условие или объявлять результат `BooleanField`: например, `ConditionValue(...)`,
+`Exists(...)` или `F("is_active")` для логического поля. Нелогическое скалярное выражение вызывает
+`QueryError` при подготовке запроса; его значение не преобразуется неявно в истину или ложь.
+Обычный конструктор `Q(...)` по-прежнему принимает позиционно только `Q` и `Exists`.
+
+```python
+Ticket.objects.filter(Q.from_expression(ConditionValue(Q(closed_at__isnull=True))))
+```
+
+Сериализация деклараций схемы и миграций не поддерживает условия-выражения внутри `Q`, включая
+`Q.from_expression(...)` и `Q(Exists(...))`, в том числе вложенные в другое условие. Запись такой
+декларации вызывает `ConfigurationError`. Это ограничение не мешает использовать их в выполняемых
+запросах и провайдерах видимости строк.
+
 Операторы: `&` / `|` (новый `Q`, объединяющий оба через AND/OR), `~` (новый `Q` с отрицанием, исходный не
 меняется), `.negate()` (меняет `_is_negated` на месте), `bool(q)` (`True`, если есть хотя бы один фильтр,
-`Exists` или истинный вложенный `Q`; `False` для пустого `Q()`).
+выражение или истинный вложенный `Q`; `False` для пустого `Q()`).
 
 ### <a id="condition-value"></a>Условие как значение: `ConditionValue`
 
@@ -95,8 +113,8 @@ JSON, расшифрованное значение `EncryptedTextField`/`Encryp
 значение — его текстом. `update()` записывает в
 поле даты только дату, а в поле момента — только момент (см.
 [Арифметика с датой и временем](#date-time-arithmetic)). Где преобразование задумано, его делает
-`Cast()`: `filter(code=Cast(F("number"), CharField(max_length=10)))`. Поле другого типа (JSON, UUID,
-массив и т. п.) не проверяется.
+`Cast()`: `filter(code=Cast(F("number"), CharField(max_length=10)))`. Другие хранимые типы, включая JSON,
+UUID и массивы, также подчиняются [правилам совместимости присваивания](queryset-methods.ru.md#update).
 
 `F("data__key")` — значение JSON по этому пути (`jsonb` в PostgreSQL), прочитанное уже разобранным:
 объект — `dict`, массив — `list`, логическое значение — `bool`, число — число. Арифметика с ним даёт
@@ -174,10 +192,9 @@ await Loan.objects.aggregate(longest=Max(F("returned_at") - F("lent_at")))   # t
 - Дата считается полночью: `date ± timedelta` — это дата момента `midnight ± timedelta`, поэтому остаток
   меньше суток **отбрасывается вниз** (`date + 23 hours` — та же дата, `date - 1 hour` — предыдущая).
 - Если одна из сторон `NULL`, результат `NULL`.
-- Результат за пределами дат, которые хранит база, — собственный у базы: SQLite даёт `OperationalError`
-  (`timestamp out of range`, `date out of range`), ClickHouse даёт ближайший момент или день, который
-  хранит колонка (`DateTime` — с 1900-01-01 по 2299-12-31 23:00, `DateTime64` начиная с ClickHouse 26.7 —
-  годы с 1 по 9999, `Date32` — до 2299-12-31), а на PostgreSQL
+- Результат за пределами дат, которые хранит база, определяется её арифметикой: SQLite даёт
+  `OperationalError` (`timestamp out of range`, `date out of range`); физические типы ClickHouse имеют
+  разные [диапазоны дат](../dialects/clickhouse/types.ru.md#fields), а на PostgreSQL
   результат после 9999 года, которого не вмещает `datetime` Python, даёт исключение при чтении.
 - При `use_timezone=False` дата-время без пояса — это местное время на часах, и сдвигается оно как
   абсолютное время в поясе системы.
@@ -281,25 +298,21 @@ SQLite делает результат за пределами 64 бит чис�
 ## <a id="case-when"></a>`Case` / `When`
 
 ```python
-CaseBranchValue = (
-    str | int | float | bool | Decimal | date | datetime | time | uuid.UUID | None | F | CombinedExpression | Function
-)
-
 class When(Expression):
     def __init__(
         self,
         *args: Q | Exists,
-        then: CaseBranchValue,
+        then: Any,
         negate: bool = False,
         **kwargs: Any,
     ) -> None: ...
 
 class Case(CombinableExpression):
-    def __init__(self, *args: When, default: CaseBranchValue = None) -> None: ...
+    def __init__(self, *args: When, default: Any = None) -> None: ...
 ```
 
-`then`/`default` принимают настоящее выражение (вычисляется для каждой строки) или простое значение
-Python любого из обычных типов значений полей — не только `str`. Условие ветки — `Q`, `Exists` или
+`then`/`default` принимают выражение, SQL `Term` или значение Python. Поддержка значений определяется
+полем результата и диалектом, включая пользовательские типы полей. Условие ветки — `Q`, `Exists` или
 именованные фильтры.
 
 `When(negate=True, ...)` отрицает всё условие ветки, в точности как `~Q(...)`:
@@ -315,7 +328,8 @@ await Book.objects.all().annotate(
 )
 ```
 
-`When`, ссылающийся на агрегат или вычисляемое значение, правильно попадает в `HAVING`, а не в `WHERE`.
+Условие `When` остаётся внутри `CASE WHEN`, в том числе при ссылке на агрегатную аннотацию.
+Отдельный фильтр по агрегату использует обычные правила `HAVING`.
 
 Тип результата `Case` определяют все его ветки вместе (`Value(...)` считается значением, которое он
 оборачивает, ветка `None` не считается):
@@ -331,8 +345,9 @@ await Book.objects.all().annotate(
   `uuid.UUID` и другие); константы `date` вместе с константами `datetime` дают `datetime` (дата в
   полночь);
 - дата рядом с моментом — `DateField` или константа `date` рядом с `DatetimeField` или константой
-  `datetime` — даёт момент, дату в полночь по UTC, как PostgreSQL делает её `timestamp` (момент не
-  обрезается до даты);
+  `datetime` — даёт момент. Константа даты становится полуночью через результирующее `DatetimeField`,
+  с `Timezone.default` при `use_timezone=True`; преобразование колонок даты следует правилам базы.
+  Момент не обрезается до даты;
 - значения типов, которые не сочетаются, — число с текстом, логическое значение с числом, дата с числом
   или интервалом, текст со временем — дают `FieldError` до выполнения запроса на любой базе: приведите их
   к одному типу через `Cast()`. Строковая константа здесь — текст, даже если читается как число
@@ -348,7 +363,7 @@ await Book.objects.all().annotate(
 
 ```python
 class Subquery(CombinableExpression, Term):
-    def __init__(self, query: AwaitableQuery[Any], *, shares_outer_scope: bool = False) -> None: ...
+    def __init__(self, query: QuerySpecification[Any], *, shares_outer_scope: bool = False) -> None: ...
 
 class OuterReference(CombinableExpression):
     # поле внешней модели или путь related__field
@@ -387,8 +402,9 @@ Author.objects.annotate(n=Length("name")).annotate(x=Exists(Book.objects.filter(
 не попадает в `GROUP BY`, а фильтр по нему идёт в `HAVING`. На вычисляемое значение с оконной функцией
 (`Window(...)`) ссылаться нельзя — это даёт `QueryError`.
 
-`OuterReference` работает только внутри запроса, обёрнутого в `Exists(...)` или `Subquery(...)`. Запрос
-`QuerySet`, переданный без `await` в `field__in=`, сам оборачивается в `Subquery`.
+`OuterReference` требует внешнего контекста: запроса, обёрнутого в `Exists(...)` или `Subquery(...)`,
+либо условия [`AsofJoin(on=...)`](filters.ru.md#asof-join). Запрос `QuerySet`, переданный без `await`
+в `field__in=`, сам оборачивается в `Subquery`.
 
 С `shares_outer_scope=True` `OuterReference` запроса подзапроса ссылается на запрос, в который вложен
 охватывающий, а не на сам охватывающий — для подзапроса между запросом и его собственными фильтрами: SQL

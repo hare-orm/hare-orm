@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import sys
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hare.cli.config_locator import ConfigLocator
 from hare.contrib.mypy.constants import (
@@ -15,8 +16,15 @@ from hare.contrib.mypy.constants import (
     PYPROJECT_FILE_NAME,
 )
 from hare.core.config import HareConfig
+from hare.exceptions import FieldError
+from hare.fields.data.containers.container_field import ContainerField
+from hare.fields.field import Field
+from hare.fields.generated_field import GeneratedField
+from hare.models.write.rules.enums import WriteType
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.typing_info.bound_models import BoundModels
+from hare.typing_info.filter_value_types import FilterValueTypes
+from hare.typing_info.write_value_types import WriteValueTypes
 
 if TYPE_CHECKING:
     from mypy.options import Options
@@ -105,19 +113,122 @@ class ModelRegistry:
 
     @staticmethod
     def _get_fingerprint(config_source: str, bound_models: BoundModels) -> str:
+        """Hash the typing contracts, without serializing defaults or other runtime values.
+
+        ValueType descriptions already contain the input/output types read by the plugin.
+        Relations are recorded as graph edges, not expanded to an arbitrary path depth;
+        container fields additionally describe their children for indexed/key paths.
+        """
         descriptions: list[str] = [config_source]
-        for connection_alias, dialect in sorted(bound_models.dialects_by_connection.items()):
-            descriptions.append(f"{connection_alias}:{dialect.name}")
-        for name, implementations in sorted(QuerySetExtensions.registered.items()):
-            for dialect_class, implementation in implementations.items():
-                descriptions.append(f"{name}@{dialect_class.name}{implementation.get_call_signature()}")
+        for connection_alias, connection_dialect in sorted(bound_models.dialects_by_connection.items()):
+            descriptions.append(f"{connection_alias}:{connection_dialect.name}")
+        for name, implementations in sorted(QuerySetExtensions.get_registered().items()):
+            for dialect_class, implementation in sorted(
+                implementations.items(), key=lambda item: BoundModels.get_fullname(item[0])
+            ):
+                parameters = tuple(
+                    (parameter.name, parameter.kind.name, parameter.default is inspect.Parameter.empty)
+                    for parameter in implementation.get_call_signature().parameters.values()
+                )
+                descriptions.append(repr((name, BoundModels.get_fullname(dialect_class), parameters)))
         for model in bound_models.models:
-            descriptions.append(f"{BoundModels.get_fullname(model)}@{model._meta.default_connection}")
-            for field_name, field in model._meta.fields_map.items():
+            meta = model._meta
+            dialect = bound_models.get_dialect(model)
+            descriptions.append(f"{BoundModels.get_fullname(model)}@{meta.default_connection}")
+            descriptions.append(repr(meta.primary_key_attribute_names))
+            descriptions.append(repr(WriteValueTypes.get_all(model)))
+            descriptions.append(
+                repr(WriteValueTypes.get_all(model, accepts_expressions=True, write_type=WriteType.UPDATE))
+            )
+            for name, generic_field in sorted(meta.generic_foreign_key_fields.items()):
+                branches = sorted(
+                    (branch, BoundModels.get_fullname(target))
+                    for target, branch in generic_field.branch_by_model.items()
+                )
+                descriptions.append(repr((name, generic_field.null, branches)))
+            for field_name, field in meta.fields_map.items():
                 related_model = getattr(field, "related_model", None)
                 descriptions.append(
-                    f"{field_name}:{BoundModels.get_fullname(type(field))}:{field.null}:{field.field_type!r}:"
-                    f"{'' if related_model is None else BoundModels.get_fullname(related_model)}:"
-                    f"{sorted(type(field).registered_lookups)}:{sorted(type(field).registered_transforms)}"
+                    repr(
+                        (
+                            field_name,
+                            ModelRegistry._get_field_description(field),
+                            None if related_model is None else BoundModels.get_fullname(related_model),
+                        )
+                    )
                 )
+            if dialect is None:
+                continue
+            for path in (*meta.fields_map, *(("pk",) if meta.has_primary_key else ())):
+                try:
+                    lookups = meta.get_lookups(path, dialect)
+                except FieldError:
+                    # Some relation attributes cannot be compared as a whole.
+                    continue
+                for suffix, lookup in sorted(lookups.items()):
+                    descriptions.append(
+                        repr(
+                            (
+                                path,
+                                suffix,
+                                lookup.target,
+                                lookup.transforms,
+                                lookup.crosses_to_many,
+                                lookup.requires_extension,
+                                FilterValueTypes.get_filter_value_type(lookup),
+                                FilterValueTypes.get_selected_value_type(lookup),
+                            )
+                        )
+                    )
         return hashlib.sha256("\n".join(descriptions).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _get_field_description(field: Field[Any]) -> tuple[Any, ...]:
+        """Describe field and extension types even inside containers with unbounded paths.
+
+        Callback identities and SQL bodies are irrelevant to typing. Registered lookups
+        contribute their declared inputs; transforms contribute their output field types.
+        """
+        effective_field = GeneratedField.get_effective_field(field)
+        if effective_field is not field:
+            return (
+                BoundModels.get_fullname(type(field)),
+                field.null,
+                ModelRegistry._get_field_description(effective_field),
+            )
+        lookups = {}
+        transforms = {}
+        for field_class in reversed(type(field).__mro__):
+            lookups.update(Field.get_class_lookups(field_class))
+            transforms.update(Field.get_class_transforms(field_class))
+        outputs = []
+        for name, transform in sorted(transforms.items()):
+            output = transform.get_transform(field)[1]
+            outputs.append(
+                (
+                    name,
+                    transform.required_extension,
+                    BoundModels.get_fullname(type(output)),
+                    output.field_type,
+                    output.get_python_type(),
+                    output.null,
+                    output.get_accepted_value_types(),
+                    None if output.supported_lookups is None else tuple(sorted(output.supported_lookups)),
+                )
+            )
+        return (
+            BoundModels.get_fullname(type(field)),
+            field.field_type,
+            field.get_python_type(),
+            field.null,
+            field.get_accepted_value_types(),
+            None if field.supported_lookups is None else tuple(sorted(field.supported_lookups)),
+            tuple(
+                (name, lookup.value_shape, lookup.value_type, lookup.required_extension)
+                for name, lookup in sorted(lookups.items())
+            ),
+            tuple(outputs),
+            tuple((step, ModelRegistry._get_field_description(child)) for step, child in field.get_held_steps())
+            if isinstance(field, ContainerField)
+            else (),
+        )

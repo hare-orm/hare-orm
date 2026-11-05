@@ -5,7 +5,7 @@ or an exception, handled or not."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hare.contrib.frameworks.constants import (
     REQUEST_TRANSACTION_SCOPE_KEY,
@@ -13,31 +13,29 @@ from hare.contrib.frameworks.constants import (
     SKIP_TRANSACTION_ATTRIBUTE,
 )
 from hare.contrib.frameworks.exceptions import ServerErrorResponse
-from hare.transactions.transactions import Transactions
-
-if TYPE_CHECKING:
-    from hare.transactions.atomic.atomic import Atomic
+from hare.transactions.transaction_group import TransactionGroup
 
 
-class RequestTransaction:
+class RequestTransaction(TransactionGroup):
     """The transactions of one request, one per connection. With several connections they commit
     one after another - a failure to commit one rolls back those not yet committed, not those
     already committed.
 
     Args:
-        connection_aliases: The connections, None for the default one.
+        connection_aliases: The connections; a None entry uses automatic transaction connection selection.
     """
 
     def __init__(self, connection_aliases: tuple[str | None, ...]) -> None:
-        self.connection_aliases = connection_aliases
-        self.open_contexts: list[Atomic] = []
+        super().__init__(connection_aliases)
         #: An exception the handler raised and the application answered itself.
         self.handled_error: BaseException | None = None
 
     @staticmethod
     def fail_request(scope: Any, error: BaseException) -> None:
-        """Rolls back the transaction of a request whose handler raised - for the framework's hook
-        that runs as the application answers the exception itself (``404`` for ``DoesNotExist``).
+        """Mark a handled request exception for rollback when the response starts.
+
+        The framework calls this while answering the exception (``404`` for ``DoesNotExist``).
+        Its exception handler still runs inside the request transaction.
 
         Args:
             scope: The request's ASGI scope.
@@ -132,21 +130,6 @@ class RequestTransaction:
         # commit.
         await self.close(ServerErrorResponse(SERVER_ERROR_STATUS_CODE))
 
-    async def begin(self) -> None:
-        """Opens a transaction on each connection.
-
-        Raises:
-            Exception: Opening one failed - those already opened are rolled back.
-        """
-        for connection_alias in self.connection_aliases:
-            context = Transactions.atomic(connection_alias)
-            try:
-                await context.__aenter__()
-            except BaseException as error:
-                await self.close(error)
-                raise
-            self.open_contexts.append(context)
-
     async def finish(self, status_code: int) -> None:
         """Ends the transactions as the response starts: commits them, or rolls them back for a
         server error or an exception the application answered itself.
@@ -161,26 +144,3 @@ class RequestTransaction:
         if error is None and status_code >= SERVER_ERROR_STATUS_CODE:
             error = ServerErrorResponse(status_code)
         await self.close(error)
-
-    async def close(self, error: BaseException | None) -> None:
-        """Ends the transactions still open, the last opened first - does nothing once they ended.
-
-        Args:
-            error: Why to roll back, None to commit.
-
-        Raises:
-            Exception: A commit failed, when committing.
-        """
-        contexts, self.open_contexts = self.open_contexts, []
-        failure: BaseException | None = None
-        for context in reversed(contexts):
-            reason = error or failure
-            try:
-                if reason is None:
-                    await context.__aexit__(None, None, None)
-                else:
-                    await context.__aexit__(type(reason), reason, reason.__traceback__)
-            except Exception as close_error:
-                failure = failure or close_error
-        if failure is not None and error is None:
-            raise failure

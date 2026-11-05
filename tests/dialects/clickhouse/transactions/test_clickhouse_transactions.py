@@ -250,7 +250,7 @@ async def test_a_transaction_per_request_needs_a_connection_with_transactions():
         lifecycle = HareLifecycle(
             {
                 "connections": {"default": url},
-                "apps": {"models": {"models": ["tests.dialects.clickhouse.transactions.models"]}},
+                "apps": {},
             },
             atomic_requests=True,
         )

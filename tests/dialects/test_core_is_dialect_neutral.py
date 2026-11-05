@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.utils.module_usage import ModuleUsage
+
 pytestmark = pytest.mark.database_independent
 
 HARE_DIRECTORY = Path(__file__).resolve().parents[2] / "hare"
@@ -60,15 +62,43 @@ DATABASE_NAMING_MODULES = frozenset({"hare/dialects/constants.py", "hare/dialect
 CORE_SQL_TEXT = re.compile(r"\bIN \(|\bSELECT\b|\bCAST\(")
 #: The events the observers are told of - any dialect may send one, though only one sends it yet.
 OBSERVED_EVENTS_MODULE = "hare/instrumentation/declarations.py"
-#: An identifier of Python source.
-IDENTIFIER_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+#: Public extension primitives remain shared even when only one built-in dialect needs them.
+SHARED_EXTENSION_NAMES = {
+    "hare.exceptions.PoolTimeoutError": "Public exception callers catch independently of the pool implementation",
+    "hare.declarations.environment_value.EnvironmentValue": "Serializable environment declaration for extensions",
+    "hare.dialects.base.connection.constants.PASSWORD_PROVIDER_OPTIONS": (
+        "Options of the shared PasswordProvider protocol"
+    ),
+    "hare.dialects.base.schema.plans.schema_transaction.SchemaTransaction": "Generic transactional SchemaStep",
+    "hare.dialects.base.schema.plans.schema_cleanup.SchemaCleanup": "Generic resource cleanup SchemaStep",
+}
+#: These declarations pass feature names to shared dynamic readers. Prose and unrelated strings do not count.
+DYNAMIC_FEATURE_DECLARATIONS = {
+    "gis/constants.py": {"GEOGRAPHY_REQUIRED_FEATURE", "SPATIAL_LOOKUP_REQUIRED_FEATURE"},
+    "query/filters/constants.py": {"LOOKUP_REQUIRED_FEATURES"},
+    "search/constants.py": {"TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE"},
+    "fields/db_defaults/uuid_v7.py": {"UuidV7.required_feature"},
+    "vectors/constants.py": {"VECTOR_SEARCH_REQUIRED_FEATURE"},
+    **{
+        f"migrations/operations/schema_objects/object_types/{name}_object_type.py": {
+            f"{''.join(part.title() for part in name.split('_'))}ObjectType.feature"
+        }
+        for name in ("function", "dictionary", "grant", "materialized_view", "policy", "sequence", "view")
+    },
+}
 #: The modules of ``base`` holding syntax several databases write alike beyond ISO SQL - their SQL
 #: isn't one database's.
 SEVERAL_DATABASES_SYNTAX_MODULES = frozenset({"hare/dialects/base/clauses/limit_returning_conflict_query_clauses.py"})
 #: The name of a function only one of the built-in databases has, given to a ``Function``.
 DIALECT_ONLY_FUNCTION_NAMES = frozenset({"ANY", "POW", "NOW", "DATE_TRUNC", "JSONB_BUILD_OBJECT", "JSON_EACH"})
 #: The modules a dialect is found by its name in - the dialect itself and the registry of dialects.
-DIALECT_NAME_MODULES = frozenset({"hare/dialects/base/dialect.py", "hare/dialects/dialect_registry.py"})
+DIALECT_NAME_MODULES = frozenset(
+    {
+        "hare/dialects/base/dialect.py",
+        "hare/dialects/dialect_registry.py",
+        "hare/core/extensions/registry_builder.py",
+    }
+)
 #: The calls taking a key first.
 KEYED_CALL_NAMES = frozenset({"get", "pop", "setdefault"})
 
@@ -76,6 +106,12 @@ KEYED_CALL_NAMES = frozenset({"get", "pop", "setdefault"})
 def get_core_modules(hare_directory: Path = HARE_DIRECTORY) -> Iterator[Path]:
     dialects_directory = hare_directory / "dialects"
     for path in sorted(hare_directory.rglob("*.py")):
+        relative_path = path.relative_to(hare_directory).as_posix()
+        # Test database adapters own their server-specific creation and cleanup SQL.
+        if relative_path.startswith("contrib/test/databases/postgresql/") or relative_path == (
+            "contrib/test/databases/test_database_config.py"
+        ):
+            continue
         if dialects_directory not in path.parents or dialects_directory / "base" in path.parents:
             yield path
 
@@ -314,6 +350,27 @@ def test_no_module_outside_the_clickhouse_dialect_names_it():
     assert naming_modules == ["dialects/constants.py"]
 
 
+def test_runtime_modules_do_not_import_test_database_adapters():
+    violations = []
+    for path in HARE_DIRECTORY.rglob("*.py"):
+        relative_path = path.relative_to(HARE_DIRECTORY).as_posix()
+        if relative_path.startswith(("contrib/test/", "contrib/pytest/")):
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = (
+                [node.module or ""]
+                if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.value]
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                else []
+            )
+            if any(name.startswith("hare.contrib.test.databases") for name in names):
+                violations.append(f"{relative_path}:{node.lineno}")
+    assert violations == []
+
+
 def get_dialect_package(path: Path, hare_directory: Path) -> str | None:
     """The built-in dialect package a module belongs to, None for a core module."""
     for package in BUILTIN_DIALECT_PACKAGES:
@@ -322,10 +379,10 @@ def get_dialect_package(path: Path, hare_directory: Path) -> str | None:
     return None
 
 
-def get_feature_names_no_core_module_reads(hare_directory: Path) -> list[str]:
+def get_feature_names_no_core_module_reads(hare_directory: Path, usage: ModuleUsage) -> list[str]:
     """The fields of ``Features`` read by no module of hare's core - by one dialect's alone."""
     features_path = hare_directory / "dialects" / "base" / "features.py"
-    features_tree = ast.parse(features_path.read_text(encoding="utf-8"))
+    features_tree = usage.trees[features_path]
     [features_class] = [
         node for node in ast.walk(features_tree) if isinstance(node, ast.ClassDef) and node.name == "Features"
     ]
@@ -334,66 +391,88 @@ def get_feature_names_no_core_module_reads(hare_directory: Path) -> list[str]:
         for statement in features_class.body
         if isinstance(statement, ast.AnnAssign)
         and isinstance(statement.target, ast.Name)
-        and "ClassVar" not in ast.unparse(statement.annotation)
+        and not (
+            isinstance(statement.annotation, ast.Subscript)
+            and (
+                isinstance(statement.annotation.value, ast.Name)
+                and statement.annotation.value.id == "ClassVar"
+                or isinstance(statement.annotation.value, ast.Attribute)
+                and statement.annotation.value.attr == "ClassVar"
+            )
+        )
     ]
-    core_words: set[str] = set()
-    for path in get_core_modules(hare_directory):
-        if path != features_path:
-            core_words.update(IDENTIFIER_PATTERN.findall(path.read_text(encoding="utf-8")))
-    return [name for name in field_names if name not in core_words]
+    reads = usage.get_attribute_reads(
+        [path for path in get_core_modules(hare_directory) if path != features_path],
+        {"features", "effective_features"},
+    )
+    for relative_path, names in DYNAMIC_FEATURE_DECLARATIONS.items():
+        reads.update(usage.get_declared_strings(hare_directory / relative_path, names))
+    return [name for name in field_names if name not in reads]
 
 
-def get_core_names_serving_one_dialect(hare_directory: Path) -> list[str]:
+def get_core_names_serving_one_dialect(hare_directory: Path, usage: ModuleUsage) -> list[str]:
     """The constants and classes of hare's core that only one dialect's package uses."""
-    paths_by_word: dict[str, set[Path]] = {}
-    for path in sorted(hare_directory.rglob("*.py")):
-        for word in set(IDENTIFIER_PATTERN.findall(path.read_text(encoding="utf-8"))):
-            paths_by_word.setdefault(word, set()).add(path)
     serving_one_dialect = []
     for path in get_core_modules(hare_directory):
         if path.relative_to(hare_directory.parent).as_posix() == OBSERVED_EVENTS_MODULE:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        defined_names = [
-            target.id
-            for statement in tree.body
-            if isinstance(statement, ast.Assign)
-            for target in statement.targets
-            if isinstance(target, ast.Name) and target.id.isupper()
-        ] + [statement.name for statement in tree.body if isinstance(statement, ast.ClassDef)]
-        for name in defined_names:
-            using_paths = paths_by_word.get(name, set()) - {path}
+        for name in usage.get_definitions(path):
+            full_name = f"{usage.modules[path]}.{name}"
+            if full_name in SHARED_EXTENSION_NAMES:
+                continue
+            using_paths = usage.references.get(full_name, set()) - {path}
             using_packages = {get_dialect_package(other, hare_directory) for other in using_paths}
             if using_paths and len(using_packages) == 1 and None not in using_packages:
                 serving_one_dialect.append(f"{path.relative_to(hare_directory.parent).as_posix()}: {name}")
     return serving_one_dialect
 
 
-def test_each_feature_of_every_dialect_is_read_outside_the_dialects():
+@pytest.fixture(scope="module")
+def module_usage():
+    return ModuleUsage(HARE_DIRECTORY)
+
+
+def test_each_feature_of_every_dialect_is_read_outside_the_dialects(module_usage):
     """A field of ``Features`` only one dialect reads belongs to that dialect's subclass of it."""
-    assert get_feature_names_no_core_module_reads(HARE_DIRECTORY) == []
+    assert get_feature_names_no_core_module_reads(HARE_DIRECTORY, module_usage) == []
 
 
-def test_no_name_of_the_core_serves_one_dialect_alone():
+def test_no_name_of_the_core_serves_one_dialect_alone(module_usage):
     """A constant or a class of hare's core that only one dialect's package uses belongs to that package."""
-    assert get_core_names_serving_one_dialect(HARE_DIRECTORY) == []
+    assert get_core_names_serving_one_dialect(HARE_DIRECTORY, module_usage) == []
 
 
 def test_a_feature_and_a_name_serving_one_dialect_are_found(tmp_path):
     hare_directory = tmp_path / "hare"
     for relative_path, text in {
-        "dialects/base/features.py": "class Features:\n    shared_flag: bool = False\n    sqlite_flag: bool = False\n",
+        "dialects/base/features.py": (
+            "from typing import ClassVar\nclass Features:\n    shared_flag: bool = False\n"
+            "    sqlite_flag: bool = False\n    dynamic_flag: bool = False\n    metadata: ClassVar[int] = 1\n"
+        ),
         "query/reader.py": (
-            "SHARED_LIMIT = 1\nONE_DIALECT_LIMIT = 2\ndef f(features):\n    return features.shared_flag\n"
+            "SHARED_LIMIT = 1\nONE_DIALECT_LIMIT: int = 2\ndef f(features):\n    return features.shared_flag\n"
         ),
         "dialects/sqlite/user.py": (
-            "def g(features):\n    return features.sqlite_flag, SHARED_LIMIT, ONE_DIALECT_LIMIT\n"
+            "from hare.query.reader import SHARED_LIMIT as shared\n"
+            "from ...query.reader import ONE_DIALECT_LIMIT as local_limit\n"
+            "def g(features):\n    return features.sqlite_flag, shared, local_limit\n"
         ),
-        "dialects/postgresql/user.py": "LIMIT = SHARED_LIMIT\n",
+        "dialects/postgresql/user.py": "import hare.query.reader as reader\nLIMIT = reader.SHARED_LIMIT\n",
+        "query/unrelated.py": (
+            "'''sqlite_flag and ONE_DIALECT_LIMIT are just documentation'''\n"
+            "# sqlite_flag ONE_DIALECT_LIMIT\n"
+            "def unrelated(obj):\n    ONE_DIALECT_LIMIT = 3\n    return ONE_DIALECT_LIMIT, obj.sqlite_flag\n"
+        ),
+        "fields/db_defaults/uuid_v7.py": (
+            "class UuidV7:\n    required_feature = 'dynamic_flag'\n"
+            "def unrelated():\n    required_feature = 'sqlite_flag'\n"
+        ),
+        "query/filters/constants.py": "LOOKUP_REQUIRED_FEATURES = {'sqlite_flag': 'dynamic_flag'}\n",
     }.items():
         module = hare_directory / relative_path
         module.parent.mkdir(parents=True, exist_ok=True)
         module.write_text(text, encoding="utf-8")
 
-    assert get_feature_names_no_core_module_reads(hare_directory) == ["sqlite_flag"]
-    assert get_core_names_serving_one_dialect(hare_directory) == ["hare/query/reader.py: ONE_DIALECT_LIMIT"]
+    usage = ModuleUsage(hare_directory)
+    assert get_feature_names_no_core_module_reads(hare_directory, usage) == ["sqlite_flag"]
+    assert get_core_names_serving_one_dialect(hare_directory, usage) == ["hare/query/reader.py: ONE_DIALECT_LIMIT"]

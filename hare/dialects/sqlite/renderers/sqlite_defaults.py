@@ -46,7 +46,7 @@ class SqliteDefaults:
         # SQLite's DEFAULT takes a literal, a signed number or a parenthesized expression. A subclass
         # with no standard SQL of its own (UuidV7) refuses here.
         sql = default.get_standard_sql()
-        if SQLITE_BARE_DEFAULT_PATTERN.fullmatch(sql) or default.is_parenthesized(sql):
+        if SQLITE_BARE_DEFAULT_PATTERN.fullmatch(sql):
             return sql
         return f"({sql})"
 

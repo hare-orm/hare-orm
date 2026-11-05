@@ -22,9 +22,13 @@ PRAGMA can't take a bind parameter):
 | boolean | `foreign_keys`, `case_sensitive_like`, `recursive_triggers`, `automatic_index`, `cell_size_check`, `defer_foreign_keys`, `ignore_check_constraints`, `trusted_schema`, `reverse_unordered_selects` | `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off` |
 | whole number | `journal_size_limit` (`-1`..`2**40`), `cache_size`, `busy_timeout` (`0`..`86400000` ms), `mmap_size`, `page_size` (a power of two, `512`..`65536`), `wal_autocheckpoint`, `threads` (`0`..`64`), `max_page_count`, `cache_spill` | within the range |
 
-Any other key (a typo such as `jurnal_mode`) or an unaccepted value raises `ConfigurationError`, as does
-an `install_regexp_functions` value that isn't a boolean. A connection without `file_path` raises
-`ConfigurationError` too.
+`secure_delete` accepts `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0`, and `FAST`, without case sensitivity.
+
+Any other PRAGMA key (a typo such as `jurnal_mode`) or an unaccepted value raises `ConfigurationError`.
+`install_regexp_functions` parses textual boolean settings and rejects unrecognized text; typed Python
+settings are passed through without requiring an exact `bool` type. A missing or empty `file_path`
+raises `ConfigurationError`. Python credentials also accept bytes and `os.PathLike` paths, normalized
+to text with `os.fsdecode`.
 
 `page_size` and `auto_vacuum` shape the database file, so SQLite takes them only before the file's header
 is written: hare sends them first, before `journal_mode=WAL`, and they take effect on a new file. An
@@ -38,7 +42,7 @@ instead of failing on the first datetime value.
 SQLite has no schemas: a model's `Meta.schema` names an attached database, and every statement writes
 the model's table in it — `"archive"."article"`. Each connection attaches the databases its
 `attached_databases` setting names (`ATTACH DATABASE`), before the first statement and again after every
-reconnect:
+reconnect. Python credentials accept a mapping of database names to file names:
 
 ```python
 # credentials: a name to its file
@@ -74,3 +78,28 @@ hare doesn't work around a fault of a particular SQLite library — the library'
 - SQLite 3.38.0 to 3.38.5 report a foreign key broken by a statement with `RETURNING` as a plain error
   instead of a constraint failure — hare raises it as `OperationalError` there, not `IntegrityError`.
   SQLite 3.39.0 fixed it.
+
+## <a id="parameter-adapters"></a>Parameter adapters
+
+Each SQLite client has its own immutable set of parameter conversions. Hare does not register
+process-wide `sqlite3` adapters. `Decimal` is stored as text, dates and times as ISO text, and
+aware datetimes as UTC text. Raw parameters use these same conversions.
+
+Register a custom adapter on the selected client before executing queries:
+
+```python
+from hare.core.connections.connections import Connections
+
+client = Connections.get("default")
+client.register_parameter_adapter(MyIdentifier, lambda value: value.text)
+```
+
+The adapter matches an exact Python type and returns a native SQLite value (`None`, `int`,
+`float`, `str`, or bytes-like data). It runs once. A value's public `__conform__` protocol is
+also supported when no explicit adapter matches. Registrations on an external `sqlite3` client
+are not imported into hare's conversions.
+
+Ordinary statements, bulk writes, cursors and packed `IN` lists use the client's conversions.
+The JSON envelope of a packed list is not passed through a custom string adapter again.
+Replacing an adapter selects a new statement-plan key. Transactions retain the adapter snapshot
+with which their wrapper was created; changing the parent client affects subsequent transactions.

@@ -125,8 +125,10 @@ class CallSignaturePlans:
             default scope was resolved with (None for a model without one); None when the default
             scope can't be resolved now (no tenant is active), or a condition keeps no plan.
         """
+        if specification._row_scope_provider is not None:
+            return None
         row_scopes = RowScopes.of(specification.model)
-        if row_scopes.scopes:
+        if row_scopes.field_scopes:
             visibility = specification._visibility.get_for_active_tenant()
             scope = row_scopes.get_filters_plan_description(
                 visibility, uses_default_scope=specification._uses_default_scope
@@ -165,6 +167,9 @@ class CallSignaturePlans:
             connection.dialect,
             connection.connection_alias,
             connection.features.plan_key,
+            connection.native_python_types,
+            connection.parameter_binding_key,
+            connection.sql_context_key,
             Timezone.get_rendered_zone_key(),
             scope_description.structure,
             calls_structure,
@@ -173,20 +178,6 @@ class CallSignaturePlans:
         if not scope_description.values:
             return key, call_values, visibility
         return key, [*scope_description.values, *call_values], visibility
-
-    @staticmethod
-    def find(model: Any, key: tuple[Any, ...]) -> StatementPlan | None:
-        """The plan kept under the key of a queryset's calls.
-
-        Args:
-            model: The model queried.
-            key: The key (``get_key()``).
-
-        Returns:
-            The plan, None when none is kept yet.
-        """
-        found = StatementPlans.call_signature_plans.get_for_model(model, key)
-        return None if found is None else found[0]
 
     @staticmethod
     def find_with_value_positions(
@@ -203,7 +194,7 @@ class CallSignaturePlans:
             The plan and the positions - None when they come in the plan's order; None when no plan
             is kept yet.
         """
-        return StatementPlans.call_signature_plans.get_for_model(model, key)
+        return StatementPlans.call_signature_plans.get_model_bucket(model).get(key)
 
     @staticmethod
     def get_value_origins(specification: QuerySpecification[Any], connection: DatabaseClient) -> list[Any] | None:
@@ -219,7 +210,7 @@ class CallSignaturePlans:
         """
         origins: list[Any] = []
         row_scopes = RowScopes.of(specification.model)
-        if row_scopes.scopes:
+        if row_scopes.field_scopes:
             scope = row_scopes.get_filters_plan_description(
                 specification._visibility.get_for_active_tenant(), uses_default_scope=specification._uses_default_scope
             )
@@ -312,7 +303,7 @@ class CallSignaturePlans:
         if type_value_number != type_value_count or len(set(positions)) != len(value_origins) + type_value_count:
             # A value of the calls the plan doesn't bind, or a value of no known origin.
             return
-        StatementPlans.call_signature_plans[(model, *key)] = (
+        StatementPlans.call_signature_plans.get_model_bucket(model)[key] = (
             plan,
             None if positions == list(range(len(positions))) else tuple(positions),
         )

@@ -2,7 +2,7 @@
 
 Uses the db_citext fixture (tests/dialects/postgresql/conftest.py), which manually creates the
 citext extension and runs generate_schemas() against tests.dialects.postgresql.column_types.models_citext -
-same pattern as db_postgis for PostGISField.
+same pattern as db_postgis for PointField.
 """
 
 import os

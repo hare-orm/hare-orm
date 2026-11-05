@@ -18,7 +18,7 @@
 | `_driver_begin()`, `_driver_commit()`, `_driver_rollback()` | Начинает транзакцию на соединении; отправляет её `COMMIT`; отправляет её `ROLLBACK`. |
 | `_driver_savepoint(name)`, `_driver_release_savepoint(name)`, `_driver_rollback_to_savepoint(name)` | Открывает точку сохранения, освобождает её и откатывается к ней. |
 | `_get_new_savepoint_name()` | Имя точки сохранения, ещё не использованное на этом соединении. |
-| `_is_connection_lost(error)` | Означает ли ошибка драйвера при `COMMIT`/`ROLLBACK`, что соединение пропало, — такую транзакцию сервер откатывает. По умолчанию `False`. |
+| `_is_connection_lost(error)` | Означает ли ошибка драйвера при `COMMIT`/`ROLLBACK`, что соединение пропало; исход транзакции определяется отдельно. По умолчанию `False`. |
 | `_is_commit_outcome_unknown(error)` | Остаётся ли при потере соединения неизвестным, прошёл ли выполнявшийся `COMMIT`. |
 | `_is_commit_rejection(error)` | Ответила ли база на `COMMIT` ошибкой — транзакция закончена. |
 | `_is_transaction_finished_error(error)` | Сообщает ли драйвер, что более ранний, прерванный `COMMIT`/`ROLLBACK` уже закончил транзакцию. |

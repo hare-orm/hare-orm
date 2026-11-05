@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.exceptions import UnSupportedError
 from hare.sql.builder.joins.join_on import JoinOn
 from hare.sql.builder.queries.constants import ROW_COUNT_FREE_AGGREGATE_NAMES
+from hare.sql.builder.queries.pagination_sql import PaginationSql
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.builder.tables.selectable import Selectable
-from hare.sql.builder.tables.table import Table
 from hare.sql.constants import CORRELATED_CONDITION_PREFIX, CORRELATED_SORT_KEY_PREFIX
 from hare.sql.enums import Boolean, Equality
 from hare.sql.identifiers import Identifiers
@@ -17,6 +17,7 @@ from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
 from hare.sql.terms.criteria.empty_criterion import EmptyCriterion
 from hare.sql.terms.field import Field
 from hare.sql.terms.functions.aggregate_function import AggregateFunction
+from hare.sql.terms.node_traversal import NodeTraversal
 from hare.sql.terms.qualified_outer_field import QualifiedOuterField
 from hare.sql.terms.tuple import Tuple
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from hare.sql.sql_context import SqlContext
+    from hare.sql.terms.node import Node
     from hare.sql.terms.term import Term
 
 
@@ -32,26 +34,6 @@ class CorrelatedSubqueries:
     (``Features.supports_correlated_subqueries``). An ``EXISTS`` correlated by equalities of its
     columns with the outer query's is written as a membership test of the outer columns in its
     rows; any other correlated subquery is refused before the statement is sent."""
-
-    @staticmethod
-    def get_table_name(table: Any) -> str | None:
-        """The name a column's table is referenced by - its alias, else its name.
-
-        Args:
-            table: A ``Table``, an aliased subquery or a plain name.
-
-        Returns:
-            The name, None for a column of no table.
-        """
-        if table is None:
-            return None
-        if isinstance(table, str):
-            return table
-        if isinstance(table, Table):
-            return table.get_table_name()
-        if isinstance(table, Selectable):
-            return table.alias
-        return None
 
     @staticmethod
     def iterate_query_terms(query: QueryBuilder) -> Iterator[Term]:
@@ -78,108 +60,78 @@ class CorrelatedSubqueries:
             if isinstance(join, JoinOn):
                 yield join.criterion
 
+    @staticmethod
+    def is_query_boundary(node: Any) -> bool:
+        """Whether a node introduces a child scope, including wrapped SQL queries."""
+        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+
+        return (
+            isinstance(node, (QueryBuilder, SetOperationQuery, Field, QualifiedOuterField))
+            or getattr(type(node), "rewrites_inner_correlation", False)
+            or getattr(type(node), "holds_nested_query", False)
+        )
+
+    @classmethod
+    def iterate_term_queries(cls, term: Node) -> Iterator[tuple[QueryBuilder, bool]]:
+        """Yield immediate child queries without traversing their inner expressions twice."""
+        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+
+        for node in NodeTraversal.walk(term, lambda child: not cls.is_query_boundary(child)):
+            rewrites = bool(getattr(type(node), "rewrites_inner_correlation", False))
+            nested = (
+                getattr(node, "inner_query")
+                if rewrites
+                else getattr(node, "get_nested_query")()
+                if getattr(type(node), "holds_nested_query", False)
+                else node
+            )
+            if isinstance(nested, QueryBuilder):
+                yield nested, rewrites
+            elif isinstance(nested, SetOperationQuery):
+                yield nested.base_query, rewrites
+                for _operation, branch in nested._set_operation:
+                    yield branch, rewrites
+                for cte in nested._with:
+                    yield from cls.iterate_term_queries(cast("Node", cte.query))
+
     @classmethod
     def iterate_nested_queries(cls, query: QueryBuilder) -> Iterator[tuple[QueryBuilder, bool]]:
-        """The queries nested one level in ``query`` - in its FROM, its joins and its terms.
-
-        Args:
-            query: The query.
-
-        Yields:
-            Each nested query, and whether a term rewriting its own correlation holds it.
-        """
-        for table in query._from:
-            if isinstance(table, QueryBuilder):
-                yield table, False
-        for join in query._joins:
-            if isinstance(join.item, QueryBuilder):
-                yield join.item, False
+        """Yield the immediately nested scopes of sources, CTEs and statement expressions."""
+        for source in (*query._from, *(join.item for join in query._joins)):
+            yield from cls.iterate_term_queries(source)
         for cte in query._with:
-            if isinstance(cte.query, QueryBuilder):
-                yield cte.query, False
+            yield from cls.iterate_term_queries(cast("Node", cte.query))
         for term in cls.iterate_query_terms(query):
-            nodes: list[Any] = list(term.nodes_())
-            # A rewriting term's nodes hold its query too - yielded once, as the term's.
-            rewritten_queries = [
-                node.inner_query for node in nodes if getattr(type(node), "rewrites_inner_correlation", False)
-            ]
-            for rewritten_query in rewritten_queries:
-                yield rewritten_query, True
-            for node in nodes:
-                if (
-                    getattr(type(node), "holds_nested_query", False)
-                    and (nested_query := node.get_nested_query()) is not None
-                ):
-                    yield nested_query, False
-                elif (
-                    isinstance(node, QueryBuilder)
-                    and node is not query
-                    and not any(node is rewritten_query for rewritten_query in rewritten_queries)
-                ):
-                    yield node, False
+            yield from cls.iterate_term_queries(term)
+
+    @staticmethod
+    def get_declared_sources(query: QueryBuilder) -> set[Selectable]:
+        """The sources introduced by this scope, excluding all nested declarations."""
+        sources = {*query._from, *(join.item for join in query._joins)}
+        if query._update_table is not None:
+            sources.add(query._update_table)
+        return sources
 
     @classmethod
-    def get_declared_table_names(cls, query: QueryBuilder) -> set[str]:
-        """The names of every table ``query`` and the queries nested in it read from.
-
-        Args:
-            query: The query.
-
-        Returns:
-            The names.
-        """
-        names = {
-            name
-            for table in (*query._from, *(join.item for join in query._joins))
-            if (name := cls.get_table_name(table)) is not None
-        }
-        names.update(cte.name for cte in query._with)
-        for nested_query, _rewrites in cls.iterate_nested_queries(query):
-            names |= cls.get_declared_table_names(nested_query)
-        return names
-
-    @classmethod
-    def reads_other_tables(cls, term: Term, declared_names: set[str]) -> bool:
-        """Whether ``term`` reads a column of a table outside ``declared_names``.
-
-        Args:
-            term: The term.
-            declared_names: The tables the term's own query reads from.
-
-        Returns:
-            True for a term reading the query around its own.
-        """
-        node: Any
-        for node in term.nodes_():
-            if isinstance(node, QueryBuilder):
-                if cls.query_reads_other_tables(node, declared_names):
+    def reads_other_tables(cls, term: Term, declared_sources: set[Selectable]) -> bool:
+        """Detect references outside this scope without importing names from nested queries."""
+        for node in NodeTraversal.walk(term, lambda child: not cls.is_query_boundary(child)):
+            if isinstance(node, (Field, QualifiedOuterField)):
+                if node.table is not None and node.table not in declared_sources:
                     return True
-            elif getattr(type(node), "rewrites_inner_correlation", False):
-                if cls.query_reads_other_tables(node.inner_query, declared_names):
-                    return True
-            elif getattr(type(node), "holds_nested_query", False):
-                nested_query = node.get_nested_query()
-                if nested_query is not None and cls.query_reads_other_tables(nested_query, declared_names):
-                    return True
-            elif isinstance(node, (Field, QualifiedOuterField)):
-                name = cls.get_table_name(node.table)
-                if name is not None and name not in declared_names:
+            elif cls.is_query_boundary(node):
+                if any(
+                    cls.query_reads_other_tables(nested, declared_sources)
+                    for nested, _rewrites in cls.iterate_term_queries(node)
+                ):
                     return True
         return False
 
     @classmethod
-    def query_reads_other_tables(cls, query: QueryBuilder, declared_names: set[str]) -> bool:
-        """Whether ``query`` reads a column of a table it doesn't read from itself.
-
-        Args:
-            query: The query.
-            declared_names: The tables of the query around it that count as its own.
-
-        Returns:
-            True for a correlated query.
-        """
-        method_parameter_names = declared_names | cls.get_declared_table_names(query)
-        return any(cls.reads_other_tables(term, method_parameter_names) for term in cls.iterate_query_terms(query))
+    def query_reads_other_tables(cls, query: QueryBuilder, declared_sources: set[Selectable]) -> bool:
+        """Detect correlation beyond the sources available in the enclosing scopes."""
+        available_sources = declared_sources | cls.get_declared_sources(query)
+        return any(cls.reads_other_tables(term, available_sources) for term in cls.iterate_query_terms(query))
 
     @classmethod
     def check_statement(cls, query: QueryBuilder, sql_context: SqlContext) -> None:
@@ -195,34 +147,45 @@ class CorrelatedSubqueries:
             UnSupportedError: A subquery reads the columns of the query around it, or the rows are grouped
                 by one where the database groups by none.
         """
-        features = sql_context.dialect.features
+        features = sql_context.effective_features
         runs_correlation = features.supports_correlated_subqueries
-        writes_rows = query._update_table is not None or bool(query._delete_from)
-        if (
-            not features.orders_by_correlated_subqueries
-            and query._groupbys
-            and cls.holds_correlation(query._groupbys, query)
-        ):
-            raise UnSupportedError(
-                f"The {sql_context.dialect.name} database groups rows by no correlated subquery - a subquery "
-                "reading the columns of the query around it can't be a key of values().annotate() or group_by() "
-                "there"
-            )
+        supports_write = (
+            features.supports_correlated_update
+            if query._update_table is not None
+            else features.supports_correlated_delete
+            if query._delete_from
+            else True
+        )
+        positions = (
+            ("SELECT", query._selects, features.supports_correlated_select),
+            (
+                "ORDER BY",
+                [term for term, _order in query._orderbys],
+                features.supports_correlated_order_by or features.rewrites_correlated_order_by,
+            ),
+            ("GROUP BY", query._groupbys, features.supports_correlated_group_by),
+        )
+        for name, terms, supported in positions:
+            if not supported and cls.holds_correlation(terms):
+                raise UnSupportedError(
+                    f"The {sql_context.dialect.name} database runs no correlated subquery in {name}"
+                )
         for nested_query, rewrites in cls.iterate_nested_queries(query):
+            rewrites = rewrites and (features.rewrites_correlated_exists or not runs_correlation)
             if (
                 rewrites
-                and writes_rows
-                and not features.orders_by_correlated_subqueries
-                and cls.split_conditions(nested_query, cls.get_declared_table_names(nested_query))[2]
+                and not supports_write
+                and cls.split_conditions(nested_query, cls.get_declared_sources(nested_query))[2]
             ):
-                # An EXISTS no membership test says runs as the database's own.
                 raise cls.get_row_write_error(sql_context)
             if not rewrites and cls.query_reads_other_tables(nested_query, set()):
                 if not runs_correlation:
                     raise cls.get_error(sql_context)
-                if writes_rows and not features.orders_by_correlated_subqueries:
+                if not supports_write:
                     raise cls.get_row_write_error(sql_context)
-                if nested_query._orderbys or nested_query._limit is not None or nested_query._offset is not None:
+                if not features.supports_ordered_correlated_subqueries and (
+                    nested_query._orderbys or nested_query._limit is not None or nested_query._offset is not None
+                ):
                     raise UnSupportedError(
                         f"The {sql_context.dialect.name} database runs no correlated subquery ordering or "
                         "limiting its own rows - a subquery reading the columns of the query around it takes no "
@@ -265,31 +228,23 @@ class CorrelatedSubqueries:
                     )
 
     @classmethod
-    def holds_correlation(cls, terms: Any, query: QueryBuilder) -> bool:
+    def holds_correlation(cls, terms: Any) -> bool:
         """Whether terms hold a subquery reading the columns of the query around it.
 
         Args:
             terms: The terms.
-            query: The query they belong to.
 
         Returns:
             Whether one does.
         """
-        for term in terms:
-            for node in term.nodes_():
-                nested_query = (
-                    node.get_nested_query()
-                    if getattr(type(node), "holds_nested_query", False)
-                    else node
-                    if isinstance(node, QueryBuilder) and node is not query
-                    else None
-                )
-                if nested_query is not None and cls.query_reads_other_tables(nested_query, set()):
-                    return True
-        return False
+        return any(
+            cls.query_reads_other_tables(nested_query, set())
+            for term in terms
+            for nested_query, _rewrites in cls.iterate_term_queries(term)
+        )
 
     @classmethod
-    def needs_derived_table(cls, query: QueryBuilder) -> bool:
+    def needs_derived_table(cls, query: QueryBuilder, sql_context: SqlContext) -> bool:
         """Whether a query runs only as a derived table - sorted by a correlated subquery, or selecting
         one beside a condition.
 
@@ -299,11 +254,21 @@ class CorrelatedSubqueries:
         Returns:
             Whether it does.
         """
-        if query._orderbys and cls.holds_correlation([term for term, _direction in query._orderbys], query):
+        features = sql_context.effective_features
+        if (
+            not features.supports_correlated_order_by
+            and features.rewrites_correlated_order_by
+            and query._orderbys
+            and cls.holds_correlation([term for term, _direction in query._orderbys])
+        ):
             return True
         # An empty condition is no condition - the query runs as it is.
         has_condition = not isinstance(query._wheres, (type(None), EmptyCriterion))
-        return has_condition and cls.holds_correlation(query._selects, query)
+        return (
+            features.correlated_select_requires_unfiltered_source
+            and has_condition
+            and cls.holds_correlation(query._selects)
+        )
 
     @classmethod
     def get_derived_table_sql(cls, query: QueryBuilder, sql_context: SqlContext) -> str:
@@ -379,7 +344,7 @@ class CorrelatedSubqueries:
                 else quoted_name
                 for quoted_name, (_term, direction) in zip(quoted_sort_keys, query._orderbys, strict=True)
             )
-        sql += query._limit_offset_sql(statement_context)
+        sql += PaginationSql.get_sql(query._limit, query._offset, statement_context)
         if sql_context.subquery:
             sql = f"({sql})"
         if sql_context.with_alias and query.alias:
@@ -412,7 +377,7 @@ class CorrelatedSubqueries:
         Returns:
             The error.
         """
-        if sql_context.dialect.features.supports_correlated_subqueries:
+        if sql_context.effective_features.supports_correlated_subqueries:
             return UnSupportedError(
                 f"The {sql_context.dialect.name} database runs a correlated EXISTS correlated in its WHERE alone, "
                 "and by equal columns alone when it groups or aggregates its rows - this subquery reads the "
@@ -441,13 +406,15 @@ class CorrelatedSubqueries:
             yield criterion
 
     @classmethod
-    def get_correlation_pairs(cls, criterion: Term, declared_names: set[str]) -> list[tuple[Term, Term]] | None:
+    def get_correlation_pairs(
+        cls, criterion: Term, declared_sources: set[Selectable]
+    ) -> list[tuple[Term, Term]] | None:
         """The inner and the outer columns of an equality correlating a subquery - of a column, or of
         a row of them (a composite key).
 
         Args:
             criterion: A condition of the subquery reading the query around it.
-            declared_names: The tables of the subquery.
+            declared_sources: The tables of the subquery.
 
         Returns:
             ``(inner column, outer column)`` per column, None for any other condition.
@@ -459,20 +426,20 @@ class CorrelatedSubqueries:
             if len(left.values) != len(right.values):
                 return None
             pairs = [
-                cls.get_column_pair(*sides, declared_names) for sides in zip(left.values, right.values, strict=True)
+                cls.get_column_pair(*sides, declared_sources) for sides in zip(left.values, right.values, strict=True)
             ]
             return None if any(pair is None for pair in pairs) else cast("list[tuple[Term, Term]]", pairs)
-        pair = cls.get_column_pair(left, right, declared_names)
+        pair = cls.get_column_pair(left, right, declared_sources)
         return None if pair is None else [pair]
 
     @classmethod
-    def get_column_pair(cls, left: Term, right: Term, declared_names: set[str]) -> tuple[Term, Term] | None:
+    def get_column_pair(cls, left: Term, right: Term, declared_sources: set[Selectable]) -> tuple[Term, Term] | None:
         """The inner and the outer column of two sides of an equality.
 
         Args:
             left: One side.
             right: The other side.
-            declared_names: The tables of the subquery.
+            declared_sources: The tables of the subquery.
 
         Returns:
             ``(inner column, outer column)``, None unless one side is a column of the subquery and the
@@ -481,22 +448,22 @@ class CorrelatedSubqueries:
         for inner, outer in ((left, right), (right, left)):
             if (
                 isinstance(inner, Field)
-                and cls.get_table_name(inner.table) in declared_names
+                and inner.table in declared_sources
                 and isinstance(outer, (Field, QualifiedOuterField))
-                and cls.get_table_name(outer.table) not in declared_names
+                and outer.table not in declared_sources
             ):
                 return inner, outer
         return None
 
     @classmethod
     def split_conditions(
-        cls, inner_query: QueryBuilder, declared_names: set[str]
+        cls, inner_query: QueryBuilder, declared_sources: set[Selectable]
     ) -> tuple[list[tuple[Term, Term]], list[Term], bool]:
         """The conditions of a subquery's ``WHERE`` by how they read the query around it.
 
         Args:
             inner_query: The subquery.
-            declared_names: The names of the tables it reads.
+            declared_sources: The names of the tables it reads.
 
         Returns:
             The pairs of its own and outer columns it equals, its conditions reading no outer column,
@@ -509,9 +476,9 @@ class CorrelatedSubqueries:
         for condition in conditions:
             if isinstance(condition, EmptyCriterion):
                 continue
-            if not cls.reads_other_tables(condition, declared_names):
+            if not cls.reads_other_tables(condition, declared_sources):
                 kept_conditions.append(condition)
-            elif (condition_pairs := cls.get_correlation_pairs(condition, declared_names)) is not None:
+            elif (condition_pairs := cls.get_correlation_pairs(condition, declared_sources)) is not None:
                 pairs.extend(condition_pairs)
             else:
                 correlated_otherwise = True
@@ -538,16 +505,16 @@ class CorrelatedSubqueries:
                 equalities of rows it limits, groups or aggregates - an aggregate gives a row even for
                 no rows.
         """
-        declared_names = cls.get_declared_table_names(inner_query)
-        pairs, kept_conditions, correlated_otherwise = cls.split_conditions(inner_query, declared_names)
+        declared_sources = cls.get_declared_sources(inner_query)
+        pairs, kept_conditions, correlated_otherwise = cls.split_conditions(inner_query, declared_sources)
         terms_outside_where = [
             term for term in cls.iterate_query_terms(inner_query) if term is not inner_query._wheres
         ]
-        if any(cls.reads_other_tables(term, declared_names) for term in terms_outside_where):
+        if any(cls.reads_other_tables(term, declared_sources) for term in terms_outside_where):
             raise cls.get_error(sql_context)
         limit = inner_query._limit
         if correlated_otherwise:
-            if not sql_context.dialect.features.supports_correlated_subqueries:
+            if not sql_context.effective_features.supports_correlated_subqueries:
                 raise cls.get_error(sql_context)
             # A limit of one row or more doesn't change whether a row exists - left out, as the
             # database limits no correlated subquery.
@@ -570,7 +537,7 @@ class CorrelatedSubqueries:
         inner_columns = [inner for inner, _outer in pairs]
         outer_columns = [outer for _inner, outer in pairs]
         membership_query = copy(inner_query)
-        membership_query._selects = list(inner_columns)  # type: ignore[arg-type]
+        membership_query._selects = list(inner_columns)
         membership_query._limit = None
         where: Term | None = None
         for condition in [*kept_conditions, *(column.notnull() for column in inner_columns)]:

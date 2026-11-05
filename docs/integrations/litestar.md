@@ -32,7 +32,8 @@ class HarePlugin:
         self,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         health_routes: HealthRoutes | None = None,
     ) -> None: ...
 ```
@@ -41,8 +42,8 @@ The plugin gives the application:
 
 - **The `HareContext`.** Opened with the application and closed with it, as the first lifespan manager —
   the application's own lifespan managers (a message broker, an outbox relay) already have the database,
-  and stop before it closes. The context is the global fallback, so every request sees it. On shutdown
-  `Hare.close_connections()` also waits for the background observers still running.
+  and stop before it closes. Middleware activates this application's context for each request. On shutdown
+  `HareContext.close_connections()` also waits for the background observers still running.
 - **Request queries are checked at startup.** `RequestQuery.check_declarations()` runs once the models
   are set up: a wrong [request query](request-queries.md) stops the application from starting, with every
   wrong class listed.
@@ -223,7 +224,7 @@ them, and each is read-only and `null` where a row has no value for it:
 class BookDTO(HareDTO[Book]):
     config = DTOConfig(exclude={"author.books"})
     extra_fields = {"reviews_count": int, "is_new": bool}  # read from the row by name, with the type
-    computed = ("title_length", "author.initials")          # properties and methods, typed by their return
+    computed = ("title_length", "author.initials")          # synchronous properties and methods
     related_values = {"author_name": "author.name"}         # a related row's field, flattened
 
 
@@ -240,7 +241,9 @@ async def list_books() -> list[Book]:
 - `extra_fields` — a query's annotation, or an attribute the handler (or a request query's `api_getter`) set
   on the row after reading it, with its type: a query builds it, so the DTO can't learn it from the model.
   A row without it — a query that didn't annotate it — answers `null`.
-- `computed` — a property or method of the model, typed by its return annotation. A field the query didn't
+- `computed` — a synchronous property or method of the model, typed by its return annotation. Its getter
+  or method receives only the row as `self` and must be callable without additional arguments. Compute
+  asynchronous values in the handler and expose them through `extra_fields`. A field the query didn't
   select (`only()`, a request query's `fields=`) read inside it answers `null`; any other `AttributeError`
   raised inside it fails the request (500) instead of answering `null`. That includes such a field read by
   another property it reads: Python reports a property failing with an `AttributeError` as a missing
@@ -287,13 +290,24 @@ The readiness and liveness routes it adds — see [Web frameworks](web-framework
 
 With hare's pytest plugin the application under test runs on the test databases and takes the test's
 context. `AsyncTestClient` runs it in the thread of an anyio portal, an event loop of its own: under
-`hare_app_transactional_db` its writes commit and the tables are emptied after the test, on every driver;
-under `hare_app_db` they are rolled back with the test's on the `postgresql` and SQLite drivers, and
+`hare_context=hare_app_transactional_db` its writes commit and the tables are emptied after the test, on
+every driver;
+with `hare_context=hare_app_db` they are rolled back with the test's on the `postgresql` and SQLite drivers,
+and
 `postgresql+asyncpg` refuses them — see [Application tests](../testing/setup.md#application-tests).
 
 ```python
 @pytest.mark.asyncio
 async def test_create_reader(hare_app_transactional_db):
+    app = Litestar(
+        route_handlers,
+        plugins=[HarePlugin(HARE_CONFIG, hare_context=hare_app_transactional_db)],
+    )
     async with AsyncTestClient(app=app) as client:
         assert (await client.post("/readers", json={"name": "ann"})).status_code == 201
 ```
+
+An explicitly supplied `hare_context` is borrowed: the integration neither initializes nor closes it.
+The caller controls its lifetime. Without it, the application creates and closes a separate context.
+Application startup does not set a process-global fallback. Pass a test fixture explicitly as
+`hare_context=hare_app_db` or `hare_context=hare_app_transactional_db`.

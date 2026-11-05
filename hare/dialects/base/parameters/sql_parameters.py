@@ -37,6 +37,15 @@ class SqlParameters:
         """The placeholder of the ``index``-th (from 1) bound parameter."""
         return self.placeholder_template.format(index)
 
+    def get_parameter_plan_options(self, value: Any) -> Any:
+        """The binding metadata a prepared parameter must preserve, beyond its Python type.
+
+        None means the Python type alone describes the binding. A dialect whose encoded
+        values carry SQL type information returns immutable options; changing them requires
+        preparing the statement again, including any predicates derived from those options.
+        """
+        return None
+
     @property
     def numbers_parameters(self) -> bool:
         """Whether a placeholder names its parameter's number (``$1``) - a value rendered twice
@@ -71,7 +80,11 @@ class SqlParameters:
         return None
 
     def get_column_arrays_rows_source_sql(
-        self, column_cast_types: Sequence[str], first_parameter_index: int
+        self,
+        column_cast_types: Sequence[str],
+        first_parameter_index: int,
+        *,
+        column_values_sql: Sequence[str] | None = None,
     ) -> str | None:
         """The source a multi-row INSERT writes its rows from when it binds one array parameter per
         column - the arrays read element by element into rows - or None when the dialect binds a
@@ -80,6 +93,8 @@ class SqlParameters:
         Args:
             column_cast_types: The SQL type of each column's values, in column order.
             first_parameter_index: The number of the first column's parameter.
+            column_values_sql: Already rendered array literals for a bound preview;
+                None uses numbered placeholders. One entry per column.
 
         Returns:
             The SQL, or None.

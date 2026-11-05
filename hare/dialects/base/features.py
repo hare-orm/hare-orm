@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Self, cast
 
 from hare.core.caching.cache import Cache
+from hare.dialects.base.search.enums import TextSearchOperation
 from hare.dialects.constants import DEFAULT_MAX_BIND_PARAMETERS, REPLACED_FEATURES_CACHE_SIZE
 from hare.transactions.enums import IsolationLevel
 
@@ -49,10 +50,15 @@ class Features:
             membership test where correlated subqueries run too - the database refuses its own in a
             join's ``ON`` and over a ``UNION DISTINCT``; one correlated by more than equalities is the
             database's own where correlated subqueries run.
-        orders_by_correlated_subqueries: A correlated subquery runs in ``ORDER BY``, and selected beside
-            a ``WHERE`` - without, such a query selects its rows in a derived table of no ``WHERE``, its
-            conditions and sort keys hidden columns of it, and filters, sorts and slices the rows of that
-            (the database runs neither); an ``UPDATE`` or a ``DELETE`` runs no correlated subquery there.
+        supports_correlated_select: A SELECT expression can contain a correlated subquery.
+        supports_correlated_order_by: An ORDER BY expression can contain a correlated subquery.
+        supports_correlated_group_by: A GROUP BY expression can contain a correlated subquery.
+        supports_correlated_update: An UPDATE can contain a correlated subquery.
+        supports_correlated_delete: A DELETE can contain a correlated subquery.
+        rewrites_correlated_order_by: A correlated ordering can be projected into one derived
+            SELECT and ordered by its resulting column.
+        correlated_select_requires_unfiltered_source: Selected correlated expressions must be
+            computed in an unfiltered derived SELECT before applying the outer conditions.
         supports_ordered_correlated_subqueries: A correlated subquery orders and limits its own rows
             (``Subquery(... .order_by(...)[:1])``).
         supports_correlated_aggregates: A correlated subquery selecting a ``COUNT``, ``SUM`` or another
@@ -87,8 +93,6 @@ class Features:
         streams_without_transaction: ``stream()`` reads rows outside a transaction too - the database
             sends a query's rows as it computes them, no cursor of a transaction holds them.
         execute_many_scales_poorly: ``executemany()`` is slower than one multi-row statement.
-        binds_written_parameters: The driver binds the parameters ``rust.native.rows.ModelWriter``
-            writes (``write_parameters()``) without reading each value from a Python object.
         max_bind_parameters: Most bind parameters one statement may carry.
         max_expression_depth: The deepest expression a statement may hold, None for no limit - a
             list of OR-ed key groups is as deep as it is long.
@@ -100,7 +104,6 @@ class Features:
             and ``delete()`` of a model with a cascade cycle retries such a DELETE with a
             Python-side cascade walk, deleting fewer levels than this at a time.
         supports_nulls_distinct: A unique constraint takes ``NULLS [NOT] DISTINCT``.
-        explain_options: The options ``EXPLAIN`` takes, upper-case.
         supports_schemas: Migrations create and drop the schemas of ``Meta.schema`` (``CREATE SCHEMA``);
             without, a model's schema - another attached database, another database of the server - is
             written as it is and has to exist.
@@ -117,8 +120,6 @@ class Features:
         supports_array_join: Each row is repeated with each element of an array of it (``ArrayJoin``).
         orders_json_values_in_aggregates: ``MAX``/``MIN`` of a JSON value compare it as the database orders
             it - without, the database orders a typed JSON value but takes none in an aggregate.
-        reads_trailing_comment_of_insert: A comment ending an ``INSERT ... VALUES`` statement is a
-            comment - else the database reads it as data, and query tags go before such a statement.
         supports_merge: ``MERGE INTO ... USING ... WHEN ...``.
         supports_merge_returning: ``MERGE ... RETURNING``.
         supports_merge_not_matched_by_source: ``MERGE ... WHEN NOT MATCHED BY SOURCE``.
@@ -216,11 +217,10 @@ class Features:
         supports_sequences: ``Meta.sequences`` - sequences and reading their next value.
         supports_row_level_security: ``Meta.row_level_security`` and ``Meta.policies``.
         supports_grants: ``Meta.grants`` - privileges granted to and revoked from roles.
-        supports_text_search_configurations: Text search beyond matching a model's fields: text search
-            configurations, ``SearchVector`` values, lexemes, rank weights by label, rank length
-            normalization and ``SearchHeadline``'s fragment options.
-        supports_full_text_index: A full-text index is a table of its own the database keeps in
-            step with the indexed table (``FullTextIndex``).
+        supports_text_search_configurations: Explicit text search configurations for queries,
+            vectors and headlines.
+        text_search_operations: Independently available vector, raw query, ranking and headline
+            operations. Configuration support implies none of these operations.
         supports_vector_search: Vector columns compared by distance - a vector extension of the
             database.
         supports_tenant_schemas: A connection keeps the tables of each tenant in a schema of its own
@@ -247,7 +247,13 @@ class Features:
     supports_correlated_subqueries: bool = True
     rewrites_correlated_exists: bool = False
     supports_ordered_correlated_subqueries: bool = True
-    orders_by_correlated_subqueries: bool = True
+    supports_correlated_select: bool = True
+    supports_correlated_order_by: bool = True
+    supports_correlated_group_by: bool = True
+    supports_correlated_update: bool = True
+    supports_correlated_delete: bool = True
+    rewrites_correlated_order_by: bool = False
+    correlated_select_requires_unfiltered_source: bool = False
     supports_correlated_aggregates: bool = True
     can_rollback_ddl: bool = False
     supports_select_for_update: bool = True
@@ -265,13 +271,11 @@ class Features:
     supports_streaming: bool = False
     streams_without_transaction: bool = False
     execute_many_scales_poorly: bool = False
-    binds_written_parameters: bool = False
     max_bind_parameters: int = DEFAULT_MAX_BIND_PARAMETERS
     max_expression_depth: int | None = None
     max_bulk_update_rows: int | None = None
     cascade_depth_limit: int | None = None
     supports_nulls_distinct: bool = False
-    explain_options: frozenset[str] = frozenset()
     supports_schemas: bool = True
     references_other_schemas: bool = True
     supports_distinct_on: bool = False
@@ -281,7 +285,6 @@ class Features:
     supports_asof_join: bool = False
     supports_array_join: bool = False
     orders_json_values_in_aggregates: bool = True
-    reads_trailing_comment_of_insert: bool = True
     supports_merge: bool = False
     supports_merge_returning: bool = False
     supports_merge_not_matched_by_source: bool = False
@@ -333,7 +336,7 @@ class Features:
     supports_row_level_security: bool = False
     supports_grants: bool = False
     supports_text_search_configurations: bool = False
-    supports_full_text_index: bool = False
+    text_search_operations: frozenset[TextSearchOperation] = frozenset()
     supports_vector_search: bool = False
     supports_tenant_schemas: bool = False
     supports_spatial: bool = False
@@ -349,9 +352,7 @@ class Features:
     plan_keys: ClassVar[Iterator[int]] = itertools.count(1)
     #: The features ``replace()`` made, each set of features once - one plan key for the connections
     #: of the same features.
-    replaced_features: ClassVar[Cache[Features]] = Cache(
-        REPLACED_FEATURES_CACHE_SIZE, holds_sql=False, keyed_by_model=False
-    )
+    replaced_features: ClassVar[Cache[Features]] = Cache(REPLACED_FEATURES_CACHE_SIZE, holds_sql=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "plan_key", next(Features.plan_keys))

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from hare.dialects.base.schema.columns.column_conversion_check import ColumnConversionCheck
@@ -8,20 +7,18 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_APPLY_DELETED_MASK_TEMPLATE,
     CLICKHOUSE_COLUMN_TYPES_QUERY,
     CLICKHOUSE_CONVERTED_VALUE_TEMPLATE,
-    CLICKHOUSE_DECIMAL_COLUMN_TYPE_PATTERN,
     CLICKHOUSE_DECIMAL_TEXT_TEMPLATE,
-    CLICKHOUSE_ENUM_LABEL_PATTERN,
-    CLICKHOUSE_NUMBER_COLUMN_TYPE_PATTERN,
-    CLICKHOUSE_TEXT_COLUMN_TYPE_PATTERN,
+    CLICKHOUSE_NUMBER_COLUMN_TYPES,
+    CLICKHOUSE_TEXT_COLUMN_TYPES,
     CLICKHOUSE_TYPE_NOT_CONVERTED_MESSAGE,
-    CLICKHOUSE_TYPE_WRAPPER_PATTERN,
-    CLICKHOUSE_UNCHECKED_CONVERSION_TYPE_PREFIXES,
+    CLICKHOUSE_UNCHECKED_CONVERSION_TYPES,
     CLICKHOUSE_UNCONVERTED_DATE_TEMPLATE,
     CLICKHOUSE_UNCONVERTED_JSON_TEMPLATE,
     CLICKHOUSE_UNCONVERTED_MOMENT_TEMPLATE,
     CLICKHOUSE_UNCONVERTED_VALUE_QUERY,
     CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE,
 )
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.exceptions import OperationalError, UnSupportedError
 from hare.fields.data.text.char_field import CharField
 from hare.fields.data.text.text_field import TextField
@@ -53,10 +50,13 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
         if not types:
             return
         old_type, new_type = types[0]["old_type"], types[0]["new_type"]
+        old_physical_type, new_physical_type = (
+            ClickhousePhysicalType.from_sql(type_name).unwrapped for type_name in (old_type, new_type)
+        )
         if (
             type(old_field) is not type(new_field)
             and not isinstance(new_field, (CharField, TextField))
-            and re.fullmatch(CLICKHOUSE_TEXT_COLUMN_TYPE_PATTERN, new_type)
+            and new_physical_type.name in CLICKHOUSE_TEXT_COLUMN_TYPES
         ):
             # A field kept as text but read as another type (a time of day) - nothing converts its values,
             # each is read as the new field reads it.
@@ -71,10 +71,12 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
                     )
                 )
             return
-        if re.fullmatch(CLICKHOUSE_TEXT_COLUMN_TYPE_PATTERN, old_type) is not None:
-            predicate_sql = self.get_unconverted_text_predicate_sql(quoted_column, new_type)
+        if old_physical_type.name in CLICKHOUSE_TEXT_COLUMN_TYPES:
+            predicate_sql = self.get_unconverted_text_predicate_sql(quoted_column, new_physical_type)
         else:
-            predicate_sql = self.get_unconverted_value_predicate_sql(quoted_column, old_type, new_type)
+            predicate_sql = self.get_unconverted_value_predicate_sql(
+                quoted_column, old_physical_type, new_physical_type
+            )
         if predicate_sql is None:
             return
         try:
@@ -97,7 +99,9 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
                 )
             )
 
-    def get_unconverted_value_predicate_sql(self, quoted_column: str, old_type: str, new_type: str) -> str | None:
+    def get_unconverted_value_predicate_sql(
+        self, quoted_column: str, old_type: ClickhousePhysicalType, new_type: ClickhousePhysicalType
+    ) -> str | None:
         """A WHERE predicate matching the rows whose value of a column of another type than text a
         column of the new type doesn't hold.
 
@@ -110,36 +114,20 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
             The predicate, None for the same type of values, a type any value converts to, or two number
             types - the narrowing check checks those.
         """
-        old_value_type, new_value_type = (self.get_value_type(type_name) for type_name in (old_type, new_type))
-        if old_value_type == new_value_type or new_value_type.startswith(
-            CLICKHOUSE_UNCHECKED_CONVERSION_TYPE_PREFIXES
-        ):
+        old_value_type, new_value_type = old_type.unwrapped, new_type.unwrapped
+        if old_value_type.sql == new_value_type.sql or new_value_type.name in CLICKHOUSE_UNCHECKED_CONVERSION_TYPES:
             return None
         if (
-            re.fullmatch(CLICKHOUSE_NUMBER_COLUMN_TYPE_PATTERN, old_value_type) is not None
-            and re.fullmatch(CLICKHOUSE_NUMBER_COLUMN_TYPE_PATTERN, new_value_type) is not None
+            old_value_type.name in CLICKHOUSE_NUMBER_COLUMN_TYPES
+            and new_value_type.name in CLICKHOUSE_NUMBER_COLUMN_TYPES
         ):
             return None
         value_sql = CLICKHOUSE_CONVERTED_VALUE_TEMPLATE.format(
-            column=quoted_column, type=self.editor.client.dialect.literals.get_literal_sql(new_value_type)
+            column=quoted_column, type=self.editor.client.dialect.literals.get_literal_sql(new_value_type.sql)
         )
         return f"{value_sql} IS NULL"
 
-    @staticmethod
-    def get_value_type(type_name: str) -> str:
-        """The type of a column's values, its ``Nullable``/``LowCardinality`` wrappers taken off.
-
-        Args:
-            type_name: The column's type.
-
-        Returns:
-            The type.
-        """
-        while (wrapper_match := re.fullmatch(CLICKHOUSE_TYPE_WRAPPER_PATTERN, type_name)) is not None:
-            type_name = wrapper_match[1]
-        return type_name
-
-    def get_unconverted_text_predicate_sql(self, quoted_column: str, new_type: str) -> str | None:
+    def get_unconverted_text_predicate_sql(self, quoted_column: str, new_type: ClickhousePhysicalType) -> str | None:
         """A WHERE predicate matching the rows whose text a column of a type doesn't hold as written.
 
         Args:
@@ -149,25 +137,28 @@ class ClickhouseColumnConversionCheck(ColumnConversionCheck):
         Returns:
             The predicate, None for a type any text converts to or none is checked for.
         """
-        if new_type.startswith(CLICKHOUSE_UNCHECKED_CONVERSION_TYPE_PREFIXES):
+        physical = new_type.unwrapped
+        if physical.name in CLICKHOUSE_UNCHECKED_CONVERSION_TYPES:
             return None
-        if new_type == "JSON" or new_type.startswith("JSON("):
+        if physical.name == "JSON":
             return CLICKHOUSE_UNCONVERTED_JSON_TEMPLATE.format(column=quoted_column)
-        if new_type.startswith(("Enum8(", "Enum16(")):
-            labels_sql = ", ".join(re.findall(CLICKHOUSE_ENUM_LABEL_PATTERN, new_type))
+        if physical.name in {"Enum8", "Enum16"}:
+            literals = self.editor.client.dialect.literals
+            labels_sql = ", ".join(
+                literals.get_string_literal_sql(label) for label in physical.get_enum_members(physical.arguments)
+            )
             return f"{quoted_column} NOT IN ({labels_sql})"
-        decimal_match = re.fullmatch(CLICKHOUSE_DECIMAL_COLUMN_TYPE_PATTERN, new_type)
-        if decimal_match is not None:
+        if physical.precision is not None and physical.scale is not None:
             number_sql = CLICKHOUSE_DECIMAL_TEXT_TEMPLATE.format(column=quoted_column)
             overflow_sql = self.editor.column_narrowing_check.get_decimal_overflow_predicate_sql(
-                number_sql, int(decimal_match[1]), int(decimal_match[2])
+                number_sql, physical.precision, physical.scale
             )
             return f"{number_sql} IS NULL OR {overflow_sql}"
         value_sql = CLICKHOUSE_CONVERTED_VALUE_TEMPLATE.format(
-            column=quoted_column, type=self.editor.client.dialect.literals.get_literal_sql(new_type)
+            column=quoted_column, type=self.editor.client.dialect.literals.get_literal_sql(physical.sql)
         )
-        if new_type in ("Date", "Date32"):
+        if physical.name in {"Date", "Date32"}:
             return CLICKHOUSE_UNCONVERTED_DATE_TEMPLATE.format(value=value_sql, column=quoted_column)
-        if new_type.startswith("DateTime"):
+        if physical.name in {"DateTime", "DateTime64"}:
             return CLICKHOUSE_UNCONVERTED_MOMENT_TEMPLATE.format(value=value_sql, column=quoted_column)
         return f"{value_sql} IS NULL"

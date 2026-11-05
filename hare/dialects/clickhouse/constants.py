@@ -112,11 +112,8 @@ CLICKHOUSE_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
 CLICKHOUSE_SINGLE_VARIANT_TYPE_TEMPLATE = "Variant({0})"
 #: The beginning of a ``Variant`` column's type.
 CLICKHOUSE_VARIANT_TYPE_PREFIX = "Variant("
-#: The wrappers of a column type that change no field - a nullable column and a dictionary-encoded one.
-CLICKHOUSE_TYPE_WRAPPERS = ("Nullable(", "LowCardinality(")
-#: The column types that are never ``Nullable`` - a container's NULL is written as an empty one (a
-#: geometry's too, but a point's, which has none), a ``Variant`` and a ``Dynamic`` column hold NULL
-#: themselves.
+#: The column types that are never wrapped in ``Nullable``. Container and geometry fields use
+#: nonnullable storage; ``Variant`` and ``Dynamic`` represent NULL in their own format.
 CLICKHOUSE_NEVER_NULLABLE_TYPE_PREFIXES = (
     "Array(",
     "Map(",
@@ -197,10 +194,10 @@ CLICKHOUSE_INDEXES_SQL = (
 #: The settings of a ClickHouse connection beyond its address and credentials.
 CLICKHOUSE_CONNECTION_OPTIONS = ConnectionOptions(
     ConnectionOption("secure", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("native_port", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=65535),
+    ConnectionOption("native_port", ConnectionOptionType.WHOLE_NUMBER),
     ConnectionOption("compress", ConnectionOptionType.BOOLEAN),
-    ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=3600),
-    ConnectionOption("send_receive_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=86400),
+    ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS),
+    ConnectionOption("send_receive_timeout", ConnectionOptionType.SECONDS),
     ConnectionOption("cluster", ConnectionOptionType.TEXT),
     ConnectionOption("async_insert", ConnectionOptionType.BOOLEAN),
     ConnectionOption("wait_for_async_insert", ConnectionOptionType.BOOLEAN),

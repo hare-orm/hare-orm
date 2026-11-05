@@ -317,11 +317,7 @@ class ColumnDefinitions(SchemaEditorPart):
         """
         if not field_object.has_db_default():
             return ""
-        db_default = field_object.db_default
-        if hasattr(db_default, "get_sql"):
-            return f" DEFAULT {self.get_db_default_sql(db_default)}"
-        db_value = self.editor.client.dialect.types.get_db_value(field_object, db_default, model)
-        return f" DEFAULT {self.editor.client.dialect.literals.get_literal_sql(db_value)}"
+        return f" DEFAULT {self.get_field_db_default_sql(field_object, model)}"
 
     def get_column_definitions(
         self, model: type[Model], deferred_table_keys: frozenset[tuple[str | None, str]] = frozenset()

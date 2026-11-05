@@ -4,6 +4,7 @@ server, on any test database."""
 import datetime
 import decimal
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,9 +15,8 @@ from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT  # noqa: E402
 from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_client import (  # noqa: E402
     ClickhouseConnectClient,
 )
+from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
 from hare.exceptions import ConfigurationError  # noqa: E402
-
-REQUIRES = ("clickhouse-connect",)
 
 literals = CLICKHOUSE_DIALECT.literals
 
@@ -139,24 +139,56 @@ def test_a_db_url_names_the_database_and_settings():
     client = ClickhouseConnectClient(connection_alias="clickhouse", **config["credentials"])
     assert client.options["secure"] is True
     assert client.options["connect_timeout"] == 5
-    with pytest.raises(ConfigurationError, match="connect_timeout"):
-        ClickhouseConnectClient(connection_alias="clickhouse", host="h", connect_timeout=0)
+    client_with_no_timeout = ClickhouseConnectClient(connection_alias="clickhouse", host="h", connect_timeout=0)
+    assert client_with_no_timeout.options["connect_timeout"] == 0
     with pytest.raises(ConfigurationError):
         DbUrlConfigGenerator.expand("clickhouse+clickhouse-connect://h/db?no_such_option=1")
 
 
 @pytest.mark.database_independent
 def test_table_options_are_checked():
-    with pytest.raises(ConfigurationError, match="engine"):
+    with pytest.raises(ConfigurationError, match="Engine name must be a SQL identifier"):
         ClickhouseTableOptions(engine="")
     with pytest.raises(ConfigurationError, match="order_by"):
-        ClickhouseTableOptions(order_by=["id"])  # type: ignore[arg-type]
+        ClickhouseTableOptions(order_by=["id)"])
     with pytest.raises(ConfigurationError, match="settings"):
-        ClickhouseTableOptions(settings=(("index_granularity", True),))
+        ClickhouseTableOptions(settings=(("invalid-name", True),))
     with pytest.raises(ConfigurationError, match="partition_by takes a field name"):
         ClickhouseTableOptions(partition_by="toYYYYMM(viewed_at)")  # type: ignore[arg-type]
     with pytest.raises(ConfigurationError, match="ttl takes a field name"):
         ClickhouseTableOptions(ttl=RawSQLTerm(" "))
+
+
+@pytest.mark.database_independent
+def test_table_options_snapshot_collections_and_accept_compatible_projections():
+    projection = ClickhouseProjection("by_site", RawSQLTerm("SELECT site ORDER BY site"))
+    compatible = SimpleNamespace(
+        name=projection.name,
+        for_model=projection.for_model,
+        with_sql_query=projection.with_sql_query,
+        get_definition_sql=projection.get_definition_sql,
+        get_read_columns=projection.get_read_columns,
+    )
+    names = ["id"]
+    settings = [["allow_nullable_key", True]]
+    options = ClickhouseTableOptions(
+        order_by=names,
+        settings=settings,
+        column_codecs=[["site", "ZSTD(3)"]],
+        column_ttls=[["site", "expires_at"]],
+        projections=[compatible],
+    )
+    names.append("site")
+    settings[0][1] = False
+    assert options.order_by == ("id",)
+    assert options.settings == (("allow_nullable_key", True),)
+    assert options.column_codecs == (("site", "ZSTD(3)"),)
+    assert options.column_ttls == (("site", "expires_at"),)
+    assert options.projections == (compatible,)
+    assert compatible.with_sql_query(None) is projection
+    assert options.get_setting_sql(True) == "1"
+    assert options.get_setting_sql(1.5) == "1.5"
+    assert options.get_setting_sql("it's a path") == literals.get_string_literal_sql("it's a path")
 
 
 @pytest.mark.parametrize(

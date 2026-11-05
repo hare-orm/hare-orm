@@ -1,5 +1,4 @@
-"""The cursors of a cursor pagination: the ordering values of a boundary row, readable only by the
-query that made them."""
+"""Boundary ordering values checked against the selected ordering and its value types."""
 
 from __future__ import annotations
 
@@ -31,9 +30,7 @@ class Cursor:
     ordering: tuple[str, ...]
     values: tuple[Any, ...]
 
-    scalar_adapters: ClassVar[Cache[TypeAdapter[Any]]] = Cache(
-        len(CURSOR_SCALAR_TYPES), holds_sql=False, keyed_by_model=False
-    )
+    scalar_adapters: ClassVar[Cache[TypeAdapter[Any]]] = Cache(len(CURSOR_SCALAR_TYPES), holds_sql=False)
 
     def encode(self) -> str:
         """The cursor as URL-safe text.

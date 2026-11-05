@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import contextvars
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from hare.dialects.base.client.database_client import DatabaseClient
-
-    DBConfigType = dict[str, Any]
     from hare.core.connections.connection_handler import ConnectionHandler
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 @dataclass(slots=True)
@@ -22,9 +19,7 @@ class ConnectionToken:
 
     _handler: ConnectionHandler
     _alias: str
-    _old_value: DatabaseClient | None
-    #: The token of the storage set() installed - what reset() restores the storage by.
-    _cv_token: contextvars.Token[dict[str, DatabaseClient]]
+    _previous: ConnectionToken | None
     _used: bool = field(default=False)
     #: The client set() put in place for ``_alias``.
     _new_value: DatabaseClient | None = field(default=None)

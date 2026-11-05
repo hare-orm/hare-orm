@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING
 
+from hare.migrations.execution.connection_migration_plan import ConnectionMigrationPlan
 from hare.migrations.execution.executor.migration_executor import MigrationExecutor
 from hare.migrations.execution.executor.plan_step import PlanStep
 from hare.migrations.loading.graph.migration_key import MigrationKey
@@ -43,11 +44,13 @@ class ConnectionsPlan:
             connection's journal for its own apps.
         """
         applied: set[MigrationKey] = set()
+        if not self.executors:
+            return [], applied
         for executor in self.executors.values():
             await executor.build_graph()
             applied.update(key for key in executor.loader.applied_migrations if key.app_label in executor.apps_config)
         planner = next(iter(self.executors.values()))
-        steps = planner.get_migration_plan(targets, applied, planner.loader.graph, app_labels=self.connection_by_app)
+        steps = planner.get_migration_plan(targets, applied, app_labels=self.connection_by_app)
         groups: list[tuple[str, list[PlanStep]]] = []
         for step in steps:
             alias = self.connection_by_app[step.migration.app_label]
@@ -65,21 +68,25 @@ class ConnectionsPlan:
         dry_run: bool = False,
         reporter: Callable[[str, list[PlanStep], bool, bool], object] | None = None,
         progress: Callable[[str, str, str], object] | None = None,
-    ) -> None:
+    ) -> list[ConnectionMigrationPlan]:
         """Runs the plan.
 
         Args:
             targets: The migrations to reach - every app's latest when None.
             fake: Record the migrations as applied or unapplied without running them.
-            dry_run: Run the operations without touching the databases or the journals.
+            dry_run: Plan without executing migration operations or changing journals.
+                Connection setup and database reads may still occur.
             reporter: Called with each run of steps before it runs.
-            progress: Called with each migration's start and end.
+            progress: Called at migration start/end; awaitable results finish before execution continues.
         """
+        targets = None if targets is None else tuple(targets)
+        result: list[ConnectionMigrationPlan] = []
         groups, applied = await self.get_groups(targets)
         for alias, steps in groups:
             executor = self.executors[alias]
 
             async def report_steps(run_steps: list[PlanStep], alias: str = alias) -> None:
+                result.append(ConnectionMigrationPlan(alias, tuple(run_steps)))
                 await self.report(reporter, alias, run_steps, fake, dry_run)
 
             # A tenant's schema, with a journal of its own, is migrated as far as the steps reach; the
@@ -106,6 +113,7 @@ class ConnectionsPlan:
                 # The targets name no app of this connection - nothing to do on it.
                 continue
             if alias not in connections_with_steps:
+                result.append(ConnectionMigrationPlan(alias, ()))
                 await self.report(reporter, alias, [], fake, dry_run)
             # Each connection once more with no step of its own: its journal is there, a squashed
             # migration whose replaced ones are all applied is recorded, and the schema of each tenant
@@ -118,6 +126,7 @@ class ConnectionsPlan:
                 dry_run=dry_run,
                 progress=progress,
             )
+        return result
 
     @staticmethod
     async def report(
@@ -159,23 +168,24 @@ class ConnectionsPlan:
             return None
         return [target for target in targets if target.app_label in executor.apps_config]
 
-    async def get_plan_lines(self, targets: Iterable[MigrationTarget] | None = None) -> list[str]:
-        """The plan's lines, a ``# Connection:`` header before each run of steps.
+    async def get_plan(self, targets: Iterable[MigrationTarget] | None = None) -> list[ConnectionMigrationPlan]:
+        """Return structured runs, including targeted connections with no pending steps.
 
         Args:
             targets: The migrations to reach - every app's latest when None.
 
         Returns:
-            The lines.
+            The runs in execution order.
         """
+        targets = None if targets is None else tuple(targets)
         groups, _applied = await self.get_groups(targets)
-        lines = [line for alias, steps in groups for line in PlanStep.format_steps(steps, alias)]
+        result = [ConnectionMigrationPlan(alias, tuple(steps)) for alias, steps in groups]
         connections_with_steps = {alias for alias, _steps in groups}
         # A connection the targets name an app of, with nothing to do, shows its header alone.
         for alias, executor in self.executors.items():
             if alias not in connections_with_steps and self.get_targets_of_connection(executor, targets) != []:
-                lines.extend(PlanStep.format_steps([], alias))
-        return lines
+                result.append(ConnectionMigrationPlan(alias, ()))
+        return result
 
     async def check_safety(self, checker: MigrationSafetyChecker) -> list[MigrationRisk]:
         """Checks the migrations the plan applies against the databases, each on its connection.

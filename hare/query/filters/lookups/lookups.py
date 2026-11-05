@@ -19,6 +19,7 @@ from hare.sql.functions.text.replace import Replace
 from hare.sql.functions.text.upper import Upper
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
+from hare.sql.terms.criteria.declarations import LikePatternParameter
 from hare.sql.terms.criteria.like import Like
 from hare.sql.terms.parameters.parameterized_value_wrapper import ParameterizedValueWrapper
 from hare.sql.terms.term import Term
@@ -303,9 +304,11 @@ class Lookups:
             # Checked as text: a parameter of no known type may have none in "IS NULL".
             return text_value.notnull() & matches
         pattern = Lookups.get_like_pattern_text(value, prefix=prefix, suffix=suffix)
+        pattern_wrapper = ValueWrapper(pattern)
+        parameter = LikePatternParameter(pattern_wrapper, prefix, suffix, value)
         if case_insensitive:
-            return Like(Upper(left), term.wrap_constant(Upper(pattern)))
-        return Like(left, term.wrap_constant(pattern))
+            return Like(Upper(left), Upper(pattern_wrapper), pattern_parameter=parameter)
+        return Like(left, pattern_wrapper, pattern_parameter=parameter)
 
     # The text lookups differ only by where the wildcards go and by the case.
     contains = partial(_get_like_pattern, prefix=True, suffix=True, case_insensitive=False)

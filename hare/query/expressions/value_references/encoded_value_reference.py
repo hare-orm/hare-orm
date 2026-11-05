@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.plans.statement.parameter_slot import ParameterSlot
+from hare.sql.terms.array import Array
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -16,14 +19,16 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class EncodedValueReference:
-    """A plan value reference of a lookup that converts its value with a ``value_encoder`` and compares
-    it as a plain ``ValueWrapper`` (an array's ``__len``). A plan hit runs the encoder on the new
-    value.
+    """One encoded lookup parameter, held by a scalar wrapper or a bound array.
+
+    A plan hit runs the encoder on the new value. ``item_key`` selects the scalar
+    comparison value of a JSON filter whose path and operator belong to the plan key.
     """
 
-    wrapper: ValueWrapper
+    wrapper: ParameterSlot | ValueWrapper | Array
     field: Field[Any]
     value_encoder: Callable[..., Any]
+    item_key: str | None = None
 
     def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
         """The parameter of a new value - through the recorded encoder.
@@ -38,6 +43,10 @@ class EncodedValueReference:
             for a fraction) and the query has to be built again.
         """
         encoded_value = self.value_encoder(value, model, self.field, dialect)
+        if self.item_key is not None:
+            encoded_value = encoded_value[self.item_key]
+            if isinstance(encoded_value, (int, float, Decimal)):
+                encoded_value = dialect.parameters.get_bindable_number(encoded_value)
         if isinstance(encoded_value, Term):
             return None
-        return [(id(self.wrapper), encoded_value, False)]
+        return [(self.wrapper, encoded_value, False)]

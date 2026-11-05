@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Iterable
-from functools import partial
 from typing import Any, cast
 
 from hare.exceptions import QueryError, UnSupportedError
@@ -21,7 +20,7 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value import Value
-from hare.query.expressions.value_references.array_value_reference import ArrayValueReference
+from hare.query.expressions.value_references.container_value_reference import ContainerValueReference
 from hare.query.expressions.value_references.encoded_value_reference import EncodedValueReference
 from hare.query.expressions.value_references.like_value_reference import LikeValueReference
 from hare.query.expressions.value_references.list_parameter_value_reference import ListParameterValueReference
@@ -31,16 +30,17 @@ from hare.query.expressions.value_references.range_value_reference import RangeV
 from hare.query.expressions.value_references.scalar_value_reference import ScalarValueReference
 from hare.query.expressions.value_references.value_reference_types import FilterValueReference, RecordedValueReferences
 from hare.query.filters import Like, ValueEncoders
+from hare.query.filters.lookups.containers.container_value_encoders import ContainerValueEncoders
 from hare.query.filters.lookups.lookups import Lookups
 from hare.query.filters.resolution.composite_key_filters import CompositeKeyFilters
 from hare.sql.functions.datetime.date_as_timestamp import DateAsTimestamp
 from hare.sql.functions.datetime.timestamp_comparand import TimestampComparand
 from hare.sql.terms.array import Array
+from hare.sql.terms.containers.container_literal import ContainerLiteral
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.between_criterion import BetweenCriterion
 from hare.sql.terms.criteria.contains_criterion import ContainsCriterion
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.functions.function import Function
 from hare.sql.terms.parameters.list_parameter import ListParameter
 from hare.sql.terms.parameters.parameterized_value_wrapper import ParameterizedValueWrapper
 from hare.sql.terms.term import Term
@@ -90,27 +90,34 @@ class FilterValues:
             # bound as another lookup is.
             if range_reference is not None or isinstance(criterion, BetweenCriterion):
                 return range_reference
-        if isinstance(criterion, Like) and isinstance(operator, partial):
+        if isinstance(criterion, Like):
             like_reference = FilterValues.get_like_value_reference(
-                criterion, operator, cache_reference_field, value_encoder
+                criterion, encoded_value, cache_reference_field, value_encoder
             )
             if like_reference is not None:
                 return like_reference
+        if (
+            value_encoder is ContainerValueEncoders.encode_container
+            and isinstance(encoded_value, ContainerLiteral)
+            and any(node is encoded_value for node in criterion.nodes_())
+        ):
+            return ContainerValueReference(encoded_value.value_wrapper, cache_reference_field)
         if isinstance(criterion, BasicCriterion):
-            # An encoder returning a whole array literal: the encoder's result must be the right
-            # operand itself - the Array node is then replaced as a whole.
             right = criterion.right
-            if (
-                right is encoded_value
-                and isinstance(right, Function)
-                and len(right.args) == 1
-                and isinstance(right.args[0], Array)
-            ):
-                return ArrayValueReference(right.args[0], cache_reference_field, value_encoder)
             # Another encoded lookup ending as a plain comparison: the ValueWrapper must hold the
             # encoder's result itself, not a piece derived from it.
             if not isinstance(criterion, Like) and isinstance(right, ValueWrapper) and right.value is encoded_value:
                 return EncodedValueReference(right, cache_reference_field, value_encoder)
+            if value_encoder is ValueEncoders.encode_json and isinstance(right, ValueWrapper):
+                if isinstance(encoded_value, dict) and len(encoded_value) == 1:
+                    item_key, item = next(iter(encoded_value.items()))
+                    if right.value is item:
+                        return EncodedValueReference(right, cache_reference_field, value_encoder, item_key)
+            if isinstance(right, Array) and isinstance(encoded_value, list):
+                if len(right.original_value) == len(encoded_value) and all(
+                    actual is expected for actual, expected in zip(right.original_value, encoded_value, strict=True)
+                ):
+                    return EncodedValueReference(right, cache_reference_field, value_encoder)
         if not isinstance(value, (list, tuple, set)):
             # The encoded value as an argument of a function in the criterion (``UPPER(?)`` of
             # ``__iexact``, the text query of ``__search``, a JSON containment test): one parameter
@@ -198,43 +205,25 @@ class FilterValues:
     @staticmethod
     def get_like_value_reference(
         criterion: Like,
-        operator: partial[Any],
+        encoded_value: Any,
         cache_reference_field: Field[Any],
         value_encoder: Callable[..., Any],
     ) -> LikeValueReference | None:
-        """The reference of a LIKE lookup's pattern. The prefix and suffix flags are read off the
-        partial the criterion was built with; a case-insensitive pattern sits inside UPPER(...) -
-        the innermost ValueWrapper is referenced either way.
+        """Use the source and wildcard settings declared while the pattern was built.
 
-        Args:
-            criterion: The filter's criterion.
-            operator: The operator that built it.
-            cache_reference_field: The field the value was converted by.
-            value_encoder: The lookup's value encoder.
-
-        Returns:
-            The reference, None when the pattern isn't where a reference can rebind it.
+        SQL wrapping for case conversion does not change the parameter source.
+        The pattern must come directly from this lookup's encoded value, not a nested
+        member or a derived value. Otherwise the plan cannot bind that source.
         """
-        case_insensitive = operator.keywords.get("case_insensitive")
-        right = criterion.right
-        pattern_wrapper: ValueWrapper | None = None
-        if case_insensitive is False and isinstance(right, ValueWrapper):
-            pattern_wrapper = right
-        elif (
-            case_insensitive is True
-            and isinstance(right, Function)
-            and len(right.args) == 1
-            and isinstance(right.args[0], ValueWrapper)
-        ):
-            pattern_wrapper = right.args[0]
-        if pattern_wrapper is None:
+        parameter = criterion.pattern_parameter
+        if parameter is None or parameter.value is not encoded_value:
             return None
         return LikeValueReference(
-            pattern_wrapper,
+            parameter.source,
             cache_reference_field,
             value_encoder,
-            operator.keywords["prefix"],
-            operator.keywords["suffix"],
+            parameter.prefix,
+            parameter.suffix,
         )
 
     @staticmethod
@@ -258,15 +247,29 @@ class FilterValues:
             The reference, None when the list isn't where a reference can rebind it.
         """
         # A list the dialect binds as one parameter - any length binds through it.
-        list_parameters = [node for node in criterion.find_(Term) if isinstance(node, ListParameter)]
+        list_parameters = criterion.find_(ListParameter)
         if len(list_parameters) == 1:
             return ListParameterValueReference(list_parameters[0], cache_reference_field, value_encoder)
         # __in/__not_in: one ContainsCriterion in the tree, alone or ORed with a NULL check. A None
         # in the list isn't bound - the plan key holds whether there is one. The container must be a
-        # literal Tuple of values, not a subquery. Other encoded lookups keep no plan.
+        # literal Tuple of values, not a subquery.
         contains_nodes = criterion.find_(ContainsCriterion)
         if len(contains_nodes) != 1 or not isinstance(contains_nodes[0].container, Tuple):
-            return None
+            if not isinstance(encoded_value, (list, tuple, set)):
+                return None
+            # Some list lookups distribute their items across several predicates.
+            # Bind only an unambiguous occurrence of each original encoded item.
+            encoded_items = [item for item in encoded_value if item is not None]
+            identities = {id(item) for item in encoded_items}
+            if len(identities) != len(encoded_items):
+                return None
+            wrappers = {id(node): node for node in criterion.find_(ValueWrapper) if id(node.value) in identities}
+            by_value = {id(node.value): node for node in wrappers.values()}
+            if len(wrappers) != len(encoded_items) or by_value.keys() != identities:
+                return None
+            return ListValueReference(
+                Tuple(*(by_value[id(item)] for item in encoded_items)), cache_reference_field, value_encoder
+            )
         container = contains_nodes[0].container
         container_values = container.values
         if not all(isinstance(container_value, ParameterizedValueWrapper) for container_value in container_values):
@@ -447,8 +450,7 @@ class FilterValues:
         Returns:
             True for a field whose ``holds_container_value`` is set.
         """
-        effective_field = field.output_field if isinstance(field, GeneratedField) else field
-        return effective_field is not None and effective_field.holds_container_value
+        return field is not None and GeneratedField.get_effective_field(field).holds_container_value
 
     @staticmethod
     def get_literal_value(value: Any) -> Any:

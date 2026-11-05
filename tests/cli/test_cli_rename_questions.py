@@ -8,6 +8,7 @@ import io
 import pytest
 
 from hare.cli.commands import migration_commands
+from hare.migrations import operations as ops
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
 TITLE_MODEL = (
@@ -49,7 +50,7 @@ async def test_a_possible_rename_is_asked_in_the_terminal(project_factory, termi
     await project.cli_ok("makemigrations")
 
     assert terminal == ["Was field 'title' of app.Item renamed to 'name'? [y/N] "]
-    assert "ops.RenameField(" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
 
 
 @pytest.mark.asyncio
@@ -62,7 +63,7 @@ async def test_no_input_asks_nothing_and_renames_nothing(project_factory, termin
     output = await project.cli_ok("makemigrations", "--no-input")
 
     assert terminal == []
-    assert "ops.RenameField(" not in project.read_latest_migration()
+    assert not any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     assert "--rename app.Item.title=name" in output
 
 
@@ -76,7 +77,7 @@ async def test_an_answer_given_with_rename_is_not_asked(project_factory, termina
     await project.cli_ok("makemigrations", "--rename", "app.Item.title=name")
 
     assert terminal == []
-    assert "ops.RenameField(" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
 
 
 @pytest.mark.asyncio
@@ -92,7 +93,7 @@ async def test_without_a_terminal_nothing_is_asked(project_factory, monkeypatch:
     await project.cli_ok("makemigrations")
 
     assert asked == []
-    assert "ops.RenameField(" not in project.read_latest_migration()
+    assert not any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
 
 
 @pytest.mark.asyncio
@@ -122,7 +123,7 @@ async def test_input_ended_in_the_terminal_is_no_answer(project_factory, monkeyp
 
     output = await project.cli_ok("makemigrations")
 
-    assert "ops.RenameField(" not in project.read_latest_migration()
+    assert not any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     assert "--rename app.Item.title=name" in output
 
 

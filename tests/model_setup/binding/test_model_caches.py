@@ -3,7 +3,11 @@ drops what each of them holds for it - nothing has to list the caches."""
 
 import gc
 import re
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,17 +17,19 @@ from hare.core.caching.constants import ENV_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MO
 from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import ConfigurationError
 from hare.models import Model
+from hare.models.write.instance_writer import InstanceWriter
+from hare.models.write.rules.enums import WriteType
+from hare.models.write.rules.row_write_rules import RowWriteRules
 from tests.shared_models.testmodels import Author, Book
 
 #: The model-keyed caches that are not ModelCache - each registered in Caches itself.
 #: Weak dictionaries that hold state, not something computed again when dropped.
 WEAK_STATE = {
-    # The fields a request query class had before its parameters were prepared - put back.
-    ("hare/contrib/request_query/request_query.py", "unprepared_fields"),
+    # The schema a request query class had before preparation, restored on invalidation.
     # The request query classes reading each model - what forgetting a model goes by.
     ("hare/contrib/request_query/request_query.py", "classes_by_model"),
-    # The latest dispatch per event loop - the next one waits for it.
-    ("hare/instrumentation/observers/observer_dispatch.py", "weakref.WeakKeyDictionary()"),
+    # Active delivery queues/errors of each scope and loop, never recomputable cache entries.
+    ("hare/instrumentation/observers/observer_set.py", "self.dispatchers"),
     # The topics of the outbox events each open transaction wrote - signalled once it commits.
     ("hare/contrib/outbox/wakeups/outbox_wakeup.py", "self.pending_topics"),
     # The topics each open transaction sent a NOTIFY of - one NOTIFY per topic and transaction.
@@ -41,16 +47,95 @@ REGISTERED_MODEL_KEYED_CACHES = {
 
 
 @pytest.mark.database_independent
+def test_write_rules_are_bounded_and_writer_observes_model_invalidation(monkeypatch):
+    cache = Cache(2, holds_sql=False)
+    monkeypatch.setattr(RowWriteRules, "RULES_CACHE", cache)
+    writer = object.__new__(InstanceWriter)
+    writer.model = Author
+    try:
+        first = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert writer.get_update_rules(["name"], WriteType.UPDATE) is first
+        RowWriteRules.get(Author, WriteType.UPDATE, ["name"], "update()")
+        RowWriteRules.get(Author, WriteType.UPDATE, ["name"], "bulk_update()")
+        assert cache.get_model_bucket(Author).entry_count == 2
+        after_eviction = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert after_eviction is not first
+        Caches.forget_model_caches([Author])
+        assert cache.get_model_bucket(Author).entry_count == 0
+        after_invalidation = writer.get_update_rules(["name"], WriteType.UPDATE)
+        assert after_invalidation is not after_eviction
+        assert after_invalidation.field_names == first.field_names
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
+def test_global_keys_do_not_infer_model_lifetime():
+    cache = Cache(2, holds_sql=False)
+    try:
+        cache[(Author, "key")] = "global"
+        model_bucket = cache.get_model_bucket(Author)
+        model_bucket[("key",)] = "model"
+        cache.forget_model(Author)
+        assert cache[(Author, "key")] == "global"
+        assert not model_bucket
+        assert list(cache) == [(Author, "key")]
+        assert len(cache) == cache.entry_count == 1
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
+def test_cache_instances_do_not_share_storage_when_object_addresses_are_reused(monkeypatch):
+    monkeypatch.setattr("hare.core.caching.cache.id", lambda value: 1, raising=False)
+    holder = SimpleNamespace(cache_buckets={})
+    first = Cache(holds_sql=False)
+    second = Cache(holds_sql=False)
+    try:
+        first.set_value(holder, "first")
+        assert second.get_value(holder) is None
+        second.set_value(holder, "second")
+        second.clear()
+        assert first.get_value(holder) == "first"
+        assert second.get_value(holder) is None
+    finally:
+        first.clear()
+        second.clear()
+        Caches.registered.remove(first)
+        Caches.registered.remove(second)
+
+
+@pytest.mark.database_independent
+def test_model_bucket_observes_builder_replacement():
+    from types import SimpleNamespace
+
+    first_builder, next_builder = object(), object()
+    model = SimpleNamespace(_meta=SimpleNamespace(plan_cache_buckets={}, query_class=first_builder))
+    cache = Cache(2)
+    try:
+        bucket = cache.get_model_bucket(model)
+        bucket["statement"] = "old SQL"
+        model._meta.query_class = next_builder
+        assert cache.get_model_bucket(model) is bucket
+        assert not bucket
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)
+
+
+@pytest.mark.database_independent
 def test_a_model_cache_registers_itself_and_forgets_one_model():
     cache: ModelCache[str] = ModelCache()
     try:
-        assert cache in Caches.registered
+        assert cache.storage in Caches.registered
         cache[Author] = "author"
         cache[Book] = "book"
         Caches.forget_model_caches([Author])
         assert dict(cache) == {Book: "book"}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
@@ -62,7 +147,7 @@ def test_a_cache_of_values_depending_on_other_models_is_dropped_whole():
         Caches.forget_model_caches([Author])
         assert dict(cache) == {}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
@@ -73,7 +158,7 @@ def test_forgetting_every_cache_drops_every_registered_one():
         Caches.forget_all_caches()
         assert dict(cache) == {}
     finally:
-        Caches.registered.remove(cache)
+        Caches.registered.remove(cache.storage)
 
 
 @pytest.mark.database_independent
@@ -85,7 +170,7 @@ def test_no_cache_is_made_by_hand():
     offenders = []
     for path in sorted(Path("hare").rglob("*.py")):
         relative_path = path.as_posix()
-        if relative_path == "hare/core/caching/cache.py":
+        if relative_path in {"hare/core/caching/cache.py", "hare/core/caching/cache_bucket.py"}:
             continue
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if hand_made.search(line) and (relative_path, line.split(":")[0].strip()) not in WEAK_STATE:
@@ -94,8 +179,8 @@ def test_no_cache_is_made_by_hand():
 
 
 @pytest.mark.database_independent
-def test_a_model_bucket_is_a_plain_dict_dropped_with_the_model():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False)
+def test_a_model_bucket_is_invalidated_with_the_model():
+    cache: Cache[str] = Cache(holds_sql=False)
     try:
         cache.get_model_bucket(Author)["key"] = "author"
         cache.get_model_bucket(Book)["key"] = "book"
@@ -111,7 +196,7 @@ def test_a_model_bucket_is_a_plain_dict_dropped_with_the_model():
 
 @pytest.mark.database_independent
 def test_model_buckets_depending_on_other_models_are_dropped_together():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, depends_on_other_models=True)
+    cache: Cache[str] = Cache(holds_sql=False, depends_on_other_models=True)
     try:
         cache.get_model_bucket(Author)["key"] = "author"
         cache.get_model_bucket(Book)["key"] = "book"
@@ -128,15 +213,15 @@ def test_an_owner_bucket_is_emptied_in_place():
         def __init__(self) -> None:
             self.cache_buckets: dict[int, dict[str, str]] = {}
 
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False)
+    cache: Cache[str] = Cache(holds_sql=False)
     owner, other = Owner(), Owner()
     try:
-        bucket = cache.get_owner_bucket(owner)
-        other_bucket = cache.get_owner_bucket(other)
-        assert cache.get_owner_bucket(owner) is bucket
+        bucket = cache.get_bucket(owner)
+        other_bucket = cache.get_bucket(other)
+        assert cache.get_bucket(owner) is bucket
         bucket["key"] = "value"
         other_bucket["key"] = "other"
-        cache.forget_owner(owner)
+        cache.forget_holder(owner)
         assert bucket == {} and other_bucket == {"key": "other"}
         Caches.forget_all_caches()
         assert other_bucket == {}
@@ -146,34 +231,34 @@ def test_an_owner_bucket_is_emptied_in_place():
 
 @pytest.mark.database_independent
 def test_a_shared_bucket_is_emptied_in_place_and_gone_with_its_holders():
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, depends_on_other_models=True)
+    cache: Cache[str] = Cache(holds_sql=False, depends_on_other_models=True)
     try:
         bucket = cache.new_shared_bucket()
         bucket["key"] = "value"
         Caches.forget_model_caches([Author])
         assert bucket == {}
-        assert len(cache.shared_buckets) == 1
+        assert len(cache.buckets) == 1
         del bucket
         gc.collect()
-        assert len(cache.shared_buckets) == 0
+        assert len(cache.buckets) == 0
     finally:
         Caches.registered.remove(cache)
 
 
 @pytest.mark.database_independent
-def test_an_owner_value_is_set_back_to_none_when_dropped():
+def test_a_lifetime_value_is_absent_after_invalidation():
     class Owner:
         value: str | None = None
 
-    cache: Cache[str] = Cache(holds_sql=False, keyed_by_model=False, owner_attribute="value")
+    cache: Cache[str] = Cache(holds_sql=False)
     owner = Owner()
     try:
-        cache.set_owner_value(owner, "kept")
-        assert owner.value == "kept"
+        cache.set_value(owner, "kept")
+        assert cache.get_value(owner) == "kept"
         Caches.forget_model_caches([Author])
-        assert owner.value == "kept"
+        assert cache.get_value(owner) == "kept"
         Caches.forget_all_caches()
-        assert owner.value is None
+        assert cache.get_value(owner) is None
     finally:
         Caches.registered.remove(cache)
 
@@ -205,7 +290,7 @@ def test_a_fact_is_computed_once_per_model_until_the_model_changes():
         get_table(Author)
         assert calls == [Author, Author]
     finally:
-        Caches.registered.remove(get_table.cache)
+        Caches.registered.remove(get_table.cache.storage)
 
 
 @pytest.mark.database_independent
@@ -229,16 +314,16 @@ def test_a_cache_dropped_with_another_is_dropped_whenever_that_one_drops_entries
     source: Cache[str] = Cache()
     dependent: Cache[str] = Cache(dropped_with=source)
     try:
-        source[(Author, "key")] = "author"
-        dependent[(Book, "key")] = "book"
+        source.get_model_bucket(Author)[("key",)] = "author"
+        dependent.get_model_bucket(Book)[("key",)] = "book"
         source.forget_model(Author)
-        assert dependent.get((Book, "key")) is None
-        dependent[(Book, "key")] = "book"
+        assert dependent.get_model_bucket(Book).get(("key",)) is None
+        dependent.get_model_bucket(Book)[("key",)] = "book"
         source.clear()
-        assert dependent.get((Book, "key")) is None
-        dependent[(Book, "key")] = "book"
+        assert dependent.get_model_bucket(Book).get(("key",)) is None
+        dependent.get_model_bucket(Book)[("key",)] = "book"
         Caches.forget_model_caches([Author])
-        assert dependent.get((Book, "key")) is None
+        assert dependent.get_model_bucket(Book).get(("key",)) is None
     finally:
         source.clear()
         Caches.registered.remove(source)
@@ -262,13 +347,89 @@ def test_a_cache_size_within_the_bounds_is_taken(monkeypatch):
 
 
 @pytest.mark.database_independent
-def test_a_plain_bucket_is_emptied_once_full():
+def test_bucket_eviction_preserves_recent_entries():
     """A model's plain bucket grew with every key of a JSON value a filter named - keys from data."""
+    from hare.core.caching.cache_bucket import CacheBucket
     from hare.core.caching.constants import MAX_PLAIN_BUCKET_ENTRIES
 
-    bucket: dict[str, int] = {}
+    bucket = CacheBucket[int](MAX_PLAIN_BUCKET_ENTRIES)
     for number in range(MAX_PLAIN_BUCKET_ENTRIES):
-        assert Cache.set_bounded(bucket, f"data__k{number}", number) == number
+        assert bucket.store(f"data__k{number}", number) == number
     assert len(bucket) == MAX_PLAIN_BUCKET_ENTRIES
-    Cache.set_bounded(bucket, "data__past", -1)
-    assert bucket == {"data__past": -1}
+    bucket.store("data__past", -1)
+    assert bucket["data__past"] == -1
+    assert len(bucket) == MAX_PLAIN_BUCKET_ENTRIES
+    assert "data__k0" not in bucket
+    assert bucket["data__k1"] == 1
+
+
+@pytest.mark.database_independent
+def test_bucket_invalidation_waits_for_an_active_lru_read():
+    from hare.core.caching.cache_bucket import CacheBucket
+
+    reading, clearing, release = Event(), Event(), Event()
+    completed = []
+
+    class PausedEntries(OrderedDict):
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            reading.set()
+            assert release.wait(10), "reader watchdog"
+            completed.append("read")
+            return value
+
+        def clear(self):
+            completed.append("clear")
+            super().clear()
+
+    bucket = CacheBucket(2)
+    bucket["value"] = 7
+    bucket.entries = PausedEntries(bucket.entries)
+
+    def invalidate():
+        clearing.set()
+        bucket.clear()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reader = executor.submit(bucket.get, "value")
+        try:
+            assert reading.wait(10), "reader start watchdog"
+            writer = executor.submit(invalidate)
+            assert clearing.wait(10), "invalidation start watchdog"
+        finally:
+            release.set()
+        assert reader.result(timeout=10) == 7
+        writer.result(timeout=10)
+    assert completed == ["read", "clear"]
+    assert not bucket
+
+
+@pytest.mark.database_independent
+def test_concurrent_cache_users_share_bounded_holder_storage():
+    holder = SimpleNamespace()
+    cache = Cache(7, holds_sql=False)
+    start = Barrier(4)
+
+    def use_cache(worker):
+        start.wait(timeout=10)
+        bucket = cache.get_bucket(holder)
+        for number in range(80):
+            assert cache.get_bucket(holder) is bucket
+            key = (worker, number % 8)
+            bucket[key] = number
+            assert bucket.get(key) in (None, number)
+            if number % 17 == 0:
+                cache.clear()
+        return bucket
+
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            buckets = list(executor.map(use_cache, range(4)))
+        assert all(bucket is buckets[0] for bucket in buckets)
+        assert cache.entry_count <= 7
+        cache.clear()
+        assert cache.get_bucket(holder) is buckets[0]
+        assert not buckets[0]
+    finally:
+        cache.clear()
+        Caches.registered.remove(cache)

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import operator
-from functools import reduce
 from typing import Any
 
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -85,7 +83,7 @@ class ClickhouseJsonEquality:
         if not isinstance(value, (list, tuple, set)):
             return Lookups.is_in(term, value)
         criteria = [cls.equal(term, element) for element in value if element is not None]
-        return reduce(operator.or_, criteria) if criteria else Lookups.is_in(term, [])
+        return Criterion.any(criteria) if criteria else Lookups.is_in(term, [])
 
     @classmethod
     def not_in(cls, term: Term, value: Any) -> Criterion:
@@ -93,4 +91,4 @@ class ClickhouseJsonEquality:
         if not isinstance(value, (list, tuple, set)):
             return Lookups.not_in(term, value)
         criteria = [cls.not_equal(term, element) for element in value if element is not None]
-        return reduce(operator.and_, criteria) if criteria else Lookups.not_in(term, [])
+        return Criterion.all(criteria) if criteria else Lookups.not_in(term, [])

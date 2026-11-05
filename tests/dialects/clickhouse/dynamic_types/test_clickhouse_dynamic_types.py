@@ -12,8 +12,9 @@ import pytest_asyncio
 
 from hare import fields
 from hare.dialects.clickhouse.fields import DynamicField, VariantField
+from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.exceptions import ConfigurationError, UnSupportedError, ValidationError
-from hare.query.expressions import Window
+from hare.query.expressions import F, Q, Window
 from hare.query.functions.window import Lag, Lead, NthValue
 from tests.dialects.clickhouse.dynamic_types.models import Sample
 from tests.utils.operations import apply_operations
@@ -103,8 +104,33 @@ async def test_dynamic_filters_match_values_of_their_own_type(samples):
     assert await ids(anything=Decimal("12.34")) == [6]
     assert await ids(anything__gt=Decimal("12.3")) == [6]
     assert await ids(anything__in=[2**70, -7]) == [15, 16]
-    assert len(await ids(anything__not=5)) == len(DYNAMIC_VALUES) - 2
-    assert 3 not in await ids(anything__not_in=[5])
+
+
+@pytest.mark.asyncio
+async def test_negative_typed_lookups_match_python_membership_including_null(clickhouse_dynamic_types_db):
+    values = (5, "5", None, 7)
+    await Sample.objects.bulk_create(
+        [Sample(id=index, anything=value, limited=value, reading=value) for index, value in enumerate(values, 1)]
+    )
+    for field_name in ("anything", "reading"):
+        for choices in ([], [5], [None], [5, None], ["5"], [5, "5", None]):
+            expected = [index for index, value in enumerate(values, 1) if value not in choices]
+            condition = Q(**{f"{field_name}__in": choices})
+            for query in (
+                Sample.objects.filter(**{f"{field_name}__not_in": choices}),
+                Sample.objects.exclude(condition),
+                Sample.objects.filter(~condition),
+            ):
+                assert await query.order_by("id").values_list("id", flat=True) == expected, (field_name, choices)
+        for value in (5, "5", None):
+            expected = [index for index, stored in enumerate(values, 1) if stored != value]
+            assert (
+                await Sample.objects.filter(**{f"{field_name}__not": value})
+                .order_by("id")
+                .values_list("id", flat=True)
+                == expected
+            )
+    assert await Sample.objects.filter(anything__not=F("limited")).count() == 0
 
 
 @pytest.mark.asyncio
@@ -160,6 +186,24 @@ async def test_variant_values(clickhouse_dynamic_types_db):
     assert await ids(reading=[1.5, 2.0]) == [3]
     with pytest.raises(ValidationError):
         await Sample.objects.create(id=9, reading={"a": 1})
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("server_type", "python_types"),
+    [
+        ("Array(Int32)", (list,)),
+        ("Array(Nullable(String))", (list,)),
+        ("Tuple(name String, count UInt8)", (tuple,)),
+        ("Map(String, Array(Int64))", (dict,)),
+        ("LowCardinality(Nullable(String))", (str,)),
+        ("Nullable(DateTime64(6, 'UTC'))", (datetime.datetime,)),
+        ("FixedString(8)", (str, bytes)),
+        ("UnknownType(String)", ()),
+    ],
+)
+def test_read_python_types_use_parsed_names_and_unwrap_scalar_wrappers(server_type, python_types):
+    assert ClickhouseTypeNames.get_read_python_types(server_type) == python_types
 
 
 @pytest.mark.database_independent
@@ -255,7 +299,7 @@ async def test_a_variant_of_fields_read_in_their_own_ways(clickhouse_dynamic_typ
     field = VariantField([FixedStringField(6), fields.IPv4AddressField(), fields.BooleanField()], null=True)
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(

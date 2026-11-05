@@ -11,6 +11,7 @@ import textwrap
 import pytest
 
 from hare.exceptions import IntegrityError
+from hare.migrations import operations as ops
 from tests.utils.cli_project import CliProject
 from tests.utils.database_under_test import DatabaseUnderTest
 
@@ -73,12 +74,11 @@ async def test_foreign_key_indexes_are_added_to_relations_migrated_without_them(
 
     project.write_models(template.format(index=""))
     await project.cli_ok("makemigrations")
-    migration_source = project.read_latest_migration()
+    migration = project.get_latest_migration()
     await project.cli_ok("migrate")
 
-    assert migration_source.count("ops.AlterField(") == 3
-    assert 'name="reviewer"' not in migration_source
-    assert 'name="owner"' not in migration_source
+    altered_fields = {operation.name for operation in migration.operations if isinstance(operation, ops.AlterField)}
+    assert altered_fields == {"author", "edition", "tags"}
     assert await get_plain_index_column_lists(project, "book") == [
         ("author_id",),
         ("edition_number", "edition_year"),

@@ -1,0 +1,932 @@
+# Import requirements and optional requirements of parametrized test cells.
+# Add every new test module here; all-extras collection verifies cell requirements.
+
+[scopes]
+"tests/contrib/mypy" = ["mypy"]
+"tests/contrib/request_query" = ["request-query"]
+"tests/contrib/taskiq" = ["taskiq"]
+"tests/stubs" = ["pyright"]
+"tests/writes/rules" = ["encryption"]
+
+[modules]
+"tests/connections/test_connection_wrapper_cancellation.py" = { requires = [], cells = [] }
+"tests/contrib/mypy/test_model_fingerprint.py" = { requires = ["mypy"], cells = [] }
+"tests/contrib/outbox/test_normalized_keys.py" = { requires = [], cells = [] }
+"tests/deletion/test_composite_cascade_defaults.py" = { requires = [], cells = [] }
+"tests/inspectdb/test_many_to_many_tables.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_generated_field_dependencies.py" = { requires = [], cells = [] }
+"tests/migrations/loading/test_module_reload.py" = { requires = [], cells = [] }
+"tests/stubs/test_package_layout.py" = { requires = ["pyright"], cells = ["mypy", "pyright"] }
+"tests/writes/rules/test_capture_batch_time.py" = { requires = [], cells = [] }
+"tests/writes/rules/test_through_model_defaults.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_null_conflict_keys.py" = { requires = [], cells = [] }
+"tests/writes/test_returned_values.py" = { requires = [], cells = [] }
+"tests/cli/test_project_resources.py" = { requires = [], cells = [] }
+"tests/contracts/test_write_value_types.py" = { requires = [], cells = [] }
+"tests/contrib/request_query/test_parameter_schema.py" = { requires = ["request-query"], cells = [] }
+"tests/stubs/test_class_stub_editor.py" = { requires = ["pyright"], cells = [] }
+"tests/contrib/frameworks/test_application_contexts.py" = { requires = ["request-query"], cells = ["fastapi", "http", "litestar", "robyn"] }
+"tests/contrib/frameworks/test_parameter_defaults.py" = { requires = ["request-query"], cells = ["fastapi", "http", "litestar"] }
+"tests/dialects/clickhouse/cluster/test_clickhouse_mutation_recovery.py" = { requires = [], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/cluster/test_clickhouse_placement.py" = { requires = [], cells = ["clickhouse-connect"] }
+"tests/inspectdb/test_catalog_snapshot.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_change_plan.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_clickhouse_rebuild_plan.py" = { requires = [], cells = [] }
+"tests/contracts/test_physical_column_types.py" = { requires = [], cells = [] }
+"tests/query_plans/test_prepared_write_values.py" = { requires = [], cells = [] }
+"tests/writes/test_bound_bulk_insert.py" = { requires = [], cells = [] }
+"tests/writes/test_bound_bulk_update.py" = { requires = [], cells = [] }
+"tests/configuration/test_benchmark_reporting.py" = { requires = [], cells = [] }
+"tests/configuration/test_matrix_processes.py" = { requires = [], cells = [] }
+"tests/configuration/test_matrix_execution.py" = { requires = [], cells = [] }
+"tests/configuration/test_matrix_catalog.py" = { requires = [], cells = [] }
+"tests/configuration/test_ci_catalog.py" = { requires = ["yaml"], cells = [] }
+"tests/package/test_wheel_staging.py" = { requires = [], cells = [] }
+"tests/package/test_artifact_cache.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_engine.py" = { requires = [], cells = [] }
+"tests/configuration/test_run_resources.py" = { requires = [], cells = [] }
+"tests/resources/test_run_resources.py" = { requires = [], cells = [] }
+"tests/configuration/test_documentation_code.py" = { requires = [], cells = [] }
+"tests/configuration/test_selection_manifest.py" = { requires = [], cells = [] }
+"tests/backends/test_asyncpg_listen.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
+"tests/backends/test_background_task_references.py" = { requires = [], cells = [] }
+"tests/backends/test_command_timeout.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_connect_retry.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_connection_config_validation.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_connection_params.py" = { requires = [], cells = ["asyncpg"] }
+"tests/backends/test_db_url.py" = { requires = [], cells = ["asyncpg"] }
+"tests/backends/test_explain.py" = { requires = [], cells = [] }
+"tests/backends/test_features.py" = { requires = [], cells = [] }
+"tests/backends/test_ping.py" = { requires = [], cells = [] }
+"tests/backends/test_pool_config_validation.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_pool_status.py" = { requires = [], cells = [] }
+"tests/backends/test_postgres.py" = { requires = [], cells = ["asyncpg", "yaml"] }
+"tests/backends/test_postgres_common_client.py" = { requires = [], cells = [] }
+"tests/backends/test_postgres_statement_metadata.py" = { requires = [], cells = [] }
+"tests/backends/test_postgres_parameter_traversal.py" = { requires = [], cells = [] }
+"tests/backends/test_postgres_root_certificate.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_postgres_search_path.py" = { requires = [], cells = [] }
+"tests/backends/test_postgres_transaction_concurrency.py" = { requires = [], cells = [] }
+"tests/backends/test_postgresql_drivers.py" = { requires = [], cells = ["asyncpg"] }
+"tests/backends/test_read_query_retry.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
+"tests/backends/test_reconnect.py" = { requires = [], cells = [] }
+"tests/backends/test_resource_completion.py" = { requires = [], cells = [] }
+"tests/backends/test_rust_pg_async_bridge.py" = { requires = ["native"], cells = [] }
+"tests/backends/test_rust_pg_transactions.py" = { requires = [], cells = [] }
+"tests/backends/test_rust_pg_listen.py" = { requires = ["native"], cells = [] }
+"tests/backends/test_sqlite_cancellation.py" = { requires = [], cells = [] }
+"tests/backends/test_sqlite_client.py" = { requires = [], cells = [] }
+"tests/backends/test_sqlite_process_exit.py" = { requires = [], cells = [] }
+"tests/backends/test_sqlite_transaction_abort.py" = { requires = [], cells = [] }
+"tests/backends/test_transaction_pooling.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/backends/test_transactional_client_shielding.py" = { requires = [], cells = ["asyncpg"] }
+"tests/cli/migration_round_trips/test_column_types.py" = { requires = [], cells = ["encryption"] }
+"tests/cli/migration_round_trips/test_indexes.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_migration_plans.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_relations.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_renames.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_table_options.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_through_tables.py" = { requires = [], cells = [] }
+"tests/cli/migration_round_trips/test_to_field_relations.py" = { requires = [], cells = [] }
+"tests/cli/test_cli.py" = { requires = [], cells = ["clickhouse-driver", "ipython", "yaml"] }
+"tests/cli/test_cli_checkmigrations.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_config_errors.py" = { requires = [], cells = ["pyright"] }
+"tests/cli/test_cli_migration_errors.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_migration_scope.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_plugins.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_rename_questions.py" = { requires = [], cells = [] }
+"tests/cli/test_cli_squash_round_trips.py" = { requires = [], cells = [] }
+"tests/cli/test_colors.py" = { requires = [], cells = [] }
+"tests/cli/test_dbshell.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/cli/test_drift.py" = { requires = [], cells = [] }
+"tests/cli/test_shell.py" = { requires = [], cells = [] }
+"tests/cli/test_shell_session.py" = { requires = [], cells = [] }
+"tests/cli/test_utils.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_composite_key_relation_component.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_composite_pk_in_building.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_composite_primary_key.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_composite_relation_lists.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_composite_target_relations_e2e.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_m2m_composite_pk_filters.py" = { requires = [], cells = [] }
+"tests/composite_primary_keys/test_many_to_many_declared_keys.py" = { requires = [], cells = [] }
+"tests/configuration/test_application_routing_state.py" = { requires = [], cells = [] }
+"tests/configuration/test_config.py" = { requires = [], cells = ["yaml"] }
+"tests/configuration/test_config_sources_and_init.py" = { requires = [], cells = ["asyncpg"] }
+"tests/configuration/test_context.py" = { requires = [], cells = ["yaml"] }
+"tests/configuration/test_deferred_queries.py" = { requires = [], cells = [] }
+"tests/configuration/test_early_init.py" = { requires = [], cells = ["pydantic"] }
+"tests/configuration/test_early_model_binding.py" = { requires = [], cells = [] }
+"tests/configuration/test_hare.py" = { requires = [], cells = [] }
+"tests/configuration/test_password_provider.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/connections/test_asyncpg_cancelled_calls.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
+"tests/connections/test_close_in_transaction.py" = { requires = [], cells = ["asyncpg"] }
+"tests/connections/test_connection.py" = { requires = [], cells = [] }
+"tests/connections/test_connection_frames.py" = { requires = [], cells = [] }
+"tests/connections/test_mapping_rows.py" = { requires = [], cells = [] }
+"tests/connections/test_memory_database_event_loops.py" = { requires = [], cells = [] }
+"tests/connections/test_reconnect.py" = { requires = [], cells = [] }
+"tests/connections/test_requires_features.py" = { requires = [], cells = [] }
+"tests/connections/test_restricted_database_features.py" = { requires = [], cells = [] }
+"tests/connections/test_reusable_test_databases.py" = { requires = [], cells = [] }
+"tests/connections/test_scripts_without_statements.py" = { requires = [], cells = [] }
+"tests/connections/test_server_version.py" = { requires = [], cells = [] }
+"tests/connections/test_test_database_leases.py" = { requires = [], cells = [] }
+"tests/connections/test_test_resource_cleanup.py" = { requires = [], cells = [] }
+"tests/connections/test_transaction_event_loops.py" = { requires = [], cells = [] }
+"tests/connections/test_xdist_sqlite_locking.py" = { requires = [], cells = ["pytest"] }
+"tests/contracts/applications/test_application_databases.py" = { requires = [], cells = ["encryption", "fastapi", "http", "litestar", "robyn", "taskiq"] }
+"tests/contracts/contrib_models/test_contrib_model_migrations.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/documentation/test_documented_imports.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/entry_points/test_command_line.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/entry_points/test_environment_entry_points.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pyright", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/entry_points/test_missing_driver_package.py" = { requires = [], cells = ["asyncpg", "encryption"] }
+"tests/contracts/exceptions/test_exception_answers.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "http", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/meta_options/test_meta_option_inheritance.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_change_capture.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_classes.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_factories.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_inspectdb.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_migrations.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_native_codecs.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_pydantic.py" = { requires = ["pydantic"], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_query_paths.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_field_request_query.py" = { requires = ["request-query"], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_generated_field_contract.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_json_aggregate_inputs.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "encryption", "fastapi", "litestar", "mypy", "opentelemetry", "phone", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/contracts/test_keyless_query_paths.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_migration_runner_state.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_prefetch_query_shapes.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_query_column_names.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_query_shape_interactions.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_relation_migration_paths.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/test_transaction_options.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/writes/test_loaded_instance_writes.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/writes/test_write_paths_complete.py" = { requires = [], cells = ["encryption"] }
+"tests/contracts/writes/test_write_paths_observers.py" = { requires = [], cells = ["encryption"] }
+"tests/contrib/frameworks/fastapi/test_application.py" = { requires = ["fastapi", "http"], cells = ["fastapi", "http"] }
+"tests/contrib/frameworks/fastapi/test_health_routes.py" = { requires = ["fastapi", "http"], cells = ["fastapi", "http"] }
+"tests/contrib/frameworks/fastapi/test_request_state.py" = { requires = ["fastapi"], cells = ["fastapi", "http"] }
+"tests/contrib/frameworks/litestar/test_dto.py" = { requires = ["litestar"], cells = ["litestar"] }
+"tests/contrib/frameworks/litestar/test_dto_backend.py" = { requires = ["litestar"], cells = ["litestar"] }
+"tests/contrib/frameworks/litestar/test_dto_extra_fields.py" = { requires = ["litestar"], cells = ["litestar"] }
+"tests/contrib/frameworks/litestar/test_health_routes.py" = { requires = ["litestar"], cells = ["litestar"] }
+"tests/contrib/frameworks/litestar/test_plugin.py" = { requires = ["litestar"], cells = ["litestar"] }
+"tests/contrib/frameworks/litestar/test_request_state.py" = { requires = ["litestar"], cells = ["http", "litestar"] }
+"tests/contrib/frameworks/robyn/test_application.py" = { requires = ["robyn"], cells = ["http", "robyn"] }
+"tests/contrib/frameworks/robyn/test_health_routes.py" = { requires = ["robyn"], cells = ["robyn"] }
+"tests/contrib/frameworks/robyn/test_request_state.py" = { requires = ["robyn"], cells = ["robyn"] }
+"tests/contrib/frameworks/test_health_routes.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/frameworks/test_lifecycle.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/frameworks/test_pages.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/frameworks/test_request_transaction_cleanup.py" = { requires = ["pydantic"], cells = [] }
+"tests/contrib/mypy/test_mypy_plugin.py" = { requires = ["mypy"], cells = ["mypy"] }
+"tests/contrib/notify/test_notification_listener.py" = { requires = [], cells = [] }
+"tests/contrib/opentelemetry/test_instrumentor.py" = { requires = ["opentelemetry"], cells = ["opentelemetry"] }
+"tests/contrib/opentelemetry/test_pool_metrics.py" = { requires = ["opentelemetry"], cells = ["opentelemetry"] }
+"tests/contrib/outbox/test_brokers.py" = { requires = [], cells = ["kafka", "rabbitmq", "redis"] }
+"tests/contrib/outbox/test_change_capture.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_change_capture_options.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_claim_tokens.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_deliveries.py" = { requires = [], cells = ["http", "kafka"] }
+"tests/contrib/outbox/test_delivery_results.py" = { requires = [], cells = ["http"] }
+"tests/contrib/outbox/test_enqueue_many.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_kafka_failed_start.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_atomicity.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_cross_connection.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_idempotency.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_json_encoding.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_outbox_publish_conflicts.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_rabbitmq_connection.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_dead_letter.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_lifecycle.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_options.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_polling.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_postgres.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_restricted_database.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_router.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_relay_topic_patterns.py" = { requires = [], cells = ["taskiq"] }
+"tests/contrib/outbox/test_wakeup_without_notification_channels.py" = { requires = [], cells = [] }
+"tests/contrib/outbox/test_webhook_targets.py" = { requires = [], cells = ["http"] }
+"tests/contrib/request_query/test_api_enrichment_batch.py" = { requires = ["http", "request-query"], cells = ["http", "request-query"] }
+"tests/contrib/request_query/test_api_getter.py" = { requires = ["http", "request-query"], cells = ["http", "request-query"] }
+"tests/contrib/request_query/test_api_getter_request_query.py" = { requires = ["http", "request-query"], cells = ["http", "request-query"] }
+"tests/contrib/request_query/test_bounds.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_concurrent_filter_methods.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_count_by.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_declarations.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_deleted_rows.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_description_cache.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_factory.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_filters.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_keyless_models.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_latest_versions.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_live_models.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_meta_filters.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_pagination.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_parameter_descriptions.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_postgresql.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_rows.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_search_ordering.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_selection_and_changes.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_tenancy.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/request_query/test_types.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/taskiq/test_taskiq.py" = { requires = ["taskiq"], cells = ["taskiq"] }
+"tests/contrib/taskiq/test_task_transaction_cleanup.py" = { requires = ["taskiq"], cells = ["taskiq"] }
+"tests/contrib/test_cursor_binary.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/contrib/test_decorator.py" = { requires = [], cells = [] }
+"tests/contrib/test_factories.py" = { requires = [], cells = ["faker"] }
+"tests/contrib/test_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_containers.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_create_schema_primary_keys.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_descriptions.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_extra_fields.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_relation_ids.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pydantic_utils.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/contrib/test_pytest_plugin.py" = { requires = ["pytest"], cells = ["pytest"] }
+"tests/contrib/test_repeated_queries.py" = { requires = [], cells = [] }
+"tests/contrib/test_repeated_query_collection.py" = { requires = [], cells = [] }
+"tests/deletion/test_cascade_batching.py" = { requires = [], cells = [] }
+"tests/deletion/test_deep_self_referential_cascade.py" = { requires = [], cells = [] }
+"tests/deletion/test_delete_preview.py" = { requires = [], cells = [] }
+"tests/deletion/test_deletion_graph_cycles.py" = { requires = [], cells = [] }
+"tests/deletion/test_deletion_graph_order.py" = { requires = [], cells = [] }
+"tests/deletion/test_deletion_scope.py" = { requires = [], cells = [] }
+"tests/deletion/test_hard_delete.py" = { requires = [], cells = [] }
+"tests/deletion/test_hard_delete_unconstrained_cascade.py" = { requires = [], cells = [] }
+"tests/deletion/test_m2m_on_delete.py" = { requires = [], cells = [] }
+"tests/deletion/test_manager_scope_cascade_refresh.py" = { requires = [], cells = [] }
+"tests/deletion/test_on_delete_protect.py" = { requires = [], cells = [] }
+"tests/deletion/test_only_deleted.py" = { requires = [], cells = [] }
+"tests/deletion/test_python_cascade_guards.py" = { requires = [], cells = [] }
+"tests/deletion/test_queryset_restore.py" = { requires = [], cells = [] }
+"tests/deletion/test_self_referential_cascade_tree.py" = { requires = [], cells = [] }
+"tests/deletion/test_soft_delete.py" = { requires = [], cells = [] }
+"tests/deletion/test_soft_delete_forward_relation_lookups.py" = { requires = [], cells = [] }
+"tests/deletion/test_soft_delete_single_update.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/change_capture/test_clickhouse_change_capture.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/cluster/test_clickhouse_cluster.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_container_order.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_containers.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_decimal_narrowing.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_enum_labels.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_moment_ticks.py" = { requires = [], cells = ["clickhouse-connect", "clickhouse-driver"] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_text_column_conversions.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_types.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_value_edges.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/column_types/test_clickhouse_zoned_moments.py" = { requires = [], cells = ["tzlocal"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_connect_codecs.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_connect_pool_status.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_connect_reads.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_connection_opening.py" = { requires = [], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_driver_connections.py" = { requires = ["clickhouse-driver"], cells = ["clickhouse-driver"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_driver_local_codecs.py" = { requires = ["clickhouse-driver"], cells = ["clickhouse-driver"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_driver_jobs.py" = { requires = ["clickhouse-driver"], cells = ["clickhouse-driver"] }
+"tests/dialects/clickhouse/connections/test_clickhouse_repeated_init.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/connections/test_clickhouse_scripts.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/connections/test_clickhouse_keeper_session.py" = { requires = ["clickhouse-keeper"], cells = [] }
+"tests/dialects/clickhouse/connections/test_clickhouse_streaming.py" = { requires = [], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/dynamic_types/test_clickhouse_dynamic_types.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/generated_keys/test_clickhouse_generated_keys.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/generated_keys/test_clickhouse_keeper_nodes_deletion.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/geometries/test_clickhouse_geometries.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/lightweight_updates/test_clickhouse_lightweight_updates.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_aggregates.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_array_join.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_asof_join.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_casts.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_condition_value.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_conditions_and_windows.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_correlated_exists.py" = { requires = [], cells = ["request-query"] }
+"tests/dialects/clickhouse/queries/test_clickhouse_correlated_subqueries.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_decimal_arithmetic.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_iterator.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_json_building.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_json_column_over_driver.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_json_equality.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_json_paths.py" = { requires = [], cells = ["http"] }
+"tests/dialects/clickhouse/queries/test_clickhouse_literals.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/queries/test_clickhouse_lookup_codecs.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_null_ordering.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_number_functions.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_queries.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_query_modifiers.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_recursive_rows.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_refusals.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_request_query.py" = { requires = ["request-query"], cells = ["request-query"] }
+"tests/dialects/clickhouse/queries/test_clickhouse_uuid_order.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/queries/test_clickhouse_value_sets.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_dictionaries.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_enum_member_migrations.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_escaped_texts_drift.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_field_index_rollbacks.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_generated_columns.py" = { requires = [], cells = ["pydantic"] }
+"tests/dialects/clickhouse/schema/test_clickhouse_identifiers.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_indexes.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_inspected_json.py" = { requires = [], cells = ["clickhouse-connect", "clickhouse-driver"] }
+"tests/dialects/clickhouse/schema/test_clickhouse_inspected_schema_objects.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_key_field_replacement.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_key_type_changes.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_many_to_many_renames.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_migration_refusals.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_migration_safety.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_model_databases.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_observed_engine.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_observed_table_options.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_parenthesized_keys_drift.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_renames.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_schema.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_shadow_database.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_structural_expressions.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_table_options.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_through_model_keys.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_typed_defaults_drift.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_versioned_collapsing_drift.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/schema/test_clickhouse_views.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/test_clickhouse_dialect_variants.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/transactions/test_clickhouse_transactions.py" = { requires = [], cells = ["pydantic"] }
+"tests/dialects/clickhouse/writes/test_clickhouse_binary_values.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_bulk_load.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/writes/test_clickhouse_composite_keys.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_connect_inserted_column_types.py" = { requires = ["clickhouse-connect"], cells = ["clickhouse-connect"] }
+"tests/dialects/clickhouse/writes/test_clickhouse_delete_preview.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_failed_mutations.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_key_defaults.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_many_to_many_writes.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_soft_deletes.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_unfinished_writes.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_write_codecs.py" = { requires = [], cells = [] }
+"tests/dialects/clickhouse/writes/test_clickhouse_writes.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_assigned_expression_types.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_assigned_values.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_asyncpg_extension_codecs.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
+"tests/dialects/postgresql/column_types/test_citext.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_container_paths.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_gis_fields.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_hstore.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_lookup_info_containers.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_ltree_field.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_multi_range_fields.py" = { requires = [], cells = ["pydantic"] }
+"tests/dialects/postgresql/column_types/test_native_enum.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_network_fields.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_pg_result_ranges_arrays.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_postgis.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_postgresql_only_column_types.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_ranges.py" = { requires = [], cells = ["pydantic"] }
+"tests/dialects/postgresql/column_types/test_tsvector_expression.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_tsvector_field.py" = { requires = [], cells = ["asyncpg"] }
+"tests/dialects/postgresql/column_types/test_uuid_v7_default.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_validators.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_vector.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/column_types/test_wall_clock_types.py" = { requires = [], cells = ["asyncpg"] }
+"tests/dialects/postgresql/connections/test_password_rotation.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_aggregates.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_expression_plans.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_functions.py" = { requires = [], cells = ["tzlocal"] }
+"tests/dialects/postgresql/queries/test_in_array_optimization.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_jsonb_agg_declared_types.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/dialects/postgresql/queries/test_jsonb_agg_non_finite_floats.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_protect_deferral.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_raw_statement_errors.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/queries/test_search.py" = { requires = [], cells = ["asyncpg"] }
+"tests/dialects/postgresql/queries/test_trigram_unaccent.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_default_schema.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_exclusion_constraint_expressions.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_exclusion_constraint_extension.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_migration_safety_postgresql.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_partitioned_tables.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_schema_objects.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_sqlite_only_features.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/schema/test_without_overlaps.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_exclusion_constraint_tenancy.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_context_scopes.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_row_level_security.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_row_level_security_combinations.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_schema_change_capture.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_schema_model_scopes.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_schema_shared_deletes.py" = { requires = [], cells = [] }
+"tests/dialects/postgresql/tenancy/test_tenant_schemas.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/native_functions/test_date_functions_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_date_timestamp_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_greatest_least_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_json_path_values_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_math_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_statistic_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_temporal_arithmetic_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/native_functions/test_text_native.py" = { requires = ["native"], cells = [] }
+"tests/dialects/sqlite/test_aiosqlite_driver.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_alter_relation_in_place.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_attached_databases.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_condition_patterns.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_drop_column_in_place.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_full_text_drift.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_full_text_migrations.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_full_text_search.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_inspectdb_declared_sizes.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_introspection_quoting.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_library_faults.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_parameter_adapters.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_spatialite.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_spatialite_index.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_sqlite_casts.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_sqlite_column_conversions.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_sqlite_migration_lock.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_stream.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_strict_tables.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_table_descriptions.py" = { requires = [], cells = [] }
+"tests/dialects/sqlite/test_vector_search.py" = { requires = [], cells = ["sqlite-vec"] }
+"tests/dialects/test_base_schema_editor_defaults.py" = { requires = [], cells = [] }
+"tests/dialects/test_core_is_dialect_neutral.py" = { requires = [], cells = [] }
+"tests/dialects/test_dialect_contract.py" = { requires = [], cells = [] }
+"tests/dialects/test_dialect_expressions.py" = { requires = [], cells = [] }
+"tests/dialects/test_introspector_dispatch.py" = { requires = [], cells = [] }
+"tests/dialects/test_text_search_capabilities.py" = { requires = [], cells = [] }
+"tests/dialects/test_unknown_dialect_errors.py" = { requires = [], cells = [] }
+"tests/fields/defaults/test_callable_default.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/defaults/test_db_default.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/defaults/test_db_default_dialect_renderers.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/defaults/test_generated_field.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/defaults/test_generated_field_virtual.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/encryption/test_application_keyrings.py" = { requires = [], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_blind_index.py" = { requires = ["encryption"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encrypted.py" = { requires = ["encryption"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encrypted_json_documents.py" = { requires = ["encryption"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encrypted_json_documents_pydantic.py" = { requires = ["encryption", "pydantic"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encrypted_pydantic.py" = { requires = ["encryption", "pydantic"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encrypted_set_operations.py" = { requires = ["encryption"], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_encryption_key_rotation.py" = { requires = [], cells = ["encryption", "phone", "pydantic"] }
+"tests/fields/encryption/test_sensitive_exception_chain.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/encryption/test_sensitive_filter_key_cycles.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_common.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_db_index.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_deep_and_circular_values.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_field_comment_descriptions.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_field_extension_hooks.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_subclass.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_subclass_filters.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/field_declaration/test_validator_lifetime.py" = { requires = [], cells = [] }
+"tests/fields/field_declaration/test_write_paths.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_fk.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_fk_async_pk_default.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_fk_uuid.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_generic_fk.py" = { requires = [], cells = ["phone", "pydantic", "request-query"] }
+"tests/fields/relations/test_generic_fk_declaration.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_m2m.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_m2m_through_model.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_m2m_uuid.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_relation_to_unique_field.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/relations/test_reverse_relation.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/test_declaration_snapshots.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_array.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_binary.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_bool.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_char.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_date.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_datetime.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_datetime_extremes.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_decimal.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_decimal_expressions.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_enum.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_float.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_int.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_ip_address_text_lookups.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_ip_address_zones.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_json.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_json_filter.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_json_preparation.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_json_pydantic.py" = { requires = ["pydantic"], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_json_values.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_literal_value_conversion.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_ordered_values.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_text.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_text_format_fields.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_text_format_fields_phone.py" = { requires = ["phone"], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_time.py" = { requires = [], cells = ["phone", "pydantic", "pytz", "tzlocal"] }
+"tests/fields/value_types/test_timedelta.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_uuid.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_uuid7.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_uuid_v7_default.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/fields/value_types/test_uuid_version.py" = { requires = [], cells = ["phone", "pydantic"] }
+"tests/gis/test_geometries.py" = { requires = [], cells = [] }
+"tests/health/test_health_check.py" = { requires = [], cells = [] }
+"tests/health/test_health_criteria.py" = { requires = [], cells = [] }
+"tests/input_checks/test_finite_numbers.py" = { requires = [], cells = [] }
+"tests/input_checks/test_fuzz.py" = { requires = [], cells = [] }
+"tests/input_checks/test_huge_int_values.py" = { requires = [], cells = [] }
+"tests/input_checks/test_mixed_value_types.py" = { requires = [], cells = [] }
+"tests/input_checks/test_sql_injection_regression.py" = { requires = [], cells = [] }
+"tests/input_checks/test_wrong_argument_types.py" = { requires = [], cells = [] }
+"tests/inspectdb/test_inspectdb.py" = { requires = [], cells = [] }
+"tests/inspectdb/test_inspectdb_reconstructed_models.py" = { requires = [], cells = [] }
+"tests/inspectdb/test_inspectdb_schema_details.py" = { requires = [], cells = [] }
+"tests/matrix/test_module_requirements.py" = { requires = [], cells = [] }
+"tests/matrix/test_selection_manifest.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_autodetector.py" = { requires = [], cells = ["phone"] }
+"tests/migrations/autodetection/test_autodetector_cross_app.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_migration_checks.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_migration_splitter.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_operation_sorter.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_rename_questions.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_required_extensions.py" = { requires = [], cells = [] }
+"tests/migrations/autodetection/test_state_diff_operations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_datetime_migration_integration.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_enum_check_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_generic_foreign_key_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_native_enum_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_range_type_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_runtime_enum_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/column_types/test_uuid7_default.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_drift.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_drift_attached_databases.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_drift_database_named_indexes.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_drift_for_alias.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_drift_shadow.py" = { requires = [], cells = [] }
+"tests/migrations/drift/test_sqlite_comment_drift.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_executor_full_plan_cache.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_in_memory_migrations.py" = { requires = [], cells = ["request-query"] }
+"tests/migrations/execution/test_migrate_api.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migrate_lock_timeout.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migrate_lock_timeout_runner.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migration_bookkeeping.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migration_lock.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migration_runner_python.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_migration_session.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_plan_api.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_prepared_operation_execution.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_recorder.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_rollback_history.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_runtime_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_sqlmigrate_api.py" = { requires = [], cells = [] }
+"tests/migrations/execution/test_sqlmigrate_matches_migrate.py" = { requires = [], cells = [] }
+"tests/migrations/loading/test_graph.py" = { requires = [], cells = [] }
+"tests/migrations/loading/test_loader_latest_dependency.py" = { requires = [], cells = [] }
+"tests/migrations/migration_files/test_migration_optimizer.py" = { requires = [], cells = [] }
+"tests/migrations/migration_files/test_squashmigrations.py" = { requires = [], cells = [] }
+"tests/migrations/migration_files/test_writer.py" = { requires = [], cells = [] }
+"tests/migrations/migration_files/test_writer_import_names.py" = { requires = [], cells = [] }
+"tests/migrations/migration_files/test_writer_value_rendering.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_add_field_not_null_python_default.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_backfill_partial_application.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_batch_ops.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_collation_not_valid_ops.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_concurrent_index_ops.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_migration_safety.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_operation_contracts.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_operations_characterization.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_operations_coverage.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_operations_database.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_operations_real_db.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_safe_migration_operations.py" = { requires = [], cells = [] }
+"tests/migrations/operations/test_separate_database_and_state.py" = { requires = [], cells = [] }
+"tests/migrations/relations/test_foreign_key_index_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/relations/test_protect_foreign_key_backstop.py" = { requires = [], cells = [] }
+"tests/migrations/relations/test_referenced_key_type_change.py" = { requires = [], cells = [] }
+"tests/migrations/relations/test_rename_composite_key_chain.py" = { requires = [], cells = [] }
+"tests/migrations/relations/test_rename_relations_real_db.py" = { requires = [], cells = [] }
+"tests/migrations/round_trips/test_round_trip.py" = { requires = [], cells = [] }
+"tests/migrations/round_trips/test_round_trip_real_db.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_generated_names_after_renames.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_postgres_schema_editor_comments.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_editor_backends.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_editor_constraints.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_editor_identifier_quoting.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_editor_sql.py" = { requires = [], cells = [] }
+"tests/migrations/schema_editor/test_schema_editor_sqlite.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_constraint_mixin_field_resolution.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_constraints.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_dictionary_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_extension_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_include_nulls_distinct.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_index_expressions_per_dialect.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_index_key_order.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_q_conditions.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_rename_schema_object_round_trips.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_schema_object_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/schema_objects/test_triggers.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_alter_model_options_state.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_model_references_in_state.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_operations_rename_model_state.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_operations_state.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_prepared_operation_states.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_rendering_in_place_removal.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_rendering_publication.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_state_generator.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_state_performance.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_state_rendering.py" = { requires = [], cells = [] }
+"tests/migrations/state/test_swappable_models.py" = { requires = [], cells = ["yaml"] }
+"tests/migrations/tables/test_schema_qualified_migrations.py" = { requires = [], cells = [] }
+"tests/migrations/tables/test_table_options.py" = { requires = [], cells = [] }
+"tests/migrations/tables/test_table_partitioning.py" = { requires = [], cells = [] }
+"tests/migrations/tables/test_table_rebuild_preserves_state.py" = { requires = [], cells = [] }
+"tests/migrations/tables/test_table_rebuild_strategy.py" = { requires = [], cells = [] }
+"tests/model_instances/test_dirty_tracking.py" = { requires = [], cells = [] }
+"tests/model_instances/test_field_snapshot.py" = { requires = [], cells = [] }
+"tests/model_instances/test_model_construct.py" = { requires = [], cells = [] }
+"tests/model_instances/test_refresh_publication.py" = { requires = [], cells = [] }
+"tests/model_instances/test_model_methods.py" = { requires = [], cells = [] }
+"tests/model_instances/test_optimistic_locking.py" = { requires = [], cells = [] }
+"tests/model_instances/test_pydantic_partial_load.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/model_instances/test_validators.py" = { requires = [], cells = ["http"] }
+"tests/model_instances/test_versioned_model.py" = { requires = [], cells = [] }
+"tests/model_instances/test_versioned_model_with_base.py" = { requires = [], cells = [] }
+"tests/model_setup/abstract_inheritance/test_abstract_model_inheritance.py" = { requires = [], cells = [] }
+"tests/model_setup/abstract_inheritance/test_duplicate_constraint_name.py" = { requires = [], cells = [] }
+"tests/model_setup/abstract_inheritance/test_inheritance.py" = { requires = [], cells = [] }
+"tests/model_setup/abstract_inheritance/test_meta_class_abstract_attr_inheritance.py" = { requires = [], cells = [] }
+"tests/model_setup/abstract_inheritance/test_meta_class_abstract_field_precedence.py" = { requires = [], cells = [] }
+"tests/model_setup/binding/test_binding_publication.py" = { requires = [], cells = [] }
+"tests/model_setup/binding/test_live_model_lifecycle.py" = { requires = [], cells = ["pydantic"] }
+"tests/model_setup/binding/test_model_caches.py" = { requires = [], cells = [] }
+"tests/model_setup/binding/test_model_class_cache_gc.py" = { requires = [], cells = [] }
+"tests/model_setup/binding/test_unbound_model_descriptions.py" = { requires = [], cells = [] }
+"tests/model_setup/concrete_inheritance/test_concrete_inheritance.py" = { requires = [], cells = [] }
+"tests/model_setup/connection_checks/test_connection_functions.py" = { requires = [], cells = [] }
+"tests/model_setup/connection_checks/test_names_by_letter_case.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_dialect_indexes.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_duplicate_table_name.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_indexes.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_meta_info_ordering_error_message.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_meta_unsupported_options.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_model_declaration_checks.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_model_field_name_conflicts.py" = { requires = [], cells = [] }
+"tests/model_setup/declaration_checks/test_unique_together.py" = { requires = [], cells = [] }
+"tests/model_setup/initialization/test_initialization.py" = { requires = [], cells = ["yaml"] }
+"tests/model_setup/model_discovery/test_model_discovery.py" = { requires = [], cells = [] }
+"tests/model_setup/models_attribute/test_models_attribute.py" = { requires = [], cells = [] }
+"tests/model_setup/naming/test_identifier_length.py" = { requires = [], cells = [] }
+"tests/model_setup/naming/test_identifiers.py" = { requires = [], cells = [] }
+"tests/model_setup/naming/test_source_field.py" = { requires = [], cells = [] }
+"tests/model_setup/naming/test_table_name.py" = { requires = [], cells = [] }
+"tests/model_setup/primary_keys/test_primary_key.py" = { requires = [], cells = [] }
+"tests/model_setup/primary_keys/test_primary_keyless_models.py" = { requires = [], cells = [] }
+"tests/model_setup/public_api/test_manager.py" = { requires = [], cells = [] }
+"tests/model_setup/public_api/test_model_get_table.py" = { requires = [], cells = [] }
+"tests/model_setup/public_api/test_public_model_api.py" = { requires = [], cells = ["pydantic"] }
+"tests/model_setup/related_name_templates/test_related_name_template.py" = { requires = [], cells = [] }
+"tests/model_setup/relation_errors/test_relation_errors.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_cascade_cross_connection.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_cross_connection_many_to_many.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_cross_connection_relation_joins.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_cross_dialect_routing.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_deletion_follows_the_connection.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_distributed_recovery.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_facade_router_laziness.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_get_or_create_router.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_m2m_cross_connection.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_read_your_writes.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_relations_on_second_connection.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_router.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_subquery_exists_cross_db_guard.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_transactions_distributed.py" = { requires = [], cells = [] }
+"tests/multiple_connections/test_two_databases.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_field_codecs.py" = { requires = [], cells = ["asyncpg"] }
+"tests/native_acceleration/test_field_codecs_asyncpg.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
+"tests/native_acceleration/test_field_codecs_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/native_acceleration/test_model_constructor.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_pg_result_reading.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_positional_hydration.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_prefetch_native_layout.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_row_reader_reuse.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_rust_hydrate_parity.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_rust_serialize_parity.py" = { requires = [], cells = [] }
+"tests/native_acceleration/test_rust_serialize_parity_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/native_acceleration/test_text_format_field_codecs.py" = { requires = [], cells = ["phone"] }
+"tests/native_acceleration/test_write_path_fast_paths.py" = { requires = [], cells = ["asyncpg"] }
+"tests/native_acceleration/test_written_parameters.py" = { requires = ["native"], cells = [] }
+"tests/observability/test_change_events.py" = { requires = [], cells = [] }
+"tests/observability/test_driver_exception_cause.py" = { requires = [], cells = [] }
+"tests/observability/test_duration_records.py" = { requires = [], cells = [] }
+"tests/observability/test_instrumentation.py" = { requires = [], cells = [] }
+"tests/observability/test_observer_scopes.py" = { requires = [], cells = [] }
+"tests/observability/test_query_counter.py" = { requires = [], cells = [] }
+"tests/observability/test_query_tags.py" = { requires = [], cells = [] }
+"tests/observability/test_sensitive_values_hidden.py" = { requires = [], cells = [] }
+"tests/observability/test_transaction_instrumentation.py" = { requires = [], cells = [] }
+"tests/observability/test_transaction_instrumentation_integration.py" = { requires = [], cells = [] }
+"tests/package/test_exceptions.py" = { requires = [], cells = ["pydantic", "request-query"] }
+"tests/package/test_extension_contributions.py" = { requires = [], cells = [] }
+"tests/package/test_lazy_pattern.py" = { requires = [], cells = [] }
+"tests/package/test_package_exports.py" = { requires = [], cells = ["asyncpg", "clickhouse-connect", "clickhouse-driver", "fastapi", "litestar", "mypy", "opentelemetry", "pydantic", "pytest", "request-query", "robyn", "taskiq"] }
+"tests/package/test_pydantic_classes.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/package/test_registries.py" = { requires = [], cells = [] }
+"tests/package/test_system_clock.py" = { requires = [], cells = [] }
+"tests/package/test_version.py" = { requires = [], cells = [] }
+"tests/queries/aggregation/test_aggregate_fan_out_pinned_rows.py" = { requires = [], cells = [] }
+"tests/queries/aggregation/test_aggregation.py" = { requires = [], cells = [] }
+"tests/queries/aggregation/test_group_by.py" = { requires = [], cells = [] }
+"tests/queries/aggregation/test_grouping_sets.py" = { requires = [], cells = [] }
+"tests/queries/dates_and_times/test_date_arithmetic_range.py" = { requires = [], cells = [] }
+"tests/queries/dates_and_times/test_date_functions.py" = { requires = [], cells = ["tzlocal"] }
+"tests/queries/dates_and_times/test_date_time_arithmetic.py" = { requires = [], cells = [] }
+"tests/queries/dates_and_times/test_date_timestamp_comparisons.py" = { requires = [], cells = ["tzlocal"] }
+"tests/queries/dates_and_times/test_now_statement_moment.py" = { requires = [], cells = [] }
+"tests/queries/dates_and_times/test_temporal_value_consistency.py" = { requires = [], cells = ["tzlocal"] }
+"tests/queries/dates_and_times/test_timezone_override.py" = { requires = [], cells = ["tzlocal"] }
+"tests/queries/expressions/test_alias_truncation.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_annotation_name_and_decimal_average.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_annotation_names_hare_uses_itself.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_array_subquery.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_bound_expression.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_case_when.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_columns_named_like_the_columns_hare_adds.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_condition_value.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_cte.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_cte_rows.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_derived_projection.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_expression_structure.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_expression_type_parity.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_extension_results.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_f.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_json_object.py" = { requires = [], cells = ["tzlocal"] }
+"tests/queries/expressions/test_json_table.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_lateral.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_nested_function_output_types.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_source_bindings.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_sql_node_traversal.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_sql_structure.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_subquery_annotation_ordering.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_subquery_rawsql_arithmetic.py" = { requires = [], cells = [] }
+"tests/queries/expressions/test_with_recursive.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_backward_relation_lookups.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_custom_lookups.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_exists_conditions.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_exists_outerref.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_filtered_relation.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_filtering.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_filters.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_implicit_subquery.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_like_with_expressions.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_literal_annotation_filters.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_lookup_info.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_numeric_lookup_precision.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_posix_regex_filter.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_q.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_relation_instance_filters.py" = { requires = [], cells = [] }
+"tests/queries/filtering/test_reserved_filter_names.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_comparison_functions.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_custom_functions.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_math_functions.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_round_function.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_statistic_functions.py" = { requires = [], cells = [] }
+"tests/queries/functions/test_text_functions.py" = { requires = [], cells = [] }
+"tests/queries/ordering/test_bound_ordering.py" = { requires = [], cells = [] }
+"tests/queries/ordering/test_expression_orderings.py" = { requires = [], cells = [] }
+"tests/queries/ordering/test_order_by.py" = { requires = [], cells = [] }
+"tests/queries/ordering/test_order_by_nested.py" = { requires = [], cells = [] }
+"tests/queries/ordering/test_queryset_orderings.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_basic.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_description_cache.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_execution_dependencies.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_query_api.py" = { requires = [], cells = ["pydantic"] }
+"tests/queries/querysets/test_query_options.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_copy.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_db_freeze.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_extensions.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_reuse.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_row_consistency.py" = { requires = [], cells = [] }
+"tests/queries/querysets/test_queryset_slots.py" = { requires = [], cells = [] }
+"tests/queries/raw_sql/test_manual_sql.py" = { requires = [], cells = [] }
+"tests/queries/raw_sql/test_query_result.py" = { requires = [], cells = [] }
+"tests/queries/raw_sql/test_raw_queryset_columns.py" = { requires = [], cells = [] }
+"tests/queries/raw_sql/test_sql.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_cursor_pagination.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_cursor_pagination_backward.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_dates_and_reverse.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_defer.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_distinct.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_get_exceptions.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_in_bulk.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_latest_earliest.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_model_get_direct_scoped.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_model_get_plans.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_model_row_reading.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_only.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_random.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_row_layout.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_table_sample.py" = { requires = [], cells = [] }
+"tests/queries/retrieval/test_unordered_slice_rows.py" = { requires = [], cells = [] }
+"tests/queries/set_operations/test_union_binary_values.py" = { requires = [], cells = [] }
+"tests/queries/set_operations/test_union_ordering_output_fields.py" = { requires = [], cells = [] }
+"tests/queries/set_operations/test_union_retrieval.py" = { requires = [], cells = [] }
+"tests/queries/values/test_date_part_paths.py" = { requires = [], cells = [] }
+"tests/queries/values/test_values.py" = { requires = [], cells = [] }
+"tests/queries/values/test_values_list_types.py" = { requires = [], cells = [] }
+"tests/queries/values/test_values_queryset_api.py" = { requires = [], cells = [] }
+"tests/queries/values/test_values_relation_paths.py" = { requires = [], cells = [] }
+"tests/queries/windows/test_window.py" = { requires = [], cells = [] }
+"tests/queries/windows/test_window_filter_wrapping.py" = { requires = [], cells = [] }
+"tests/queries/windows/test_window_frames.py" = { requires = [], cells = [] }
+"tests/query_plans/test_aggregate_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_bound_literals_on_execution_paths.py" = { requires = [], cells = [] }
+"tests/query_plans/test_bounded_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_call_signature_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_compiled_statement.py" = { requires = [], cells = [] }
+"tests/query_plans/test_cte_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_decode_plan_cache.py" = { requires = [], cells = [] }
+"tests/query_plans/test_equality_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_expression_plan_descriptions.py" = { requires = [], cells = [] }
+"tests/query_plans/test_filter_expression_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_in_list_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_parameter_slots.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plain_query_shape_key.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_cache_forms.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_cache_shapes.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_connection_features.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_hit_scoping.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_key_coverage.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_origins.py" = { requires = [], cells = [] }
+"tests/query_plans/test_plan_verification.py" = { requires = [], cells = [] }
+"tests/query_plans/test_query_plans_time_zones.py" = { requires = [], cells = ["tzlocal"] }
+"tests/query_plans/test_query_shape_cache.py" = { requires = [], cells = [] }
+"tests/query_plans/test_query_shape_cache_manager_scope.py" = { requires = [], cells = [] }
+"tests/query_plans/test_row_scope_provider.py" = { requires = [], cells = [] }
+"tests/query_plans/test_set_operation_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_subquery_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_values_query_plans.py" = { requires = [], cells = [] }
+"tests/query_plans/test_write_query_plans.py" = { requires = [], cells = [] }
+"tests/relations/test_lazy_relation_descriptors.py" = { requires = [], cells = [] }
+"tests/relations/test_lazy_relation_loading.py" = { requires = [], cells = [] }
+"tests/relations/test_m2m_add_visible_scope.py" = { requires = [], cells = [] }
+"tests/relations/test_m2m_nested_path_scope.py" = { requires = [], cells = [] }
+"tests/relations/test_manager_join_scope.py" = { requires = [], cells = [] }
+"tests/relations/test_prefetch_objects_of_several_models.py" = { requires = [], cells = [] }
+"tests/relations/test_prefetch_publication.py" = { requires = [], cells = [] }
+"tests/relations/test_prefetch_slices.py" = { requires = [], cells = [] }
+"tests/relations/test_prefetching.py" = { requires = [], cells = [] }
+"tests/relations/test_related_managers.py" = { requires = [], cells = [] }
+"tests/relations/test_relation_edge_cases.py" = { requires = [], cells = [] }
+"tests/relations/test_relation_rows_lifetime.py" = { requires = [], cells = [] }
+"tests/relations/test_relations.py" = { requires = [], cells = [] }
+"tests/relations/test_relations_with_unique.py" = { requires = [], cells = [] }
+"tests/relations/test_reverse_add_visible_scope.py" = { requires = [], cells = [] }
+"tests/relations/test_select_related_ambient_scoping.py" = { requires = [], cells = [] }
+"tests/relations/test_select_related_extra_conditions.py" = { requires = [], cells = [] }
+"tests/relations/test_select_related_source_field_casing.py" = { requires = [], cells = [] }
+"tests/schema/test_foreign_key_indexes.py" = { requires = [], cells = [] }
+"tests/schema/test_generate_schema.py" = { requires = [], cells = [] }
+"tests/schema/test_generate_schemas_matches_migrate.py" = { requires = [], cells = [] }
+"tests/schema/test_models_round_trip.py" = { requires = [], cells = [] }
+"tests/schema/test_postgres_comment_escaping.py" = { requires = [], cells = [] }
+"tests/schema/test_schema_qualified_bulk_loads.py" = { requires = [], cells = [] }
+"tests/sql_builder/test_hashing.py" = { requires = [], cells = [] }
+"tests/sql_builder/test_querybuilder_copy_isolation.py" = { requires = [], cells = [] }
+"tests/sql_builder/test_replace_table.py" = { requires = [], cells = [] }
+"tests/stubs/test_pyright_reads_stubs.py" = { requires = ["pyright", "pyright-cli"], cells = ["mypy", "pyright", "pyright-cli"] }
+"tests/stubs/test_stub_determinism.py" = { requires = ["pyright"], cells = ["mypy", "pyright"] }
+"tests/stubs/test_stub_imports.py" = { requires = ["pyright"], cells = ["mypy", "pyright"] }
+"tests/stubs/test_stub_text.py" = { requires = ["pyright"], cells = ["mypy", "pyright"] }
+"tests/stubs/test_stubs_command.py" = { requires = ["pyright"], cells = ["mypy", "pyright"] }
+"tests/tenancy/test_tenancy.py" = { requires = [], cells = [] }
+"tests/tenancy/test_tenant_scope_values.py" = { requires = [], cells = ["pydantic"] }
+"tests/transactions/test_atomic_retries.py" = { requires = [], cells = [] }
+"tests/transactions/test_autonomous_transaction.py" = { requires = [], cells = [] }
+"tests/transactions/test_concurrency.py" = { requires = [], cells = [] }
+"tests/transactions/test_copy_in_transaction.py" = { requires = [], cells = [] }
+"tests/transactions/test_get_or_create_isolation.py" = { requires = [], cells = [] }
+"tests/transactions/test_lazy_savepoints.py" = { requires = [], cells = [] }
+"tests/transactions/test_rollback_isolation.py" = { requires = [], cells = [] }
+"tests/transactions/test_rollback_restored_instances.py" = { requires = [], cells = [] }
+"tests/transactions/test_select_for_share.py" = { requires = [], cells = [] }
+"tests/transactions/test_transaction_client_lifetime.py" = { requires = [], cells = [] }
+"tests/transactions/test_transaction_connection.py" = { requires = [], cells = [] }
+"tests/transactions/test_transaction_outcomes.py" = { requires = [], cells = [] }
+"tests/transactions/test_transaction_retry_errors.py" = { requires = [], cells = ["asyncpg"] }
+"tests/transactions/test_transactions.py" = { requires = [], cells = ["asyncpg"] }
+"tests/transactions/test_transactions_failure_paths.py" = { requires = [], cells = [] }
+"tests/transactions/test_transactions_isolation.py" = { requires = [], cells = [] }
+"tests/transactions/test_transactions_read_only.py" = { requires = [], cells = [] }
+"tests/transactions/test_transactions_task_safety.py" = { requires = [], cells = [] }
+"tests/utils/test_run_async.py" = { requires = [], cells = [] }
+"tests/value_conversion/test_converters.py" = { requires = [], cells = [] }
+"tests/value_conversion/test_value_conversion_call_points.py" = { requires = [], cells = [] }
+"tests/writes/rules/test_automatic_values.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_captured_write.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_derived_values.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_reported_fields.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_sensitive_values.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_tenant_write_rules.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_written_fields.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/rules/test_written_targets.py" = { requires = ["encryption"], cells = ["encryption"] }
+"tests/writes/test_bulk.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_conflict_where.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_ignore_conflicts.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_large_lists.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_normalized_conflicts.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_on_conflict_constraint.py" = { requires = [], cells = [] }
+"tests/writes/test_bulk_sql_params_inline.py" = { requires = [], cells = [] }
+"tests/writes/test_db_default_insert.py" = { requires = [], cells = [] }
+"tests/writes/test_db_default_insert_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }
+"tests/writes/test_db_defaults_without_returning.py" = { requires = [], cells = [] }
+"tests/writes/test_default.py" = { requires = [], cells = [] }
+"tests/writes/test_field_names_outside_python_syntax.py" = { requires = [], cells = [] }
+"tests/writes/test_insert_from.py" = { requires = [], cells = [] }
+"tests/writes/test_insert_from_union.py" = { requires = [], cells = [] }
+"tests/writes/test_merge.py" = { requires = [], cells = [] }
+"tests/writes/test_returned_key_reading.py" = { requires = [], cells = [] }
+"tests/writes/test_returning_old_values.py" = { requires = [], cells = [] }
+"tests/writes/test_save_changed_only.py" = { requires = [], cells = [] }
+"tests/writes/test_save_edge_cases.py" = { requires = [], cells = [] }
+"tests/writes/test_truncate.py" = { requires = [], cells = [] }
+"tests/writes/test_truncate_schema_and_unmanaged.py" = { requires = [], cells = [] }
+"tests/writes/test_update.py" = { requires = [], cells = [] }
+"tests/writes/test_write_returning.py" = { requires = [], cells = [] }

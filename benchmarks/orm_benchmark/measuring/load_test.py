@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from orm_benchmark.constants import LOAD_OPERATION_CYCLE, LOAD_WARM_UP_ROUNDS
+from orm_benchmark.definitions.measurement import Measurement
 
 
 class LoadTest:
@@ -13,8 +16,8 @@ class LoadTest:
 
     @staticmethod
     async def run(
-        name: str, operation: Callable[[int], Awaitable[object]], concurrency: int, total: int
-    ) -> dict[str, float]:
+        name: str, operation: Callable[[int], Coroutine[Any, Any, object]], concurrency: int, total: int
+    ) -> dict[str, Measurement]:
         """Runs a load test after an untimed warm-up: the state of an application running for a
         while, not of one just started.
 
@@ -25,34 +28,45 @@ class LoadTest:
             total: How many operations the timed round runs.
 
         Returns:
-            The wall-clock time, the throughput and the average latency under the load.
+            Wall-clock duration, throughput and actual per-operation latency samples.
+            Latency includes the operation's own pool wait, not time before a worker
+            claims it. Task groups drain all workers before failure or cancellation
+            reaches the caller, so database cleanup cannot race a surviving worker.
         """
-        lock = asyncio.Lock()
+        counter = itertools.count()
+        latencies = [0.0] * total
 
-        async def worker(counter: dict[str, int], operations: int) -> None:
+        async def worker() -> None:
             while True:
-                async with lock:
-                    if counter["done"] >= operations:
-                        return
-                    index = counter["done"]
-                    counter["done"] += 1
+                index = next(counter)
+                if index >= total:
+                    return
+                start = time.perf_counter()
                 await operation(index)
+                latencies[index] = (time.perf_counter() - start) * 1000
 
-        # Every pool connection runs every operation of the load before the timed round: each
-        # operation of the cycle runs on every worker at once, so each takes a connection of its
-        # own. Opening a connection and preparing a statement on it are one-time costs of an
-        # application's start, not the ORM's per-operation overhead.
+        # Exercise every operation concurrently before timing. Pool scheduling decides which
+        # connections serve these workers; this is not a per-connection preparation guarantee.
         for __ in range(LOAD_WARM_UP_ROUNDS):
             for offset in range(LOAD_OPERATION_CYCLE):
-                await asyncio.gather(
-                    *[operation(offset + LOAD_OPERATION_CYCLE * number) for number in range(concurrency)]
-                )
-        counter = {"done": 0}
+                async with asyncio.TaskGroup() as workers:
+                    for number in range(concurrency):
+                        workers.create_task(operation(offset + LOAD_OPERATION_CYCLE * number))
         start = time.perf_counter()
-        await asyncio.gather(*[worker(counter, total) for __ in range(concurrency)])
+        async with asyncio.TaskGroup() as workers:
+            for _ in range(concurrency):
+                workers.create_task(worker())
         elapsed_seconds = time.perf_counter() - start
+        warmup = LOAD_WARM_UP_ROUNDS * LOAD_OPERATION_CYCLE * concurrency
+        conditions = {"concurrency": concurrency, "operations": total, "operation_cycle": LOAD_OPERATION_CYCLE}
         return {
-            f"{name}_total_ms": elapsed_seconds * 1000,
-            f"{name}_throughput_ops_per_sec": total / elapsed_seconds,
-            f"{name}_avg_latency_ms": elapsed_seconds * 1000 / total * concurrency,
+            f"{name}_total_ms": Measurement(
+                (elapsed_seconds * 1000,), warmup_operations=warmup, conditions=conditions
+            ),
+            f"{name}_throughput_ops_per_sec": Measurement(
+                (total / elapsed_seconds,), unit="ops/s", warmup_operations=warmup, conditions=conditions
+            ),
+            f"{name}_avg_latency_ms": Measurement(
+                tuple(latencies), statistic="mean", warmup_operations=warmup, conditions=conditions
+            ),
         }

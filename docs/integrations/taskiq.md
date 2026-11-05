@@ -33,7 +33,8 @@ class HareTaskiq:
         broker: AsyncBroker,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        atomic_tasks: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_tasks: bool | Iterable[str] = False,
         tenant_label: str | None = "tenant",
         transaction_retries: int = 0,
     ) -> None: ...
@@ -43,7 +44,7 @@ class HareTaskiq:
 
 - opens the `HareContext` of `config` (as for `Hare.init(config=...)`) when a worker starts
   (`WORKER_STARTUP`) and closes its connections when it stops (`WORKER_SHUTDOWN`) — the context is the
-  global fallback, seen by every task the worker runs;
+  explicit context activated by middleware for each task the worker runs;
 - adds `HareTaskiqMiddleware` to the broker (`hare_taskiq.middleware`) — create the `HareTaskiq` in the
   module both the application and the worker import the broker from: the sending side needs the
   middleware too, to write the tenant into the tasks it sends.
@@ -64,10 +65,16 @@ The application sending tasks keeps its own `HareContext` (`Hare.init()`, a web 
   for an abstract model, raises `UnSupportedError` when the task is sent — the task never runs without
   the scope of its sender. A label set by hand (`task.kicker().with_labels(tenant=...)`) is kept. The
   worker runs the task inside the scope the label names. `tenant_label=None` leaves tenants alone.
-- **Transaction** — with `atomic_tasks=True` the task runs in a transaction on the default connection
-  (connection aliases — one on each), committed when the task returns and rolled back when it raises. A
+- **Transaction** — `atomic_tasks=True` selects one connection automatically: the only configured
+  connection, then the common connection of all registered models, then the alias `default`.
+  An ambiguous configuration raises `QueryError`; an explicit list of aliases opens one transaction
+  per named connection. It commits when the task returns and rolls back when it raises. A
   failing commit fails the task. Callbacks of `Transactions.on_commit()` run after the commit —
-  `TaskiqDelivery.kiq_on_commit()` from a task wakes the relay then.
+  `TaskiqDelivery.kiq_on_commit()` from a task wakes the relay then. If opening a later connection
+  fails, already opened transactions roll back. Completion drains every acquired transaction,
+  including when cancelled, before restoring task scopes. Connections commit in reverse acquisition
+  order; a later failure cannot undo an earlier successful commit. Multiple completion failures
+  are reported together with the original task error.
 - **Retry after a conflict** — a task whose transaction hits `TransactionRetryError` (a serialization
   failure, a deadlock — in the task or at the commit) is rolled back and sent again under its own id, up
   to `transaction_retries` times; the label `hare_transaction_retries` counts the retries. The failed
@@ -75,9 +82,18 @@ The application sending tasks keeps its own `HareContext` (`Hare.init()`, a web 
   failure. With taskiq's own `SimpleRetryMiddleware`, leave `TransactionRetryError` out of its
   exceptions, or a conflict is retried twice.
 
-Everything the middleware set up is undone when the task ends — the tags, the tenant scope, the running
-task. A synchronous task runs in a thread, where hare's asynchronous API isn't available.
+Hare's `post_execute` hook completes transactions and restores the tags, tenant and running-task
+scope. This includes a task error reported through taskiq's `on_error` hook. The hooks depend on
+taskiq's receiver reaching them: an exception in another middleware, dependency cleanup or an
+earlier broker acknowledgement can interrupt that sequence. Hare cannot finish a skipped hook.
+Keep taskiq's default `when_saved` acknowledgement mode for atomic tasks: `when_received` and
+`when_executed` acknowledge before Hare commits, so a later transaction failure cannot undo that
+acknowledgement. Database commit and broker acknowledgement are separate operations.
+A synchronous task runs in a thread, where hare's asynchronous API isn't available.
 
+`atomic_tasks` accepts an iterable of connection aliases, including a one-shot iterator. The iteration
+order is captured at construction; later changes to the source collection have no effect. A single string
+is not a collection of aliases. Transactions commit in reverse order, as described above.
 A connection alias of `atomic_tasks` the configuration lacks is refused when the worker starts.
 
 ## <a id="kiq-on-commit"></a>Sending tasks after commit
@@ -102,7 +118,7 @@ async with tasks.get_relay(poll_interval_seconds=1.0):
     async with Transactions.atomic():
         loan = await Loan.objects.create(book=book, reader=reader)
         await tasks.kiq_on_commit(send_due_date_reminder, loan.id)
-    # send_due_date_reminder is sent here, right after the commit.
+    # The event is committed; the relay is woken to send the task.
 ```
 
 `TaskiqDelivery(broker, *, model, topic="taskiq", using=None, wakeup=None)` is the outbox delivery sending
@@ -117,13 +133,16 @@ tenant, not in the relay's. It returns the event.
 The relay of `get_relay(**relay_options)` sends the tasks — the events of the delivery's `topic` only, so
 the table can hold other topics too — a relay of the other events of the table takes
 `exclude_topics=[delivery.topic]`. The delivery's wakeup — an `InProcessWakeup` of its own by default —
-starts the relay right after the commit, so run the relay in the process sending the tasks; give a
+wakes the running relay after the commit, so run the relay in the process sending the tasks; give a
 broker's wakeup (`RedisWakeup`, ...) to send from another one at once. A task the broker didn't take (it
 was down) is retried by the relay like any outbox event.
 
-Delivery is at least once: a task can arrive twice — make tasks safe to repeat. `using` names the
-connection the tasks are written on — the model's by default. An empty `topic` raises
-`ConfigurationError`.
+Delivery is at least once: a task can arrive twice. Include a stable business idempotency key in its
+arguments or labels and use it to handle duplicates; `event.id` is not automatically passed to Taskiq.
+`using` names the connection the tasks are written on — the model's by default. `get_relay()` uses the same
+connection
+unless its `using` option explicitly selects another one. An empty `topic` raises
+`ValidationError` when enqueuing a task.
 
 ## <a id="testing"></a>Testing
 
@@ -135,6 +154,11 @@ broker = InMemoryBroker(await_inplace=True)
 broker.add_middlewares(HareTaskiqMiddleware(atomic_tasks=True))
 ```
 
-`HareTaskiq` started in a test under hare's pytest plugin's `hare_app_db` takes the test's context instead
+`HareTaskiq(..., hare_context=hare_app_db)` explicitly borrows the test's context instead
 of opening its configuration's databases — the tasks' writes are rolled back with the test's; see
 [Application tests](../testing/setup.md#application-tests).
+
+An explicitly supplied `hare_context` is borrowed: the integration neither initializes nor closes it.
+The caller controls its lifetime. Without it, the application creates and closes a separate context.
+Application startup does not set a process-global fallback. Pass a test fixture explicitly as
+`hare_context=hare_app_db` or `hare_context=hare_app_transactional_db`.

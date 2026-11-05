@@ -32,7 +32,7 @@ async def _create_table_with_rows(conn, editor, table: str, row_count: int) -> S
         options={"table": table},
     )
     state = State()
-    await apply_operations("models", state, create_op, schema_editor=editor)
+    state = await apply_operations("models", state, create_op, schema_editor=editor)
     for row_id in range(1, row_count + 1):
         await conn.execute_script(f"INSERT INTO {q(table)} ({q('id')}, {q('name')}) VALUES ({row_id}, 'n{row_id}')")
     return state

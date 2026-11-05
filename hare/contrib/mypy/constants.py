@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+from inspect import _ParameterKind as ParameterType
+
 from mypy.errorcodes import ErrorCode
+from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, ARG_STAR, ARG_STAR2, ArgKind as ArgumentType
 
 from hare.contrib.mypy.enums import AnnotationTypeRule
 
@@ -40,6 +44,7 @@ NAME_METHOD_NAMES = frozenset({"order_by", "only", "defer", "select_related", "b
 #: Where the plugin keeps the annotations of a queryset whose class doesn't pass the annotations type
 #: parameter on - a key no attribute can be named.
 HIDDEN_ANNOTATIONS_ATTRIBUTE = "hare annotations"
+HIDDEN_SELECTION_ATTRIBUTE = "hare values selection"
 
 #: The type of an annotation by the class of its expression.
 ANNOTATION_TYPE_RULES = {
@@ -80,3 +85,13 @@ NOT_DIRECT_FIELD_MESSAGE = (
 )
 UNKNOWN_WRITE_NAME_MESSAGE = "{model} has no field {name!r} to set"
 MANY_ROWS_RELATION_WRITE_MESSAGE = "{model}.{name} is a relation holding many rows - it can't be set"
+REFUSED_UPDATE_NAME_MESSAGE = "{model}.{name} can't be assigned by update()"
+
+#: mypy's argument type of each type of parameter, required and with a default.
+ARGUMENT_TYPES: dict[ParameterType, tuple[ArgumentType, ArgumentType]] = {
+    inspect.Parameter.POSITIONAL_ONLY: (ARG_POS, ARG_OPT),
+    inspect.Parameter.POSITIONAL_OR_KEYWORD: (ARG_POS, ARG_OPT),
+    inspect.Parameter.KEYWORD_ONLY: (ARG_NAMED, ARG_NAMED_OPT),
+    inspect.Parameter.VAR_POSITIONAL: (ARG_STAR, ARG_STAR),
+    inspect.Parameter.VAR_KEYWORD: (ARG_STAR2, ARG_STAR2),
+}

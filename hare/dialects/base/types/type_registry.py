@@ -5,19 +5,17 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.core.registries import Registries
+from hare.core.caching.cache_bucket import CacheBucket
+from hare.core.extensions.snapshot_mapping import SnapshotMapping
 from hare.dialects.base.types.constants import NATIVE_KEY_VALUE_TYPES
 
 if TYPE_CHECKING:
+    from hare.dialects.base.types.type_mapping import DbConverter, PythonConverter
     from hare.fields.field import Field
     from hare.fields.generated_field import GeneratedField
     from hare.models import Model
     from hare.sql.terms.term import Term
 
-    #: ``(field, value, instance) -> value``; the field parameter is typed by each converter.
-    DbConverter = Callable[..., Any]
-    #: ``(field, value) -> value``; the field parameter is typed by each converter.
-    PythonConverter = Callable[..., Any]
 from hare.dialects.base.types.type_mapping import TypeMapping
 
 
@@ -27,45 +25,35 @@ class TypeRegistry:
 
     #: What each registry found for a field class through the class's bases, kept in a bucket of
     #: the registry: its mappings, nearest first, and its ``to_db``, ``to_lookup`` and ``to_python``.
-    found_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False)
     #: The mappings each registry gives a field class its column type from, nearest first.
-    found_column_type_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
-    found_db_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
-    found_lookup_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
-    found_python_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_column_type_mappings: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_db_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_lookup_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_python_converters: ClassVar[Cache[Any]] = Cache(holds_sql=False)
     #: The native key type each registry found for a field class and its value type.
-    found_native_key_types: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_native_key_types: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     def __init__(self) -> None:
         from hare.fields.generated_field import GeneratedField
 
-        self.generated_field_class = GeneratedField
-        #: The buckets of the caches this registry reads (``Cache.get_owner_bucket()``).
+        #: The buckets of the caches this registry reads (``Cache.get_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
-        self.mappings: dict[type, TypeMapping] = {}
+        self.mappings: SnapshotMapping[type, TypeMapping] = SnapshotMapping()
         #: The registries of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
         self.mirrors: list[TypeRegistry] = []
-        self.mappings_by_field_class: dict[type, tuple[TypeMapping, ...]] = (
-            TypeRegistry.found_mappings.get_owner_bucket(self)
-        )
-        self.column_type_mappings_by_field_class: dict[type, tuple[TypeMapping, ...]] = (
-            TypeRegistry.found_column_type_mappings.get_owner_bucket(self)
-        )
-        self.db_converters: dict[type, DbConverter | None] = TypeRegistry.found_db_converters.get_owner_bucket(self)
-        self.lookup_converters: dict[type, DbConverter | None] = TypeRegistry.found_lookup_converters.get_owner_bucket(
+        self.mappings_by_field_class: CacheBucket[tuple[TypeMapping, ...]] = TypeRegistry.found_mappings.get_bucket(
             self
         )
-        self.python_converters: dict[type, PythonConverter | None] = (
-            TypeRegistry.found_python_converters.get_owner_bucket(self)
+        self.column_type_mappings_by_field_class: CacheBucket[tuple[TypeMapping, ...]] = (
+            TypeRegistry.found_column_type_mappings.get_bucket(self)
         )
-        self.native_key_types: dict[tuple[type, Any], type | None] = (
-            TypeRegistry.found_native_key_types.get_owner_bucket(self)
+        self.db_converters: CacheBucket[DbConverter | None] = TypeRegistry.found_db_converters.get_bucket(self)
+        self.lookup_converters: CacheBucket[DbConverter | None] = TypeRegistry.found_lookup_converters.get_bucket(self)
+        self.python_converters: CacheBucket[PythonConverter | None] = TypeRegistry.found_python_converters.get_bucket(
+            self
         )
-        #: Whether a dialect reads its fields through this registry - until then nothing has
-        #: cached what it maps, so a mapping registered while it is built drops no cache.
-        self.in_use = False
-        #: Whether a mapping writes the rows of an INSERT as a SELECT (``inserted_by_select``).
-        self.has_inserted_by_select = False
+        self.native_key_types: CacheBucket[type | None] = TypeRegistry.found_native_key_types.get_bucket(self)
         #: The Python types bound as text - a datetime as the ISO text of its UTC instant, a date
         #: and a time as their ISO text, a Decimal in fixed-point notation.
         self.bound_as_text: frozenset[type] = frozenset()
@@ -88,19 +76,14 @@ class TypeRegistry:
             field_class: The field class.
             mapping: Its mapping.
         """
-        self.mappings[field_class] = mapping
-        if mapping.inserted_by_select is not False:
-            self.has_inserted_by_select = True
-        TypeRegistry.found_mappings.forget_owner(self)
-        TypeRegistry.found_column_type_mappings.forget_owner(self)
-        TypeRegistry.found_db_converters.forget_owner(self)
-        TypeRegistry.found_lookup_converters.forget_owner(self)
-        TypeRegistry.found_python_converters.forget_owner(self)
-        TypeRegistry.found_native_key_types.forget_owner(self)
-        for mirror in self.mirrors:
-            mirror.register(field_class, mapping)
-        if self.in_use:
-            Registries.changed()
+        self.mappings.register(field_class, mapping, tuple(mirror.mappings for mirror in self.mirrors))
+        if not self.mappings.sealed:
+            Cache.clear_holder(self)
+
+    @property
+    def has_inserted_by_select(self) -> bool:
+        """Whether this execution's mappings require SELECT-based row insertion."""
+        return any(mapping.inserted_by_select is not False for mapping in self.mappings.values())
 
     def get_mappings(self, field_class: type) -> tuple[TypeMapping, ...]:
         """The mappings registered for ``field_class`` and its bases, nearest first.
@@ -221,7 +204,9 @@ class TypeRegistry:
         Returns:
             The output field of a generated field, else the field itself.
         """
-        if field.generated and isinstance(field, self.generated_field_class):
+        from hare.fields.generated_field import GeneratedField
+
+        if field.generated and isinstance(field, GeneratedField):
             return field.output_field
         return field
 
@@ -265,14 +250,6 @@ class TypeRegistry:
             converter = self.db_converters[field_class] = self.find_converter(field_class, "to_db")
             return converter
 
-    def is_refusing_db_converter(self, field_class: type) -> bool:
-        """Whether the ``to_db`` the dialect registers for ``field_class`` only refuses values the field's
-        ``native_write_check`` leaves to it (``TypeMapping.to_db_refuses_only``)."""
-        for mapping in self.get_mappings(field_class):
-            if mapping.to_db is not None:
-                return mapping.to_db_refuses_only
-        return False
-
     def get_native_key_type(self, field: Field[Any]) -> type | None:
         """The type of values unchanged by both writing and reading the field. A value of exactly that
         type is its own stored and decoded key: the field writes it unchanged (possibly with native
@@ -297,8 +274,8 @@ class TypeRegistry:
             field.field_type
             if field.field_type in NATIVE_KEY_VALUE_TYPES
             and field.keeps_native_db_values
-            and (field_class.to_db_value is Field.to_db_value or field.get_native_write_check() is not None)
-            and (self.get_db_converter(field_class) is None or self.is_refusing_db_converter(field_class))
+            and field_class.to_db_value is Field.to_db_value
+            and self.get_db_converter(field_class) is None
             and self.get_python_converter(field_class) is None
             else None
         )
@@ -338,14 +315,6 @@ class TypeRegistry:
             if converter is not None:
                 return converter
         return None
-
-    def reads_naive_datetime_as_utc(self, field_class: type) -> bool:
-        """Whether the ``to_python`` the dialect registers for ``field_class`` is the field's own
-        reading, with a naive datetime from the driver taken as a UTC instant."""
-        return next(
-            (mapping.naive_datetime_is_utc for mapping in self.get_mappings(field_class) if mapping.to_python),
-            False,
-        )
 
     def get_db_value(self, field: Field[Any], value: Any, instance: type[Model] | Model | None) -> Any:
         """The value bound for a column of ``field``.
@@ -395,17 +364,10 @@ class TypeRegistry:
         # Local import: the fields import the dialects' types.
         from hare.fields.data.json.json_field import JSONField
 
-        value_field = (
-            self.get_value_field(field) if field.generated and isinstance(field, self.generated_field_class) else field
-        )
+        value_field = self.get_value_field(field)
         if isinstance(value_field, JSONField):
             return self.get_db_value(field, value, instance)
-        field_class = type(field)
-        try:
-            converter = self.lookup_converters[field_class]
-        except KeyError:
-            converter = self.get_lookup_converter(field_class)
-        return field.to_lookup_value(value, instance) if converter is None else converter(field, value, instance)
+        return self.get_lookup_value(field, value, instance)
 
     def get_lookup_values(
         self, field: Field[Any], values: list[Any], instance: type[Model] | Model | None
@@ -468,6 +430,13 @@ class TypeRegistry:
         if converter is None:
             return field.from_db_value
         return functools.partial(converter, field)
+
+    def get_field_encoder(self, field: Field[Any]) -> Callable[[Any], Any]:
+        """Encode a literal as a field's stored value, without a model instance.
+
+        The regular write conversion retains dialect converters and field overrides.
+        """
+        return functools.partial(self.get_db_value, field, instance=None)
 
     def get_generated_db_value(self, field: GeneratedField, value: Any, instance: type[Model] | Model | None) -> Any:
         """Converts a value of a generated column as a value of its output field."""

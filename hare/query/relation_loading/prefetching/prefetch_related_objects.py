@@ -35,6 +35,9 @@ async def prefetch_related_objects(
             ``to_attribute`` of a ``Prefetch`` given with it.
     """
     from hare.query.relation_loading.prefetching.prefetch import Prefetch
+    from hare.query.relation_loading.prefetching.prefetch_plan import PrefetchPlan
+    from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
+    from hare.query.relation_loading.prefetching.prefetch_result import PrefetchResult
     from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 
     instances_by_model: dict[type[Model], list[Model]] = {}
@@ -69,6 +72,9 @@ async def prefetch_related_objects(
                     else model,
                 )
                 for name in sorted(prefetch_map.keys() | prefetch_queries.keys())
+                # Dependent to_attribute paths belong to their explicit source
+                # prefetch, whose relation already contributes to this signature.
+                if name in meta.fetch_fields
             ),
         )
         if signature in compatible_instances:
@@ -76,5 +82,19 @@ async def prefetch_related_objects(
         else:
             compatible_instances[signature] = (model, instances_by_model[model])
     # Forward relations to the same model share a query; reverse relations keep their source model.
+    plans = []
     for model, model_instances in compatible_instances.values():
-        await Prefetcher(model, connection).load(model_instances, *lookups, db_explicitly_chosen=using is not None)
+        prefetch_map = {}
+        prefetch_queries = {}
+        Prefetch.add_lookups(model, prefetch_map, prefetch_queries, lookups)
+        plans.append(
+            PrefetchPlan.prepare(
+                Prefetcher(model, connection),
+                model_instances,
+                PrefetchRequest(prefetch_map, prefetch_queries, db_explicitly_chosen=using is not None),
+            )
+        )
+    result = PrefetchResult()
+    for plan in plans:
+        result.extend(await plan.fetch())
+    result.attach()

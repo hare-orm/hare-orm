@@ -6,8 +6,6 @@ import pytest
 from hare.dialects.sqlite.functions.datetime.temporal_arithmetic_functions import TemporalArithmeticFunctions
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]

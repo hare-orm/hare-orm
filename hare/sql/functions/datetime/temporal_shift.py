@@ -12,6 +12,9 @@ class TemporalShift(Function):
     dialect's interval column is added as the database adds it.
     """
 
+    structure_attributes = ("is_date", "is_interval", "is_naive", "is_subtraction")
+    has_repeatable_value = True
+
     requires_dialect_renderer = True
 
     def __init__(

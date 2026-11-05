@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.exceptions import ConfigurationError, IntegrityError
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
@@ -46,13 +46,14 @@ class AlterColumnNotNullSafe(ModelBoundOperation):
                 f"Field {self.field_name} is not present on model {app_label}.{self.model_name}"
             )
 
-        new_field = deepcopy(old_field)
+        new_field = old_field.snapshot()
         new_field.null = False
-        model_state.fields[self.field_name] = new_field
+        model_state.set_field(self.field_name, new_field)
 
-        state.mark_models_changed(self.get_changed_model_keys(app_label, old_field))
+        state.mark_models_changed(self.get_changed_model_keys(app_label, old_field, state))
 
-    async def _lock_table_against_concurrent_writes(self, model: type[Model], state_editor: BaseSchemaEditor) -> None:
+    @staticmethod
+    async def _lock_table_against_concurrent_writes(model: type[Model], state_editor: BaseSchemaEditor) -> None:
         """Locks the table against writes for the rest of the transaction (``get_lock_table_sql()``, a
         no-op where the dialect has none) - only when a transaction is actually open.
         """
@@ -89,19 +90,24 @@ class AlterColumnNotNullSafe(ModelBoundOperation):
             return
         old_model = self._model(old_state, app_label)
         new_model = self._model(new_state, app_label)
+        alteration = state_editor.get_alter_field_plan(old_model, new_model, self.field_name)
         if (
             not state_editor.client.is_transaction_client
             and state_editor.client.features.supports_not_valid_constraints
         ):
-            await self._set_not_null_through_check_constraint(old_model, new_model, state_editor)
+            await self._set_not_null_through_check_constraint(old_model, new_model, state_editor, alteration)
             return
         if not state_editor.collect_sql:
             await self._lock_table_against_concurrent_writes(old_model, state_editor)
             await self._raise_if_nulls_remain(old_model, state_editor)
-        await state_editor.alter_field(old_model, new_model, self.field_name)
+        await alteration.execute(state_editor)
 
     async def _set_not_null_through_check_constraint(
-        self, old_model: type[Model], new_model: type[Model], state_editor: BaseSchemaEditor
+        self,
+        old_model: type[Model],
+        new_model: type[Model],
+        state_editor: BaseSchemaEditor,
+        alteration: SchemaChangePlan,
     ) -> None:
         """Sets NOT NULL outside a transaction without scanning the table while it is locked: a
         ``CHECK (column IS NOT NULL)`` is added unvalidated, validated with a lock that doesn't block
@@ -116,15 +122,19 @@ class AlterColumnNotNullSafe(ModelBoundOperation):
             check=Q(**{f"{self.field_name}__isnull": False}),
             name=GeneratedNames.get_index_name(GeneratedNamePrefix.NOT_NULL_CHECK, old_model, [db_field]),
         )
-        await state_editor.constraint_statements.add_check_constraint_not_valid(old_model, check)
+        addition = state_editor.constraint_statements.get_unvalidated_check_add_plan(old_model, check)
+        validation = state_editor.constraint_statements.get_constraint_validation_plan(old_model, check.name)
+        failure_removal = state_editor.get_remove_constraint_plan(old_model, check)
+        removal = state_editor.get_remove_constraint_plan(new_model, check)
+        await addition.execute(state_editor)
         try:
-            await state_editor.constraint_statements.validate_constraint(old_model, check.name)
+            await validation.execute(state_editor)
         except IntegrityError:
-            await state_editor.remove_constraint(old_model, check)
+            await failure_removal.execute(state_editor)
             await self._raise_if_nulls_remain(old_model, state_editor)
             raise
-        await state_editor.alter_field(old_model, new_model, self.field_name)
-        await state_editor.remove_constraint(new_model, check)
+        await alteration.execute(state_editor)
+        await removal.execute(state_editor)
 
     async def database_backward(
         self,

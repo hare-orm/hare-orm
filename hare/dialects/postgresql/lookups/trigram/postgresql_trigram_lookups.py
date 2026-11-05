@@ -4,9 +4,11 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+from hare.core.extensions.declarations import LookupRegistration
 from hare.dialects.postgresql.enums import PostgresqlLookup, PostgresqlTrigramMatching
 from hare.dialects.postgresql.lookups.constants import TRIGRAM_EXTENSION
 from hare.fields.field import Field
+from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.query.filters.lookups.dialect_implemented_operators import DialectImplementedOperators
 from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.query.filters.lookups.lookups import Lookups
@@ -54,16 +56,21 @@ class PostgresqlTrigramLookups:
         return FieldLookup(operator, ValueEncoders.encode_string, text_function=text_function)
 
     @classmethod
-    def register(cls) -> None:
-        """Adds the trigram lookups to every value: they match its text, whatever its type."""
-        for lookup, operator in (
-            (PostgresqlLookup.TRIGRAM_SIMILAR, cls.similar),
-            (PostgresqlLookup.TRIGRAM_WORD_SIMILAR, cls.word_similar),
-            (PostgresqlLookup.TRIGRAM_STRICT_WORD_SIMILAR, cls.strict_word_similar),
-        ):
-            Field.register_lookup(
+    def get_registrations(cls) -> tuple[LookupRegistration, ...]:
+        """Declare the text operators without changing the field registry."""
+        return tuple(
+            LookupRegistration(
+                Field,
                 lookup,
-                partial(cls.get_lookup, operator),
-                value_type=str,
-                required_extension=TRIGRAM_EXTENSION,
+                RegisteredLookup(
+                    partial(cls.get_lookup, operator),
+                    value_type=str,
+                    required_extension=TRIGRAM_EXTENSION,
+                ),
             )
+            for lookup, operator in (
+                (PostgresqlLookup.TRIGRAM_SIMILAR, cls.similar),
+                (PostgresqlLookup.TRIGRAM_WORD_SIMILAR, cls.word_similar),
+                (PostgresqlLookup.TRIGRAM_STRICT_WORD_SIMILAR, cls.strict_word_similar),
+            )
+        )

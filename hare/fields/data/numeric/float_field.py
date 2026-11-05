@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import FLOAT32_MAX_DIGITS, FLOAT32_MIN_DIGITS
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.float_precision_limit import FloatPrecisionLimit
 
@@ -23,6 +22,7 @@ class FloatField(Field[TFloat]):
     ``Decimal`` a float holds; a bool or a text is refused."""
 
     field_type = float
+    accepted_value_types = (int, Decimal)
 
     SQL_TYPE = "DOUBLE PRECISION"
     #: The bits of a value's mantissa - an integer past two to their power isn't held exactly.
@@ -76,7 +76,6 @@ class FloatField(Field[TFloat]):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
-    native_write_check = NativeWriteCheck.NOT_NAN
     #: A float the driver returns is the value - to_python() only checks what is assigned.
     keeps_native_db_values = True
 

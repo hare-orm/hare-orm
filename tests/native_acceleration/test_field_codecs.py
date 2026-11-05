@@ -1,17 +1,13 @@
-"""Each ``rust.native.rows.FieldCodec`` gives what the field's own Python method gives - the same value
-of the same type, or the same error with the same message - on a grid of values: naive and aware
-datetimes around DST changes, the ends of the date range, infinities, NaN, null bytes, long integers,
-decimal rounding, enum non-members, None and values of the wrong type. Every grid runs on SQLite and
-rust_pg - asyncpg's reads and a declared JSON type's in modules of their environments - with and without
-``use_timezone`` and in zones with and without DST.
+"""Field conversion grids through bound readers and writers.
+
+Model hydration and annotation columns retain values, errors and warnings of the field
+contract across driver representations, time zones, NULLs and invalid input.
 """
 
 from __future__ import annotations
 
 import datetime
 import math
-import random
-import struct
 import uuid
 import warnings
 from decimal import Decimal
@@ -42,12 +38,10 @@ from hare.fields.validators import MaxValueValidator, MinLengthValidator, MinVal
 from hare.models.write.instance_values import InstanceValues
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
-from hare.query.rows.enums import ReadCodecType
-from hare.query.rows.native.enums import FieldBucket
-from hare.query.rows.native.field_codecs import FieldCodecs
+from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
+from hare.query.rows.row_column import RowColumn
 from hare.time import Timezone
-from rust.native import rows as native_rows
 from tests.shared_models.testmodels import (
     BinaryFields,
     BooleanFields,
@@ -67,8 +61,6 @@ from tests.shared_models.testmodels import (
 from tests.shared_models.testmodels_postgres import DecimalFields
 from tests.utils.timezone_context import override_timezone
 
-REQUIRES = ("native",)
-
 pytestmark = pytest.mark.database_independent
 
 SQLITE_TYPES = SqliteTypes.build()
@@ -84,7 +76,7 @@ ZONES = [(False, "UTC"), (True, "UTC"), (True, "Europe/Berlin"), (True, "America
 SQLITE_ADAPTERS = {
     datetime.datetime: SqliteParameterAdapters.adapt_datetime,
     datetime.date: datetime.date.isoformat,
-    datetime.time: SqliteParameterAdapters.adapt_time,
+    datetime.time: datetime.time.isoformat,
     Decimal: SqliteParameterAdapters.adapt_decimal,
 }
 UTC = datetime.UTC
@@ -177,20 +169,21 @@ def assert_reads_match(
     """Reads every raw value with the codec and with the field, on every connection and zone."""
     for connection_alias, types, native_types in connections:
         layout = get_layout(model, types, native_types)
-        column, field, bucket, dialect_reader = layout.entry_by_field_name[field_name]
-        reader = layout.reader_by_field_name[field_name] or (lambda value: value)
+        column, field, bound_reader = layout.entry_by_field_name[field_name]
+        reader = (lambda value: value) if bound_reader is None else types.get_python_reader(field)
+        columns = ModelColumns.build(model, layout, [column], [0])
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
-                codec_type, options = FieldCodecs.get_read_specification(
-                    (field_name, field, bucket, dialect_reader), types, Timezone.get_aware_zone_name()
-                )
-                codec = native_rows.FieldCodec(field_name, codec_type, options)
                 for raw in raw_values:
                     label = (
                         f"{model.__name__}.{field_name} read {raw!r} on {connection_alias}, {zone} "
                         f"use_timezone={use_timezone}"
                     )
-                    assert_same_outcome(run(codec.read, raw), run(reader, raw), label)
+                    assert_same_outcome(
+                        run(lambda value: getattr(columns.hydrate((value,), None), field_name), raw),
+                        run(reader, raw),
+                        label,
+                    )
 
 
 def bind(value: Any, types: Any, decode_through: Any = None) -> Any:
@@ -212,8 +205,7 @@ def assert_writes_match(
     for connection_alias, types, _native_types in connections:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
-                codec_type, options = FieldCodecs.get_write_specification(field, types, Timezone.get_aware_zone_name())
-                codec = native_rows.FieldCodec(field.model_field_name, ReadCodecType.AS_IS, {}, codec_type, options)
+                writer = types.get_db_writer(field)
                 for value in values:
                     label = (
                         f"{field.model_field_name} write {value!r} on {connection_alias}, {zone} "
@@ -221,9 +213,7 @@ def assert_writes_match(
                     )
                     assert_same_outcome(
                         run(
-                            lambda value: bind(
-                                codec.write(value, instance), types, field if compare_decoded else None
-                            ),
+                            lambda value: bind(writer(value, instance), types, field if compare_decoded else None),
                             value,
                         ),
                         run(
@@ -294,7 +284,7 @@ DATETIME_WRITE_VALUES = [
 ]
 
 
-def test_datetime_validator_runs_on_the_codec_path():
+def test_bound_datetime_writer_runs_validators():
     field = make_field(fields.DatetimeField(validators=[MinValueValidator(0)]), "moment")
     assert_writes_match(field, [datetime.datetime(2024, 1, 15, tzinfo=UTC)])
 
@@ -307,8 +297,7 @@ def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_i
     for _connection_name, types, _native_types in CONNECTIONS:
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
-                codec_type, options = FieldCodecs.get_write_specification(field, types, Timezone.get_aware_zone_name())
-                codec = native_rows.FieldCodec(field_name, ReadCodecType.AS_IS, {}, codec_type, options)
+                writer = types.get_db_writer(field)
                 instance = DatetimeFields(datetime=datetime.datetime(2024, 1, 1, tzinfo=UTC))
                 RowWriteRules.get(DatetimeFields, WriteType.INSERT, None, "create()").stamp(
                     (instance,), InstanceValues()
@@ -316,7 +305,7 @@ def test_a_stamp_writes_like_the_field_and_the_write_leaves_the_instance_as_it_i
                 stamp = getattr(instance, field_name)
                 assert stamp is not None
                 assert_same_outcome(
-                    run(lambda value: bind(codec.write(value, instance), types), stamp),
+                    run(lambda value: bind(writer(value, instance), types), stamp),
                     run(lambda value: bind(types.get_db_value(field, value, instance), types), stamp),
                     f"{field_name} stamp, {zone} use_timezone={use_timezone}",
                 )
@@ -412,11 +401,8 @@ UUID_VALUES = [
 
 
 def test_uuid_read_builds_a_plain_uuid():
-    codec_type, options = FieldCodecs.get_read_specification(
-        ("data", UUIDFields._meta.fields_map["data"], FieldBucket.COMPLEX, None), SQLITE_TYPES, None
-    )
-    codec = native_rows.FieldCodec("data", codec_type, options)
-    value = codec.read(str(SAMPLE_UUID))
+    column = RowColumn(0, SQLITE_TYPES.get_python_reader(UUIDFields._meta.fields_map["data"]))
+    value = column.read((str(SAMPLE_UUID),))
     assert type(value) is uuid.UUID
     assert value == SAMPLE_UUID
     assert value.is_safe is uuid.SafeUUID.unknown
@@ -486,7 +472,6 @@ def test_decimal_bounds_are_checked_in_validator_order():
         ),
         "amount",
     )
-    assert "checks" in FieldCodecs.get_write_specification(field, SQLITE_TYPES, None)[1]
     assert_writes_match(field, [Decimal("-20"), Decimal("0.1"), Decimal("0.5"), Decimal("60"), Decimal("12345.67")])
 
 
@@ -495,7 +480,6 @@ def test_decimal_with_a_custom_message_is_validated_by_the_field():
         fields.DecimalField(max_digits=6, decimal_places=2, validators=[MinValueValidator(0, message="positive")]),
         "amount",
     )
-    assert "validate" in FieldCodecs.get_write_specification(field, SQLITE_TYPES, None)[1]
     assert_writes_match(field, [Decimal("-1"), Decimal("1")])
 
 
@@ -562,18 +546,6 @@ JSON_WRITE_VALUES = [
     True,
     b"bytes",
 ]
-
-
-def test_json_writes_every_float_as_orjson():
-    field = JSONFields._meta.fields_map["data"]
-    codec_type, options = FieldCodecs.get_write_specification(field, SQLITE_TYPES, None)
-    codec = native_rows.FieldCodec("data", ReadCodecType.AS_IS, {}, codec_type, options)
-    generator = random.Random(20261003)
-    floats = [struct.unpack("<d", generator.getrandbits(64).to_bytes(8, "little"))[0] for _ in range(20_000)]
-    floats += [generator.uniform(-1e6, 1e6) for _ in range(5_000)]
-    floats += [10.0**exponent for exponent in range(-320, 309)] + [-(10.0**exponent) for exponent in range(-20, 20)]
-    floats = [number for number in floats if math.isfinite(number)]
-    assert codec.write(floats, None) == field.to_db_value(floats, None)
 
 
 SCALAR_CASES = [
@@ -644,71 +616,26 @@ def test_scalar_checks_run_in_validator_order():
     field = make_field(
         fields.CharField(max_length=5, validators=[MinLengthValidator(2), MinLengthValidator(4)]), "label"
     )
-    assert "checks" in FieldCodecs.get_write_specification(field, SQLITE_TYPES, None)[1]
     assert_writes_match(field, ["a", "abc", "abcd", "abcdef", "a\x00bcd"])
     number = make_field(fields.IntField(validators=[MaxValueValidator(10), MaxValueValidator(100)]), "count")
     assert_writes_match(number, [5, 50, 500, -(2**40)])
 
 
-def test_custom_validator_is_called_by_the_codec():
+def test_bound_writer_calls_custom_validator():
     number = make_field(fields.IntField(validators=[MultipleOfThree()]), "count")
-    assert "validate" in FieldCodecs.get_write_specification(number, SQLITE_TYPES, None)[1]
     assert_writes_match(number, [9, 10, None, "9"])
 
 
-def test_sensitive_fields_are_written_by_the_field():
-    for field in (
-        make_field(fields.CharField(max_length=3, sensitive=True), "secret"),
-        make_field(fields.JSONField(sensitive=True), "secret_json"),
-        make_field(fields.DecimalField(max_digits=4, decimal_places=1, sensitive=True), "secret_amount"),
+def test_sensitive_fields_preserve_validation_errors():
+    for field, values in (
+        (make_field(fields.CharField(max_length=3, sensitive=True), "secret"), ["abc", "abcd", 5]),
+        (make_field(fields.JSONField(sensitive=True), "secret_json"), [{"a": 1}, object()]),
+        (
+            make_field(fields.DecimalField(max_digits=4, decimal_places=1, sensitive=True), "secret_amount"),
+            [Decimal("1.5"), "bad"],
+        ),
     ):
-        assert FieldCodecs.get_write_specification(field, SQLITE_TYPES, None)[0] == "call"
-
-
-#: (model, field name) -> the read codec, the write codec, and the read codec on a connection reading
-#: the column otherwise.
-BUILTIN_FIELD_CODECS: dict[tuple[Any, str], tuple[str, str, dict[str, str]]] = {
-    (DatetimeFields, "datetime"): ("datetime", "datetime", {}),
-    (DatetimeFields, "datetime_auto"): ("datetime", "datetime", {}),
-    (DateFields, "date"): ("date", "date", {"asyncpg": "as_is", "rust_pg": "as_is"}),
-    (TimeFields, "time"): ("time", "time", {}),
-    (TimeDeltaFields, "timedelta"): ("timedelta", "timedelta", {}),
-    (UUIDFields, "data"): ("uuid", "uuid", {}),
-    (EnumFields, "service"): ("enumeration", "enumeration", {}),
-    (EnumFields, "currency"): ("enumeration", "enumeration", {}),
-    # rust_pg returns the Decimal the column holds.
-    (DecimalFields, "decimal"): ("decimal", "decimal", {"rust_pg": "as_is"}),
-    (JSONFields, "data"): ("json", "json", {}),
-    (BooleanFields, "boolean"): ("boolean", "scalar", {}),
-    (BinaryFields, "binary"): ("binary", "scalar", {}),
-    (IntFields, "intnum"): ("as_is", "scalar", {}),
-    (CharFields, "char"): ("as_is", "scalar", {}),
-    (FloatFields, "floatnum"): ("as_is", "scalar", {}),
-}
-
-
-@pytest.mark.parametrize(("model", "field_name"), list(BUILTIN_FIELD_CODECS))
-def test_builtin_fields_read_and_write_through_their_codecs(model, field_name):
-    """A built-in field never goes to its Python method for every value."""
-    assert_builtin_codecs(model, field_name, BUILTIN_FIELD_CODECS[(model, field_name)], CONNECTIONS[:2])
-
-
-def assert_builtin_codecs(
-    model: Any, field_name: str, codecs: tuple[str, str, dict[str, str]], connections: list[tuple[str, Any, Any]]
-) -> None:
-    """Checks the codecs a field reads and writes with on each connection and zone."""
-    expected_read, expected_write, read_by_connection = codecs
-    for connection_alias, types, native_types in connections:
-        layout = get_layout(model, types, native_types)
-        _column, field, bucket, dialect_reader = layout.entry_by_field_name[field_name]
-        for use_timezone, zone in ZONES:
-            with override_timezone(use_timezone=use_timezone, timezone=zone):
-                zone_name = Timezone.get_aware_zone_name()
-                entry = (field_name, field, bucket, dialect_reader)
-                read_type = FieldCodecs.get_read_specification(entry, types, zone_name)[0]
-                assert read_type == read_by_connection.get(connection_alias, expected_read), (connection_alias, zone)
-                write_type = FieldCodecs.get_write_specification(field, types, zone_name)[0]
-                assert write_type == expected_write, (connection_alias, zone, use_timezone)
+        assert_writes_match(field, values)
 
 
 EXPRESSION_FIELDS = [
@@ -739,34 +666,30 @@ EXPRESSION_VALUES = [
 
 @pytest.mark.parametrize("field", EXPRESSION_FIELDS, ids=lambda field: field.model_field_name)
 def test_expression_column_reads_match(field):
-    """An annotation's column is read as its output field reads it, whatever type the driver
-    returns for the expression."""
-    for connection_alias, types, native_types in CONNECTIONS:
+    for connection_alias, types, _native_types in CONNECTIONS:
         reader = types.get_python_reader(field)
+        column = RowColumn("result", reader)
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
-                codec_type, options = FieldCodecs.get_expression_read_specification(
-                    field.model_field_name, field, types, Timezone.get_aware_zone_name()
-                )
-                codec = native_rows.FieldCodec(field.model_field_name, codec_type, options)
                 for raw in EXPRESSION_VALUES:
-                    label = (
-                        f"{field.model_field_name} expression {raw!r} on {connection_alias}, {zone} "
-                        f"use_timezone={use_timezone}"
+                    assert_same_outcome(
+                        run(lambda value: column.read({"result": value}), raw),
+                        run(types.get_python_value, field, raw),
+                        f"{field.model_field_name} expression on {connection_alias}, {zone}",
                     )
-                    assert_same_outcome(run(codec.read, raw), run(reader, raw), label)
 
 
 def assert_container_reads_match(field: Any, raw_values: list[Any]) -> None:
-    """Reads every raw value of a PostgreSQL container field with its codec and with the field."""
     for use_timezone, zone in ZONES:
         with override_timezone(use_timezone=use_timezone, timezone=zone):
-            spec = field.get_read_codec_specification(POSTGRESQL_TYPES, Timezone.get_aware_zone_name())
-            assert spec is not None, field
-            codec = native_rows.FieldCodec(field.model_field_name, *spec)
+            reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
+            column = RowColumn(0, reader)
             for raw in raw_values:
-                label = f"{field.model_field_name} read {raw!r} in {zone} use_timezone={use_timezone}"
-                assert_same_outcome(run(codec.read, raw), run(POSTGRESQL_TYPES.get_python_reader(field), raw), label)
+                assert_same_outcome(
+                    run(lambda value: column.read((value,)), raw),
+                    run(POSTGRESQL_TYPES.get_python_value, field, raw),
+                    f"{field.model_field_name} container in {zone}",
+                )
 
 
 class DriverRange:
@@ -867,11 +790,12 @@ def test_array_reads_match(field, raw_values):
 
 def test_an_array_subclass_reading_otherwise_is_read_by_the_field():
     class UpperTextArray(ArrayField):
-        def from_db_value(self, value: Any) -> Any:
-            return [element.upper() for element in super().from_db_value(value)]
+        def decode_value(self, value, types):
+            return [element.upper() for element in super().decode_value(value, types)]
 
     field = UpperTextArray(base_field=fields.TextField())
-    assert field.get_read_codec_specification(POSTGRESQL_TYPES, None) is None
+    reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
+    assert RowColumn(0, reader).read((["hello", "World"],)) == ["HELLO", "WORLD"]
 
 
 def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
@@ -879,4 +803,7 @@ def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
         def coerce_bound(self, value: Any) -> Any:
             return None if value is None else int(value) + 1
 
-    assert ShiftedIntRange().get_read_codec_specification(POSTGRESQL_TYPES, None) is None
+    field = ShiftedIntRange()
+    reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
+    value = RowColumn(0, reader).read((Range(1, 4),))
+    assert (value.lower, value.upper) == (2, 5)

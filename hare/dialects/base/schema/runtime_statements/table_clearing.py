@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 from hare.models import Model
+
+if TYPE_CHECKING:
+    from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
 class TableClearing(SchemaEditorPart):
@@ -14,6 +18,16 @@ class TableClearing(SchemaEditorPart):
     happens."""
 
     __slots__ = ()
+
+    @staticmethod
+    def get_table_target_sql(editor: BaseSchemaEditor, table_name: str, schema: str | None) -> str:
+        """Prepare an automatic physical table's clearing target before rendering the script."""
+        return editor.qualify_table_name(table_name, schema)
+
+    @classmethod
+    def get_model_target_sql(cls, editor: BaseSchemaEditor, model: type[Model]) -> str:
+        """Prepare a model target while its storage declaration is still available."""
+        return cls.get_table_target_sql(editor, model._meta.db_table, model._meta.schema)
 
     @classmethod
     async def clear_tables(cls, connection: DatabaseClient, quoted_tables: Sequence[str]) -> None:

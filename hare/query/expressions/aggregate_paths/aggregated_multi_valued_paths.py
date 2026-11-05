@@ -19,13 +19,11 @@ if TYPE_CHECKING:
 from hare.query.expressions.aggregate_paths.aggregate_crossing import AggregateCrossing
 
 
-class AggregatedMultiValuedPaths(dict[str, bool]):
+class AggregatedMultiValuedPaths:
     """Tracks the to-many relation JOINs of a query, to detect aggregates that another JOIN fans out.
 
-    As a dict it maps each to-many path (``products``, ``products__reviews``) crossed by an
-    aggregate to whether every aggregate crossing it used distinct=True.
-
     Attributes:
+        paths: Every to-many path crossed by an aggregate, including its filter.
         aggregate_crossings: One entry per resolved aggregate expression.
         row_paths: Paths joined outside any aggregate - by ``.filter()``/``.exclude()``
             conditions, non-aggregate annotations, ``values()`` fields and the ordering. A separate
@@ -46,7 +44,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
     """
 
     def __init__(self) -> None:
-        super().__init__()
+        self.paths: set[str] = set()
         self.aggregate_crossings: list[AggregateCrossing] = []
         self.row_paths: list[str] = []
         self.group_key_paths: set[str] = set()
@@ -118,8 +116,7 @@ class AggregatedMultiValuedPaths(dict[str, bool]):
             for path in (*crossing.argument_paths, *crossing.filter_paths):
                 self.record_path(path)
         self.aggregate_crossings.append(crossing)
-        for path in {*crossing.argument_paths, *crossing.filter_paths}:
-            self[path] = self.get(path, True) and distinct
+        self.paths.update(crossing.argument_paths, crossing.filter_paths)
 
     @contextmanager
     def aggregate_filter_scope(self) -> Generator[None]:

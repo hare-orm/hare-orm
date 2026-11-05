@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, ClassVar
 
 from hare.gis.constants import GEOGRAPHY_REQUIRED_FEATURE
 from hare.gis.enums import SpatialFunctionType
 from hare.gis.fields.geometry_field import GeometryField
+from hare.gis.geometries.geometry import Geometry
+from hare.gis.geometry_arguments import GeometryArguments
 from hare.gis.spatial_features import SpatialFeatures
 from hare.gis.terms.geometry_value import GeometryValue
 from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, Function as HareFunction
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.term import Term
@@ -21,6 +27,11 @@ class SpatialFunction(HareFunction):
     Each dialect writes the SQL; one without spatial functions raises ``UnSupportedError``.
     """
 
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),),
+        keywords=(("field", ArgumentRole.FIELD), ("expression", ArgumentRole.FIELD)),
+    )
+
     #: What the function computes.
     function_type: ClassVar[SpatialFunctionType]
     #: How many of the arguments are geometries.
@@ -32,14 +43,21 @@ class SpatialFunction(HareFunction):
 
     plan_parts: ClassVar[DeclaredPlanParts] = (
         ("keeps_plan", PlanPartType.KEEPS_PLAN_METHOD),
+        ("get_geometry_plan_key", PlanPartType.KEY_METHOD),
         *HareFunction.plan_parts,
     )
 
     def keeps_plan(self) -> bool:
-        """Whether the call keeps a plan - not with a geometry from Python, which decides the SQL
-        around its parameter (a transform to the column's SRID)."""
+        """Keep geometries with explicit reference-system metadata and expression arguments."""
         geometry_values = self.default_values[: self.geometry_argument_count - 1]
-        return all(isinstance(value, (Expression, Term)) for value in geometry_values)
+        return all(isinstance(value, (Expression, Term, Geometry)) for value in geometry_values)
+
+    def get_geometry_plan_key(self) -> tuple[Any, ...]:
+        """Include metadata controlling casts/transforms, independently of bound coordinates."""
+        return tuple(
+            (value.GEOMETRY_TYPE, value.srid, value.has_z) if isinstance(value, Geometry) else None
+            for value in self.default_values[: self.geometry_argument_count - 1]
+        )
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         SpatialFeatures.raise_if_unsupported(expression_context, type(self).__name__)
@@ -76,7 +94,17 @@ class SpatialFunction(HareFunction):
             zip(self.default_values, default_results, strict=True)
         ):
             if index < self.geometry_argument_count - 1 and not isinstance(default_value, (Expression, Term)):
-                default_terms.append(self.get_geometry_value(default_value, geometry_field))
+                geometry_term = self.get_geometry_value(default_value, geometry_field)
+                default_terms.append(geometry_term)
+                if expression_context.value_wrapper_references is not None:
+                    ExpressionArguments.record_literal(
+                        expression_context.value_wrapper_references,
+                        self,
+                        "default_values",
+                        geometry_term.args[0],
+                        partial(GeometryArguments.get_ewkt, field=geometry_field),
+                        index,
+                    )
             else:
                 default_terms.append(default_result.term)
         return default_terms
@@ -92,11 +120,7 @@ class SpatialFunction(HareFunction):
         Returns:
             The term.
         """
-        field = geometry_field if geometry_field is not None else GeometryField()
-        geometry = field.get_parsed_geometry(value)
-        target_srid = geometry_field.srid if geometry_field is not None else geometry.srid
-        geography = geometry_field.geography if geometry_field is not None else False
-        return GeometryValue(geometry, target_srid, geography)  # type: ignore[arg-type]
+        return GeometryArguments.get_value(value, geometry_field)
 
     def _get_output_field(self, function_arg: ExpressionResult, default_results: list[ExpressionResult]) -> Any:
         # A measure, a flag or a text has its own field; a geometry is read as the first argument's.

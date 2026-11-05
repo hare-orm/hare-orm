@@ -1,0 +1,272 @@
+# Shared versions, sources and environments for local runs and CI.
+
+[tools]
+poetry = "2.1.4"
+poetry_export = "1.9.0"
+uv = "0.12.7"
+
+[spatialite]
+version = "5.1.0"
+windows_archive_url = "https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_spatialite-5.1.0-win-amd64.7z"
+
+[versions]
+"python" = ["3.12", "3.13", "3.14"]
+"postgres" = ["14", "15", "16", "17", "18"]
+"pgbouncer" = ["1.22", "1.23", "1.24", "1.25", "1.26"]
+"clickhouse" = ["25.8", "25.10", "25.12", "26.3", "26.7", "26.8", "26.9"]
+"redis" = ["7.2", "8.10"]
+"rabbitmq" = ["4.0", "4.3"]
+"kafka" = ["3.9", "4.3"]
+
+[images.pgbouncer]
+"1.22" = "edoburu/pgbouncer:1.22.1-p0@sha256:7f39cf2f872c8d9a0bb0e6a5440c3bf5814036eccf284102870ab08e2603a2c7"
+"1.23" = "edoburu/pgbouncer:v1.23.1-p3@sha256:377dec3c0e4a66a1077ec043e16a26ed5702a6d954011a7983a1457c2e070b1d"
+"1.24" = "edoburu/pgbouncer:v1.24.1-p1@sha256:3db3d7223e93af52b4116f642951a1a5fa44702a88c2a59cf7562cac19320c9e"
+"1.25" = "edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340"
+"1.26" = "edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624"
+
+[images.kafka]
+"3.9" = "apache/kafka:3.9.2"
+"4.3" = "apache/kafka:4.3.1"
+
+[database_driver_extras]
+"sqlite" = []
+"postgresql" = []
+"postgresql+asyncpg" = ["asyncpg"]
+"clickhouse+clickhouse-connect" = ["clickhouse-connect", "clickhouse-keeper"]
+"clickhouse+clickhouse-driver" = ["clickhouse-driver", "clickhouse-keeper"]
+
+[databases_by_driver]
+"rust_pg" = "postgresql"
+"asyncpg" = "postgresql+asyncpg"
+"clickhouse-connect" = "clickhouse+clickhouse-connect"
+"clickhouse-driver" = "clickhouse+clickhouse-driver"
+
+[urls.postgres]
+"asyncpg" = "postgresql+asyncpg://postgres:postgres@127.0.0.1:{port}/test_{{}}"
+"rust_pg" = "postgresql://postgres:postgres@127.0.0.1:{port}/test_{{}}"
+
+[urls.clickhouse]
+"clickhouse-connect" = "clickhouse+clickhouse-connect://default:clickhouse@127.0.0.1:{port}/{database}"
+"clickhouse-driver" = "clickhouse+clickhouse-driver://default:clickhouse@127.0.0.1:{port}/{database}"
+
+[url_queries]
+"pgbouncer" = "?transaction_pooling=true&direct_host=127.0.0.1&direct_port={direct_port}"
+"clickhouse" = "?keeper_hosts={keeper_hosts}"
+"clickhouse_cluster" = "?cluster=hare_sharded"
+
+[paths]
+"clickhouse" = ["tests/dialects/clickhouse", "tests/contracts", "tests/fields/value_types/test_ordered_values.py", "tests/fields/value_types/test_ip_address_text_lookups.py", "tests/fields/value_types/test_ip_address_zones.py"]
+"clickhouse_cluster" = ["tests/dialects/clickhouse/cluster"]
+"sqlite_regexp" = ["tests/queries/filtering/test_posix_regex_filter.py", "tests/backends/test_sqlite_client.py"]
+
+[pytest]
+"options" = ["-q", "-p", "no:cacheprovider", "--tb=short", "--verify-plans"]
+
+[brokers.redis]
+"variable" = "HARE_TEST_REDIS_URL"
+"url" = "redis://127.0.0.1:{port}/0"
+"port_prefix" = 16
+
+[brokers.rabbitmq]
+"variable" = "HARE_TEST_RABBITMQ_URL"
+"url" = "amqp://guest:guest@127.0.0.1:{port}/"
+"port_prefix" = 15
+
+[brokers.kafka]
+"variable" = "HARE_TEST_KAFKA_BOOTSTRAP"
+"url" = "127.0.0.1:{port}"
+"port_prefix" = 19
+
+[sqlite_releases."3.35.5"]
+"windows_dll" = "2021/sqlite-dll-win64-x64-3350500.zip"
+"amalgamation" = "2021/sqlite-amalgamation-3350500.zip"
+
+[sqlite_releases."3.37.2"]
+"windows_dll" = "2022/sqlite-dll-win64-x64-3370200.zip"
+"amalgamation" = "2022/sqlite-amalgamation-3370200.zip"
+
+[sqlite_releases."3.38.0"]
+"windows_dll" = "2022/sqlite-dll-win64-x64-3380000.zip"
+"amalgamation" = "2022/sqlite-amalgamation-3380000.zip"
+
+[sqlite_releases."3.41.0"]
+"windows_dll" = "2023/sqlite-dll-win64-x64-3410000.zip"
+"amalgamation" = "2023/sqlite-amalgamation-3410000.zip"
+
+[sqlite_releases."3.53.4"]
+"windows_dll" = "2026/sqlite-dll-win-x64-3530400.zip"
+"amalgamation" = "2026/sqlite-amalgamation-3530400.zip"
+
+[[environments]]
+name = "core"
+databases = ["sqlite", "postgresql", "clickhouse+clickhouse-connect", "clickhouse+clickhouse-driver"]
+whole_suite = true
+on_newest_servers_only = true
+
+[[environments]]
+name = "pure"
+databases = ["sqlite"]
+native = false
+whole_suite = true
+on_newest_servers_only = true
+
+[[environments]]
+name = "asyncpg"
+extras = ["asyncpg"]
+
+[[environments]]
+name = "clickhouse-connect"
+extras = ["clickhouse-connect"]
+
+[[environments]]
+name = "clickhouse-driver"
+extras = ["clickhouse-driver"]
+
+[[environments]]
+name = "clickhouse-keeper"
+extras = ["clickhouse-keeper"]
+
+[[environments]]
+name = "encryption"
+extras = ["encryption"]
+
+[[environments]]
+name = "encryption-pydantic"
+extras = ["encryption", "pydantic"]
+
+[[environments]]
+name = "phone"
+extras = ["phone"]
+
+[[environments]]
+name = "sqlite-vec"
+extras = ["sqlite-vec"]
+
+[[environments]]
+name = "tzlocal"
+extras = ["tzlocal"]
+
+[[environments]]
+name = "yaml"
+extras = ["yaml"]
+
+[[environments]]
+name = "faker"
+extras = ["faker"]
+
+[[environments]]
+name = "pytz"
+groups = ["pytz"]
+
+[[environments]]
+name = "opentelemetry"
+extras = ["opentelemetry"]
+
+[[environments]]
+name = "pydantic"
+extras = ["pydantic"]
+
+[[environments]]
+name = "request-query-http"
+extras = ["request-query", "http"]
+
+[[environments]]
+name = "http"
+extras = ["http"]
+
+[[environments]]
+name = "litestar"
+extras = ["litestar"]
+
+[[environments]]
+name = "fastapi"
+extras = ["fastapi"]
+
+[[environments]]
+name = "fastapi-http"
+extras = ["fastapi", "http"]
+
+[[environments]]
+name = "robyn"
+extras = ["robyn"]
+
+[[environments]]
+name = "taskiq"
+extras = ["taskiq"]
+
+[[environments]]
+name = "redis"
+extras = ["redis"]
+database_independent = false
+
+[[environments]]
+name = "kafka"
+extras = ["kafka"]
+database_independent = false
+
+[[environments]]
+name = "rabbitmq"
+extras = ["rabbitmq"]
+database_independent = false
+
+[[environments]]
+name = "pytest-plugin"
+extras = ["pytest"]
+
+[[environments]]
+name = "mypy"
+extras = ["mypy"]
+
+[[environments]]
+name = "stubs"
+extras = ["pyright"]
+groups = ["pyright-cli"]
+
+[[environments]]
+name = "ipython"
+extras = ["ipython"]
+
+[[environments]]
+name = "all"
+databases = ["sqlite", "postgresql", "postgresql+asyncpg", "clickhouse+clickhouse-connect", "clickhouse+clickhouse-driver"]
+whole_suite = true
+database_independent = false
+all_extras = true
+
+[platforms]
+runners = ["ubuntu-24.04", "windows-2025", "macos-15"]
+
+[ci.build-native]
+matrix = { "include" = [ { "os" = "windows-2025", "make_target" = "build_native_windows", "extension_files" = "rust/native.cp3*-win_amd64.pyd" }, { "os" = "macos-15", "make_target" = "build_native_macos", "extension_files" = "rust/native.cpython-3*-darwin.so" } ] }
+
+[ci.test-sqlite]
+axes = { "python" = "versions.python" }
+
+[ci.test-database-independent]
+axes = { "os" = "platforms.runners", "python" = "versions.python" }
+
+[ci.test-postgres]
+axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
+
+[ci.test-lowest-dependencies]
+axes = { "python" = "versions.python" }
+
+[ci.test-brokers]
+axes = { "python" = "versions.python" }
+
+[ci.test-clickhouse]
+axes = { "clickhouse" = "versions.clickhouse" }
+newest_axes = { "python" = "versions.python" }
+matrix = { "include" = [ { "clickhouse" = "25.8", "python" = "3.12" }, { "clickhouse" = "25.8", "python" = "3.13" } ] }
+
+[ci.test-pgbouncer]
+axes = { "pgbouncer" = "versions.pgbouncer" }
+newest_axes = { "postgres" = "versions.postgres", "python" = "versions.python" }
+matrix = { "include" = [ { "pgbouncer" = "1.26", "postgres" = "14", "python" = "3.14" } ] }
+
+[ci.test-poetry-add]
+axes = { "os" = "platforms.runners", "python" = "versions.python" }
+
+[ci_gate]
+jobs = [ "catalog", "check", "build-native-linux", "build-native", "test-sqlite", "test-database-independent", "test-postgres", "test-lowest-dependencies", "test-brokers", "test-clickhouse", "test-pgbouncer", "test-poetry-add" ]

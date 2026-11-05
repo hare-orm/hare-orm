@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.ddl.schema_objects.trigger import Trigger
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.triggers.trigger_statements import TriggerStatements
 from hare.dialects.postgresql.constants import (
     POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE,
@@ -45,7 +46,7 @@ class PostgresqlTriggerStatements(TriggerStatements):
         statements = [
             function_template.format(
                 function_name=qualified_function,
-                body=trigger.body.sql,
+                body=self.editor.client.dialect.literals.get_string_literal_sql(f"BEGIN\n{trigger.body.sql}\nEND;\n"),
                 language=trigger.language or POSTGRESQL_DEFAULT_TRIGGER_LANGUAGE,
             )
         ]
@@ -88,10 +89,6 @@ class PostgresqlTriggerStatements(TriggerStatements):
             )
         return statements
 
-    async def add_trigger(self, model: type[Model], trigger: Trigger) -> None:
-        for statement in self.get_trigger_create_sqls(model, trigger):
-            await self.editor.run_sql(statement)
-
     async def remove_trigger(self, model: type[Model], trigger: Trigger) -> None:
         table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
         qualified_function = self.editor.qualify_table_name(trigger.function_name, model._meta.schema)
@@ -99,12 +96,6 @@ class PostgresqlTriggerStatements(TriggerStatements):
             self.editor.TRIGGER_DROP_TEMPLATE.format(trigger_name=self.editor.quote(trigger.name), table=table)
         )
         await self.editor.run_sql(self.editor.TRIGGER_FUNCTION_DROP_TEMPLATE.format(function_name=qualified_function))
-
-    async def alter_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
-        # PostgreSQL can't alter a trigger's timing, events or body - it is dropped and created
-        # again.
-        await self.remove_trigger(model, old_trigger)
-        await self.add_trigger(model, new_trigger)
 
     async def rename_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
         if old_trigger.name == new_trigger.name:
@@ -129,13 +120,12 @@ class PostgresqlTriggerStatements(TriggerStatements):
                 )
             )
             return
-        await self.remove_trigger(model, old_trigger)
-        await self.add_trigger(model, new_trigger)
+        await super().rename_trigger(model, old_trigger, new_trigger)
 
-    async def move_trigger_to_schema(
+    def get_trigger_schema_move_plan(
         self, model: type[Model], trigger: Trigger, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        """Moves the trigger's function - it lives in the table's schema."""
-        await self.editor.schemas.move_object_to_schema(
+    ) -> SchemaChangePlan:
+        """Prepares moving the trigger's function, which lives in the table's schema."""
+        return self.editor.schemas.get_object_schema_move_plan(
             "FUNCTION", f"{self.editor.qualify_table_name(trigger.function_name, old_schema)}()", new_schema
         )

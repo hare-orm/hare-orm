@@ -22,9 +22,6 @@ class ValidateConstraint(ModelBoundOperation):
         name: The constraint's name.
     """
 
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
-
     def __init__(self, model_name: str, name: str) -> None:
         self.model_name = model_name
         self.name = name
@@ -58,13 +55,6 @@ class ValidateConstraint(ModelBoundOperation):
     ) -> None:
         if not state_editor:
             return
-        await state_editor.constraint_statements.validate_constraint(self._model(new_state, app_label), self.name)
-
-    async def database_backward(
-        self,
-        app_label: str,
-        old_state: State,
-        new_state: State,
-        state_editor: BaseSchemaEditor | None = None,
-    ) -> None:
-        pass
+        await state_editor.constraint_statements.get_constraint_validation_plan(
+            self._model(new_state, app_label), self.name
+        ).execute(state_editor)

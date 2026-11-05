@@ -16,7 +16,7 @@ class RandomUUID(ConstantExpression):
     Example: ``Token.objects.filter(expired=True).update(key=RandomUUID())``
     """
 
-    #: Shared, long-lived instance - the statement plans hold output fields weakly.
+    #: Shared output descriptor reused by expression results.
     OUTPUT_FIELD: ClassVar[UUIDField[Any]] = UUIDField()
 
     populate_field_object = True

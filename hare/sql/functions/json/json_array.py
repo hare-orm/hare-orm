@@ -8,6 +8,9 @@ from hare.sql.terms.functions.function import Function
 class JsonArray(Function):
     """A JSON array of the arguments - each dialect writes its own function."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     requires_dialect_renderer = True
 
     def __init__(self, *arguments: Any, alias: str | None = None) -> None:

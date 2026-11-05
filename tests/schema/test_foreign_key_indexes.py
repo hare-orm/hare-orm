@@ -6,7 +6,8 @@ from collections.abc import AsyncGenerator
 import pytest
 import pytest_asyncio
 
-from tests.schema.test_generate_schema import _init_for_postgres, _init_for_sqlite, _reset_hare, _teardown_hare
+from hare.core.hare_context import HareContext
+from tests.schema.test_generate_schema import _init_for_postgres, _init_for_sqlite
 
 pytestmark = pytest.mark.database_independent
 
@@ -28,12 +29,9 @@ def get_plain_index_columns(sqls: list[str], table: str) -> list[tuple[str, ...]
 
 @pytest_asyncio.fixture(params=["sqlite", pytest.param("postgresql", marks=pytest.mark.requires("native"))])
 async def schema_sqls(request) -> AsyncGenerator[list[str]]:
-    await _reset_hare()
-    try:
+    async with HareContext():
         initialize = _init_for_sqlite if request.param == "sqlite" else _init_for_postgres
         yield await initialize(MODELS_MODULE)
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.asyncio
@@ -42,6 +40,7 @@ async def test_foreign_key_is_indexed_unless_disabled_or_covered(schema_sqls: li
         ("indexed_id",),
         ("unconstrained_id",),
         ("second_in_index_id",),
+        ("in_partial_index_id",),
         ("pair_left", "pair_right"),
         ("in_meta_index_id", "code"),
         ("code", "second_in_index_id"),

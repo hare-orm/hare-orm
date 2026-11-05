@@ -36,7 +36,7 @@ class NestedSavepointLock:
         Raises:
             TimeoutError: The turn didn't come within ``timeout_seconds``.
         """
-        span = self._open_span_if_topmost(parent_span)
+        span = self.open_without_waiting(parent_span)
         if span is not None:
             return span
         async with asyncio.timeout(timeout_seconds):
@@ -47,7 +47,7 @@ class NestedSavepointLock:
                     await waiter
                 finally:
                     self._waiters.remove(waiter)
-                span = self._open_span_if_topmost(parent_span)
+                span = self.open_without_waiting(parent_span)
         return span
 
     def open_without_waiting(self, span: SavepointSpan | None) -> SavepointSpan | None:
@@ -60,8 +60,7 @@ class NestedSavepointLock:
         Returns:
             The new span, or None when the query has to wait (``wait_for_query_span()``).
         """
-        # get_nearest_span_of_lock() and _get_open_ancestor() in one walk: a released span's parent is
-        # a span of the same lock.
+        # Find the nearest active ancestor belonging to this lock in one walk.
         while span is not None and (span.owner_lock is not self or span.released):
             span = span.parent
         open_spans = self._open_spans
@@ -111,23 +110,6 @@ class NestedSavepointLock:
             if not waiter.done():
                 waiter.set_result(None)
 
-    def _open_span_if_topmost(self, parent_span: SavepointSpan | None) -> SavepointSpan | None:
-        """Opens a new span under the nearest still-open ancestor of ``parent_span`` when that
-        ancestor is the topmost open span.
-
-        Args:
-            parent_span: a span of this lock, or None at the top level.
-
-        Returns:
-            The new span, or None when it is not this ancestor's turn yet.
-        """
-        ancestor = self._get_open_ancestor(parent_span)
-        if self._current_top() is not ancestor:
-            return None
-        span = SavepointSpan(self, ancestor)
-        self._open_spans.append(span)
-        return span
-
     def get_nearest_span_of_lock(self, span: SavepointSpan | None) -> SavepointSpan | None:
         """The nearest span this lock created, walking up from ``span``. A span of another connection's
         lock is no ancestor here - waiting on it would never end.
@@ -141,12 +123,3 @@ class NestedSavepointLock:
         while span is not None and span.owner_lock is not self:
             span = span.parent
         return span
-
-    @staticmethod
-    def _get_open_ancestor(span: SavepointSpan | None) -> SavepointSpan | None:
-        while span is not None and span.released:
-            span = span.parent
-        return span
-
-    def _current_top(self) -> SavepointSpan | None:
-        return self._open_spans[-1] if self._open_spans else None

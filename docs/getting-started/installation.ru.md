@@ -13,9 +13,10 @@ pip install hare-orm
 Дополнительные пакеты ставятся по необходимости:
 
 ```bash
-pip install hare-orm[asyncpg]        # драйвер PostgreSQL на Python вместо драйвера на Rust
+pip install hare-orm[asyncpg]        # PostgreSQL через asyncpg
 pip install hare-orm[clickhouse-connect]  # диалект ClickHouse по HTTP (clickhouse-connect)
 pip install hare-orm[clickhouse-driver]   # диалект ClickHouse по родному протоколу поверх TCP (clickhouse-driver)
+pip install hare-orm[clickhouse-keeper]   # блокировки миграций и очистка узлов Keeper (Kazoo)
 pip install hare-orm[sqlite-vec]     # поиск по векторам на SQLite (sqlite-vec)
 pip install hare-orm[ipython]        # `hare shell` с IPython
 pip install hare-orm[tzlocal]        # часовой пояс машины для функций даты и времени на PostgreSQL и ClickHouse при use_timezone=False
@@ -65,10 +66,14 @@ pip install hare-orm[pytest]         # плагин pytest для hare (pytest, 
 сервера](../dialects/dialects-and-features.ru.md#the-server-version).
 
 Нижние версии зависимостей, объявленные в `pyproject.toml`, тоже проверяются — на каждом Python.
+Это окружение выбирает нижние границы прямых зависимостей hare и extras. Тестовые инструменты берутся
+из экспорта lock-файла Poetry с сохранением маркеров Python и платформы; экспорт выполняется в отдельном
+окружении инструментов, чтобы его зависимости не попадали в проверяемое окружение. Эти прогоны также
+проверяют кэшированные планы запросов с `--verify-plans`.
 
 ## <a id="wheels"></a>Wheel-пакеты
 
-Драйвер PostgreSQL на Rust, чтение и запись строк на Rust и скомпилированные [функции
+Драйвер PostgreSQL на Rust, нативные операции с атрибутами и форматами значений и [скомпилированные функции
 SQLite](../dialects/sqlite/functions.ru.md#compiled-functions) (расширение `rust.native`) поставляются
 уже собранными — отдельный wheel на каждую версию Python (cp312, cp313 и cp314) для каждой платформы:
 

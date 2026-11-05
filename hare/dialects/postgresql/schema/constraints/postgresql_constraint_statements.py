@@ -11,6 +11,8 @@ from hare.ddl.enums import ExclusionConstraintUsing
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.schema.constraints.constraint_statements import ConstraintStatements
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.postgresql.schema.constants import BTREE_GIST_EXTENSION
 from hare.dialects.postgresql.types.postgresql_types import PostgresqlTypes
 from hare.fields.field import Field
@@ -35,9 +37,7 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             if isinstance(expression, RawSQLTerm):
                 expression_sql = expression.get_sql()
             elif isinstance(expression, str):
-                expression_sql = self.editor.quote(
-                    self.editor.constraint_names.get_fields_to_columns(model, [expression])[0]
-                )
+                expression_sql = self.editor.quote(model._meta.get_column_names([expression])[0])
             else:
                 expression_sql = f"({DeclaredExpressions.get_sql(expression, model, self.editor.client.dialect)})"
             expression_sqls.append(f"{expression_sql} WITH {operator}")
@@ -57,26 +57,30 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             where=clauses_sql,
         )
 
-    async def add_check_constraint_not_valid(self, model: type[Model], constraint: CheckConstraint) -> None:
+    def get_unvalidated_check_add_plan(self, model: type[Model], constraint: CheckConstraint) -> SchemaChangePlan:
         constraint_sql = self.editor.CHECK_CONSTRAINT_CREATE_TEMPLATE.format(
             name=self.editor.quote(constraint.name),
             check=ConstraintCondition.get_sql(constraint.check, model, self.editor.client),
         )
-        await self.editor.run_sql(
-            self.editor.ADD_CONSTRAINT_TEMPLATE.format(
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
-                constraint=f"{constraint_sql} NOT VALID",
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.ADD_CONSTRAINT_TEMPLATE.format(
+                        table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+                        constraint=f"{constraint_sql} NOT VALID",
+                    )
+                ),
             )
         )
 
-    async def add_unique_constraint_using_index(
+    def get_unique_constraint_using_index_plan(
         self, model: type[Model], constraint: UniqueConstraint, index_name: str
-    ) -> None:
+    ) -> SchemaChangePlan:
         # The index is renamed to the constraint's name and kept.
         deferrable_sql = ""
         if constraint.deferrable:
             deferrable_sql = " DEFERRABLE INITIALLY " + ("DEFERRED" if constraint.initially_deferred else "IMMEDIATE")
-        await self.editor.run_sql(
+        statement = SchemaStatement(
             self.editor.ADD_CONSTRAINT_TEMPLATE.format(
                 table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
                 constraint=(
@@ -86,9 +90,13 @@ class PostgresqlConstraintStatements(ConstraintStatements):
             )
         )
 
-    async def validate_constraint(self, model: type[Model], name: str) -> None:
+        return SchemaChangePlan((statement,))
+
+    def get_constraint_validation_plan(self, model: type[Model], name: str) -> SchemaChangePlan:
         table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
-        await self.editor.run_sql(f"ALTER TABLE {table} VALIDATE CONSTRAINT {self.editor.quote(name)}")
+        return SchemaChangePlan(
+            (SchemaStatement(f"ALTER TABLE {table} VALIDATE CONSTRAINT {self.editor.quote(name)}"),)
+        )
 
     @classmethod
     def get_nulls_distinct_sql(cls, nulls_distinct: bool) -> str:

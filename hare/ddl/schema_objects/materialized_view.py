@@ -16,9 +16,11 @@ class MaterializedView(View):
     Args:
         name: The view's name.
         query: The ``SELECT`` - as ``View.query``.
-        with_data: Fill the view when it is created; False leaves it unreadable until refreshed.
-        unique_columns: Columns of the view a unique index is built over - a concurrent refresh
-            needs one.
+        with_data: Fill the view when it is created. Without this, the view may be empty
+            or unreadable until refreshed, depending on the dialect. The schema objects
+            guide describes each supported database's behavior.
+        unique_columns: Columns of the view's unique index where the dialect supports
+            it. A concurrent refresh may require this index.
 
     Raises:
         ConfigurationError: See ``View``; ``unique_columns`` isn't a sequence of distinct non-empty

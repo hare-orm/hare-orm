@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.schema.columns.column_renames import ColumnRenames
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.fields.field import Field
 from hare.models import Model
 
@@ -20,12 +21,12 @@ class ClickhouseColumnRenames(ColumnRenames):
 
     editor: ClickhouseSchemaEditor
 
-    async def rename_model_columns(
+    def get_model_column_rename_plan(
         self,
         old_model: type[Model],
         new_model: type[Model],
         field_pairs: list[tuple[Field[Any], Field[Any]]],
-    ) -> bool:
+    ) -> SchemaChangePlan:
         renamed_columns = [
             (old_field.model_field_name, old_column)
             for old_field, new_field in field_pairs
@@ -40,6 +41,5 @@ class ClickhouseColumnRenames(ColumnRenames):
             or table_rebuild.is_read_by_schema_objects(old_model, field_name, column)
             for field_name, column in renamed_columns
         ):
-            await self.editor.table_rebuild.remake_table(old_model, new_model, altered_fields=field_pairs)
-            return True
-        return await super().rename_model_columns(old_model, new_model, field_pairs)
+            return table_rebuild.get_rebuild_plan(old_model, new_model, altered_fields=field_pairs)
+        return super().get_model_column_rename_plan(old_model, new_model, field_pairs)

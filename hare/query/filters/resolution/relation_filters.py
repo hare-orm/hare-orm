@@ -98,7 +98,7 @@ class RelationFilters:
                 # An aggregate that crossed this relation reads only one of the JOINs, while the
                 # WHERE spans both - its value would be wrong, so this raises.
                 aggregated_paths = expression_context.aggregated_multi_valued_paths
-                if aggregated_paths and full_path in aggregated_paths:
+                if aggregated_paths is not None and full_path in aggregated_paths.paths:
                     raise QueryError(
                         f"Combining an aggregate (Count/Sum/Avg/...) over {full_path!r} with two or "
                         "more separate .filter()/.exclude() calls on that same to-many relation produces an "
@@ -289,8 +289,10 @@ class RelationFilters:
             related_table = (
                 join_table
                 if join_table is not None
-                else RelationFilters.get_filter_join_table(
-                    model, backward_relation.model_field_name, table, Table(owner_meta.db_table)
+                else Table(owner_meta.db_table).as_(
+                    Identifiers.get_within_limit(
+                        f"{table.get_table_name()}__{backward_relation.model_field_name}__direct"
+                    )
                 )
             )
             left_columns = tuple(
@@ -314,7 +316,9 @@ class RelationFilters:
         if field_lookup.value_encoder is not None and not isinstance(value, Term):
             # A value that is a SQL term (OuterReference/Subquery/F()) is compared as it is.
             value = field_lookup.value_encoder(value, model, relation, expression_context.dialect)
-        operator = expression_context.dialect.filter_operators.get_operator(field_lookup)
+        operator = expression_context.dialect.filter_operators.get_operator(
+            field_lookup, expression_context.connection
+        )
         return operator(compared_term, value), join, operator, value
 
     @staticmethod
@@ -492,22 +496,3 @@ class RelationFilters:
                 # A to-many relation compares the related rows' primary key - an instance names its own.
                 filter_value = getattr(value, "pk", value)
         return compared_lookup_info, filter_value
-
-    @staticmethod
-    def get_filter_join_table(model: type[Model], key: str, table: Table, filter_table: Table) -> Table:
-        """Aliases the joined table of a backward FK/O2O lookup, so a self-referential relation
-        (or a chain whose base table is the related table) can tell the two occurrences apart.
-
-        Args:
-            model: The model the lookup key is resolved against.
-            key: The lookup key, e.g. ``team_members__isnull``.
-            table: The table `model` is currently read through.
-            filter_table: The unaliased related table registered for the lookup.
-
-        Returns:
-            The aliased table for a backward relation, `filter_table` unchanged otherwise.
-        """
-        relation_name = key.partition("__")[0]
-        if not isinstance(model._meta.fields_map.get(relation_name), BackwardForeignKeyRelation):
-            return filter_table
-        return filter_table.as_(Identifiers.get_within_limit(f"{table.get_table_name()}__{relation_name}__direct"))

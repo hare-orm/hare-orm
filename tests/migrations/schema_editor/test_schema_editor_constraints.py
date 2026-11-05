@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from hare import fields
@@ -14,7 +16,7 @@ from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from tests.utils.fake_client import FakeClient, MockIntrospectionClient
+from tests.utils.fake_client import FakeClient
 
 pytestmark = pytest.mark.database_independent
 
@@ -86,7 +88,7 @@ async def test_remove_constraint_drops_the_name_hare_gave_it(
     editor_cls: type[BaseSchemaEditor], dialect: str, expected_sql: str
 ) -> None:
     """remove_constraint drops the constraint under its generated name - the catalog is never read,
-    so a name the database holds otherwise changes nothing."""
+    so an attempted catalog query fails instead of supplying a guessed constraint name."""
 
     class Widget(Model):
         id = fields.IntField(primary_key=True)
@@ -96,7 +98,7 @@ async def test_remove_constraint_drops_the_name_hare_gave_it(
             table = "widget"
             app = "models"
 
-    client = MockIntrospectionClient(dialect, constraint_names=[{"conname": "legacy_auto_name"}])
+    client = FakeClient(dialect)
     editor = editor_cls(client)
 
     await editor.remove_constraint(Widget, UniqueConstraint(fields=("email",)))
@@ -267,7 +269,7 @@ async def test_remove_check_constraint_generates_sql() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
+async def test_sqlite_add_check_constraint_rebuilds_table(monkeypatch) -> None:
     """SQLite adds CHECK constraints by rebuilding the table."""
 
     class Product(Model):
@@ -281,32 +283,39 @@ async def test_sqlite_add_check_constraint_rebuilds_table() -> None:
 
     client = FakeClient("sqlite")
     editor = SqliteSchemaEditor(client)
+    statements = Mock()
+    for method in ("execute", "execute_script"):
+        observer = AsyncMock(wraps=getattr(client, method))
+        statements.attach_mock(observer, method)
+        monkeypatch.setattr(client, method, observer)
 
     constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_price")
     await editor.add_constraint(Product, constraint)
 
-    assert len(client.executed) == 8
-    assert client.executed[0] == (
-        'CREATE TABLE "new__product" ('
+    assert len(client.executed) == 6
+    assert " ".join(client.executed[0].split()) == (
+        'CREATE TABLE "new__product" ( '
         '"id" INTEGER CONSTRAINT "pk_product_id_e67c4fd63155" PRIMARY KEY AUTOINCREMENT NOT NULL, '
         '"price" REAL NOT NULL, '
-        'CONSTRAINT "ck_price" CHECK (price > 0))'
+        'CONSTRAINT "ck_price" CHECK (price > 0) );'
     )
-    assert client.executed[1] == (
-        'INSERT INTO "new__product" ("id", "price")\n'
-        '                SELECT "id", "price"\n'
-        '                FROM "product"'
+    assert " ".join(client.executed[1].split()) == (
+        'INSERT INTO "new__product" ("id", "price") SELECT "id", "price" FROM "product"'
     )
     # The AUTOINCREMENT counter goes on from the replaced table's.
     assert client.executed[2].startswith("UPDATE sqlite_sequence SET seq")
     assert client.executed[3].startswith("INSERT INTO sqlite_sequence")
     assert client.executed[4] == 'DROP TABLE "product"'
     # A view naming the table would fail the modern rename while the table is briefly missing.
-    assert client.executed[5:] == [
-        "PRAGMA legacy_alter_table = ON",
-        'ALTER TABLE "new__product" RENAME TO "product"',
-        "PRAGMA legacy_alter_table = OFF",
+    assert client.executed[5] == 'ALTER TABLE "new__product" RENAME TO "product"'
+    assert [(method, arguments[0]) for method, arguments, _ in statements.mock_calls] == [
+        *(("execute_script", sql) for sql in client.executed[:5]),
+        ("execute", "PRAGMA legacy_alter_table"),
+        ("execute", "PRAGMA legacy_alter_table = ON"),
+        ("execute_script", client.executed[5]),
+        ("execute", "PRAGMA legacy_alter_table = 0"),
     ]
+    assert client.legacy_alter_table == 0
 
 
 # ---------------------------------------------------------------------------

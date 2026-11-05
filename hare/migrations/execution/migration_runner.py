@@ -4,16 +4,18 @@ files and for migrations an application builds in memory or keeps in its databas
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from hare.core.config.migrations_config import MigrationsConfig
 from hare.core.connections.connections import Connections
+from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.migrations.exceptions import PartiallyAppliedMigrationError
+from hare.migrations.execution.prepared_operation_execution import PreparedOperationExecution
 from hare.migrations.loading.graph.migration_key import MigrationKey
 from hare.migrations.operations import RunPython, SeparateDatabaseAndState
-from hare.transactions.transactions import Transactions
+from hare.transactions.transaction_options import TransactionOptions
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -21,7 +23,7 @@ if TYPE_CHECKING:
     from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
     from hare.migrations.migration import Migration
     from hare.migrations.reports.operation_effect import OperationEffect
-    from hare.migrations.state.declarations import OperationUndo
+    from hare.migrations.state.prepared_operation_states import PreparedOperationStates
     from hare.migrations.state.state import State
 
 
@@ -34,7 +36,9 @@ class MigrationRunner:
     Constraint checks are deferred while it runs and checked before the commit.
 
     Args:
-        connection: The connection the migrations run on.
+        connection: The connection the migrations run on. Its handler is retained; for a standalone
+            client without a handler, the current handler is captured once. An active transaction
+            on this exact client is reused without substituting another client with the same alias.
         recorder: The journal of applied migrations - ``MigrationRecorder(connection)`` for the
             one ``hare migrate`` keeps, one on a table of its own for migrations an application
             keeps elsewhere; None records nothing.
@@ -54,9 +58,14 @@ class MigrationRunner:
         recorder: MigrationRecorder | None = None,
         lock_timeout: float | None = None,
     ) -> None:
-        self.connection = connection
-        self.recorder = recorder
         self.lock_timeout = MigrationsConfig(lock_timeout=lock_timeout).lock_timeout
+        self.connection = connection
+        self.connections = (
+            connection.connection_handler if connection.connection_handler is not None else Connections.current()
+        )
+        if connection.connection_handler is None:
+            connection.connection_handler = self.connections
+        self.recorder = recorder
 
     def get_schema_editor(self, *, atomic: bool = True, collect_sql: bool = False) -> BaseSchemaEditor:
         """A schema editor of the connection's dialect.
@@ -68,8 +77,14 @@ class MigrationRunner:
         Returns:
             The schema editor.
         """
-        editor_class = self.connection.dialect.schema_editor_class
-        return editor_class(self.connection, atomic=atomic, collect_sql=collect_sql)
+        connection = self.connection
+        active = self.connections.get_frame().get(connection.connection_alias)
+        # Reuse a transaction on this exact client, never another pool or schema
+        # merely sharing its alias. Explicit transaction clients nest themselves.
+        if isinstance(active, TransactionClient) and active.get_non_transactional_client() is connection:
+            connection = active
+        editor_class = connection.dialect.schema_editor_class
+        return editor_class(connection, atomic=atomic, collect_sql=collect_sql)
 
     async def ensure_journal(self) -> None:
         """Creates the recorder's table when it doesn't exist yet - nothing without a recorder."""
@@ -93,78 +108,52 @@ class MigrationRunner:
             yield schema_editor
             return
         async with self.connection.lock_timeout_session(self.lock_timeout) as session_client:
-            connection_token = Connections.current().set(session_client.connection_alias, session_client)
+            connection_token = self.connections.set(session_client.connection_alias, session_client)
             try:
                 schema_editor.client = session_client
                 yield schema_editor
             finally:
-                Connections.current().reset(connection_token)
+                connection_token.reset()
 
     async def apply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State:
-        """Applies a migration and records it - see ``_run()``.
-
-        Args:
-            migration: The migration.
-            state: The state before it - brought forward in place.
-            dry_run: Run the operations without touching the database or the journal.
-
-        Returns:
-            The state after it.
-        """
+        """Apply a migration, returning its new state and preserving the input on failure too."""
+        prepared = migration.prepare(state)
         async with self.migration_schema_editor(migration) as schema_editor:
-            return await self._run(migration, state, schema_editor, forwards=True, dry_run=dry_run)
+            return await self._run(migration, prepared, schema_editor, forwards=True, dry_run=dry_run)
 
-    async def unapply(
-        self,
-        migration: Migration,
-        state: State,
-        *,
-        dry_run: bool = False,
-        undos: Sequence[OperationUndo] | None = None,
-    ) -> State:
-        """Unapplies a migration and removes its record - see ``_run()``.
-
-        Args:
-            migration: The migration.
-            state: The state before the migration was applied - or, with ``undos``, the state after it,
-                taken back in place.
-            dry_run: Run the operations without touching the database or the journal.
-            undos: What takes the state back from each of the migration's operations
-                (``Migration.unapply_in_place()``).
-
-        Returns:
-            The state once it is unapplied.
-        """
+    async def unapply(self, migration: Migration, state_before: State, *, dry_run: bool = False) -> State:
+        """Reverse a migration from its explicit before-state, which is kept unchanged."""
+        migration.raise_if_irreversible()
+        prepared = migration.prepare(state_before)
         async with self.migration_schema_editor(migration) as schema_editor:
-            return await self._run(migration, state, schema_editor, forwards=False, dry_run=dry_run, undos=undos)
+            return await self._run(migration, prepared, schema_editor, forwards=False, dry_run=dry_run)
 
     async def _run(
         self,
         migration: Migration,
-        state: State,
+        prepared: PreparedOperationStates,
         schema_editor: BaseSchemaEditor,
         *,
         forwards: bool,
         dry_run: bool = False,
-        undos: Sequence[OperationUndo] | None = None,
     ) -> State:
         """Applies or unapplies a migration and records it.
 
         Args:
             migration: The migration.
-            state: The state before it - brought forward in place when applying.
+            prepared: Independent before/after snapshots for every operation.
             schema_editor: The schema editor it runs with.
             forwards: True to apply it, False to unapply it.
-            dry_run: Run the operations without touching the database or the journal.
-            undos: What takes the state after it back from each operation, when unapplying in place.
+            dry_run: Return the simulated state without executing migration operations or
+                changing the journal. Connection and transaction setup may still run.
 
         Returns:
             The state after it.
 
         Raises:
             IrreversibleMigrationError: An operation can't be unapplied.
-            PartiallyAppliedMigrationError: An operation of a non-atomic migration failed after
-                others had run; its record is left as it was.
+            PartiallyAppliedMigrationError: Execution failed after data or schema may have changed;
+                the migration's journal record is left as it was.
         """
         # Entered on schema_editor.client as it is before the transaction below opens it - a database
         # may ignore turning its foreign key checks off inside an open transaction.
@@ -174,11 +163,11 @@ class MigrationRunner:
                 # own cleanup runs on it - not on the finished transaction's client.
                 pre_transaction_client = schema_editor.client
                 try:
-                    async with Transactions.atomic(
-                        self.connection.connection_alias, lock_timeout=self.lock_timeout
+                    async with pre_transaction_client._in_transaction(
+                        TransactionOptions(lock_timeout=self.lock_timeout)
                     ) as transaction_client:
                         schema_editor.client = transaction_client
-                        state = await self._run_operations(migration, state, schema_editor, forwards, dry_run, undos)
+                        state = await self._run_operations(migration, prepared, schema_editor, forwards, dry_run)
                         if not dry_run:
                             await schema_editor.check_constraints()
                             # On the transaction the DDL ran on - a crash between the two can't
@@ -189,10 +178,10 @@ class MigrationRunner:
                 return state
             if forwards and not dry_run:
                 # Refused before any operation runs - none of them is undone by a transaction.
-                migration.raise_if_unsupported(state.clone(), schema_editor)
+                PreparedOperationExecution.check_support(migration, prepared, schema_editor)
             run_statement_count = schema_editor.run_statement_count
             try:
-                state = await self._run_operations(migration, state, schema_editor, forwards, dry_run, undos)
+                state = await self._run_operations(migration, prepared, schema_editor, forwards, dry_run)
             except Exception as error:
                 if schema_editor.run_statement_count == run_statement_count and not MigrationRunner.runs_python(
                     migration
@@ -209,31 +198,15 @@ class MigrationRunner:
     @staticmethod
     async def _run_operations(
         migration: Migration,
-        state: State,
+        prepared: PreparedOperationStates,
         schema_editor: BaseSchemaEditor,
         forwards: bool,
         dry_run: bool,
-        undos: Sequence[OperationUndo] | None = None,
     ) -> State:
-        """Runs a migration's operations one way.
-
-        Args:
-            migration: The migration.
-            state: The state before it.
-            schema_editor: The schema editor it runs with.
-            forwards: True to apply it, False to unapply it.
-            dry_run: Run the operations without touching the database.
-            undos: What takes the state after it back from each operation, when unapplying in place.
-
-        Returns:
-            The state after it - ``state`` itself when unapplying.
-        """
-        if forwards:
-            return await migration.apply(state, dry_run=dry_run, schema_editor=schema_editor)
-        if undos is not None:
-            return await migration.unapply_in_place(state, undos, dry_run=dry_run, schema_editor=schema_editor)
-        await migration.unapply(state, dry_run=dry_run, schema_editor=schema_editor)
-        return state
+        """Execute the prepared tree once, returning an independent result snapshot."""
+        if not dry_run:
+            await PreparedOperationExecution.run(migration, prepared, schema_editor, backward=not forwards)
+        return (prepared.after if forwards else prepared.before).clone()
 
     @staticmethod
     def runs_python(migration: Migration) -> bool:
@@ -320,9 +293,9 @@ class MigrationRunner:
         """
         schema_editor = self.get_schema_editor(atomic=migration.atomic, collect_sql=True)
         if backward:
-            await migration.unapply(state.clone(), schema_editor=schema_editor, collect_sql=True)
+            await migration.unapply(state, schema_editor=schema_editor, collect_sql=True)
         else:
-            await migration.apply(state.clone(), schema_editor=schema_editor, collect_sql=True)
+            await migration.apply(state, schema_editor=schema_editor, collect_sql=True)
         if schema_editor.atomic_migration and schema_editor.collected_sql:
             transactions = schema_editor.client.dialect.transactions
             return [
@@ -343,10 +316,8 @@ class MigrationRunner:
         Returns:
             One effect per operation, in order.
         """
-        dialect = self.connection.dialect
-        operation_state = state.clone()
-        effects = []
-        for operation in migration.operations:
-            effects.append(operation.get_effect(migration.app_label, operation_state, dialect))
-            operation.state_forward(migration.app_label, operation_state)
-        return effects
+        prepared = migration.prepare(state)
+        schema_editor = self.get_schema_editor(collect_sql=True)
+        return [
+            item.operation.get_effect(migration.app_label, item.before, schema_editor) for item in prepared.operations
+        ]

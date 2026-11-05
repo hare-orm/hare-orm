@@ -1621,13 +1621,8 @@ async def test_filter_composite_pk_parent_by_backward_o2o_isnull():
 
 @pytest.mark.sqlite_only
 @pytest.mark.asyncio
-async def test_f_expression_terminal_relation_to_composite_pk_target_raises():
-    """F("<relation>") (and any other resolve_nested_field caller - order_by, annotate) used to
-    build `related_table[""]` when the relation's *last* segment targets a composite-PK model -
-    a composite PK has no single column, so there's no well-defined scalar term to return here
-    (unlike a JOIN condition, every caller of resolve_nested_field - F() arithmetic, annotate/
-    aggregate, cursor pagination - consumes the result as ONE scalar Term). Raises a clear
-    ConfigurationError instead of building broken SQL."""
+async def test_arithmetic_on_a_composite_relation_refuses_a_scalar_operand():
+    """Selecting a composite relation expands its key, but scalar arithmetic cannot use that key."""
     from hare.contrib.test.isolated_contexts import hare_test_context
     from hare.query.expressions import F
 
@@ -1640,7 +1635,7 @@ async def test_f_expression_terminal_relation_to_composite_pk_target_raises():
         with pytest.raises(QueryError):
             await (
                 FkTargetNoConstraint.objects.filter(id=child.id)
-                .annotate(other_val=F("other"))
+                .annotate(other_val=F("other") + 1)
                 .values("id", "other_val")
             )
 

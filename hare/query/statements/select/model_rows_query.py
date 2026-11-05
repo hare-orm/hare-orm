@@ -17,7 +17,6 @@ from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
-from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
 from hare.query.queryset.specification_copying import SpecificationCopying
@@ -97,12 +96,6 @@ class ModelRowsQuery(SelectQuery[TModel]):
         *StatementPlanDescriptions.EXPRESSION_TERMS_SLOTS,
     )
 
-    #: Slots a copy made to run once (_get_execution_query()) gets its own shallow copy of.
-    mutable_clone_slots: ClassVar[dict[str, str]] = QuerySpecification.MUTABLE_SPECIFICATION_SLOTS | {
-        "_joined_tables": "[]",
-        "_joined_tables_set": "set()",
-    }
-
     def __init__(self, source_queryset: QuerySet[TModel, Any]) -> None:
         """
         Args:
@@ -133,7 +126,7 @@ class ModelRowsQuery(SelectQuery[TModel]):
     async def _execute(self) -> list[TModel]:
         InstanceHydration.check_no_annotation_field_collision(self)
         instance_list: list[TModel] = await InstanceHydration.get_model_rows_reader(self).fetch(  # type: ignore[assignment]
-            *self._get_parameterized_sql(), InstanceHydration.get_prefetch_request(self)
+            *self._get_parameterized_sql(), InstanceHydration.get_prefetch_request(self), retry_read=self.is_read_only
         )
         if self._single:
             if len(instance_list) == 1:
@@ -351,10 +344,6 @@ class ModelRowsQuery(SelectQuery[TModel]):
         """
         raise NotImplementedError
 
-    def _get_plan_key(self, description: PlanDescription) -> tuple[Any, ...]:
-        # Kept among the model's own plans.
-        return (self.model, *description.structure)
-
     def _prepare_call_signature_run(self) -> None:
         # The relations loaded by default (a lazy="select" relation is prefetched); the row layout
         # the build works out is the plan's, restored from it.
@@ -414,16 +403,16 @@ class ModelRowsQuery(SelectQuery[TModel]):
         decode_plan_key = (
             self.model,
             self.dialect,
-            # See plan_key's own comment above on why the connection alias itself (not
-            # just its dialect) must be part of this key too.
+            # Independent clients can share an alias and dialect but return different native types.
             self._connection.connection_alias if self._connection is not None else None,
+            self._connection.native_python_types if self._connection is not None else None,
             self._decode_plan_key,
             len(self._select_related_positions),
         )
-        decode_plan = StatementPlans.decode_plans.get(decode_plan_key, PLAN_CACHE_MISS)
+        decode_plan = StatementPlans.decode_plans.get_model_bucket(self.model).get(decode_plan_key, PLAN_CACHE_MISS)
         if decode_plan is PLAN_CACHE_MISS:
-            decode_plan = StatementPlans.decode_plans[decode_plan_key] = InstanceHydration.build_decode_plan(
-                self, cast("tuple[Term, ...]", self._base_selects)
+            decode_plan = StatementPlans.decode_plans.get_model_bucket(self.model)[decode_plan_key] = (
+                InstanceHydration.build_decode_plan(self, cast("tuple[Term, ...]", self._base_selects))
             )
         self._decode_plan = decode_plan
         self._decode_plan_is_partial = bool(self._effective_fields_for_select)

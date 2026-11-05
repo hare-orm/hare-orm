@@ -1,4 +1,4 @@
-"""A plain query (filters, ordering, .distinct() and a slice only) takes the short query-shape key."""
+"""Query shapes reuse prepared SQL, bind current values and respect cache invalidation."""
 
 import pytest
 
@@ -7,23 +7,24 @@ from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
 from tests.shared_models import testmodels
 
-
-def shape_keys(model):
-    bucket = model._meta.plan_cache_buckets.get(id(StatementPlans.plans))
-    return [] if bucket is None else [rest for _index, rest in bucket]
+pytestmark = pytest.mark.plan_verification_after_test
 
 
 @pytest.mark.asyncio
-async def test_plain_query_is_stored_under_the_short_key(db):
+async def test_plain_query_reuses_its_plan_with_new_values(db):
+    for name in ("first", "second"):
+        await testmodels.Tournament.objects.create(name=name)
     StatementPlans.plans.clear()
-    await testmodels.Tournament.objects.create(name="plain")
-    await testmodels.Tournament.objects.filter(name="plain").order_by("id")
-    keys = shape_keys(testmodels.Tournament)
-    assert len(keys) == 1
-    # query class, declaration, model, dialect, connection, its features, visibility, columns,
-    # orderings, Meta.ordering off, distinct, LIMIT present, OFFSET present, .none(), filters, CTEs,
-    # dialect QuerySet method calls, zone - the model is the bucket too.
-    assert len(keys[0]) == 18
+    StatementPlans.call_signature_plans.clear()
+    rows = await testmodels.Tournament.objects.filter(name="first").order_by("id")
+    assert [row.name for row in rows] == ["first"]
+    bucket = StatementPlans.plans.get_model_bucket(testmodels.Tournament)
+    (plan,) = bucket.values()
+    hits = StatementPlans.hits
+    rows = await testmodels.Tournament.objects.filter(name="second").order_by("id")
+    assert [row.name for row in rows] == ["second"]
+    assert tuple(bucket.values()) == (plan,)
+    assert StatementPlans.hits == hits + 1
 
 
 @pytest.mark.asyncio
@@ -72,7 +73,14 @@ async def test_ordering_and_filter_values_change_between_hits(db):
 
 @pytest.mark.asyncio
 async def test_forgetting_model_caches_drops_the_plain_shape_caches(db):
+    Caches.forget_model_caches([testmodels.Tournament])
     await testmodels.Tournament.objects.filter(name="x")
+    bucket = StatementPlans.plans.get_model_bucket(testmodels.Tournament)
+    (plan,) = bucket.values()
     assert testmodels.Tournament in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
     Caches.forget_model_caches([testmodels.Tournament])
+    assert not bucket
     assert testmodels.Tournament not in InstanceHydration.ALL_FIELDS_SELECTS_KEY_CACHE
+    assert await testmodels.Tournament.objects.filter(name="x") == []
+    (replacement,) = StatementPlans.plans.get_model_bucket(testmodels.Tournament).values()
+    assert replacement is not plan

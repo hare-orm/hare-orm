@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Generator
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
 from hare.cli.config_locator import ConfigLocator
-from hare.contrib.application_lifecycle import ApplicationLifecycle
 from hare.contrib.pytest.constants import (
     CONTEXT_FIXTURE_NAMES,
     DEFAULT_TEST_DB_URL,
@@ -17,6 +15,7 @@ from hare.contrib.pytest.constants import (
     HARE_REQUIRES_MARKER,
 )
 from hare.contrib.test.databases.model_truncation import truncate_all_models
+from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.contrib.test.databases.rollback_isolation import RollbackIsolation
 from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.contrib.test.features.feature_conditions import FeatureConditions
@@ -31,7 +30,7 @@ class HareFixtures:
     configuration - the configured databases themselves are never opened."""
 
     @staticmethod
-    def get_config(pytestconfig: pytest.Config) -> dict[str, Any]:
+    def get_config(pytestconfig: pytest.Config) -> HareConfig:
         """The configuration the ini's ``hare_config`` names, else ``HARE_ORM`` or ``[tool.hare]``.
 
         Raises:
@@ -43,7 +42,7 @@ class HareFixtures:
                 f"hare's fixtures need the configuration: set {HARE_CONFIG_INI} in the pytest settings, "
                 "HARE_ORM in the environment or hare_orm in pyproject.toml's [tool.hare]"
             )
-        return HareConfig.load(config_path).to_dict()
+        return HareConfig.load(config_path)
 
     @staticmethod
     def get_db_url(pytestconfig: pytest.Config) -> str:
@@ -78,45 +77,37 @@ class HareFixtures:
         """The context of a test whose writes really commit - ``on_commit()`` callbacks run - and
         whose tables are emptied when it ends."""
         token = HareContext.current_context.set(hare_database)
+        cleanup = ResourceCleanup()
+        original: BaseException | None = None
         try:
+            for connection in hare_database.connections.all():
+                cleanup.push(truncate_all_models, context=hare_database, connections=[connection])
             yield hare_database
+        except BaseException as error:
+            original = error
+            raise
         finally:
-            await truncate_all_models(context=hare_database)
-            HareContext.current_context.reset(token)
+            try:
+                await cleanup.close()
+            finally:
+                HareContext.current_context.reset(token)
+            cleanup.raise_errors(original)
 
     @pytest_asyncio.fixture(loop_scope="session")
     async def hare_app_db(self, hare_db: HareContext) -> AsyncGenerator[HareContext]:
         """The test's context - its writes rolled back - for the application under test, started in the
-        test and running in its event loop (Litestar's ``AsyncTestClient``, an httpx ASGI client of
-        FastAPI, taskiq's ``InMemoryBroker``): the application takes it instead of opening its
-        configuration's databases."""
-        with HareFixtures.as_application_context(hare_db):
-            yield hare_db
+        test and passed explicitly as ``hare_context``. HTTPX's ASGI transport and taskiq's
+        ``InMemoryBroker`` run in the test's loop. Litestar's ``AsyncTestClient`` uses another loop;
+        sharing the isolating transaction there requires a driver supporting cross-loop use.
+        The testing setup guide lists which drivers support that arrangement."""
+        yield hare_db
 
     @pytest_asyncio.fixture(loop_scope="session")
     async def hare_app_transactional_db(self, hare_transactional_db: HareContext) -> AsyncGenerator[HareContext]:
         """The test's context - its writes committed, the tables emptied after the test - for an
-        application running in an event loop or thread of its own (Robyn's ``TestClient``): the
-        isolating transaction of the test's loop can't hold its queries."""
-        with HareFixtures.as_application_context(hare_transactional_db):
-            yield hare_transactional_db
-
-    @staticmethod
-    @contextmanager
-    def as_application_context(context: HareContext) -> Generator[None]:
-        """Makes a test's context the one an application started in the block takes.
-
-        Args:
-            context: The test's context.
-        """
-        ApplicationLifecycle.test_context = context
-        try:
-            yield
-        finally:
-            ApplicationLifecycle.test_context = None
-            # An application the test left running gives the context back with the test.
-            ApplicationLifecycle.test_context_applications.clear()
-            HareContext.clear_global_if(context)
+        application running in an event loop or thread of its own. Use this when the driver cannot
+        share the test's isolating transaction across loops, or the test needs real commits."""
+        yield hare_transactional_db
 
     @pytest.fixture
     def hare_assert_query_count(self) -> Callable[..., Any]:

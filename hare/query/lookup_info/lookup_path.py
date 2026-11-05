@@ -26,9 +26,7 @@ class LookupPath:
 
     #: A model's parsed names, in a bucket the model keeps: (name, crosses_last) -> the path. A
     #: path crosses relations into other models, so a change to any model drops them all.
-    paths: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True, model_attribute="lookup_paths"
-    )
+    paths: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
 
     relations: tuple[RelationalField[Model], ...]
     relation_names: tuple[str, ...]
@@ -50,9 +48,7 @@ class LookupPath:
         Returns:
             The path.
         """
-        paths: dict[tuple[str, bool], LookupPath] | None = model._meta.lookup_paths
-        if paths is None:
-            paths = LookupPath.paths.get_model_bucket(model)
+        paths = LookupPath.paths.get_model_bucket(model)
         cache_key = (name, crosses_last)
         cached_path = paths.get(cache_key)
         if cached_path is not None:
@@ -68,7 +64,7 @@ class LookupPath:
             current_model = relation.related_model
             position += 1
         path = cls(tuple(relations), tuple(segments[:position]), current_model, tuple(segments[position:]))
-        return Cache.set_bounded(paths, cache_key, path)
+        return paths.store(cache_key, path)
 
     @property
     def prefix(self) -> str:

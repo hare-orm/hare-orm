@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.ddl.schema_objects.view import View
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_objects.views import Views
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_VIEW_CREATE_TEMPLATE,
+    POSTGRESQL_VIEW_DROP_IF_EXISTS_TEMPLATE,
     POSTGRESQL_VIEW_DROP_TEMPLATE,
     POSTGRESQL_VIEW_RENAME_TEMPLATE,
 )
@@ -32,9 +34,12 @@ class PostgresqlViews(Views):
         ]
 
     async def drop_view(self, model: type[Model], view: View) -> None:
-        await self.editor.run_sql(
-            POSTGRESQL_VIEW_DROP_TEMPLATE.format(view=self.editor.qualify_object_name(model, view.name))
-        )
+        await self.editor.run_sql(self.get_view_drop_sql(model, view))
+
+    def get_view_drop_sql(self, model: type[Model], view: View, *, if_exists: bool = False) -> str:
+        """Compile removal without changing the catalog."""
+        template = POSTGRESQL_VIEW_DROP_IF_EXISTS_TEMPLATE if if_exists else POSTGRESQL_VIEW_DROP_TEMPLATE
+        return template.format(view=self.editor.qualify_object_name(model, view.name))
 
     async def rename_view(self, model: type[Model], old_view: View, new_view: View) -> None:
         if old_view.name == new_view.name:
@@ -45,9 +50,9 @@ class PostgresqlViews(Views):
             )
         )
 
-    async def move_to_schema(
+    def get_schema_move_plan(
         self, model: type[Model], view: View, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        await self.editor.schemas.move_object_to_schema(
+    ) -> SchemaChangePlan:
+        return self.editor.schemas.get_object_schema_move_plan(
             "VIEW", self.editor.qualify_table_name(view.name, old_schema), new_schema
         )

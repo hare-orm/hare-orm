@@ -246,7 +246,7 @@ async def test_an_aggregate_of_decimals(db, function_class, expected):
 async def test_aggregate_sum_no_exist_field_with_f_expression(db):
     with pytest.raises(
         FieldError,
-        match="There is no non-virtual field not_exist on Model DecimalFields",
+        match="Unknown field 'not_exist': DecimalFields has no field 'not_exist'",
     ):
         await (
             testmodels_postgres.DecimalFields.objects.all()

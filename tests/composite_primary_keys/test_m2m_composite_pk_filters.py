@@ -6,7 +6,7 @@ import pytest
 
 from hare import Prefetch
 from hare.exceptions import UnSupportedError
-from hare.query.relation_loading.prefetching import related_rows_fetch
+from hare.query.relation_loading.prefetching import prefetch_keys
 from tests.shared_models.testmodels import CompositePkM2MFilterOwner, CompositePkM2MFilterTarget
 
 
@@ -163,7 +163,7 @@ async def test_composite_pk_m2m_is_prefetched_past_only_and_defer(db):
 
 @pytest.mark.asyncio
 async def test_composite_pk_m2m_prefetch_preserves_order_across_key_batches(db, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(related_rows_fetch, "PREFETCH_MAX_COMPOSITE_ROWS", 2)
+    monkeypatch.setattr(prefetch_keys, "PREFETCH_MAX_COMPOSITE_ROWS", 2)
     owner = await CompositePkM2MFilterOwner.objects.create(name="Owner")
     targets = [
         await CompositePkM2MFilterTarget.objects.create(a=number, b=1, name=f"T{number}") for number in range(1, 6)

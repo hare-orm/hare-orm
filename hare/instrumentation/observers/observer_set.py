@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
+from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar
+from weakref import WeakKeyDictionary
 
 from hare.exceptions import QueryError
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
@@ -10,6 +13,7 @@ from hare.instrumentation.observers.observer import Observer, ObserverCallback
 if TYPE_CHECKING:
     from hare.core.apps.apps import Apps
     from hare.core.apps.declarations import ModelReference
+    from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
     from hare.models import Model
 
 
@@ -22,6 +26,34 @@ class ObserverSet:
 
     def __init__(self) -> None:
         self.observers_by_event_type: dict[type, dict[ObserverCallback, Observer]] = {}
+        # Live dispatch state, separate from observer registration and query caches.
+        self.dispatchers: WeakKeyDictionary[asyncio.AbstractEventLoop, ObserverDispatcher] = WeakKeyDictionary()
+        self.dispatch_lock = Lock()
+
+    def get_dispatcher(self) -> ObserverDispatcher:
+        """The background delivery queue of this scope on the calling event loop."""
+        from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
+
+        loop = asyncio.get_running_loop()
+        with self.dispatch_lock:
+            dispatcher = self.dispatchers.get(loop)
+            if dispatcher is None:
+                dispatcher = self.dispatchers[loop] = ObserverDispatcher(loop)
+        return dispatcher
+
+    async def wait_for_pending(self, timeout_seconds: float | None = None) -> None:
+        """Drain every loop serving this scope, collecting failures without skipping a queue."""
+        with self.dispatch_lock:
+            dispatchers = tuple(self.dispatchers.values())
+        results = await asyncio.gather(
+            *(dispatcher.wait_for_pending(timeout_seconds) for dispatcher in dispatchers),
+            return_exceptions=True,
+        )
+        errors = [error for error in results if isinstance(error, BaseException)]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Observer failures", errors)
 
     def add(self, event_type: type, callback: ObserverCallback, models: Iterable[ModelReference] | None) -> None:
         """Adds an observer. Adding a callback again adds the models to the ones it observes; an

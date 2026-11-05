@@ -1,9 +1,9 @@
 # ClickHouse: types
 
-Every field of hare has a ClickHouse column type; `hare.dialects.clickhouse.fields` adds the types only
-ClickHouse has, and the containers of `hare.fields` hold any field, each other too, to any depth.
-`hare inspectdb` writes every one of them back as its field, and `hare drift` compares them as whole
-trees.
+The fields below have ClickHouse column types; `hare.dialects.clickhouse.fields` adds types specific
+to ClickHouse. Containers from `hare.fields` nest supported fields, including other containers.
+A field requiring another dialect's type is not supported simply because it is inside a container.
+`hare inspectdb` reconstructs supported declarations, and `hare drift` compares their type trees.
 
 ## <a id="fields"></a>Fields and their columns
 
@@ -62,7 +62,9 @@ type works as on PostgreSQL.
   server would read it as the text's end.
 - **`ClickhouseDatetimeField`** keeps a moment in ClickHouse's own `DateTime` (whole seconds, 1970
   to 2106) or, with `precision` (0 to 9 digits after the second), `DateTime64(precision)` (1900 to 2299),
-  in the column's `timezone` — an IANA name, `None` for the server's own; it reads and writes like
+  except precision 9, whose latest Python value is `2262-04-11 23:47:16.854775 UTC`.
+  Python `datetime` values retain microsecond precision. The column's `timezone` is an IANA name,
+  `None` for the server's own; it reads and writes like
   `DatetimeField`, whose lookups (`__year`, `__hour`, ...) it has. A written moment is rounded to the
   column's precision, a tie away from zero, as a `DecimalField` rounds to its places; one outside a
   `DateTime` column's range raises `ValidationError`. **`ClickhouseDateField`** keeps a day in a `Date`
@@ -74,11 +76,13 @@ type works as on PostgreSQL.
 ## <a id="enums"></a>Enums
 
 A `CharEnumField` or an `IntEnumField` is an `Enum8`/`Enum16` of labels and numbers. ClickHouse keeps the
-numbers and reads the labels off the type, so a label keeps its number for good:
+numbers and reads the labels from the type:
 
 - an `IntEnumField`'s labels are its members' names, numbered by their values;
-- a `CharEnumField`'s labels are its stored values, numbered from a checksum of the label — a member
-  added, removed or moved changes no other label's number. The server would compare and sort the column
+- a `CharEnumField`'s labels are its stored values, numbered from checksums in sorted label order.
+  Declaration order does not affect the numbers. Collisions are resolved within the current label set,
+  so adding or removing a label can change another label's number; review the generated enum definition
+  when changing members. The server would compare and sort the column
   by those numbers, so hare reads it as its label there (`toString(status)`): `order_by()`, `__gt` and
   `Min`/`Max` follow the text, as on PostgreSQL.
 
@@ -95,6 +99,7 @@ column, which the drivers then read as `None` or fail on.
 
 ```python
 from hare import fields
+from hare.models import Model
 
 
 class Delivery(Model):
@@ -121,7 +126,7 @@ field there.
 
 - **`NULL`.** An array, a map and a tuple are never `Nullable` in ClickHouse, so `null=True` on one —
   at the top or inside another container — has no column: the model raises `UnSupportedError` when it is
-  bound. `None` given to the model (`Shipment(tags=None)`, `create(tags=None)`) raises `QueryError`, as on
+  bound. `None` given to the model (`Delivery(tags=None)`, `create(tags=None)`) raises `QueryError`, as on
   any field without `null=True`, and a container left unset or set to `None` afterwards raises
   `ValidationError` on every write — the server would store an empty array or a tuple of zeros instead.
   `null=True` on a scalar field inside makes that element `Nullable`. `Min`/`Max` of an array, a map or a
@@ -173,16 +178,21 @@ is given back by the field of its ClickHouse type — so give fields read as dis
 filter matches the values of the filter value's field only, and `reading__0__gt=3` reads the values of
 the field at that position, `NULL` for the others.
 
-A `DynamicField` holds a value of any type, kept with the type its Python value has (an int as `Int64`, a text
-as `String`, a list as an `Array`) and read back as it was written — a moment in the configured time zone, as
-a `DatetimeField` reads it (a naive one written is the UTC wall clock). `max_types` caps the types kept in
+A `DynamicField` accepts booleans, integers, floats, text, `Decimal`, dates, datetimes, UUIDs, IP addresses,
+and lists, tuples and dicts of supported values; enum members use their values. Integers choose the first
+fitting type from `Int64` through `UInt256`, covering `-2**255` through `2**256 - 1`. Unsupported objects
+or values outside their storage ranges raise `ValidationError`. A moment is read in the configured
+time zone, as a `DatetimeField` reads it (a naive one written is the UTC wall clock).
+`max_types` caps the types kept in
 columns of their own. A filter matches the values of the filter value's type only (`value=5` doesn't match
 `"5"`); a path named by a type reads the values of that type — `value__String__startswith="a"`,
 `value__Int64__gt=3`.
 
 ClickHouse orders no rows by a `Variant` or `Dynamic` column — `order_by()` on one raises
-`UnSupportedError`; order by a path of it. The column holds `NULL` itself: its fields take no
-`null=True`.
+`UnSupportedError`; order by a path of it. The column holds `NULL` without a `Nullable` wrapper.
+Set `null=True` on `DynamicField` or `VariantField` to allow writing `None`; `null=False` refuses it.
+Negative filters (`__not`, `__not_in`, `exclude()`) include NULL rows unless the excluded values
+include `None`, just as for other nullable fields.
 
 ## <a id="geo"></a>Geo
 
@@ -191,7 +201,8 @@ A `GeometryField` of `hare.gis` is a `Point`, `LineString`, `Polygon`, `MultiLin
 another SRID in a write, a filter or an equality raises (ClickHouse transforms none). A point is a tuple,
 and a line and an area are arrays: none of them is `Nullable`, so a geometry field with `null=True`
 raises `UnSupportedError` when its model is bound, and a `None` written raises `ValidationError`. An empty
-geometry is ClickHouse's own value, and a function of it gives ClickHouse's own answer or error. A
+point raises `ValidationError`: its coordinate tuple has no empty form. Other supported empty geometries
+are ClickHouse values, and a function of them gives ClickHouse's own answer or error. A
 polygon's rings are stored in the orientation ClickHouse's functions read — the outer ring
 clockwise — so a polygon given the other way round reads back with its rings reversed.
 

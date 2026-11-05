@@ -7,6 +7,7 @@ tests/shared_models/testmodels.py, following the same pattern as test_m2m_cross_
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import types
@@ -17,6 +18,7 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib.test import requires_features
 from hare.models import Model
+from hare.query.expressions import Q
 from hare.transactions.transactions import Transactions
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 
@@ -29,6 +31,44 @@ class ReadWriteSplitRouter:
 
     def db_for_write(self, model):
         return "write_primary"
+
+
+@requires_features(supports_select_for_update=True)
+@pytest.mark.asyncio
+async def test_locking_reads_use_the_write_router_for_every_result_shape(read_write_split):
+    _, model = read_write_split
+
+    async def seed():
+        await model.objects.using("write_primary").create(id=1, name="primary")
+        await model.objects.using("read_replica").create(id=1, name="replica")
+
+    # A write in the reader's task would pin its ordinary reads to the primary and hide
+    # a wrong routing decision by select_for_update().
+    await asyncio.create_task(seed())
+    assert (await model.objects.get(id=1)).name == "replica"
+    async with Transactions.atomic("write_primary"):
+        for repeat in range(2):
+            for shape in ("get", "get_q", "first", "list", "values", "values_list"):
+                query = model.objects.select_for_update()
+                if shape == "get":
+                    result = await query.get(id=1)
+                elif shape == "get_q":
+                    result = await query.get(Q(id=1))
+                elif shape == "first":
+                    result = await query.filter(id=1).first()
+                elif shape == "list":
+                    result = await query.filter(id=1)
+                elif shape == "values":
+                    result = await query.values("name").get(id=1)
+                else:
+                    result = await query.values_list("name", flat=True).get(id=1)
+                if shape == "values":
+                    assert result == {"name": "primary"}, (repeat, shape)
+                elif shape == "values_list":
+                    assert result == "primary", (repeat, shape)
+                else:
+                    objs = result if shape == "list" else [result]
+                    assert [obj.name for obj in objs] == ["primary"], (repeat, shape)
 
 
 @pytest_asyncio.fixture

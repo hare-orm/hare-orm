@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.dialects.base.types.type_mapping import TypeMapping
@@ -121,20 +122,19 @@ class ClickhouseTypes:
                 to_db=DatetimeField.to_db_instant_value,
                 to_lookup=DatetimeField.to_db_instant_value,
                 to_python=ClickhouseTypes.get_datetime_python_value,
-                naive_datetime_is_utc=True,
             ),
         )
         types.register(DateField, TypeMapping(column_type="Date32"))
         # ClickHouse's own narrower and other-precision types - each column type its field's.
         types.register(ClickhouseDateField, TypeMapping(column_type="Date"))
-        types.register(ClickhouseIntegerField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
-        types.register(FixedStringField, TypeMapping(column_type=lambda field: field.SQL_TYPE))
+        types.register(ClickhouseIntegerField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
+        types.register(FixedStringField, TypeMapping(column_type=attrgetter("SQL_TYPE")))
         # A moment is rounded to the column's precision as it is written - and as it is compared, so a filter by
         # it finds the row it was written to.
         types.register(
             ClickhouseDatetimeField,
             TypeMapping(
-                column_type=lambda field: field.SQL_TYPE,
+                column_type=attrgetter("SQL_TYPE"),
                 to_db=ClickhouseDatetimeField.to_db_rounded_value,
                 to_lookup=ClickhouseDatetimeField.to_db_rounded_value,
             ),

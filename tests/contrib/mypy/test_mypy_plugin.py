@@ -1,23 +1,21 @@
 """The mypy plugin (``hare.contrib.mypy``), run by mypy itself on the case files: each line marked
-``# E: <text>`` gets an error holding the text, no other line gets one, and every ``assert_type``
+``# E: <text>`` gets exactly one error holding the text, no other line gets one, and every ``assert_type``
 holds."""
 
-import hashlib
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from mypy.options import Options
-from mypy.version import __version__ as mypy_version
 
 from hare.contrib.mypy.hare_mypy_plugin import HareMypyPlugin
 from hare.contrib.mypy.model_registry import ModelRegistry
+from hare.core.registries import Registries
 from hare.query.filters import FieldLookup
 from hare.query.filters.lookups.lookups import Lookups
 from tests.contrib.mypy.models import RatingField
@@ -30,10 +28,6 @@ REPOSITORY_PATH = Path(__file__).resolve().parents[3]
 CASE_FILES = sorted(path.name for path in CASES_PATH.glob("*.py"))
 #: The case files of the PostgreSQL models, checked in a run of their own - by their path in the cases.
 POSTGRESQL_CASE_FILES = sorted(f"postgresql/{path.name}" for path in (CASES_PATH / "postgresql").glob("*.py"))
-PLUGIN_PATH = REPOSITORY_PATH / "hare" / "contrib" / "mypy"
-#: Where the mypy runs keep their caches from one test run to the next - hare and the libraries are
-#: read from them instead of checked again, the test modules are checked every time.
-MYPY_CACHE_ROOT = Path(tempfile.gettempdir()) / "hare-mypy-plugin-tests"
 MYPY_PYTHON_VERSION = "3.12"
 MYPY_PROJECT_CONFIG = """
 [tool.mypy]
@@ -71,30 +65,8 @@ def get_project_config(hare_orm: str, mypy_imports: str) -> str:
     return MYPY_PROJECT_CONFIG.format(python_version=MYPY_PYTHON_VERSION, hare_orm=hare_orm, mypy_imports=mypy_imports)
 
 
-def get_mypy_projects_path() -> Path:
-    """The directory of the mypy runs' projects and caches for the plugin's code, mypy and Python as
-    they are - those of any other are removed: the plugin's hooks run on hare's own modules too. A
-    project keeps its path from one test run to the next: the plugin's messages name its
-    configuration file, and mypy checks every module anew when they change.
-
-    Returns:
-        The directory.
-    """
-    digest = hashlib.sha256(f"{mypy_version} {sys.version}".encode())
-    for path in sorted(PLUGIN_PATH.rglob("*.py")):
-        digest.update(path.relative_to(PLUGIN_PATH).as_posix().encode())
-        digest.update(path.read_bytes())
-    projects_path = MYPY_CACHE_ROOT / digest.hexdigest()[:16]
-    if MYPY_CACHE_ROOT.exists():
-        for stale_path in MYPY_CACHE_ROOT.iterdir():
-            if stale_path != projects_path:
-                shutil.rmtree(stale_path, ignore_errors=True)
-    return projects_path
-
-
 def start_mypy(project_path: Path, file_names: list[str], hare_orm: str, mypy_imports: str) -> subprocess.Popen[str]:
-    """Starts mypy with the plugin on case files, in a process of its own - the test modules are
-    checked again whatever the project's cache holds of them.
+    """Start mypy with a private configuration and cache for this test run.
 
     Returns:
         The process.
@@ -103,7 +75,6 @@ def start_mypy(project_path: Path, file_names: list[str], hare_orm: str, mypy_im
     config_path = project_path / "pyproject.toml"
     config_path.write_text(get_project_config(hare_orm, mypy_imports), encoding="utf-8")
     cache_path = project_path / ".mypy_cache"
-    shutil.rmtree(cache_path / MYPY_PYTHON_VERSION / "tests", ignore_errors=True)
     return subprocess.Popen(
         [
             sys.executable,
@@ -139,17 +110,37 @@ def read_mypy_errors(process: subprocess.Popen[str]) -> dict[tuple[str, int], li
     for output_line in stdout.splitlines():
         match = MYPY_MESSAGE.match(output_line)
         assert match is not None, output_line
-        messages[(Path(match["path"]).name, int(match["line"]))].append(match["message"])
+        file_name = Path(match["path"]).resolve().relative_to(CASES_PATH.resolve()).as_posix()
+        messages[(file_name, int(match["line"]))].append(match["message"])
+    assert process.returncode == int(bool(messages)), (process.returncode, stdout, stderr)
     return messages
 
 
+def stop_mypy(process: subprocess.Popen[str]) -> None:
+    """Stop an unfinished checker before its Popen context closes pipes and reaps it."""
+    if process.poll() is None:
+        process.kill()
+
+
 @pytest.fixture(scope="module")
-def mypy_errors() -> dict[str, dict[tuple[str, int], list[str]]]:
-    """The errors of every mypy run of the module, by the run's name. A run checks hare itself and
-    takes ten seconds without its cache, so they go side by side."""
-    projects_path = get_mypy_projects_path()
-    processes = {name: start_mypy(projects_path / name, *arguments) for name, arguments in MYPY_RUNS.items()}
-    return {name: read_mypy_errors(process) for name, process in processes.items()}
+def mypy_errors(tmp_path_factory) -> dict[str, dict[tuple[str, int], list[str]]]:
+    """Run independent checkers concurrently with caches and processes scoped to this run.
+
+    Every started process is killed and reaped on setup, parsing or assertion failure;
+    no shared temporary directories are removed.
+    """
+    projects_path = tmp_path_factory.mktemp("mypy-plugin")
+    with ExitStack() as cleanup:
+        processes = {}
+        for name, arguments in MYPY_RUNS.items():
+            process = cleanup.enter_context(start_mypy(projects_path / name, *arguments))
+            cleanup.callback(stop_mypy, process)
+            processes[name] = process
+        results = {name: read_mypy_errors(process) for name, process in processes.items()}
+        for name, errors in results.items():
+            expected_files = set(MYPY_RUNS[name][0])
+            assert {file_name for file_name, _ in errors} <= expected_files, errors
+        return results
 
 
 @pytest.mark.parametrize(
@@ -162,17 +153,11 @@ def test_a_case_file_gets_exactly_its_expected_errors(mypy_errors, run_name, fil
         for line_number, line in enumerate((CASES_PATH / file_name).read_text(encoding="utf-8").splitlines(), start=1)
         if (match := EXPECTED_ERROR.search(line)) is not None
     }
-    actual_by_line = {
-        line: messages for (name, line), messages in mypy_errors[run_name].items() if name == Path(file_name).name
-    }
-    missing = {
-        line: expected
-        for line, expected in expected_by_line.items()
-        if not any(expected in message for message in actual_by_line.get(line, []))
-    }
-    unexpected = {line: messages for line, messages in actual_by_line.items() if line not in expected_by_line}
-    assert not missing, f"expected errors not reported: {missing}\nreported: {actual_by_line}"
-    assert not unexpected, f"errors not expected: {unexpected}"
+    actual_by_line = {line: messages for (name, line), messages in mypy_errors[run_name].items() if name == file_name}
+    assert actual_by_line.keys() == expected_by_line.keys(), (expected_by_line, actual_by_line)
+    for line, expected in expected_by_line.items():
+        messages = actual_by_line[line]
+        assert len(messages) == 1 and expected in messages[0], (line, expected, messages)
 
 
 def test_models_that_cant_be_loaded_are_reported_once_in_each_module(mypy_errors):
@@ -201,13 +186,22 @@ def test_the_fingerprint_follows_the_registered_lookups(tmp_path):
     assert registry.load_error is None
     assert registry.get_model("tests.contrib.mypy.models.Writer") is not None
     assert registry.get_model("tests.contrib.mypy.models.Missing") is None
+    previous_snapshot = Registries.snapshot
     RatingField.register_lookup("rated_for_fingerprint", lambda field: FieldLookup(Lookups.between))
     try:
         changed_registry = ModelRegistry(options)
         changed_registry.load()
+        assert changed_registry.load_error is None
         assert changed_registry.fingerprint != registry.fingerprint
+        RatingField.register_lookup(
+            "rated_for_fingerprint", lambda field: FieldLookup(Lookups.between), value_type=str
+        )
+        replaced_registry = ModelRegistry(options)
+        replaced_registry.load()
+        assert replaced_registry.load_error is None
+        assert replaced_registry.fingerprint != changed_registry.fingerprint
     finally:
-        del RatingField.registered_lookups["rated_for_fingerprint"]
+        Registries.snapshot = previous_snapshot
     plugin = HareMypyPlugin(options)
     assert plugin.report_config_data(SimpleNamespace(id="any", path="any.py", is_check=True)) == registry.fingerprint
     assert HareMypyPlugin.for_version("1.19.1") is HareMypyPlugin

@@ -7,6 +7,9 @@ from hare.sql.terms.functions.function import Function
 class Now(Function):
     """The current moment - ISO SQL's ``CURRENT_TIMESTAMP``."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, alias: str | None = None) -> None:
         super().__init__("CURRENT_TIMESTAMP", alias=alias)
 

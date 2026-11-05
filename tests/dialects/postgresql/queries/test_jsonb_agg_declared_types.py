@@ -10,8 +10,6 @@ from hare.dialects.postgresql.functions.aggregates import JSONBAgg
 from tests.dialects.postgresql.conftest import skip_if_not_postgres
 from tests.dialects.postgresql.queries.models_jsonb_documents import JsonbDocument, JsonbDocumentRow
 
-REQUIRES = ("pydantic",)
-
 
 @pytest.mark.asyncio
 async def test_jsonb_agg_gives_each_element_the_declared_type():

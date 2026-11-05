@@ -4,6 +4,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.core.extensions.declarations import MethodRegistration
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.enums import ClickhouseClause
 from hare.dialects.clickhouse.query.clickhouse_totals import ClickhouseTotals
@@ -16,8 +17,9 @@ from hare.dialects.clickhouse.query.constants import (
 )
 from hare.exceptions import QueryError, UnSupportedError
 from hare.query.expressions import Expression
-from hare.query.queryset.constants import MAX_TABLE_SAMPLE_PERCENT, WRITE_REFUSED_EXTENSION_MESSAGE
-from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
+from hare.query.queryset.constants import MAX_TABLE_SAMPLE_PERCENT
+from hare.query.queryset.extensions.enums import ExtensionPhase
+from hare.query.queryset.extensions.query_set_extension import QuerySetExtension
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -33,43 +35,39 @@ class ClickhouseQuerySetMethods:
     """
 
     @classmethod
-    def register(cls, dialect_class: type[Dialect]) -> None:
-        """Registers the methods for a dialect.
-
-        Args:
-            dialect_class: The dialect's class.
-        """
-        QuerySetExtensions.register("final", dialect_class, cls.final, reads_query=True, refuses_writes=True)
-        QuerySetExtensions.register(
-            "sample_rows", dialect_class, cls.sample_rows, reads_query=True, refuses_writes=True
+    def get_registrations(cls, dialect_class: type[Dialect]) -> tuple[MethodRegistration, ...]:
+        """Declare methods as one part of the dialect's atomic contribution."""
+        return (
+            MethodRegistration(
+                "final", dialect_class, QuerySetExtension(cls.final, reads_query=True, refuses_writes=True)
+            ),
+            MethodRegistration(
+                "sample_rows", dialect_class, QuerySetExtension(cls.sample_rows, reads_query=True, refuses_writes=True)
+            ),
+            MethodRegistration(
+                "sample_offset", dialect_class, QuerySetExtension(cls.sample_offset, refuses_writes=True)
+            ),
+            MethodRegistration(
+                "prewhere",
+                dialect_class,
+                QuerySetExtension(cls.prewhere, reads_query=True, takes_condition=True, refuses_writes=True),
+            ),
+            MethodRegistration(
+                "limit_by",
+                dialect_class,
+                QuerySetExtension(cls.limit_by, reads_query=True, changes_rows=True, refuses_writes=True),
+            ),
+            MethodRegistration(
+                "settings", dialect_class, QuerySetExtension(cls.settings, phase=ExtensionPhase.STATEMENT)
+            ),
+            MethodRegistration(
+                "with_totals",
+                dialect_class,
+                QuerySetExtension(
+                    cls.with_totals, reads_query=True, transform_result=ClickhouseTotals.transform_result
+                ),
+            ),
         )
-        QuerySetExtensions.register(
-            "sample_offset", dialect_class, cls.sample_offset, reads_query=True, refuses_writes=True
-        )
-        QuerySetExtensions.register(
-            "prewhere", dialect_class, cls.prewhere, reads_query=True, takes_condition=True, refuses_writes=True
-        )
-        QuerySetExtensions.register(
-            "limit_by", dialect_class, cls.limit_by, reads_query=True, changes_rows=True, refuses_writes=True
-        )
-        QuerySetExtensions.register("settings", dialect_class, cls.settings)
-        QuerySetExtensions.register(
-            "with_totals", dialect_class, cls.with_totals, reads_query=True, run_query=ClickhouseTotals.run
-        )
-
-    @staticmethod
-    def raise_if_write(extension_query: QuerySetExtensionQuery, method_name: str) -> None:
-        """Rejects a method of the rows read on an ``UPDATE`` or ``DELETE``.
-
-        Args:
-            extension_query: The query.
-            method_name: The method.
-
-        Raises:
-            QueryError: The query is a write.
-        """
-        if extension_query.is_write:
-            raise QueryError(WRITE_REFUSED_EXTENSION_MESSAGE.format(method_name=method_name))
 
     @staticmethod
     def get_table_options(extension_query: QuerySetExtensionQuery) -> ClickhouseTableOptions:
@@ -104,7 +102,6 @@ class ClickhouseQuerySetMethods:
         Raises:
             QueryError: The query is a write, or the model's table engine keeps one version of a row.
         """
-        ClickhouseQuerySetMethods.raise_if_write(extension_query, "final")
         if all_tables:
             return ClickhouseQuerySetMethods.add_settings(builder, {"final": 1})
         table_options = ClickhouseQuerySetMethods.get_table_options(extension_query)
@@ -142,21 +139,19 @@ class ClickhouseQuerySetMethods:
                 f"sample_rows() takes an int from {CLICKHOUSE_MIN_SAMPLE_ROWS} to {CLICKHOUSE_MAX_ROW_COUNT}, got "
                 f"{rows!r}"
             )
-        ClickhouseQuerySetMethods.raise_if_write(extension_query, "sample_rows")
         if builder._table_sample is not None:
             raise QueryError("sample_rows() reads a sample of a number of rows - the queryset reads a sample() too")
         ClickhouseQuerySetMethods.get_table_options(extension_query).raise_if_unsampled(extension_query.model)
         return builder.set_dialect_clause(ClickhouseClause.SAMPLE_ROWS, rows)
 
     @staticmethod
-    def sample_offset(builder: QueryBuilder, extension_query: QuerySetExtensionQuery, percent: float) -> QueryBuilder:
+    def sample_offset(builder: QueryBuilder, percent: float) -> QueryBuilder:
         """``QuerySet.sample_offset(percent)`` - the sample of ``sample()``/``sample_rows()`` is read
         from the part of the sample key's range after ``percent`` of it (``SAMPLE ... OFFSET``):
         ``sample(50)`` and ``sample(50).sample_offset(50)`` read disjoint halves.
 
         Args:
             builder: The query's builder.
-            extension_query: The query.
             percent: The part of the range skipped, in percent - an int or float from 0 below 100.
 
         Returns:
@@ -175,7 +170,6 @@ class ClickhouseQuerySetMethods:
                 f"sample_offset() takes a percent from 0 below {MAX_TABLE_SAMPLE_PERCENT}, got "
                 f"{ValueDescriptions.get_shown_value(percent)}"
             )
-        ClickhouseQuerySetMethods.raise_if_write(extension_query, "sample_offset")
         return builder.set_dialect_clause(ClickhouseClause.SAMPLE_OFFSET, percent)
 
     @staticmethod
@@ -195,7 +189,6 @@ class ClickhouseQuerySetMethods:
         Raises:
             QueryError: The query is a write; the condition reads a related model or an aggregate.
         """
-        ClickhouseQuerySetMethods.raise_if_write(extension_query, "prewhere")
         modifier = extension_query.get_condition(condition)
         if modifier.joins or modifier.having_criterion:
             raise QueryError(
@@ -249,7 +242,6 @@ class ClickhouseQuerySetMethods:
                 f"limit_by() groups the rows by field names or expressions - at least one, got "
                 f"{ValueDescriptions.get_shown_value(expressions)}"
             )
-        ClickhouseQuerySetMethods.raise_if_write(extension_query, "limit_by")
         if extension_query.reads_rows_in_derived_table:
             raise UnSupportedError(
                 "limit_by() can't be combined with a filter on a window function - the rows are read in a "
@@ -331,9 +323,9 @@ class ClickhouseQuerySetMethods:
     def with_totals(builder: QueryBuilder, extension_query: QuerySetExtensionQuery) -> QueryBuilder:
         """``QuerySet.with_totals()`` - a grouped ``values()`` query's rows come with the row of its
         aggregates over every group (``GROUP BY ... WITH TOTALS``): the query returns a
-        ``TotalsResult``, its rows with ``.totals``, the aggregates over all the rows its conditions
-        match - of the groups ``HAVING`` keeps - before ``LIMIT``; its grouped fields hold their
-        types' default values there, as ClickHouse writes them.
+        ``TotalsResult``, its rows with ``.totals``, the aggregates before ``LIMIT``. Whether
+        ``HAVING`` affects the totals depends on the server's ``totals_mode`` setting, which this
+        method does not override. Grouped fields hold their types' default values there.
 
         Args:
             builder: The query's builder.

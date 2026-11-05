@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, cast
 
+from hare.classes.constants import CONTAINER_MAX_DEPTH
 from hare.exceptions import QueryError
 from hare.query.expressions.constants import (
     ISNULL_LOOKUP_SUFFIXES,
@@ -11,7 +12,6 @@ from hare.query.expressions.constants import (
     LONG_IN_LIST_STRUCTURE,
     PLAIN_VALUE_TYPES,
     RANGE_LOOKUP_SUFFIX,
-    VALUE_PARAMETER_MAX_DEPTH,
 )
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
@@ -100,11 +100,11 @@ class FilterPlanDescriptions:
             The shape, hashable.
 
         Raises:
-            QueryError: The value nests deeper than ``VALUE_PARAMETER_MAX_DEPTH`` - or holds itself.
+            QueryError: The value nests deeper than ``CONTAINER_MAX_DEPTH`` - or holds itself.
         """
-        if isinstance(value, (dict, list, tuple, set)) and depth > VALUE_PARAMETER_MAX_DEPTH:
+        if isinstance(value, (dict, list, tuple, set)) and depth > CONTAINER_MAX_DEPTH:
             raise QueryError(
-                f"A filter value nesting deeper than {VALUE_PARAMETER_MAX_DEPTH} levels, or holding itself, can't "
+                f"A filter value nesting deeper than {CONTAINER_MAX_DEPTH} levels, or holding itself, can't "
                 "be compared"
             )
         if isinstance(value, dict):

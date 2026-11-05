@@ -52,7 +52,7 @@ CLICKHOUSE_MATH_FUNCTION_NAMES = {
 
 #: A number written into an integer enum column, refused when no member has it - a mutation writes it
 #: even through a CAST to the column's type. A member's number is an Int16: ClickHouse converts no wider
-#: integer (the Int256 of exact arithmetic) to an enum. {0}: the number, {1}: the members' numbers.
+#: integer result to an enum. {0}: the number, {1}: the members' numbers.
 CLICKHOUSE_ASSIGNED_ENUM_TEMPLATE = (
     "arrayMap(x -> if(throwIf(ifNull(x NOT IN ({1}), 0), 'the value is the number of no member of the enum') = 0, "
     "toInt16(x), toInt16(x)), [{0}])[1]"
@@ -250,6 +250,6 @@ CLICKHOUSE_NOW_SQL = f"now64({CLICKHOUSE_DATETIME_PRECISION}, 'UTC')"
 
 #: The zone an aware moment is written and read in.
 CLICKHOUSE_UTC_ZONE_SQL = "'UTC'"
-#: The digits after the point of a quotient, an average or a statistic of Decimals ClickHouse works out
-#: through hare - its own gives a double or cuts the quotient to the dividend's scale.
+#: Default scale for explicit DecimalMod and casts to UnroundedDecimalField; ordinary division and
+#: aggregate functions keep ClickHouse's result types and scales.
 DECIMAL_QUOTIENT_SCALE = 20

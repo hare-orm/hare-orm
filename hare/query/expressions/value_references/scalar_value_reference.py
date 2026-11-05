@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -15,11 +16,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ScalarValueReference:
-    """A single-value plan value reference (see ``ExpressionContext.value_wrapper_references``) - the
-    ORIGINAL ``ValueWrapper`` a plain ``field = value``-shaped criterion embeds, and the ``Field``
-    whose ``to_db_value()`` a cache hit re-runs on a fresh raw value to build the replacement."""
+    """Bind a fresh filter value through the field's lookup conversion.
 
-    wrapper: ValueWrapper
+    Preparation identifies the criterion's ``ValueWrapper``; the published statement plan
+    stores its immutable ``ParameterSlot`` instead. A cache hit uses ``get_lookup_value``
+    to preserve filtering semantics rather than write-time rounding or truncation.
+    """
+
+    wrapper: ParameterSlot | ValueWrapper
     field: Field[Any]
 
     def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
@@ -38,4 +42,4 @@ class ScalarValueReference:
         lookup_value = dialect.types.get_lookup_value(self.field, value, model)
         if isinstance(lookup_value, Term):
             return None
-        return [(id(self.wrapper), lookup_value, False)]
+        return [(self.wrapper, lookup_value, False)]

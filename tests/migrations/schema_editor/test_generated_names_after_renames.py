@@ -11,6 +11,7 @@ from hare.migrations.migration import Migration
 from hare.migrations.operations import AlterModelTable, CreateModel, RenameField
 from hare.migrations.state.state import State
 from tests.utils.fake_client import FakeClient
+from tests.utils.operations import apply_operations
 
 pytestmark = pytest.mark.database_independent
 
@@ -29,10 +30,6 @@ def create_item() -> CreateModel:
     )
 
 
-async def apply(state: State, editor, *operations) -> None:
-    await Migration("rename", APP_LABEL, operations=list(operations)).apply(state, schema_editor=editor)
-
-
 def get_expected_index_names(state: State, editor) -> set[str]:
     model = state.apps.get_model(f"{APP_LABEL}.Item")
     return {
@@ -47,12 +44,18 @@ async def test_indexes_take_the_names_of_the_renamed_columns_and_table_on_sqlite
     try:
         editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
         state = State()
-        await apply(state, editor, create_item())
-        await apply(state, editor, RenameField("Item", "price", "amount"), RenameField("Item", "code", "label"))
+        state = await apply_operations(APP_LABEL, state, create_item(), schema_editor=editor)
+        state = await apply_operations(
+            APP_LABEL,
+            state,
+            RenameField("Item", "price", "amount"),
+            RenameField("Item", "code", "label"),
+            schema_editor=editor,
+        )
         _, rows = await client.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rn_item'")
         assert {row["name"] for row in rows} == get_expected_index_names(state, editor)
 
-        await apply(state, editor, AlterModelTable("Item", "rn_thing"))
+        state = await apply_operations(APP_LABEL, state, AlterModelTable("Item", "rn_thing"), schema_editor=editor)
         _, rows = await client.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rn_thing'")
         assert {row["name"] for row in rows} == get_expected_index_names(state, editor)
     finally:
@@ -64,7 +67,7 @@ async def test_a_renamed_relation_renames_its_foreign_key_on_postgres() -> None:
     client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
     state = State()
-    await Migration(
+    state = await Migration(
         "initial",
         APP_LABEL,
         operations=[
@@ -76,7 +79,7 @@ async def test_a_renamed_relation_renames_its_foreign_key_on_postgres() -> None:
         ],
     ).apply(state, dry_run=True)
 
-    await apply(state, editor, RenameField("Book", "author", "writer"))
+    await apply_operations(APP_LABEL, state, RenameField("Book", "author", "writer"), schema_editor=editor)
 
     old_name = GeneratedNames.get_foreign_key_name("book", ("author_id",))
     new_name = GeneratedNames.get_foreign_key_name("book", ("writer_id",))

@@ -1,6 +1,4 @@
-"""Model definitions for tests/contrib/outbox/ - kept in their own module (rather than inline
-per test file) since hare_test_context()/make_db_fixture() both discover models by module path.
-"""
+"""Shared outbox models discovered by module path through hare_test_context()."""
 
 from hare import fields
 from hare.contrib.outbox import OutboxEvent

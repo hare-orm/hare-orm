@@ -5,13 +5,14 @@ import pytest
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes import PartialIndex
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError, IntegrityError, UnSupportedError
 from hare.fields.data.numeric import FloatField, IntField
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.text import CharField
 from hare.fields.relations.fields import ForeignKeyField
 from hare.migrations.operations import RemoveField, RenameField
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.query.expressions import F, Q
 from tests.migrations.round_trips.test_round_trip_real_db import RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -112,7 +113,7 @@ def test_q_condition_round_trips_through_a_migration_file() -> None:
     condition = (~Q(qty__lt=0) | Q(price__gte=1.50, name__in=["a", "b"])) & Q(qty__gt=F("min_qty"))
     constraint = CheckConstraint(check=condition, name="stock_check")
     imports = ImportManager()
-    code = MigrationWriter.render_value(constraint, imports)
+    code = DeclarationValueSerializer.render_value(constraint, imports)
     namespace: dict = {}
     for statement in imports.render():
         exec(statement, namespace)  # noqa: S102 - the writer's own import lines
@@ -122,16 +123,16 @@ def test_q_condition_round_trips_through_a_migration_file() -> None:
 
 @pytest.mark.database_independent
 def test_q_condition_holding_an_expression_is_written_as_it() -> None:
-    from hare.classes.comparable_values import ComparableValues
+    from hare.declarations.declaration_values import DeclarationValues
     from hare.query.functions import Upper
 
     condition = Q(name=Upper("other"), low__lt=F("high") + 1)
     imports = ImportManager()
-    code = MigrationWriter.render_value(condition, imports)
+    code = DeclarationValueSerializer.render_value(condition, imports)
     namespace: dict = {}
     for statement in imports.render():
         exec(statement, namespace)  # noqa: S102 - the writer's own import lines
-    assert ComparableValues.are_equal(eval(code, namespace), condition)  # noqa: S307 - the writer's own rendered code
+    assert DeclarationValues.are_equal(eval(code, namespace), condition)  # noqa: S307 - the writer's own rendered code
 
 
 @pytest.mark.database_independent

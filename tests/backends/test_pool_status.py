@@ -61,7 +61,7 @@ async def wait_for_waiting(client, count: int) -> None:
 
 @pytest.mark.asyncio
 @requires_features(supports_pool_status=True)
-async def test_the_connection_s_own_pool_is_reported(db):
+async def test_the_connection_s_own_pool_is_reported(db_simple):
     client = Connections.current().get_main("models")
     await client.execute_dicts("SELECT 1 AS one")
     status = client.get_pool_status()

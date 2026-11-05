@@ -10,10 +10,11 @@ if TYPE_CHECKING:
 @dataclass
 class QueryCounter:
     """What ``capture_queries()``/``assert_query_count()`` yields - the count and SQL text of every
-    query sent to one connection so far, updated live as the ``async with`` body runs.
+    query with one connection alias so far, updated live as the ``async with`` body runs.
+    Independent and schema clients with that alias contribute to the same counter.
 
     Attributes:
-        connection_alias: The connection whose queries count.
+        connection_alias: The alias whose queries count, regardless of client identity.
         count: How many queries ran.
         queries: Their SQL text, in order - query tags included; the dialect's text of a bulk load for
             one.

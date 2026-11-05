@@ -56,7 +56,7 @@ class FilteredTicketQuery(RequestQuery[Ticket]):
 
 def annotation_of(request_query_class: type[RequestQuery], parameter: str):
     request_query_class.prepare_parameters()
-    return request_query_class.model_fields[parameter].annotation
+    return request_query_class.prepare_parameters().model_fields[parameter].annotation
 
 
 def titles(books: list[Book]) -> list[str]:
@@ -117,7 +117,7 @@ async def test_a_composite_key_and_an_enum(library):
 @pytest.mark.asyncio
 async def test_parameters_are_described_by_the_fields(library):
     FilteredBookQuery.prepare_parameters()
-    fields = FilteredBookQuery.model_fields
+    fields = FilteredBookQuery.prepare_parameters().model_fields
     assert fields["published_at__gte"].description == "When the book came out"
     assert fields["published_at__range"].description == (
         "When the book came out Two values, from and to: repeat the parameter."
@@ -125,7 +125,10 @@ async def test_parameters_are_described_by_the_fields(library):
     assert fields["status__in"].description == "Repeat the parameter for each value."
     assert fields["author_ids"].description == "Repeat the parameter for each value."
     assert fields["status"].description is None
-    assert "Repeat the parameter" in FilteredBookQuery.model_json_schema()["properties"]["tags__in"]["description"]
+    assert (
+        "Repeat the parameter"
+        in FilteredBookQuery.prepare_parameters().model_json_schema()["properties"]["tags__in"]["description"]
+    )
 
 
 @pytest.mark.asyncio
@@ -219,7 +222,7 @@ class CityBookQuery(RequestQuery[Book]):
 @pytest.mark.asyncio
 async def test_a_parameter_named_otherwise_filters_by_its_path(library):
     assert annotation_of(CityBookQuery, "city__in") == list[str] | None
-    assert Filter("author__profile__city__in") in CityBookQuery.model_fields["city__in"].metadata
+    assert Filter("author__profile__city__in") in CityBookQuery.prepare_parameters().model_fields["city__in"].metadata
     assert titles(await CityBookQuery(city="Moscow").fetch()) == ["Alpha", "Beta"]
     assert titles(await CityBookQuery.from_query_string("city__in=Kazan&city__in=Moscow").fetch()) == [
         "Alpha",
@@ -230,6 +233,6 @@ async def test_a_parameter_named_otherwise_filters_by_its_path(library):
     filter_keys = {item.parameter: item.filter_key for item in CityBookQuery.get_declaration().filters}
     assert filter_keys["city"] == "author__profile__city"
     assert filter_keys["published__gte"] == "published_at__gte"
-    assert CityBookQuery.model_fields["published__gte"].description == "Out"
+    assert CityBookQuery.prepare_parameters().model_fields["published__gte"].description == "Out"
     with pytest.raises(InvalidRequestQuery):
         CityBookQuery(published__gte=datetime.datetime(2026, 2, 1), published__lte=datetime.datetime(2026, 1, 1))

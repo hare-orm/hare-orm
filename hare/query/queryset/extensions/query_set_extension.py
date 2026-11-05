@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from hare.query.queryset.extensions.enums import ExtensionPhase
 
 if TYPE_CHECKING:
     from hare.query.queryset.extensions.query_set_extension_query import QuerySetExtensionQuery
@@ -23,10 +25,10 @@ class QuerySetExtension:
         takes_condition: Whether the method's arguments are one condition, as ``filter()``'s are -
             ``Q`` objects and filters, recorded as one ``Q`` that ``apply`` gets.
         changes_rows: Whether a call changes which rows the query returns beyond its conditions (a
-            limit per group) - ``count()`` and ``exists()`` then count the rows returned.
-        run_query: Runs a rows query with the call in place of its plain run -
-            ``await run_query(extension_query, *args, **kwargs)`` returns what the query returns. None
-            runs it as any query.
+            limit per group) - ``count()``, ``exists()`` and ``aggregate()`` then read the rows returned.
+        transform_result: Shapes the materialized result after ordinary execution. It receives
+            QuerySetExtensionResult and the recorded arguments. At most one handler may be used.
+        phase: Apply to the row source before wrapping, or to the final statement.
         refuses_writes: Whether a write (``update()``, ``delete()``) refuses the call - it changes how
             rows are read, and a write matches its rows by its conditions alone.
     """
@@ -35,8 +37,9 @@ class QuerySetExtension:
     reads_query: bool = False
     takes_condition: bool = False
     changes_rows: bool = False
-    run_query: Callable[..., Awaitable[Any]] | None = None
+    transform_result: Callable[..., Any] | None = None
     refuses_writes: bool = False
+    phase: ExtensionPhase = ExtensionPhase.ROW_SOURCE
 
     def get_call_signature(self) -> inspect.Signature:
         """The parameters a call of the method takes - ``apply``'s after the builder and the query;

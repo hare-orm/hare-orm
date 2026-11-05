@@ -4,13 +4,14 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from hare.dialects.base.clauses.query_clauses import QueryClauses
+from hare.sql.builder.update_from_values import ValuesColumn
 from hare.sql.exceptions import QueryException
 
 if TYPE_CHECKING:
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
+    from hare.sql.builder.update_from_values import UpdateFromValues
     from hare.sql.sql_context import SqlContext
-    from hare.sql.tables.table import Table
 
 
 class LimitReturningConflictQueryClauses(QueryClauses):
@@ -159,7 +160,7 @@ class LimitReturningConflictQueryClauses(QueryClauses):
             querystring += QuerySqlRendering.where_sql(builder, sql_context)
 
         if builder._orderbys:
-            querystring += builder._orderby_sql(sql_context)
+            querystring += QuerySqlRendering.orderby_sql(builder, sql_context)
         if builder._limit is not None:
             querystring += self.get_limit_offset_sql(builder._limit.get_sql(sql_context), None)
         return querystring
@@ -169,26 +170,26 @@ class LimitReturningConflictQueryClauses(QueryClauses):
         return ", ".join(f"column{index} AS {name}" for index, name in enumerate(column_names, start=1))
 
     def get_update_from_values_sql(
-        self,
-        *,
-        with_sql: str,
-        table: Table,
-        table_sql: str,
-        assignments: Sequence[tuple[str, str]],
-        values_columns_sql: str,
-        values_sql: str,
-        values_alias_sql: str,
-        matches: Sequence[tuple[str, str]],
-        condition_sql: str | None,
-        returned: Sequence[ReturnedValue],
+        self, *, write: UpdateFromValues, with_sql: str, values_sql: str, sql_context: SqlContext
     ) -> str:
-        set_sql = ", ".join(f"{column} = {value_sql}" for column, value_sql in assignments)
-        where_parts = [f"{column_sql} = {value_sql}" for column_sql, value_sql in matches]
-        if condition_sql is not None:
-            where_parts.append(f"({condition_sql})")
-        values_rows_sql = f"(VALUES {values_sql}) AS {self.dialect.literals.quote_identifier(self.values_rows_alias)}"
+        qualified = sql_context.copy(with_namespace=True)
+        quote = sql_context.quote
+        row_columns = [f"{quote(write.alias)}.{quote(column)}" for column in write.columns]
+        set_sql = ", ".join(
+            f"{quote(column)} = "
+            + (row_columns[value.position] if isinstance(value, ValuesColumn) else value.get_sql(qualified))
+            for column, value in write.assignments
+        )
+        where_parts = [
+            f"{write.table.get_column_sql(column, qualified)} = {row_columns[value.position]}"
+            for column, value in write.matches
+        ]
+        if write.condition is not None:
+            where_parts.append(f"({write.condition.get_sql(qualified.copy(subquery=True))})")
+        values_rows_sql = f"(VALUES {values_sql}) AS {quote(self.values_rows_alias)}"
+        values_columns_sql = self.get_values_table_columns_sql(tuple(quote(column) for column in write.columns))
         return (
-            f"{with_sql}UPDATE {table_sql} SET {set_sql} "  # nosec B608
-            f"FROM (SELECT {values_columns_sql} FROM {values_rows_sql}) AS {values_alias_sql} "
+            f"{with_sql}UPDATE {write.table.get_sql(sql_context)} SET {set_sql} "  # nosec B608
+            f"FROM (SELECT {values_columns_sql} FROM {values_rows_sql}) AS {quote(write.alias)} "
             f"WHERE {' AND '.join(where_parts)}"
-        ) + self.get_returning_sql(returned)
+        ) + self.get_returning_sql(write.returned)

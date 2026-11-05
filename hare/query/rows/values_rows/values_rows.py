@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import contextlib
+from collections.abc import AsyncGenerator, Callable, Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.dialects.base.results.statement_result import StatementResult
 from hare.query.enums import RowShape
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
+from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.dialects.base.results.statement_result import StatementResult
-    from hare.models import Model
-    from hare.query.rows.values_rows.value_field import ValueField
 
 #: A selected column's alias (or its position in a driver row) with the function decoding its
 #: value, None when the raw value is used as-is.
@@ -53,113 +54,99 @@ class ValuesRows:
         """
         raise NotImplementedError()
 
-    @staticmethod
-    def get_composite_key_value(component_values: Sequence[Any]) -> tuple[Any, ...] | None:
-        """A composite key read back from its columns - None when every column is NULL (a null
-        foreign key, or no related row).
-
-        Args:
-            component_values: The key's column values, in key order.
-
-        Returns:
-            The key tuple, or None.
-        """
-        if all(component_value is None for component_value in component_values):
-            return None
-        return tuple(component_values)
-
     async def fetch(
         self,
         connection: DatabaseClient,
         sql: str,
         parameters: list[Any],
         column_converters: list[ColumnConverter],
-        model: type[Model] | None = None,
-        value_fields: tuple[ValueField, ...] | None = None,
+        *,
+        retry_read: bool = False,
     ) -> list[Any]:
-        """Runs a statement selecting the columns and builds the rows.
+        """Fetch and materialize through the same layout used by streamed batches."""
+        result = await self.fetch_result(connection, sql, parameters, retry_read=retry_read)
+        return self.convert_batch(connection, result, column_converters)
 
-        Args:
-            connection: The connection.
-            sql: The SQL.
-            parameters: Its parameters.
-            column_converters: Each column's alias and decoder.
-            model: The queried model.
-            value_fields: What each column is read as - the rows are then built in one
-                ``rust.native.rows`` call where the driver's rows are read by position.
-
-        Returns:
-            The rows.
-        """
-        raise NotImplementedError()
-
-    def read_with_accelerator(
-        self, reader: Any, rows: Sequence[Any], column_converters: list[ColumnConverter]
-    ) -> list[Any]:
-        """The rows of positional driver rows whose columns are the selected ones in order, built by
-        a ``rust.native.rows.ValuesReader``.
-
-        Args:
-            reader: The reader of the selected columns.
-            rows: The driver rows.
-            column_converters: Each column's alias and decoder.
-
-        Returns:
-            The rows.
-        """
-        raise NotImplementedError()
+    @staticmethod
+    async def fetch_result(
+        connection: DatabaseClient, sql: str, parameters: list[Any], *, retry_read: bool = False
+    ) -> StatementResult:
+        """Execute once and preserve driver metadata alongside the ordinary rows."""
+        return await connection.execute(
+            sql,
+            parameters,
+            returns_rows=True,
+            rows_by_position=connection.features.supports_positional_rows,
+            retry_read=retry_read,
+        )
 
     def convert_batch(
         self,
         connection: DatabaseClient,
         result: StatementResult,
         column_converters: list[ColumnConverter],
-        model: type[Model] | None = None,
-        value_fields: tuple[ValueField, ...] | None = None,
     ) -> list[Any]:
-        """The rows of a batch of driver rows - in one ``rust.native.rows`` call when the value
-        fields are known and the rows are read by position, else one at a time.
+        """Decode one batch, selecting column positions once for the whole batch."""
+        if not result.rows:
+            return []
+        reader = self.get_result_reader(connection, result, column_converters)
+        return [reader(row) for row in result.rows]
 
-        Args:
-            connection: The connection the rows were read on.
-            result: The driver rows, at least one, with their column names.
-            column_converters: Each column's alias and decoder.
-            model: The queried model.
-            value_fields: What each column is read as.
+    async def stream_batches(
+        self,
+        connection: DatabaseClient,
+        sql: str,
+        parameters: list[Any],
+        column_converters: list[ColumnConverter],
+        chunk_size: int,
+    ) -> AsyncGenerator[list[Any]]:
+        """Stream through one decoder bound to the first nonempty batch's column metadata.
 
-        Returns:
-            The rows.
+        All batches belong to the same driver result. Closing or failing the consumer
+        closes the underlying cursor, including when no nonempty batch was received.
         """
-        rows = result.rows
-        if not connection.features.supports_positional_rows:
-            return [self.convert(dict(row), column_converters) for row in rows]
-        column_names = result.column_names
-        if (
-            model is not None
-            and value_fields is not None
-            and HydrateAccelerator.module is not None
-            and not self.has_composite_outputs
-            and list(column_names) == [alias for alias, _function in column_converters]
-        ):
-            return HydrateAccelerator.run_or_fall_back(
-                lambda: self.read_with_accelerator(
-                    HydrateAccelerator.get_values_reader(model, value_fields, connection), rows, column_converters
-                ),
-                lambda: [self.convert(dict(zip(column_names, row, strict=True)), column_converters) for row in rows],
-            )
-        # Rows read by position may read by position alone.
-        return [self.convert(dict(zip(column_names, row, strict=True)), column_converters) for row in rows]
+        reader = None
+        async with contextlib.aclosing(connection.stream_batches(sql, parameters, chunk_size=chunk_size)) as batches:
+            async for rows in batches:
+                if not rows:
+                    yield []
+                    continue
+                if reader is None:
+                    reader = self.get_result_reader(connection, StatementResult(len(rows), rows), column_converters)
+                yield [reader(row) for row in rows]
 
-    def convert(self, row: dict[str, Any], column_converters: list[ColumnConverter]) -> Any:
-        """Builds one row from a fetched row.
+    def get_result_reader(
+        self,
+        connection: DatabaseClient,
+        result: StatementResult,
+        column_converters: list[ColumnConverter],
+    ) -> Callable[[Any], Any]:
+        """Bind one decoder for ordinary and additional rows of the same driver result."""
+        layout = self.get_layout(
+            column_converters,
+            result.column_names if connection.features.supports_positional_rows else None,
+        )
+        return partial(self.read_row, layout=layout)
 
-        Args:
-            row: The fetched row, by column alias.
-            column_converters: Each column's alias and decoder.
+    def read_row(self, row: Any, *, layout: RowLayout) -> Any:
+        """Apply the bound column layout and assemble the requested row shape."""
+        return self.make_row(layout.read(row))
 
-        Returns:
-            The row.
-        """
+    def get_layout(
+        self,
+        column_converters: list[ColumnConverter],
+        column_names: Sequence[str] | None = None,
+    ) -> RowLayout:
+        """Bind selected aliases to this result's keys, including composite groups."""
+        columns = tuple(
+            RowColumn(column_names.index(alias) if column_names is not None else alias, converter)
+            for alias, converter in column_converters
+        )
+        groups = tuple(len(aliases) for aliases in self.output_column_aliases) if self.has_composite_outputs else ()
+        return RowLayout(columns, groups)
+
+    def make_row(self, values: tuple[Any, ...]) -> Any:
+        """Assemble an already decoded row in the requested result shape."""
         raise NotImplementedError()
 
     def get_reader(self, position: int, alias: str) -> Callable[[Any], Any]:

@@ -30,13 +30,7 @@ class Hare(metaclass=HareMeta):
         Raises:
             ConfigurationError: There is none - ``Hare.init()`` hasn't run.
         """
-        context = HareContext.get_current()
-        if context is None:
-            raise ConfigurationError(
-                "Hare ORM is not initialized. Call Hare.init() first "
-                "or use 'async with HareContext()' for explicit context management."
-            )
-        return context
+        return HareContext.require_current()
 
     @classproperty
     def apps(cls) -> Apps | None:
@@ -59,7 +53,7 @@ class Hare(metaclass=HareMeta):
         _create_db: bool = False,
         use_timezone: bool = True,
         timezone: str = DEFAULT_TIMEZONE,
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         table_name_generator: Callable[[type[Model]], str] | None = None,
         slow_query_threshold_ms: float = SLOW_QUERY_THRESHOLD_MS,
         _enable_global_fallback: bool = False,

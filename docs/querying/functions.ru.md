@@ -13,6 +13,10 @@
 меньше аргументов, чем она принимает (`Upper("title", "x")`, `Coalesce("title")`), даёт `QueryError`
 при создании.
 
+`ArrayAgg` и `ArrayItem` также экспортируются из `hare.query.functions` для баз с массивами.
+См. [агрегацию массивов и доступ к элементам в PostgreSQL](../dialects/postgresql/functions.ru.md) и
+[агрегаты массивов ClickHouse](../dialects/clickhouse/aggregates.ru.md). В SQLite нет типа колонки массива.
+
 ## <a id="aggregates"></a>Агрегаты
 
 | Класс | SQL | Примечания |
@@ -37,7 +41,8 @@ ClickHouse пишут его как `COUNT(*)` и не читают колонк
 
 Показатель по всей совокупности или по выборке при `sample=True`; `distinct=`/`_filter=` — как у
 агрегатов выше. `NULL` пропускаются; без значений (меньше двух при `sample=True`) результат `None`. Тип —
-как у `Avg`: `float` для целых и `float`; для `DecimalField` — не округлённый `Decimal`, который
+как у `Avg`: `float` для чисел с плавающей точкой; для целых — точный `Decimal` на PostgreSQL и `float`
+на SQLite и ClickHouse; для `DecimalField` — не округлённый `Decimal`, который
 PostgreSQL считает по своим правилам numeric, и `float` в ClickHouse, который считает статистики
 десятичных как числа с плавающей точкой (`Features.computes_decimal_statistics_exactly`). В SQLite таких
 функций нет — hare регистрирует свои.
@@ -74,6 +79,12 @@ await Author.objects.aggregate(with_books=Count("id", _filter=Exists(Book.object
 `week_day` считает от 1 (воскресенье) до 7, `iso_week_day` — от 1 (понедельник) до 7. Часть или
 округление, которых у значения нет (час у `DateField`, месяц у `TimeField`), дают `FieldError`, как и
 аргумент, который не является датой, временем или датой-временем.
+
+При переводе часов на долю часа `TruncHour` может давать разные результаты на разных базах.
+PostgreSQL и ClickHouse вычитают местные минуты и секунды из исходного момента, SQLite усекает местное
+время. Для `2024-04-06 15:07 UTC` в `Australia/Lord_Howe` результаты соответственно `14:30 UTC`
+(местное `01:30`) и `14:00 UTC` (местное `01:00`). В таких переходах нельзя рассчитывать на одинаковую
+группировку по часам между базами.
 
 ```python
 await Loan.objects.annotate(month=TruncMonth("lent_at")).group_by("month").annotate(total=Count("id")).values("month", "total")
@@ -143,10 +154,10 @@ await Branch.objects.annotate(distance=Sqrt(Power("x", 2) + Power("y", 2))).filt
 | Класс | Результат |
 |---|---|
 | `Left(text, length)`, `Right(text, length)` | первые/последние символы; при отрицательной длине столько символов отбрасывается с другого конца |
-| `Substr(text, position, length=None)` | с позиции, считая с 1, собственным `substr` базы: PostgreSQL считает позиции до 1 пустыми, а отрицательную длину отвергает; SQLite считает отрицательную позицию с конца, а при отрицательной длине берёт символы перед позицией; ClickHouse (`substringUTF8`) отвергает позицию 0, считает отрицательную позицию с конца, а при отрицательной длине оставляет символы в конце |
+| `Substr(text, position)`, `Substr(text, position, length)` | с позиции, считая с 1, собственным `substr` базы: PostgreSQL считает позиции до 1 пустыми, а отрицательную длину отвергает; SQLite считает отрицательную позицию с конца, а при отрицательной длине берёт символы перед позицией; ClickHouse (`substringUTF8`) отвергает позицию 0, считает отрицательную позицию с конца, а при отрицательной длине оставляет символы в конце |
 | `StrIndex(text, substring)` | позиция первого вхождения, считая с 1, или `0`, если вхождения нет, — `int` |
 | `Replace(text, old, new="")`, `Repeat(text, count)`, `Reverse(text)` | текст |
-| `LPad(text, length, fill=" ")`, `RPad(...)` | дополнено до `length`; более длинный текст обрезается до неё |
+| `LPad(text, length, fill=" ")`, `RPad(...)` | дополнено до `length`; более длинный текст обрезается до неё. Пустой `fill` оставляет короткий текст неизменным в PostgreSQL/SQLite; ClickHouse дополняет пробелами. Отрицательная длина даёт пустой текст в PostgreSQL/SQLite и ошибку базы в ClickHouse |
 | `LTrim(text)`, `RTrim(text)` | без пробелов в начале/конце |
 | `Chr(code)`, `Ord(text)` | символ по коду; код первого символа — собственные `chr`/`ascii` базы (`Ord("")` в SQLite — `NULL`; `Chr` в ClickHouse отвергает только код, которому не соответствует ни один символ, `Chr(0)` — `\x00`) |
 | `MD5`, `SHA1`, `SHA224`, `SHA256`, `SHA384`, `SHA512(text)` | хэш текста в UTF-8 шестнадцатеричными цифрами в нижнем регистре |

@@ -17,33 +17,13 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class Coalesce(Function):
-    """The first of its arguments that isn't NULL, read by the first argument's field:
-    ``Coalesce("nickname", "name", "-")``."""
+    """The first argument that isn't NULL, read using the common compatible type of all arguments:
+    ``Coalesce("nickname", F("name"), "-")``. Strings after the first argument are literal values."""
 
     database_function = functions.Coalesce
     default_value_counts = (1, None)
     returns_an_argument = True
-    # The result is decoded by the first argument's field.
     populate_field_object = True
-
-    @staticmethod
-    def _default_is_compatible(output_field: Field[Any], default_value: Any, default_result: ExpressionResult) -> bool:
-        """Whether a default value fits the main argument's field. Ruled out only for a numeric field
-        given a default wider than it holds.
-
-        Args:
-            output_field: The main argument's output field.
-            default_value: The original default value.
-            default_result: The default value resolved.
-
-        Returns:
-            False when the field's type can't represent the default.
-        """
-        return OutputFieldCompatibility.is_value_compatible(
-            output_field,
-            default_value,
-            default_result.output_field,
-        )
 
     def _get_output_field(
         self, function_arg: ExpressionResult, default_results: list[ExpressionResult]
@@ -109,7 +89,9 @@ class Coalesce(Function):
             elif (
                 output_field is not None
                 and not isinstance(literal_value, (Expression, Term))
-                and not self._default_is_compatible(output_field, default_value, default_result)
+                and not OutputFieldCompatibility.is_value_compatible(
+                    output_field, default_value, default_result.output_field
+                )
                 and (cast_sql_type := Value.get_cast_sql_type(literal_value, Value.NUMBER_LITERAL_SQL_TYPE))
                 is not None
             ):

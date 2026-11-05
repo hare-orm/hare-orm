@@ -48,6 +48,6 @@ class StatementResult(tuple[int | None, Sequence[Any]]):
         first row's names when the rows read by name; empty for no rows read by name."""
         description = self.description
         if description is not None:
-            return tuple([column[0] for column in description])
+            return tuple(map(itemgetter(0), description))
         rows = self.rows
         return tuple(rows[0].keys()) if rows else ()

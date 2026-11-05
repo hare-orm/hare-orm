@@ -1,36 +1,23 @@
 from __future__ import annotations
 
 import datetime
-import re
 import struct
 import uuid
 from collections.abc import Collection, Mapping
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.dialects.clickhouse.constants import (
-    CLICKHOUSE_COLUMNS_SQL,
     CLICKHOUSE_CURRENT_DATABASE_SQL,
     CLICKHOUSE_DATABASE_EXISTS_SQL,
-    CLICKHOUSE_DEFAULT_INDEX_TYPE,
     CLICKHOUSE_DICTIONARY_NAMES_SQL,
-    CLICKHOUSE_EPHEMERAL_COLUMN_TODO,
-    CLICKHOUSE_EPHEMERAL_COLUMN_TYPE,
-    CLICKHOUSE_GENERATED_COLUMN_TYPES,
     CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS,
     CLICKHOUSE_INDEX_TYPE_ARGUMENTS,
-    CLICKHOUSE_INDEXES_SQL,
-    CLICKHOUSE_OBJECT_DEFINITIONS_SQL,
-    CLICKHOUSE_OBJECT_PART_TYPES,
     CLICKHOUSE_TABLE_EXISTS_SQL,
     CLICKHOUSE_TABLE_NAMES_SQL,
-    CLICKHOUSE_TABLE_SQL,
     CLICKHOUSE_TYPE_MAP,
-    CLICKHOUSE_TYPE_WRAPPERS,
     CLICKHOUSE_VIEWS_SQL,
-    CLICKHOUSE_VIRTUAL_COLUMN_TYPE,
 )
-from hare.dialects.clickhouse.drivers.clickhouse_shared_variant_values import ClickhouseSharedVariantValues
 from hare.dialects.clickhouse.indexes import (
     BloomFilterIndex,
     MinMaxIndex,
@@ -38,19 +25,18 @@ from hare.dialects.clickhouse.indexes import (
     SetIndex,
     TokenBloomFilterIndex,
 )
-from hare.dialects.clickhouse.introspection.clickhouse_check_constraints import ClickhouseCheckConstraints
-from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
+from hare.dialects.clickhouse.introspection.clickhouse_catalog_parts import ClickhouseCatalogParts
+from hare.dialects.clickhouse.introspection.clickhouse_catalog_reader import ClickhouseCatalogReader
+from hare.dialects.clickhouse.introspection.clickhouse_declaration_mapper import ClickhouseDeclarationMapper
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.introspection.clickhouse_type_parser import ClickhouseTypeParser
 from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_CAST_DEFAULT_PATTERN,
     CLICKHOUSE_DATE_DEFAULT_PATTERN,
     CLICKHOUSE_DECIMAL_DEFAULT_PATTERN,
-    CLICKHOUSE_ESCAPED_CHARACTERS,
     CLICKHOUSE_FLOAT_DEFAULT_PATTERN,
     CLICKHOUSE_MOMENT_DEFAULT_PATTERN,
     CLICKHOUSE_QUOTED_STRING_PATTERN,
-    CLICKHOUSE_STRING_ESCAPE_PATTERN,
     CLICKHOUSE_TEXT_VALUE_DEFAULT_PATTERN,
     CLICKHOUSE_WIDE_INTEGER_DEFAULT_PATTERN,
 )
@@ -59,17 +45,19 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_INSPECTED_ENUM_NAME,
     CLICKHOUSE_INT_ENUM_FIELD_PATH,
 )
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
 from hare.inspectdb.exceptions import SchemaNotFoundError
+from hare.inspectdb.introspection.catalog_snapshot import CatalogSnapshot
 from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.enums import SchemaPartType
-from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.inspectdb.introspection.table_info import TableInfo
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.dialect import Dialect
 
 
 class ClickhouseIntrospector(SchemaIntrospector):
@@ -161,7 +149,7 @@ class ClickhouseIntrospector(SchemaIntrospector):
         type_name, arguments = ClickhouseTypeNames.get_type_parts(type_sql)
         if type_name not in {"Enum8", "Enum16"} or isinstance(value, bool) or not isinstance(value, int | str):
             return value
-        numbers_by_label = ClickhouseSharedVariantValues.get_enum_numbers(arguments)
+        numbers_by_label = ClickhousePhysicalType.get_enum_members(arguments)
         specification = ClickhouseTypeParser.get_enum_specification(
             type_name, arguments, CLICKHOUSE_INSPECTED_ENUM_NAME
         )
@@ -177,22 +165,7 @@ class ClickhouseIntrospector(SchemaIntrospector):
         quoted_match = CLICKHOUSE_QUOTED_STRING_PATTERN.fullmatch(literal_sql)
         if quoted_match is None:
             return None
-        return CLICKHOUSE_STRING_ESCAPE_PATTERN.sub(cls.get_escaped_character, quoted_match.group(1))
-
-    @staticmethod
-    def get_escaped_character(escape_match: re.Match[str]) -> str:
-        """The character an escape of a string literal stands for.
-
-        Args:
-            escape_match: The escape, without its backslash in its group.
-
-        Returns:
-            The character.
-        """
-        escaped = escape_match.group(1)
-        if len(escaped) == 3:
-            return chr(int(escaped[1:], 16))
-        return CLICKHOUSE_ESCAPED_CHARACTERS.get(escaped, escaped)
+        return ClickhouseSqlParts.get_string_text(literal_sql)
 
     @classmethod
     async def fetch_default_schema(cls, connection: DatabaseClient) -> str:
@@ -228,129 +201,21 @@ class ClickhouseIntrospector(SchemaIntrospector):
     async def fetch_object_parts(
         cls, connection: DatabaseClient, schema: str, object_names: Mapping[SchemaPartType, Collection[str]]
     ) -> list[SchemaPart]:
-        if not any(object_names.get(part_type) for part_type in CLICKHOUSE_OBJECT_PART_TYPES.values()):
-            return []
-        parts: list[SchemaPart] = []
-        for row in await connection.execute_dicts(CLICKHOUSE_OBJECT_DEFINITIONS_SQL, [schema]):
-            part_type = CLICKHOUSE_OBJECT_PART_TYPES[str(row["engine"])]
-            if row["name"] in object_names.get(part_type, ()):
-                parts.append(SchemaPart(part_type, "", row["name"], {"query": row["create_table_query"]}))
-        return parts
+        snapshot = await ClickhouseCatalogReader.read_objects(connection, schema, object_names)
+        return ClickhouseCatalogParts.get_objects(snapshot)
 
     @classmethod
-    async def fetch_tables(cls, connection: DatabaseClient, tables: list[str], schema: str) -> list[TableInfo]:
-        default_schema = await cls.fetch_default_schema(connection)
-        return [await cls.fetch_table(connection, table, schema, schema == default_schema) for table in tables]
+    def get_table_infos(cls, snapshot: CatalogSnapshot, dialect: Dialect) -> list[TableInfo]:
+        return ClickhouseDeclarationMapper(cls).get_tables(snapshot)
 
     @classmethod
-    async def fetch_table(
-        cls, connection: DatabaseClient, table: str, schema: str, is_in_default_schema: bool
-    ) -> TableInfo:
-        """Reads one table: its columns, primary key, data skipping indexes, storage options and
-        comment.
+    def get_table_parts(cls, snapshot: CatalogSnapshot, table_infos: list[TableInfo]) -> list[SchemaPart]:
+        return ClickhouseCatalogParts.get(snapshot, table_infos)
 
-        Args:
-            connection: The connection.
-            table: The table.
-            schema: The database it lives in.
-            is_in_default_schema: Whether that is the connection's database.
-
-        Returns:
-            The table.
-        """
-        table_rows = await connection.execute_dicts(CLICKHOUSE_TABLE_SQL, [schema, table])
-        column_rows = await connection.execute_dicts(CLICKHOUSE_COLUMNS_SQL, [schema, table])
-        column_names = {str(row["name"]) for row in column_rows}
-        # A key of the primary key that is no column - the expression a sample is picked by - is none
-        # of a model's key.
-        primary_key_columns = [
-            identifier
-            for key_sql in ClickhouseSqlParts.split(
-                ClickhouseSqlParts.get_unwrapped(str(table_rows[0]["primary_key"])) if table_rows else ""
-            )
-            if (identifier := ClickhouseSqlParts.get_identifier(ClickhouseSqlParts.get_unwrapped(key_sql)))
-            in column_names
-        ]
-        indexes: list[IndexInfo] = []
-        column_indexes: list[IndexInfo] = []
-        for row in await connection.execute_dicts(CLICKHOUSE_INDEXES_SQL, [schema, table]):
-            expression = ClickhouseSqlParts.get_unwrapped(str(row["expr"]))
-            # An index over columns lists them, comma-separated - a name quoted when it isn't plain
-            # ASCII; one with a key of another expression is rebuilt from its keys' SQL, each kept whole.
-            parts = [part.strip() for part in ClickhouseSqlParts.split(expression)]
-            part_identifiers = [ClickhouseSqlParts.get_identifier(part) for part in parts]
-            reads_columns_only = all(identifier in column_names for identifier in part_identifiers)
-            index_columns = cast("list[str]", part_identifiers) if reads_columns_only else []
-            # A minmax index of granularity 1 is the one hare writes for an index of no type. Over one
-            # column it is a field flag, as a plain single-column index is on the other databases.
-            index_type = str(row["type"])
-            granularity = int(row["granularity"])
-            is_default_type = index_type == CLICKHOUSE_DEFAULT_INDEX_TYPE and granularity == 1
-            if is_default_type and len(index_columns) == 1:
-                column_indexes.append(IndexInfo(columns=index_columns, is_unique=False, name=str(row["name"])))
-            else:
-                indexes.append(
-                    IndexInfo(
-                        columns=index_columns,
-                        is_unique=False,
-                        name=str(row["name"]),
-                        expression_terms=None if reads_columns_only else parts,
-                        index_type="" if is_default_type else index_type,
-                        storage_parameters={}
-                        if is_default_type
-                        else cls.get_index_storage_parameters(index_type, str(row["type_full"]), granularity),
-                    )
-                )
-        indexed_columns = {index.columns[0] for index in column_indexes}
-        columns = []
-        for row in column_rows:
-            db_type, nullable = cls.unwrap_type(str(row["type"]))
-            precision, scale = cls.get_decimal_precision_scale(db_type)
-            name = str(row["name"])
-            columns.append(
-                ColumnInfo(
-                    name=name,
-                    db_type=db_type,
-                    nullable=nullable,
-                    is_pk=name in primary_key_columns,
-                    is_unique=False,
-                    pk_position=primary_key_columns.index(name) + 1 if name in primary_key_columns else None,
-                    numeric_precision=precision,
-                    numeric_scale=scale,
-                    db_default=cls.get_column_default(str(row["default_expression"]), db_type)
-                    if row["default_type"] == "DEFAULT"
-                    else None,
-                    generated_expression=str(row["default_expression"])
-                    if row["default_type"] in CLICKHOUSE_GENERATED_COLUMN_TYPES
-                    else None,
-                    generated_stored=row["default_type"] != CLICKHOUSE_VIRTUAL_COLUMN_TYPE,
-                    description=str(row["comment"]) or None,
-                    full_type=str(row["type"]),
-                    has_index=name in indexed_columns,
-                    todo_reason=CLICKHOUSE_EPHEMERAL_COLUMN_TODO
-                    if row["default_type"] == CLICKHOUSE_EPHEMERAL_COLUMN_TYPE
-                    else None,
-                )
-            )
-        return TableInfo(
-            name=table,
-            schema=schema,
-            is_in_default_schema=is_in_default_schema,
-            columns=columns,
-            indexes=indexes,
-            column_indexes=column_indexes,
-            table_description=(str(table_rows[0]["comment"]) or None) if table_rows else None,
-            check_constraints=ClickhouseCheckConstraints.get_check_constraints(
-                str(table_rows[0]["create_table_query"])
-            )
-            if table_rows
-            else [],
-            table_options=await ClickhouseObservedTableOptions.fetch(
-                connection, table_rows[0], column_rows, primary_key_columns
-            )
-            if table_rows
-            else None,
-        )
+    @classmethod
+    async def fetch_catalog(cls, connection: DatabaseClient, tables: list[str], schema: str) -> CatalogSnapshot:
+        """Capture raw catalog metadata without reconstructing model declarations."""
+        return await ClickhouseCatalogReader.read_tables(connection, tables, schema)
 
     @classmethod
     def column_types_differ(cls, declared_type: str, column: ColumnInfo) -> bool:
@@ -406,16 +271,8 @@ class ClickhouseIntrospector(SchemaIntrospector):
         Returns:
             The type, and whether the column is nullable.
         """
-        nullable = False
-        unwrapped = True
-        while unwrapped:
-            unwrapped = False
-            for wrapper in CLICKHOUSE_TYPE_WRAPPERS:
-                if type_sql.startswith(wrapper) and type_sql.endswith(")"):
-                    nullable = nullable or wrapper == CLICKHOUSE_TYPE_WRAPPERS[0]
-                    type_sql = type_sql[len(wrapper) : -1]
-                    unwrapped = True
-        return type_sql, nullable
+        physical_type = ClickhousePhysicalType.from_sql(type_sql)
+        return physical_type.unwrapped.sql, physical_type.nullable
 
     @staticmethod
     def get_decimal_precision_scale(db_type: str) -> tuple[int | None, int | None]:
@@ -427,7 +284,7 @@ class ClickhouseIntrospector(SchemaIntrospector):
         Returns:
             The precision and scale, None for any other type.
         """
-        if not db_type.startswith("Decimal(") or not db_type.endswith(")"):
+        physical_type = ClickhousePhysicalType.from_sql(db_type)
+        if physical_type.name != "Decimal":
             return None, None
-        precision_sql, _, scale_sql = db_type[len("Decimal(") : -1].partition(",")
-        return int(precision_sql), int(scale_sql or 0)
+        return physical_type.precision, physical_type.scale

@@ -12,8 +12,9 @@ use std::sync::Arc;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::Row;
 
-use crate::pg::client::{unspecified_type, StatementCaching};
+use crate::pg::client::StatementCaching;
 use crate::pg::error::DriverError;
+use crate::pg::parameter_values::ParameterValues;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::value::Value;
 
@@ -26,7 +27,7 @@ pub(crate) fn binds_in_one_round_trip(caching: &StatementCaching, params: &[Valu
 pub(crate) fn typed_parameters(params: &[Value]) -> Vec<(&(dyn ToSql + Sync), Type)> {
     params
         .iter()
-        .map(|value| (value as &(dyn ToSql + Sync), value.pg_type().unwrap_or_else(unspecified_type)))
+        .map(|value| (value as &(dyn ToSql + Sync), value.pg_type().unwrap_or_else(ParameterValues::unspecified_type)))
         .collect()
 }
 
@@ -41,7 +42,7 @@ pub(crate) async fn get_result_columns(
     if let Some(first_row) = rows.first() {
         return Ok(ResultColumns::of_columns(first_row.columns()));
     }
-    let types: Vec<Type> = params.iter().map(|value| value.pg_type().unwrap_or_else(unspecified_type)).collect();
+    let types = ParameterValues::types(params);
     let statement = client.prepare_typed(sql, &types).await?;
     Ok(ResultColumns::of_statement(&statement))
 }

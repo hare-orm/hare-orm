@@ -22,8 +22,6 @@ from tests.contrib.request_query.models import (
     Visit,
 )
 
-REQUIRES = ("request-query",)
-
 
 def _get_request_query_classes() -> list[type]:
     classes: list[type] = []

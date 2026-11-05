@@ -51,8 +51,8 @@ class PostgresqlTextRenderers:
         """``CONCAT()`` - it reads a NULL argument as empty text."""
         return f"CONCAT({','.join(function.get_arg_sql(argument, sql_context) for argument in function.args)})"
 
-    @classmethod
-    def render_cast_to(cls, function: functions.CastTo, sql_context: SqlContext) -> str:
+    @staticmethod
+    def render_cast_to(function: functions.CastTo, sql_context: SqlContext) -> str:
         """The cast - a naive timestamp read or made in the machine's local zone."""
         term_sql = function.get_arg_sql(function.args[0], sql_context)
         if not function.is_aware and (function.source == CastType.DATETIME) != (function.target == CastType.DATETIME):

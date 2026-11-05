@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 from typing import Any, ClassVar
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range import Range
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
@@ -11,6 +10,7 @@ from hare.fields import Field
 from hare.fields.constants import NAIVE_INFINITY_DATETIMES
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.fields.data.temporal.parse_datetime import parse_datetime
+from hare.fields.data.temporal.temporal_values import TemporalValues
 from hare.time import Timezone
 
 
@@ -27,9 +27,8 @@ class DateTimeRangeField(RangeField):
 
     SQL_TYPE = "tstzrange"
     ELEMENT_SQL_TYPE = "timestamptz"
-    NATIVE_BOUND_TYPE = RangeBoundType.DATETIME
 
-    #: Shared field a bound is read through - the statement plans hold output fields weakly.
+    #: Shared field used to read timestamp bounds and describe their output type.
     BOUND_FIELD: ClassVar[DatetimeField[Any]] = DatetimeField()
 
     def get_bound_field(self) -> Field[Any]:
@@ -124,13 +123,7 @@ class DateTimeRangeField(RangeField):
         if value is None:
             return value
         if isinstance(value, str):
-            validation_error = None
-            try:
-                value = parse_datetime(value)
-            except (ValueError, TypeError) as error:
-                validation_error = self.get_validation_error(error, value)
-            if validation_error is not None:
-                raise validation_error
+            value = TemporalValues.parse_text(self, value, parse_datetime, catch=(ValueError, TypeError))
         if not isinstance(value, datetime.datetime):
             raise ValidationError(
                 f"{self.model_field_name}: expected a datetime, got {self.get_value_for_message(value)}"

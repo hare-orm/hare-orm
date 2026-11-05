@@ -1,18 +1,21 @@
 """QuerySet methods a dialect registers (QuerySetExtensions) - recorded on the queryset, applied
 through the implementation of the connection's dialect, refused on another dialect."""
 
+import dataclasses
 import sys
 import types
+from types import MappingProxyType
 
 import pytest
 
 from hare import fields
 from hare.contrib.test import requires_features
 from hare.core.hare_context import HareContext
+from hare.core.registries import Registries
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
-from hare.exceptions import ConfigurationError, UnSupportedError
+from hare.exceptions import ConfigurationError, QueryError, UnSupportedError
 from hare.models import Model
 from hare.query.expressions import ArrayJoin, AsofJoin, OuterReference, Q
 from hare.query.plans.statement.statement_plans import StatementPlans
@@ -36,7 +39,7 @@ def named(builder: QueryBuilder, names: list[str]) -> QueryBuilder:
 
 @pytest.fixture
 def first_rows_method(monkeypatch):
-    monkeypatch.setattr(QuerySetExtensions, "registered", {})
+    monkeypatch.setattr(Registries, "snapshot", dataclasses.replace(Registries.snapshot, methods=MappingProxyType({})))
     QuerySetExtensions.register("first_rows", SqliteDialect, first_rows)
     QuerySetExtensions.register("first_values", SqliteDialect, first_values)
     QuerySetExtensions.register("named", SqliteDialect, named)
@@ -54,9 +57,9 @@ class DeferredExtensionReading(Model):
 
 @pytest.mark.database_independent
 def test_a_method_can_not_shadow_a_queryset_attribute(first_rows_method):
-    with pytest.raises(ConfigurationError, match="can't be named 'filter'"):
+    with pytest.raises(ConfigurationError, match="cannot be named 'filter'"):
         QuerySetExtensions.register("filter", SqliteDialect, first_rows)
-    with pytest.raises(ConfigurationError, match="can't be named '_private'"):
+    with pytest.raises(ConfigurationError, match="cannot be named '_private'"):
         QuerySetExtensions.register("_private", SqliteDialect, first_rows)
 
 
@@ -129,7 +132,7 @@ async def test_a_plan_hit_still_refuses_a_method_no_longer_registered(db, first_
     await Tournament.objects.create(name="a")
     queryset = Tournament.objects.all().first_rows("c")
     assert len(await queryset) == 1
-    monkeypatch.setattr(QuerySetExtensions, "registered", {})
+    monkeypatch.setattr(Registries, "snapshot", dataclasses.replace(Registries.snapshot, methods=MappingProxyType({})))
     with pytest.raises(UnSupportedError, match=r"Tournament.first_rows\(\) is a method of the no longer registered"):
         await queryset
 
@@ -177,21 +180,21 @@ def first_by_name(builder: QueryBuilder, extension_query, count: int) -> QueryBu
     return builder.orderby(extension_query.get_expression("name").term).limit(count)
 
 
-async def tagged(extension_query, tag: str):
-    return tag, await extension_query.query._execute()
+def tagged(result, tag: str):
+    return tag, result.result
 
 
 @pytest.fixture
 def query_reading_methods(db, monkeypatch):
-    monkeypatch.setattr(QuerySetExtensions, "registered", {})
+    monkeypatch.setattr(Registries, "snapshot", dataclasses.replace(Registries.snapshot, methods=MappingProxyType({})))
     for dialect_class in {SqliteDialect, PostgresqlDialect, type(Tournament._meta.connection.dialect)}:
         QuerySetExtensions.register("matching", dialect_class, matching, reads_query=True, takes_condition=True)
         QuerySetExtensions.register("first_by_name", dialect_class, first_by_name, reads_query=True, changes_rows=True)
-        QuerySetExtensions.register("tagged", dialect_class, lambda builder, tag: builder, run_query=tagged)
+        QuerySetExtensions.register("tagged", dialect_class, lambda builder, tag: builder, transform_result=tagged)
 
 
 def test_a_method_takes_a_condition_alike_on_every_dialect(query_reading_methods):
-    with pytest.raises(ConfigurationError, match="takes_condition=True"):
+    with pytest.raises(ConfigurationError, match="same takes_condition"):
         QuerySetExtensions.register("matching", type("OtherDialect", (Dialect,), {"name": "other"}), first_rows)
 
 
@@ -220,10 +223,62 @@ async def test_count_and_exists_count_the_rows_a_method_keeps(db, query_reading_
 
 
 @pytest.mark.asyncio
-async def test_a_method_runs_the_query(db, query_reading_methods):
+async def test_a_method_shapes_the_executed_result(db, query_reading_methods):
     await Tournament.objects.create(name="a")
     tag, names = await Tournament.objects.all().tagged("names").values_list("name", flat=True)
     assert (tag, names) == ("names", ["a"])
+
+
+@pytest.mark.asyncio
+async def test_result_handlers_do_not_replace_each_other(db, query_reading_methods):
+    with pytest.raises(QueryError, match="Only one result-shaping extension"):
+        await Tournament.objects.tagged("first").tagged("second").values("name")
+
+
+@pytest.mark.asyncio
+async def test_iterator_yields_rows_without_applying_a_whole_result_handler(db, query_reading_methods):
+    for name in ("a", "b", "c"):
+        await Tournament.objects.create(name=name)
+    queryset = Tournament.objects.tagged("names").order_by("name").values_list("name", flat=True)
+    assert [row async for row in queryset.iterator(chunk_size=1)] == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_extension_summary_reuses_the_declaration_and_reads_all_metric_columns(db, query_reading_methods):
+    for name in ("c", "a", "b"):
+        await Tournament.objects.create(name=name)
+    from hare.query.functions import Max
+
+    queryset = Tournament.objects.first_by_name(2)
+    count = queryset.count()
+    for _ in range(2):
+        assert await count == 2
+        assert await queryset.aggregate(last_name=Max("name")) == {"last_name": "b"}
+        assert await queryset.order_by("name").values_list("name", flat=True) == ["a", "b"]
+
+
+@pytest.mark.database_independent
+def test_extension_effects_are_selected_for_the_bound_dialect(monkeypatch):
+    from types import SimpleNamespace
+
+    from hare.query.queryset.extensions.query_set_extension import QuerySetExtension
+    from hare.query.queryset.extensions.query_set_extension_call import QuerySetExtensionCall
+
+    implementations = {
+        "pick_rows": {
+            SqliteDialect: QuerySetExtension(lambda builder: builder, changes_rows=False),
+            PostgresqlDialect: QuerySetExtension(lambda builder: builder, changes_rows=True),
+        },
+    }
+    monkeypatch.setattr(QuerySetExtensions, "get_registered", lambda: implementations)
+    for dialect_class, expected in ((SqliteDialect, False), (PostgresqlDialect, True)):
+        query = SimpleNamespace(
+            model=Tournament,
+            dialect=object.__new__(dialect_class),
+            _bound_extensions=None,
+            _extension_calls=(QuerySetExtensionCall("pick_rows"),),
+        )
+        assert QuerySetExtensions.changes_rows(query) is expected
 
 
 @pytest.mark.asyncio

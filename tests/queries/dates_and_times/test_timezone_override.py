@@ -10,8 +10,7 @@ import pytest
 
 from hare.exceptions import ConfigurationError
 from hare.query.functions import Extract, TruncDay
-from hare.time import Timezone
-from hare.time.zone_info import ZoneInfo
+from hare.time import Timezone, ZoneInfo
 from tests.shared_models.testmodels import DatetimeFields
 
 UTC = datetime.UTC
@@ -20,6 +19,15 @@ LATE_EVENING = datetime.datetime(2026, 3, 28, 22, 30, tzinfo=UTC)
 #: 00:30 and 01:30 UTC on March 29 - Berlin moves to summer time at 01:00 UTC: 01:30 CET, 03:30 CEST.
 BEFORE_DST = datetime.datetime(2026, 3, 29, 0, 30, tzinfo=UTC)
 AFTER_DST = datetime.datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
+
+
+@pytest.mark.database_independent
+@pytest.mark.requires("tzlocal")
+@pytest.mark.parametrize("month", [1, 7])
+def test_local_zone_matches_the_system_clock_in_winter_and_summer(month):
+    moment = datetime.datetime(2024, month, 15, 12, tzinfo=UTC)
+    zone = ZoneInfo(Timezone.get_local_zone_name())
+    assert moment.astimezone(zone).utcoffset() == moment.astimezone().utcoffset()
 
 
 async def create_rows() -> None:

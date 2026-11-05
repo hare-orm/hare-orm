@@ -8,7 +8,8 @@ from hare.exceptions import (
     ValidationError,
 )
 from hare.query.enums import Connector
-from hare.query.expressions import ExpressionContext, F, Q
+from hare.query.expressions import Exists, ExpressionContext, F, Q
+from hare.query.queryset import QuerySet
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from tests.shared_models.testmodels import CharFields, IntFields
 
@@ -295,6 +296,14 @@ def test_q_repr_rebuilds_the_connector():
     assert repr(Q.with_connector(Connector.OR, a=1, b=2)) == "Q.with_connector(Connector.OR, a=1, b=2)"
     assert repr(~Q.with_connector(Connector.OR, a=1)) == "~Q.with_connector(Connector.OR, a=1)"
     assert repr(Q(a=1, b=2)) == "Q(a=1, b=2)"
+    condition = Q.from_expression(F("is_active"))
+    assert repr(condition) == "Q.from_expression(F('is_active'))"
+    assert repr(~condition) == "~Q.from_expression(F('is_active'))"
+    assert repr(~~condition) == "~~Q.from_expression(F('is_active'))"
+    assert repr(condition & Q(name="visible")) == "Q(Q.from_expression(F('is_active')), Q(name='visible'))"
+    exists = Exists(QuerySet(IntFields))
+    assert repr(Q(exists)) == f"Q({exists!r})"
+    assert repr(~Q(exists)) == f"~Q({exists!r})"
 
 
 @pytest.mark.database_independent

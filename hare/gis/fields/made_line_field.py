@@ -25,9 +25,8 @@ class MadeLineField(GeometryField):
     gives it: NULL as None, a line of one position, which no ``LineString`` is, refused with that
     reason."""
 
-    #: (srid, dimensions) -> the shared field of lines of such points - a plan holds an output field
-    #: weakly, so a fresh one per call would be collected at once.
-    fields: ClassVar[Cache[MadeLineField]] = Cache(Cache.max_size_from_env(), holds_sql=False, keyed_by_model=False)
+    #: Bounded reuse of output fields with the same (srid, dimensions).
+    fields: ClassVar[Cache[MadeLineField]] = Cache(Cache.max_size_from_env(), holds_sql=False)
 
     @classmethod
     def get_for(cls, point_field: GeometryField) -> MadeLineField:

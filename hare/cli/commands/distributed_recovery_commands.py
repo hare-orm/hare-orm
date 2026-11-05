@@ -8,10 +8,7 @@ from hare.cli.context.cli_context import CLIContext
 from hare.cli.context.command_context import CommandContext
 from hare.cli.exceptions import CLIUsageError
 from hare.cli.output.terminal_colors import TerminalColors
-from hare.core.connections.connections import Connections
-from hare.transactions.distributed.distributed_coordinator import DistributedCoordinator
-from hare.transactions.distributed.stale_prepared_transaction import StalePreparedTransaction
-from hare.transactions.enums import DistributedTransactionResolution
+from hare.transactions.distributed.distributed_recovery import DistributedRecovery
 
 
 class DistributedRecoveryCommands:
@@ -32,16 +29,15 @@ class DistributedRecoveryCommands:
         hare_config = CommandContext.load_config(cli_context)
         if coordinator not in hare_config.connections:
             raise CLIUsageError(f"Unknown connection alias: {coordinator}")
-        config_dict = hare_config.to_dict()
 
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict):
-            stale = await DistributedCoordinator.detect_stale_prepared_transactions(coordinator, older_than_seconds)
-            if not stale:
+        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config):
+            report = await DistributedRecovery.run(coordinator, finish=finish, older_than_seconds=older_than_seconds)
+            if not report.entries and not report.decision_errors:
                 print(f"{TerminalColors.BOLD}No stale distributed transactions found.{TerminalColors.RESET}")
                 return None
 
             if not finish:
-                for entry in stale:
+                for entry in report.entries:
                     print(
                         f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} xid={entry.xid} "
                         f"alias={entry.participant_alias} "
@@ -49,20 +45,13 @@ class DistributedRecoveryCommands:
                     )
                 return 1
 
-            pending_entries: list[StalePreparedTransaction] = []
-            for entry in stale:
-                try:
-                    connection = Connections.get(entry.participant_alias)
-                    if entry.resolution == DistributedTransactionResolution.COMMIT:
-                        await DistributedCoordinator.commit_prepared(connection, entry.participant_alias, entry.xid)
-                    else:
-                        await DistributedCoordinator.rollback_prepared(connection, entry.participant_alias, entry.xid)
-                except Exception as error:
+            for result in report.attempts:
+                entry = result.entry
+                if result.error is not None:
                     print(
                         f"  {TerminalColors.RED}!{TerminalColors.RESET} xid={entry.xid} "
-                        f"alias={entry.participant_alias} failed: {error}"
+                        f"alias={entry.participant_alias} failed: {result.error}"
                     )
-                    pending_entries.append(entry)
                 else:
                     print(
                         f"  {TerminalColors.GREEN}+{TerminalColors.RESET} xid={entry.xid} "
@@ -70,14 +59,9 @@ class DistributedRecoveryCommands:
                         f"resolved ({entry.resolution})"
                     )
 
-            # An xid is resolved only once every entry of it succeeded - a later run would otherwise
-            # take a pending participant for an orphan and roll back a committed write.
-            pending_xids = {entry.xid for entry in pending_entries}
-            finished_xids = {entry.xid for entry in stale} - pending_xids
-            coordinator_connection = Connections.get(coordinator)
-            for xid in finished_xids:
-                await DistributedCoordinator.mark_decision_resolved(coordinator_connection, xid)
-            return 1 if pending_entries else None
+            for xid, error in report.decision_errors:
+                print(f"  {TerminalColors.RED}!{TerminalColors.RESET} xid={xid} decision update failed: {error}")
+            return 1 if report.decision_errors or any(result.error is not None for result in report.attempts) else None
 
     @staticmethod
     async def run_distributed_recover(cli_context: CLIContext, args: argparse.Namespace) -> int | None:

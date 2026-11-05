@@ -7,9 +7,10 @@ from hare.instrumentation.constants import DURATION_RECORDS_CAPACITY
 
 class DurationRecords:
     """The latest durations of one type a pool measured - its waits for a connection, or its
-    connects - numbered in the order they came. Each reader (the OpenTelemetry metrics, each health
-    check) keeps its own cursor and takes the durations after it, so readers never take them from
-    one another. Read from the metrics exporter's thread too, hence the lock.
+    connects - numbered in the order they came. Each health reader keeps its own cursor and takes
+    the durations after it, so readers never take them from one another. The lock protects reads
+    and writes across threads. Metric subscribers receive measurements separately through the
+    pool's recorder and do not consume this buffer.
 
     Args:
         capacity: How many of the latest durations are kept.
@@ -18,8 +19,8 @@ class DurationRecords:
     __slots__ = ("capacity", "durations", "count", "lock")
 
     def __init__(self, capacity: int = DURATION_RECORDS_CAPACITY) -> None:
-        self.capacity = capacity
-        self.durations = [0.0] * capacity
+        self.capacity = max(1, capacity)
+        self.durations = [0.0] * self.capacity
         #: How many durations were ever added - the cursor of a reader that has them all.
         self.count = 0
         self.lock = threading.Lock()

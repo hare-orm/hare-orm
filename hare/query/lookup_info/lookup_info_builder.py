@@ -46,21 +46,13 @@ class LookupInfoBuilder:
     #: A model's descriptions, in a bucket the model keeps: filter key -> ``get_lookup_info()``,
     #: ordering name -> ``get_ordering_info()``, (path, dialect name) -> ``get_lookups()``. A
     #: description follows relations into other models, so a change to any model drops them all.
-    lookup_infos: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True, model_attribute="lookup_infos"
-    )
-    ordering_infos: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True, model_attribute="ordering_infos"
-    )
-    lookups_by_path: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True, model_attribute="lookups_by_path"
-    )
+    lookup_infos: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
+    ordering_infos: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
+    lookups_by_path: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
 
     #: The descriptions of keys starting with an annotation, in a bucket a queryset shares with
     #: its clones: (description type, key, dialect name) -> the description.
-    annotation_descriptions: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True
-    )
+    annotation_descriptions: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
 
     @classmethod
     def forget_descriptions(cls) -> None:
@@ -648,7 +640,7 @@ class LookupInfoBuilder:
         else:
             raise FieldError(f"{label}: the annotation {name!r} has no lookup {suffix!r}")
         # A lookup registered on Field itself is a lookup of an annotation too.
-        registered_lookup = None if transforms else Field.registered_lookups.get(str(lookup))
+        registered_lookup = None if transforms else Field.get_class_lookups(Field).get(str(lookup))
         if registered_lookup is not None:
             value_shape = registered_lookup.value_shape
             value_type = registered_lookup.value_type or value_type or object
@@ -745,7 +737,7 @@ class LookupInfoBuilder:
                 continue
             output_field = path_transform[1]
             segment_path = f"{prefix}{segment}"
-            for lookup_suffix in ["", *cls._get_field_filter_suffixes(output_field)]:
+            for lookup_suffix in cls._get_field_filter_suffixes(output_field):
                 suffix = f"{segment_path}__{lookup_suffix}" if lookup_suffix else segment_path
                 try:
                     cls.get_lookup_info(model, f"{path}__{suffix}")
@@ -782,9 +774,9 @@ class LookupInfoBuilder:
         if not lookup_name:
             return None
         for field_class in type(field_object).__mro__:
-            registered_lookup = field_class.__dict__.get("registered_lookups", {}).get(lookup_name)
+            registered_lookup = Field.get_class_lookups(field_class).get(lookup_name)
             if registered_lookup is not None:
-                return cast("RegisteredLookup", registered_lookup)
+                return registered_lookup
         return None
 
     @staticmethod

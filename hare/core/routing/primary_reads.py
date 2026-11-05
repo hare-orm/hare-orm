@@ -10,15 +10,25 @@ class PrimaryReads:
     ``async with`` alike (``Routing.using_primary()``). Blocks nest."""
 
     #: Whether the current task is inside such a block.
-    active: ClassVar[ContextVar[bool]] = ContextVar("hare_primary_reads", default=False)
+    active: ClassVar[ContextVar[frozenset[object]]] = ContextVar("hare_primary_reads", default=frozenset())
 
     __slots__ = ("_token",)
 
     def __init__(self) -> None:
-        self._token: Token[bool] | None = None
+        self._token: Token[frozenset[object]] | None = None
+
+    @staticmethod
+    def is_active() -> bool:
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.get_current()
+        return context is not None and context.identity in PrimaryReads.active.get()
 
     def __enter__(self) -> None:
-        self._token = PrimaryReads.active.set(True)
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.require_current()
+        self._token = PrimaryReads.active.set(PrimaryReads.active.get() | {context.identity})
 
     def __exit__(
         self,

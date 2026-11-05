@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from hare.fields.field import Field
-from tests.contracts.constants import SAMPLED_FIELD_NAME
+from tests.contracts.constants import CONTRACT_DIALECTS, SAMPLED_FIELD_NAME
 
 
 @dataclasses.dataclass(frozen=True)
@@ -26,6 +26,7 @@ class FieldSample:
         column_name: The name the values are written under and an event holds them under - a foreign
             key's column.
         captured: Whether a captured change holds the field - a sensitive field it leaves out.
+        column_dialects: Expected dialects supporting this declaration, independent of field implementation.
         value_dialects: The dialects storing the values, None for each the field has a column on - SQLite
             refuses a NaN.
         registered_live: Whether the sample's models can be registered while the application runs - a generic
@@ -46,6 +47,7 @@ class FieldSample:
     related: bool = False
     column_name: str = SAMPLED_FIELD_NAME
     captured: bool = True
+    column_dialects: tuple[str, ...] = CONTRACT_DIALECTS
     value_dialects: tuple[str, ...] | None = None
     registered_live: bool = True
     request_values: tuple[Any, ...] | None = None

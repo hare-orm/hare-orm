@@ -2,6 +2,7 @@
 
 import pytest
 
+from hare.core.registries import Registries
 from hare.dialects.base.features import Features
 from hare.dialects.base.sql_dialect import SqlDialect
 from hare.dialects.dialect_registry import DialectRegistry
@@ -32,7 +33,7 @@ def test_a_dialect_keeping_shorter_names_is_refused():
 
     with pytest.raises(ConfigurationError, match="within 30 bytes"):
         DialectRegistry.register_dialect(ShortNamesDialect())
-    assert "short_names" not in DialectRegistry.dialects_by_name
+    assert "short_names" not in Registries.snapshot.dialects
 
 
 def test_multibyte_join_alias_is_shortened_by_bytes():

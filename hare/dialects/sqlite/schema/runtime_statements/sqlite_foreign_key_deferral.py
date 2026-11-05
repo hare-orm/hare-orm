@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from hare.dialects.sqlite.client.sqlite_pragma_scope import SqlitePragmaScope
 from hare.exceptions import IntegrityError
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 
@@ -79,9 +80,6 @@ class SqliteForeignKeyDeferral:
         if next(iter(defer_row.values())):
             yield False
             return
-        await connection.execute("PRAGMA defer_foreign_keys = ON")
-        try:
+        async with SqlitePragmaScope.run(connection, "defer_foreign_keys", "ON", previous="OFF"):
             yield True
             await SqliteForeignKeyDeferral.check_cascade_foreign_keys(model, connection)
-        finally:
-            await connection.execute("PRAGMA defer_foreign_keys = OFF")

@@ -126,7 +126,6 @@ async def test_an_optimistic_lock_field_is_refused(clickhouse_db, monkeypatch):
     ],
 )
 def test_an_index_key_direction_is_refused(index):
-    index.get_expressions(Player)
     with pytest.raises(UnSupportedError, match="keep no key order"):
         index.raise_if_unsupported(CLICKHOUSE_DIALECT)
 

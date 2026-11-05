@@ -13,10 +13,16 @@ hare drift --connection default
 ## <a id="from-code"></a>Calling it from code
 
 The command is a thin wrapper around a public library function — call it directly (e.g. from a
-health-check endpoint or a CI gate) instead of shelling out:
+health-check endpoint or a CI gate) instead of shelling out.
+
+Reference signature:
 
 ```python
-from hare.migrations.drift import detect_drift_for_alias
+from collections.abc import Collection
+from typing import Any
+
+from hare.core.apps import Apps
+from hare.migrations.drift import DriftResult
 
 async def detect_drift_for_alias(
     apps: Apps,
@@ -27,12 +33,20 @@ async def detect_drift_for_alias(
     app_labels: list[str] | None = None,
     journal_tables: Collection[str] = (),
 ) -> DriftResult: ...
+```
+
+Example in an already initialized application. `apps_config` is the `apps` configuration mapping
+used to initialize that application's model registry:
+
+```python
+from hare import Hare
+from hare.migrations.drift import detect_drift_for_alias
 
 result = await detect_drift_for_alias(Hare.apps, apps_config, "default")
 if result.has_drift:
     for operation in result.operations:
         print(operation.describe())
-    print(result.untracked_tables, result.untracked_columns, result.mismatched_columns)
+    print(result.untracked_tables, result.untracked_columns, result.mismatched_columns, result.mismatched_objects)
 ```
 
 It checks every app on connection `connection_alias`: an app from `apps_config` whose
@@ -54,18 +68,17 @@ application runs itself ([Migrations without files](migrations-without-files.md)
 not untracked (`hare drift --journal-table NAME` on the command line). Raises `ConfigurationError` for an
 unknown alias, an unknown entry of `app_labels`, or an alias no app uses.
 
-Inspect `DriftResult.operations`/`.untracked_tables`/`.untracked_columns`/`.mismatched_columns`, or just
-its `.has_drift` property.
+Inspect `DriftResult.operations`, `.untracked_tables`, `.untracked_columns`, `.mismatched_columns`
+and `.mismatched_objects`, or just its `.has_drift` property.
 
 ## <a id="what-is-compared"></a>What is compared
 
 The schema the models declare is built beside the database — in a *shadow*, by the same SQL
 `generate_schemas()` writes — and then the database and the shadow are read by the same introspector and
-compared part by part. Both sides are printed by the database itself, so a schema `migrate` or
-`generate_schemas()` just created never shows drift, whatever words the database rewrites a declaration
-in, and any change made by hand shows: of a column's type, nullability or default (a date, a JSON
-document too), of an index's expression or a partial index's condition, of a `CHECK`, of a trigger's body
-or condition, of a view's query.
+compared part by part. Reading both sides through the same introspector avoids differences caused only
+by the database's normalized SQL. The comparison reports supported catalog differences for the selected
+models and declared schema objects: column types, nullability and defaults, index expressions and
+conditions, constraints, triggers and view queries. It does not inventory every undeclared schema object.
 
 ### <a id="shadow"></a>The shadow
 
@@ -80,6 +93,9 @@ The shadow is removed at the end, whatever happened — after an error too:
 On ClickHouse a shadow database is of the `Replicated` engine under the Keeper path `/hare_shadow_<hex>/...`
 when the database it stands for is one, and a `Replicated*` table with a Keeper path of its own keeps it
 under that prefix too — no table of the shadow becomes a replica of a real one.
+
+Comparison maps the database setting of a local ClickHouse dictionary source back to the real
+database. Remote sources and SQL string values keep their declared contents.
 
 A database whose dialect has no shadow raises `UnSupportedError`.
 
@@ -128,6 +144,24 @@ Two differences no operation restores are a `ColumnMismatch` (`app_label`, `mode
 model's primary key ("is not in the table's PRIMARY KEY, the model's primary key holds it"; on ClickHouse a
 `PRIMARY KEY (id, v)` where the model's key is `id`), and a foreign key declared with `swappable()` that
 references the table of the model its setting pointed at before — its rows name rows of that table.
+
+`.mismatched_objects` retains other differences without a faithful migration operation as
+`ObjectMismatch(part_type, table, name, detail)`. For example, an unrecognized catalog privilege or
+a grant on an ambiguous function overload remains drift even though a name-based `Grant` cannot
+express its correction. These records contribute to `.has_drift` and appear in CLI output. Review
+the reported object and reconcile it explicitly; an empty `.operations` list alone does not mean
+that the schemas agree.
+
+The column catalog also records the settings of associated sequences: type, start, increment,
+bounds, cache and cycle. An internal identity sequence is matched through its column, so a different
+server-generated sequence name in the shadow does not cause drift. The same applies to a SERIAL
+primary key's owned sequence and its exact `nextval` default after a table or column rename.
+Explicit defaults and independent sequence references retain their identities. Changing a generated
+integer key's type also changes its owned sequence's integer type, preserving custom sequence settings.
+Its current counter is data and
+is not compared. Settings that the field declaration cannot express are reported in
+`.mismatched_objects`, rather than as an `AlterField` that would leave them unchanged. A simultaneous
+representable change, such as a column comment, can still produce its own operation.
 
 ## <a id="detect-drift"></a>From an already-built state: `detect_drift()`
 

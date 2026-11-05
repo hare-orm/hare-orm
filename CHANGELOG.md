@@ -22,6 +22,64 @@ renames that section to its version and date.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Replace `PostGISField`, `STDistance` and `STDWithin` with `PointField(geography=True, srid=4326)`,
+  `Distance` and `DWithin`; construct coordinates as `Point(longitude, latitude)`.
+- Declare reusable row restrictions with `Manager(scope=...)`; filters in a custom `get_queryset()` are no
+  longer inferred as JOIN policies.
+- Migration `apply()` and `unapply()` preserve their input `State` and return the resulting state; pass the
+  state before the migration to `unapply()`.
+- Migration `plan()` and `migrate()` return `ConnectionMigrationPlan` records; use `MigrationSession` when
+  several API calls must share connections.
+- Update custom migration operations to the snapshot and `get_rewrite()` contracts and the schema-editor
+  argument of `get_effect()`; remove `bases` from `CreateModel` calls.
+- Use the class returned by `RequestQuery.prepare_parameters()` for validation and schema inspection; the
+  declaration class retains its declared fields.
+- Percent-encode reserved characters in database URL credentials; PostgreSQL `schema` denotes one exact schema
+  name, while multiple schemas belong in `search_path` or `SearchPath(...)`.
+- Dialect entry points now return `ExtensionContribution`; custom drivers must pass a `StatementForm` to
+  `translate_exceptions()`.
+- Custom caches must use explicit holder/model buckets; replace owner helpers with `get_bucket()`,
+  `get_value()`, `set_value()` and `forget_holder()`.
+- Declare ClickHouse dictionary sources with `DictionarySource` and explicit `EnvironmentValue` references, or
+  literal `RawSQLTerm`; raw SQL no longer expands environment placeholders.
+- Install `hare-orm[clickhouse-keeper]` for ClickHouse Keeper allocation and migration locks.
+- `hare.time.ZoneInfo` is the standard-library class; replace the removed `.zone` compatibility attribute with
+  `.key`.
+
+### Added
+
+- GIS geometry values and fields cover points, lines, polygons, multi-geometries and collections with explicit
+  SRIDs.
+- `TSVectorField(expression=...)` supports composed `SearchVector` expressions; the `source_fields`, `config`,
+  `weights` and `stored` shorthand remains supported.
+- `ApiGetter.prepare()` and `apply()` separate asynchronous enrichment preparation from assignment.
+
+### Changed
+
+- Connection clones retain effective construction settings; transactions, migrations and integrations use
+  their owning context instead of an unrelated ambient connection.
+- Migration preparation snapshots declarations and assembles schema changes before execution; progress
+  callbacks support synchronous and asynchronous implementations.
+- Framework and Taskiq transaction configuration accepts iterables of connection aliases and snapshots their
+  order once.
+- Removed arbitrary caps on configured pagination/outbox batch sizes, sequence caches and search weights,
+  markers and counts; input validation and database-specific limits remain.
+- Pydantic list loading delegates to the selected submodel's `from_queryset()`, including custom overrides;
+  generated typing and stubs follow published query descriptions.
+- Use maintained dependencies for SQL tokenization, Python source editing, native async interop and Keeper
+  transport; updated contract matrices and English/Russian documentation.
+
+### Fixed
+
+- Preserve dependent schema objects across generated-column replacement, renames and table/schema changes, and
+  retain representable catalog details during introspection.
+- Correct expression traversal, query-plan reuse and value conversion across nested queries, containers,
+  projections and dialect-specific clauses.
+- Preserve cancellation and primary failures while draining connection, stream, integration and outbox
+  resources; lost Keeper ownership interrupts the protected migration scope.
+
 ## [0.12.0] - 2026-11-01
 
 ### Breaking changes

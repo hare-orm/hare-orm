@@ -13,8 +13,8 @@ from hare.dialects.postgresql.parameters.constants import (
     POSTGRESQL_PARAMETER_CASTS,
     POSTGRESQL_SELECTED_LITERAL_POSITIONS,
     POSTGRESQL_SELECTED_LITERAL_TYPES,
-    POSTGRESQL_TYPE_MODIFIER_PATTERN,
 )
+from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.sql.enums import JsonValueType
 
 if TYPE_CHECKING:
@@ -32,21 +32,31 @@ class PostgresqlParameters(SqlParameters):
         return f"SELECT FROM generate_series(1, {int(row_count)})"  # nosec B608 - an int, not input
 
     def get_column_arrays_rows_source_sql(
-        self, column_cast_types: Sequence[str], first_parameter_index: int
+        self,
+        column_cast_types: Sequence[str],
+        first_parameter_index: int,
+        *,
+        column_values_sql: Sequence[str] | None = None,
     ) -> str | None:
         # unnest() reads a nested array element by element - an array column stays on VALUES, and so
         # does a multirange one: its value is a list of ranges, which a driver binds as an array, not
         # as an element of one. So does a geometry: an array of them is delimited by its own character,
         # which a driver writing an array as text doesn't use.
         if any(
-            cast_type.rstrip().endswith(("]", "multirange"))
-            or cast_type.lstrip().lower().startswith(POSTGRESQL_CUSTOM_ARRAY_DELIMITER_TYPE_PREFIXES)
-            for cast_type in column_cast_types
+            physical_type.name is None
+            or physical_type.array_dimensions
+            or (physical_type.name or "").endswith("multirange")
+            or physical_type.name in POSTGRESQL_CUSTOM_ARRAY_DELIMITER_TYPE_PREFIXES
+            for physical_type in map(PostgresqlPhysicalType.from_sql, column_cast_types)
         ):
             return None
+        values = (
+            column_values_sql
+            if column_values_sql is not None
+            else [self.get_placeholder(first_parameter_index + index) for index in range(len(column_cast_types))]
+        )
         arguments = ",".join(
-            f"{self.get_placeholder(first_parameter_index + index)}::{cast_type}[]"
-            for index, cast_type in enumerate(column_cast_types)
+            f"{value}::{cast_type}[]" for value, cast_type in zip(values, column_cast_types, strict=True)
         )
         return f"SELECT * FROM unnest({arguments})"  # nosec B608 - placeholders and column types
 
@@ -81,7 +91,9 @@ class PostgresqlParameters(SqlParameters):
     def get_copy_column_type(self, field: Field[Any]) -> str:
         # Binary COPY is told each type by its name alone ("VARCHAR(255)" -> "VARCHAR") - an array's
         # brackets kept ("VARCHAR(255)[]" -> "VARCHAR[]").
-        return POSTGRESQL_TYPE_MODIFIER_PATTERN.sub("", super().get_copy_column_type(field)).strip()
+        physical_type = PostgresqlPhysicalType.from_sql(super().get_copy_column_type(field))
+        spelling = physical_type.without_modifiers
+        return spelling.upper() if physical_type.name is not None else spelling
 
     def supports_copy_column_type(self, column_type: str) -> bool:
         # The types both drivers' binary COPY encodes - not an array, a range or an extension's type.

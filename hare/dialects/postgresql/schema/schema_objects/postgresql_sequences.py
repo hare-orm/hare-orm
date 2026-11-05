@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.ddl.schema_objects.database_sequence import DatabaseSequence
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_objects.sequences import Sequences
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_SEQUENCE_ALTER_TEMPLATE,
@@ -57,17 +58,18 @@ class PostgresqlSequences(Sequences):
         self, model: type[Model], old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
     ) -> None:
         qualified_sequence = self.editor.qualify_object_name(model, new_sequence.name)
-        await self.editor.run_sql(
+        statements = [
             POSTGRESQL_SEQUENCE_ALTER_TEMPLATE.format(
                 sequence=qualified_sequence, options=self.get_sequence_options_sql(new_sequence, altering=True)
             )
-        )
+        ]
         if old_sequence.owned_by != new_sequence.owned_by:
-            await self.editor.run_sql(
+            statements.append(
                 POSTGRESQL_SEQUENCE_OWNER_TEMPLATE.format(
                     sequence=qualified_sequence, owner=self.get_sequence_owner_sql(model, new_sequence)
                 )
             )
+        await self.editor.run_sqls(statements)
 
     async def rename_sequence(
         self, model: type[Model], old_sequence: DatabaseSequence, new_sequence: DatabaseSequence
@@ -124,9 +126,9 @@ class PostgresqlSequences(Sequences):
         column = self.editor.get_column_name(model, sequence.owned_by, f"DatabaseSequence {sequence.name!r} owned_by")
         return f"{self.editor.get_model_table_sql(model)}.{self.editor.quote(column)}"
 
-    async def move_to_schema(
+    def get_schema_move_plan(
         self, model: type[Model], sequence: DatabaseSequence, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        await self.editor.schemas.move_object_to_schema(
+    ) -> SchemaChangePlan:
+        return self.editor.schemas.get_object_schema_move_plan(
             "SEQUENCE", self.editor.qualify_table_name(sequence.name, old_schema), new_schema
         )

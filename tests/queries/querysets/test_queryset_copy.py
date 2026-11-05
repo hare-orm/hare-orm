@@ -1,9 +1,4 @@
-"""Correctness tests for ChooseDBMixin.__copy__ (hare/query/queryset/awaitable.py) - the compiled,
-per-subclass `newone.a = self.a; ...` copy function `_compiled_copy()` generates from
-`_clone_slots()`, replacing a getattr()/setattr() loop for speed (see that file's own
-docstrings). This file checks the thing that actually matters if the codegen goes wrong: does the copy carry over
-every attribute correctly, independently of the original, for every shape of subclass that
-shares this one `__copy__` (QuerySet vs a structurally different sibling like CountQuery)."""
+"""Query declarations and statements preserve state without sharing mutable containers."""
 
 from copy import copy
 
@@ -27,11 +22,7 @@ async def test_copy_preserves_every_clone_slot_value(db):
 
 @pytest.mark.asyncio
 async def test_clone_is_independent_of_the_original(db):
-    """`__copy__` itself is a plain shallow copy (a mutable slot like `_q_objects` legitimately
-    aliases the same list as the original right after it, same as the old getattr/setattr-loop
-    implementation) - the independence guarantee for mutable containers comes from `_clone()`
-    giving each of them (see its own comment) their own copy on top of `copy(self)`, which is
-    what `.filter()`/`.order_by()`/... actually call. Testing that layer, not raw `__copy__`."""
+    """A clone can change filters and options without changing the source declaration."""
     qs = Tournament.objects.filter(name="a")
     cloned = qs._clone()
 
@@ -45,9 +36,7 @@ async def test_clone_is_independent_of_the_original(db):
 
 @pytest.mark.asyncio
 async def test_copy_works_for_a_structurally_different_sibling_subclass(db):
-    """CountQuery shares ChooseDBMixin.__copy__ with QuerySet but declares a different slot
-    set (no _orderings/_select_for_update*/etc.) - the exact scenario _clone_slots() being
-    per-subclass (not hardcoded to QuerySet) exists to handle correctly."""
+    """The summary statement retains its state independently of a model-row queryset."""
     count_query = Tournament.objects.filter(name="a").count()
     cloned = copy(count_query)
     for name in SpecificationCopying.get_slot_names(type(count_query)):
@@ -55,13 +44,44 @@ async def test_copy_works_for_a_structurally_different_sibling_subclass(db):
     assert cloned is not count_query
 
 
-@pytest.mark.database_independent
-def test_compiled_copy_is_cached_per_subclass():
-    """_compiled_copy() must not accidentally share ONE cached function across differently-
-    shaped subclasses (each subclass's cache lives on its own cls.__dict__, not inherited) -
-    QuerySet and CountQuery must each get their own generated function tailored to their own
-    _clone_slots()."""
-    from hare.query.queryset import QuerySet
-    from hare.query.statements import CountQuery
+@pytest.mark.asyncio
+async def test_copy_separates_nested_prefetch_queries(db):
+    from hare.query.relation_loading.prefetching.prefetch import Prefetch
+    from tests.shared_models.testmodels import Event
 
-    assert SpecificationCopying.compile_copy(QuerySet) is not SpecificationCopying.compile_copy(CountQuery)
+    queryset = Tournament.objects.prefetch_related(Prefetch("events", Event.objects.filter(name="first")))
+    cloned = copy(queryset)
+    cloned._prefetch_queries["events"].append(("other_events", Event.objects.filter(name="second")))
+    assert len(queryset._prefetch_queries["events"]) == 1
+    assert len(cloned._prefetch_queries["events"]) == 2
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("uses_slots", [False, True])
+def test_custom_queryset_copies_mutable_state_through_its_hook(uses_slots):
+    from hare.query.queryset import QuerySet
+
+    class TaggedQuerySet(QuerySet):
+        __slots__ = ("tags", "__label", "optional") if uses_slots else ("__dict__",)
+
+        def __init__(self, model):
+            super().__init__(model)
+            self.tags = ["root"]
+            self.__label = "declared"
+
+        @property
+        def label(self):
+            return self.__label
+
+        def copy_extension_state(self, target):
+            super().copy_extension_state(target)
+            target.tags = list(self.tags)
+
+    queryset = TaggedQuerySet(Tournament)
+    branch = queryset.filter(name="first")
+    branch.tags.append("branch")
+    assert queryset.tags == ["root"]
+    assert branch.tags == ["root", "branch"]
+    assert branch.label == "declared"
+    assert not hasattr(branch, "optional")
+    assert type(branch) is TaggedQuerySet

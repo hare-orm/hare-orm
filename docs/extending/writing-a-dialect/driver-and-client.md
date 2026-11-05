@@ -15,8 +15,8 @@ class ColstoreDriver(Driver):
     default_credentials = {"port": 9000}
     connection_options = ConnectionOptions(   # hare.dialects.base.connection.connection_options
         ConnectionOption("compression", ConnectionOptionType.BOOLEAN),
-        ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=3600),
-        ConnectionOption("max_block_size", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=1_000_000),
+        ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS),
+        ConnectionOption("max_block_size", ConnectionOptionType.WHOLE_NUMBER),
     )
     strict_query_parameters = True            # an unknown ?parameter is a ConfigurationError
 
@@ -37,17 +37,19 @@ class ColstoreDriver(Driver):
 | `get_client_class(credentials)` | The client class for a connection — it may pick one by a credential and remove it (SQLite's `install_regexp_functions`). |
 | `get_client_classes()` | Every client class, transaction clients included. |
 | `is_retryable(error)` | Whether a driver error means the database aborted the transaction for a concurrent one (serialization failure, deadlock); hare raises `TransactionRetryError` for it. |
-| `get_url_path(url)`, `get_testing_path(path, reuse_databases)` | Reading the path of the database URL, and the path a test run connects to (the `{}` placeholder of `HARE_TEST_DB` filled with a fresh name). |
+| `get_url_path(url)` | Read the database path from its URL. Test names and resource leases are managed by `hare.contrib.test`, outside the driver. |
 
 ### <a id="connection-options-strict-query"></a>`connection_options`, `strict_query_parameters`
 
-The settings a connection takes, each declared once as a
-`ConnectionOption(name, value_type, *, minimum, maximum, positive, power_of_two, choices)` — its value
-type is `ConnectionOptionType.WHOLE_NUMBER`, `SECONDS`, `BOOLEAN`, `CHOICE` or `TEXT`. A setting is
-checked the same way whether it comes typed from a config dict's `credentials` or as text from a database
-URL query parameter (`?connect_timeout=5`): the client calls `options.read(settings)` in its `__init__`
-to take the known settings out, type- and range-checked, and
-`options.raise_for_unknown(settings, driver_name)` to reject a misspelled one. No hand-written parsing.
+Declare each connection setting with `ConnectionOption(name, value_type, *, sql_value=False, ...)`.
+Additional options are `minimum=None`, `maximum=None`, `power_of_two=False` and `choices=()`. Its value
+type is `ConnectionOptionType.WHOLE_NUMBER`, `SECONDS`, `BOOLEAN`, `CHOICE`, `TEXT` or `CALLABLE`
+(a callable or its dotted import path). `options.read(settings)` converts URL text such as
+`?connect_timeout=5` and preserves typed driver settings; the driver or library consuming them defines
+their accepted values. Declared choices and callable paths are handled by the same parser.
+Use `sql_value=True` for settings rendered directly into SQL, such as SQLite PRAGMAs: their numeric
+shape, bounds, powers of two and allowed tokens are checked before rendering.
+`options.raise_for_unknown(settings, driver_name)` rejects misspelled settings. No hand-written parsing.
 
 ## <a id="client"></a>2. Running statements: the client
 
@@ -60,6 +62,13 @@ class ColstoreClient(DatabaseClient):
     # What the database supports is the dialect's; the client adds what its driver does.
     features = COLSTORE_DIALECT.features.replace(max_bind_parameters=100_000)
 ```
+
+Pass every explicit constructor parameter together with `kwargs` to `DatabaseClient.__init__` before
+normalizing or consuming settings. It captures the original values in `ConnectionConfig` for independent
+and tenant-schema clients. `driver_name` must name the registered engine, so clients created directly
+can also recreate their connection settings. Handler-created clients receive the handler's captured
+configuration, including credentials used to select the client class. Derived clients preserve opaque
+objects such as callbacks and SSL contexts; do not mutate nested caller settings during initialization.
 
 A client implements `create_connection(with_db)`, `close()`, `db_create()`, `db_delete()`,
 `acquire_connection()` (a context manager handing out the raw connection) and the statement methods — the
@@ -80,7 +89,8 @@ whole contract between hare and a driver:
 One statement. `StatementResult(row_count, rows, inserted_id=None, description=None)`
 (`hare.dialects.base.results`): the rows it returned — each read by column name — and the rows it changed
 for a write without `RETURNING`. `returns_rows` says whether the statement returns rows (a `SELECT`, a
-write with `RETURNING`); `None` leaves the driver to find out from the SQL text. `rows_by_position=True`
+write with `RETURNING`); `None` asks the driver to discover the result from statement metadata.
+SQL text alone is not a reliable description of an opaque command's result. `rows_by_position=True`
 is passed by a reader taking the rows by position alone where `Features.supports_positional_rows`: the
 driver may then give its cheapest rows read by position — plain tuples — with the database-API
 `description` of the columns, which `StatementResult.column_names` reads (from the first row's names when
@@ -89,33 +99,58 @@ their rows. Every read and write of the ORM goes through it — there is no sepa
 dict-returning method to implement (`execute_dicts()` is built on it; set `row_to_dict` when the driver's
 rows need a conversion other than `dict(row)` for correctness or speed). This conversion preserves
 each column's exact name and value: SQLite pairs names with positional values because its named-row
-lookup treats `a` and `A` as the same name. Combined-query streams use this conversion too.
+lookup treats `a` and `A` as the same name. Combined-query streams use the shared batch row decoder.
+
+`invalidate_schema_cache()` discards prepared statement and type metadata made stale by DDL.
+The default implementation does nothing; implement it when the driver retains schema metadata.
+Schema editors call it after executing or attempting a schema command, including a failed script
+that may already have changed the catalog. Collection of SQL and row-only backfill batches do not
+call it. A pooled implementation must refresh idle and checked-out connections before their next
+ORM statement. Calls made directly on a retained raw driver connection remain the caller's
+responsibility. Failure to invalidate must not hide the original execution error. Raw SQL callers
+must mark schema work through the schema editor or call this hook explicitly; clients do not guess
+schema changes from SQL keywords.
 
 A statement's `values` are a `list`, or its subclass `QueryParameters`
 (`hare.sql.terms.parameters.query_parameters`) when some of them hold a `sensitive=True` field's value:
 `repr()` of it shows those as `<hidden>`, so a client logging its parameters with `%s` hides them without
 doing anything. A driver that accepts no list subclass is given `list(values)`.
 
-`native_python_types` is the set of Python types the driver hands back as a field wants them — the row
-readers skip conversion for a field of such a type.
+`native_python_types` identifies Python types returned directly by the driver. `HydrationLayout` first
+uses a dialect reader when one is registered. Otherwise it skips the field reader only when the field's
+type is native and `field.keeps_native_db_values` is true.
 
 Each statement method turns the driver's own exceptions into hare's — `DBConnectionError`,
 `IntegrityError`, and `OperationalError` or `TransactionRetryError` through `_get_operational_error()`,
 which asks the driver's `is_retryable()` — and reports the call to
 [observers and query wrappers](../../observability/observers.md). Both happen in one decorator,
 `DatabaseClient.translate_exceptions`, which the dialect's client class applies to the statement methods
-of its drivers (`@ColstoreClient.translate_exceptions`). It appends the active query tags
-(`DatabaseClient.get_tagged_query_arguments()`), runs the call inside the query wrappers when any is
+of its drivers (`@ColstoreClient.translate_exceptions(StatementForm.SQL)`). `StatementForm` is imported
+from `hare.dialects.base.client.enums`: `SQL` accepts query/values, `BULK_LOAD` accepts table/columns,
+`MANY` and `SCRIPT` execute batches or scripts, and `CONTROL` has no SQL. Stream cursor operations
+are observed and translated by the outer stream boundary.
+The method name only labels the observer call. `StatementExecution` binds a `StatementRequest`,
+places active query tags through `QueryClauses.get_tagged_statement_sql(sql, comment)`, and runs the call
+inside the query wrappers when any is
 installed (`Observers.run_wrapped(QueryCall(...), proceed)`), reports it to the observers once it has
 finished, successful or not (`Observers.record_query()`), and raises what the driver raised as the
 client's `translate_driver_error(client, error, sql, parameters, args, is_query_executing)` returns — the
-one method a dialect's client overrides to map its driver's exceptions. The hooks the decorator reads are
-class attributes of the client, read once when a method is wrapped: `rejected_sql_character` (a character
+one method a dialect's client overrides to map its driver's exceptions. The execution hooks are
+class attributes of the client: `rejected_sql_character` (a character
 refused before the statement is sent), `checks_aborted_transactions` and `aborted_transaction_message` (a
 statement refused in a transaction the database has aborted), `runs_statement_options`
 (`command_timeout`, `password_provider`, a transaction pooler, read retries). The decorator runs on every
 statement, so it reads the client's `is_transaction_client` (true on every `TransactionClient`) rather
 than calling `isinstance()`.
+
+`execute(..., retry_read=True)` explicitly permits connection-loss retries for that invocation;
+the default is False. A returned row or a SQL keyword never grants permission. Only a caller that
+knows the operation has no write effects may enable it; a transaction, bulk load or stream never
+retries this way. Each attempt is translated and observed separately, with sensitive parameters
+masked before events are published. Nested calls and observer wrappers inherit no retry permission.
+The driver still handles acquisition and wire cleanup; cancelling a waiter does not imply a completed
+write or a released connection. Streaming shares the lifecycle and reports completion after cleanup,
+including cancellation errors. Raw SQL is not parsed to establish safety or comment placement.
 
 Once a connection opens, the client calls `_post_connect()`, which reads the server's version from
 `get_server_version()` — `(major, minor, ...)`, read without query instrumentation; the default `None`
@@ -170,10 +205,11 @@ hare/dialects/sqlite/
         sqlite_client.py               # SqliteClient: what any SQLite driver shares
         sqlite_transaction_client.py   # SqliteTransactionClient: the shared transaction lifecycle
         declarations.py                # SqliteDriverErrors: the driver's exception classes
-    driver.py                          # SqliteDriver: the shared Driver base
+    connection/
+        sqlite_driver.py               # SqliteDriver: the shared Driver base
     drivers/
         aiosqlite/
-            driver.py                  # AiosqliteDriver: name, DB_URL schemes, registration
+            aiosqlite_driver.py        # AiosqliteDriver: name, DB_URL schemes, registration
             client/
                 aiosqlite_client.py    # AiosqliteClient(SqliteClient)
                 aiosqlite_transaction_client.py
@@ -259,14 +295,20 @@ reads none of them.
 | `supports_row_deletes` | Every `DELETE` raises `UnSupportedError` before it is sent, and a cascade needing one writes nothing. |
 | `rewrites_correlated_exists` | Set it where the database runs correlated subqueries but computes a correlated `EXISTS` wrongly: such an `EXISTS` keeps its `IN` form. |
 | `supports_ordered_correlated_subqueries` | A correlated subquery ordering or slicing its own rows raises `UnSupportedError` before the statement is sent. |
-| `orders_by_correlated_subqueries` | A query with a correlated subquery in `ORDER BY`, or selected beside a `WHERE`, selects its rows in a derived table — the conditions and sort keys hidden columns of it — and filters, orders and slices them outside; an `UPDATE`/`DELETE` with a correlated subquery raises `UnSupportedError`. |
+| `supports_correlated_select` | Correlated subquery in SELECT |
+| `supports_correlated_order_by` | Correlated subquery in ORDER BY |
+| `supports_correlated_group_by` | Correlated subquery in GROUP BY |
+| `supports_correlated_update` | Correlated subquery in UPDATE |
+| `supports_correlated_delete` | Correlated subquery in DELETE |
+| `rewrites_correlated_order_by` | Correlated ordering through a column of one derived SELECT |
+| `correlated_select_requires_unfiltered_source` | Selected correlation computed before outer conditions |
 | `supports_correlated_subqueries` | An `EXISTS` correlated by equal columns is written as `(outer columns) IN (SELECT inner columns ...)` — see [`supports_correlated_subqueries`](#supports-correlated-subqueries) |
 | `can_rollback_ddl` | A migration isn't wrapped in a transaction. |
 | `supports_select_for_update` | `select_for_update()` and `RowChanges.get_for_update()` raise `UnSupportedError` when the query runs; `update_or_create()` skips its lock. |
 | `supports_select_for_no_key_update` | `select_for_update(no_key=True)` takes a plain `FOR UPDATE` lock. |
 | `supports_select_for_share` / `supports_select_for_key_share` | `select_for_update(share=True)` / `(key_share=True)` raises `UnSupportedError` when the query runs. |
 | `supports_update_limit_order_by` | `QuerySet.update()`/`delete()` of a sliced queryset raise `QueryError` before any SQL is sent; with it, a slice without an offset is written as the statement's own `ORDER BY ... LIMIT`. |
-| `supports_returning` | An `INSERT` asks for nothing back, and `returning()` and `bulk_create(returning=True)` raise `UnSupportedError` — see [`supports_returning`](#supports-returning) |
+| `supports_returning` | An `INSERT` asks for nothing back; operations requiring SQL `RETURNING` raise `UnSupportedError`. Deletion performed by hare can use separate reads — see [`supports_returning`](#supports-returning). |
 | `guarantees_returning_order` | A multi-row `INSERT ... RETURNING` is matched back to its objects by primary key instead of by position. |
 | `supports_posix_regex` | A filter with `posix_regex`/`iposix_regex` raises `UnSupportedError` before the query runs. |
 | `cuts_like_pattern_at_null_byte` | Set it where `LIKE` reads a pattern only up to its first null byte: a text lookup whose pattern holds one raises `ValidationError`. |
@@ -277,14 +319,13 @@ reads none of them.
 | `supports_copy` | `bulk_create(use_copy=True)` raises `UnSupportedError`. |
 | `copies_bulk_inserts` | `bulk_create()` loads rows through `copy()` only with `use_copy=True`. Set it where `copy()` is the database's usual way to write many rows: `bulk_create()` then takes it whenever it handles no conflict and reads no row back. |
 | `inline_comments` | Table and column comments go into `CREATE TABLE` instead of `COMMENT ON`. |
-| `supports_positional_rows` | Rows are read by column name only — no `execute(rows_by_position=True)`, no native reading of rows and no run of a queryset on the plan of its calls. |
+| `supports_positional_rows` | Rows are read by column name only — no `execute(rows_by_position=True)`, no positional row reading and no run of a queryset on the plan of its calls. |
 | `execute_many_scales_poorly` | Bulk writes are sent as multi-row statements instead of `executemany()`. |
-| `binds_written_parameters` | Rows written by the native writer are bound as Python objects. |
 | `binds_array_parameters` | A list bound as one parameter (a `RawSQL` parameter such as `= ANY(%s)`) raises `UnSupportedError`. |
 | `max_bind_parameters` | Bulk writes, prefetching and cascades split their statements to stay under it. |
 | `max_bulk_update_rows` | `bulk_update()` writes at most this many rows per statement. |
 | `supports_nulls_distinct` | `UniqueConstraint(nulls_distinct=...)` raises `UnSupportedError` before its DDL is sent. |
-| `explain_options` | An `EXPLAIN` option not listed raises `UnSupportedError` before the statement is sent. |
+| `PostgresqlFeatures.explain_options` | An `EXPLAIN` option not listed raises `UnSupportedError` before the statement is sent. |
 | `supports_schemas` | Migrations create and drop no schema; a schema-qualified model's table is written as it is and has to exist. The schema editor's `get_index_name_sql()`, `get_indexed_table_sql()` and `get_referenced_table_sql()` write the names an index, a trigger and a foreign key take in the database's own form. |
 | `supports_distinct_on` | `distinct(*fields)` raises `UnSupportedError` when the query is built. |
 | `supports_grouping_sets` | `group_by(Rollup/Cube/GroupingSets(...))` and `Grouping()` raise `UnSupportedError`. |
@@ -297,7 +338,7 @@ reads none of them.
 | `supports_merge_returning` | `merge().returning()` raises `UnSupportedError`. |
 | `supports_merge_not_matched_by_source` | `merge().when_not_matched_by_source()` raises `UnSupportedError`. |
 | `supports_pool_status` | `get_pool_status()` raises `UnSupportedError`, and the client's pools are left out of `Connections.get_pool_statuses()`. |
-| `sorts_nulls_first` | Where NULL sorts by default — `nulls_first`/`nulls_last` add the clause only where it changes the order. |
+| `sorts_nulls_first` | Where NULL sorts when no placement is requested. Explicit `nulls_first`/`nulls_last` is rendered even when it matches that default. |
 | `divides_integers_exactly` | Set it where `/` of two integers gives the exact quotient: the expression's output field is a `FloatField` instead of the integer field. |
 | `computes_integer_statistics_exactly` | Set it where the database computes `AVG`, `STDDEV` and `VARIANCE` of integers as exact decimals: the result is read as a `Decimal`; without, hare reads it as a float. |
 | `computes_decimal_statistics_exactly` | On by default. Turn it off where the database computes `AVG`, `STDDEV` and `VARIANCE` of decimals as floats: hare then reads the result as a float, not a `Decimal`. |
@@ -305,8 +346,9 @@ reads none of them.
 | `supports_conflict_constraint_names`, `supports_conflict_where` | `bulk_create(on_conflict_constraint=...)` / `conflict_where=` raise `UnSupportedError`. |
 | `matches_ordering_to_grouping_by_sql` | Set it when an ordering term that is also grouped by has to be written exactly as in `GROUP BY`. |
 | `supports_virtual_generated_columns` | `GeneratedField(stored=False)` raises `UnSupportedError`. |
-| `supports_text_search_configurations` | A text search configuration, a `SearchVector` value, lexemes, `SearchRank`'s label weights, `normalization` and `cover_density`, and `SearchHeadline`'s fragment options raise `UnSupportedError`. |
-| `supports_full_text_index` | `FullTextIndex` and `SearchRank`'s weights by field raise `UnSupportedError`. |
+| `supports_text_search_configurations` | Explicit config= for a search query, vector or headline |
+| `text_search_operations` | Independent TextSearchOperation entries, checked by the dialect against connection features |
+| `SqliteFeatures.supports_full_text_index` | `FullTextIndex` and `SearchRank`'s weights by field raise `UnSupportedError`. |
 | `supports_vector_search` | The vector distances and `__nearby` raise `UnSupportedError`. |
 | `supports_tenant_schemas` | `TenantSchemas.create()`/`drop()`/`get_tenants()` raise `UnSupportedError`; implement the client's `get_tenant_client_settings(schema_name)` (the search path of a tenant's schema), the connection option `tenant_schema_template` and the introspector's `fetch_schema_names()`. |
 | `supports_spatial` | The `hare.gis` lookups, paths, functions and aggregates raise `UnSupportedError`; register renderers of `GeometryValue`, `SpatialRelationTerm`, `SpatialFunctionTerm` and the names of `SpatialAggregateFunction`, and a `GeometryField` column type with its value conversions. |
@@ -340,7 +382,9 @@ with `takes_keys_before_insert`) — a primary key left to a `db_default` is ref
 and the values of `db_default` and computed columns stay unread: the field holds
 `DatabaseDefault`, a computed field isn't loaded, and `refresh_from_db()` reads them. An `UPDATE` doesn't
 read changed generated columns back, a bulk write can't tell which rows it really inserted, and
-`returning()` and `bulk_create(returning=True)` raise `UnSupportedError`.
+`bulk_create(returning=True)`, returning updates and direct SQL deletes raise `UnSupportedError`.
+A Python cascade, soft-delete or overridden deletion method can instead read rows by primary key;
+transaction guarantees depend on the connection's capabilities.
 
 The DDL features are listed with [the schema editor](schema.md#schema-editor). A client class can derive
 another's features: `AiosqliteClient.features.replace(supports_posix_regex=True)`.
@@ -353,5 +397,6 @@ same row readers build instances from what `execute()` returns. What differs bet
 from the dialect's parts and the connection's `Features`: generated and database-default columns come
 back through `INSERT ... RETURNING` where `supports_returning`; `clauses.get_upsert_inserted_flag_sql()`
 gives the `RETURNING` expression that tells an inserted row of an upsert from an updated one
-(PostgreSQL's `xmax = 0`; `None` makes hare read the existing keys before the write, and only while an
-observer listens).
+(PostgreSQL's `xmax = 0`). Existing keys are read when an observer or `Meta.change_capture` needs to
+distinguish inserted and updated rows and the dialect supplies no such expression. Capture of previous
+values can require this read even when that expression is available.

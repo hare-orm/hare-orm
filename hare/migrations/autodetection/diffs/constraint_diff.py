@@ -4,9 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.migrations.autodetection.diffs.schema_object_diff import SchemaObjectDiff
-from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.migrations.operations import AddConstraint, HareOperation, RemoveConstraint, RenameConstraint
-from hare.models.enums import ModelOption
+from hare.migrations.operations.schema_objects.object_types.constraint_object_type import ConstraintObjectType
 
 if TYPE_CHECKING:
     from hare.migrations.state.model_state import ModelState
@@ -17,7 +16,7 @@ class ConstraintDiff(SchemaObjectDiff):
     everything; an unnamed unique constraint is removed by its fields."""
 
     def get_objects(self, model_state: ModelState) -> list[Any]:
-        return StateSignatures.normalize_constraints(model_state.get_option_list(ModelOption.CONSTRAINTS))
+        return ConstraintObjectType.get_objects(model_state)
 
     def is_made_by_its_field(self, new_object: Any) -> bool:
         # An unnamed unique constraint on one field that is unique=True itself: both compute the

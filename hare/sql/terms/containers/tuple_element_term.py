@@ -14,6 +14,8 @@ class TupleElementTerm(ContainerFunction):
         alias: The alias.
     """
 
+    structure_attributes = ("index",)
+
     function_name: ClassVar[str] = "tuple_element"
 
     def __init__(self, tuple_term: Any, index: int, alias: str | None = None) -> None:

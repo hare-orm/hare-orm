@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.schema_objects.materialized_view import MaterializedView
 from hare.dialects.base.schema.schema_objects.materialized_views import MaterializedViews
+from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_DISTRIBUTED_IDENTITIES_SQL
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_MATERIALIZED_VIEW_CLUSTER_FILL_MESSAGE,
     CLICKHOUSE_MATERIALIZED_VIEW_CREATE_TEMPLATE,
@@ -23,11 +24,16 @@ from hare.dialects.clickhouse.schema_objects.clickhouse_materialized_view import
 from hare.exceptions import UnSupportedError
 from hare.models import Model
 
+if TYPE_CHECKING:
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
+
 
 class ClickhouseMaterializedViews(MaterializedViews):
     """MaterializedViews as ClickHouse writes it - a view follows the rows inserted into the table it
     reads, kept in a storage of its own or written to another table, or holds the rows of its query as
     of a refresh on a schedule. It isn't dropped with the table it reads."""
+
+    editor: ClickhouseSchemaEditor
 
     __slots__ = ()
 
@@ -38,6 +44,7 @@ class ClickhouseMaterializedViews(MaterializedViews):
         clickhouse_view = ClickhouseMaterializedView.from_materialized_view(view)
         return [
             CLICKHOUSE_MATERIALIZED_VIEW_CREATE_TEMPLATE.format(
+                on_cluster=self.editor.get_schema_cluster_sql(model._meta.schema),
                 if_not_exists="IF NOT EXISTS " if safe else "",
                 view=self.editor.qualify_object_name(model, view.name),
                 schedule=self.get_schedule_sql(model, clickhouse_view),
@@ -79,7 +86,7 @@ class ClickhouseMaterializedViews(MaterializedViews):
         """
         if view.to is not None:
             return f" TO {self.editor.qualify_object_name(model, view.to)}"
-        storage_sql = f" ENGINE = {view.engine}"
+        storage_sql = f" ENGINE = {view.get_engine().get_sql(model, self.editor.client.dialect)}"
         if view.partition_by is not None:
             storage_sql += f" PARTITION BY {self.get_key_sql(model, view.partition_by)}"
         sort_keys_sql = ", ".join(self.get_key_sql(model, key) for key in view.get_sort_keys())
@@ -128,16 +135,31 @@ class ClickhouseMaterializedViews(MaterializedViews):
             UnSupportedError: The view's own storage is filled on a cluster, its query reading a table that
                 isn't distributed.
         """
+        await self.editor.run_sqls(await self.get_checked_recreation_sqls(model, view))
+
+    async def get_checked_recreation_sqls(self, model: type[Model], view: MaterializedView) -> list[str]:
+        """Prepare replacement SQL and validate its fill placement before removing existing storage."""
+        statements = self.get_recreation_sqls(model, view)
         clickhouse_view = ClickhouseMaterializedView.from_materialized_view(view)
         if view.with_data and clickhouse_view.refresh is None and clickhouse_view.to is None:
             await self.raise_if_filled_on_one_server(model, view)
-        await self.editor.run_sqls(self.get_materialized_view_create_sqls(model, view))
-        if not view.with_data:
-            return
-        if clickhouse_view.refresh is not None:
-            await self.wait_for_refresh(model, view)
-        elif clickhouse_view.to is None:
-            await self.fill_materialized_view(model, view)
+        return statements
+
+    def get_recreation_sqls(self, model: type[Model], view: MaterializedView) -> list[str]:
+        """Compile recreation and filling; the caller checks cluster placement first.
+
+        A declared target table retains its existing rows. Only storage belonging to
+        the view is filled again; refreshable views wait for their scheduled refresh.
+        """
+        declaration = ClickhouseMaterializedView.from_materialized_view(view)
+        statements = self.get_materialized_view_create_sqls(model, view)
+        if view.with_data:
+            view_sql = self.editor.qualify_object_name(model, view.name)
+            if declaration.refresh is not None:
+                statements.append(CLICKHOUSE_VIEW_WAIT_TEMPLATE.format(view=view_sql))
+            elif declaration.to is None:
+                statements.append(self.get_fill_sql(model, view))
+        return statements
 
     async def raise_if_filled_on_one_server(self, model: type[Model], view: MaterializedView) -> None:
         """Refuses to fill a view on a cluster from tables keeping rows of each server's own - the fill runs on
@@ -154,8 +176,11 @@ class ClickhouseMaterializedViews(MaterializedViews):
         cluster = getattr(self.editor.client, "cluster", None)
         if cluster is None or self.editor.collect_sql:
             return
-        distributed_tables = await cluster.fetch_distributed_tables()
-        read_tables = dict.fromkeys(table for table, _column in view.read_columns)
+        distributed_tables = {
+            (str(row["database"]), str(row["name"]))
+            for row in await self.editor.client.execute_dicts(CLICKHOUSE_DISTRIBUTED_IDENTITIES_SQL)
+        }
+        read_tables = dict.fromkeys(table for table, _column in view.for_model(model).get_read_columns())
         local_tables = [
             table
             for table in read_tables
@@ -178,10 +203,12 @@ class ClickhouseMaterializedViews(MaterializedViews):
             model: The model declaring the view.
             view: The view.
         """
-        await self.editor.run_sql(
-            CLICKHOUSE_MATERIALIZED_VIEW_FILL_TEMPLATE.format(
-                view=self.editor.qualify_object_name(model, view.name), query=self.editor.get_view_query_sql(view)
-            )
+        await self.editor.run_sql(self.get_fill_sql(model, view))
+
+    def get_fill_sql(self, model: type[Model], view: MaterializedView) -> str:
+        """Compile the fill statement before a caller changes the view's existing storage."""
+        return CLICKHOUSE_MATERIALIZED_VIEW_FILL_TEMPLATE.format(
+            view=self.editor.qualify_object_name(model, view.name), query=self.editor.get_view_query_sql(view)
         )
 
     async def wait_for_refresh(self, model: type[Model], view: MaterializedView) -> None:
@@ -196,17 +223,16 @@ class ClickhouseMaterializedViews(MaterializedViews):
         )
 
     async def drop_materialized_view(self, model: type[Model], view: MaterializedView) -> None:
-        await self.editor.run_sql(
-            CLICKHOUSE_VIEW_DROP_TEMPLATE.format(if_exists="", view=self.editor.qualify_object_name(model, view.name))
-        )
+        await self.editor.run_sql(self.get_materialized_view_drop_sql(model, view))
 
-    async def drop_model_materialized_views(self, model: type[Model]) -> None:
-        for view in reversed(model._meta.materialized_views):
-            await self.editor.run_sql(
-                CLICKHOUSE_VIEW_DROP_TEMPLATE.format(
-                    if_exists="IF EXISTS ", view=self.editor.qualify_object_name(model, view.name)
-                )
-            )
+    def get_materialized_view_drop_sql(
+        self, model: type[Model], view: MaterializedView, *, if_exists: bool = False
+    ) -> str:
+        return CLICKHOUSE_VIEW_DROP_TEMPLATE.format(
+            on_cluster=self.editor.get_schema_cluster_sql(model._meta.schema),
+            if_exists="IF EXISTS " if if_exists else "",
+            view=self.editor.qualify_object_name(model, view.name),
+        )
 
     async def alter_materialized_view(
         self, model: type[Model], old_view: MaterializedView, new_view: MaterializedView
@@ -220,7 +246,9 @@ class ClickhouseMaterializedViews(MaterializedViews):
         if new.to is not None and new.refresh is None and dataclasses.replace(old, query=new.query) == new:
             await self.editor.run_sql(
                 CLICKHOUSE_MATERIALIZED_VIEW_QUERY_TEMPLATE.format(
-                    view=view_sql, query=self.editor.get_view_query_sql(new)
+                    on_cluster=self.editor.get_schema_cluster_sql(model._meta.schema),
+                    view=view_sql,
+                    query=self.editor.get_view_query_sql(new),
                 )
             )
             return
@@ -230,11 +258,16 @@ class ClickhouseMaterializedViews(MaterializedViews):
             and dataclasses.replace(old, refresh=new.refresh) == new
         ):
             await self.editor.run_sql(
-                CLICKHOUSE_MATERIALIZED_VIEW_SCHEDULE_TEMPLATE.format(view=view_sql, schedule=new.refresh.strip())
+                CLICKHOUSE_MATERIALIZED_VIEW_SCHEDULE_TEMPLATE.format(
+                    on_cluster=self.editor.get_schema_cluster_sql(model._meta.schema),
+                    view=view_sql,
+                    schedule=new.refresh.strip(),
+                )
             )
             return
+        statements = await self.get_checked_recreation_sqls(model, new_view)
         await self.drop_materialized_view(model, old_view)
-        await self.create_materialized_view_again(model, new_view)
+        await self.editor.run_sqls(statements)
 
     async def rename_materialized_view(
         self, model: type[Model], old_view: MaterializedView, new_view: MaterializedView
@@ -260,8 +293,11 @@ class ClickhouseMaterializedViews(MaterializedViews):
                 f"Materialized view {view.name!r} can't be refreshed concurrently on ClickHouse - it is emptied and "
                 "filled again; a ClickhouseMaterializedView(refresh=...) replaces its rows at once"
             )
-        held_table_sql = view_sql
+        held_table_sql = self.editor.get_schema_table_sql(view.name, model._meta.schema)
         if clickhouse_view.to is not None:
-            held_table_sql = self.editor.qualify_object_name(model, clickhouse_view.to)
-        await self.editor.run_sql(CLICKHOUSE_TABLE_TRUNCATE_TEMPLATE.format(table=held_table_sql))
-        await self.fill_materialized_view(model, view)
+            held_table_sql = self.editor.get_schema_table_sql(clickhouse_view.to, model._meta.schema)
+        statements = [
+            CLICKHOUSE_TABLE_TRUNCATE_TEMPLATE.format(table=held_table_sql),
+            self.get_fill_sql(model, view),
+        ]
+        await self.editor.run_sqls(statements)

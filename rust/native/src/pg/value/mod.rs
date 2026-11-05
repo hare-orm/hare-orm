@@ -6,21 +6,19 @@
 //! Every value is encoded and decoded here, checked against the parameter or column type the server
 //! resolved - a value is never written as another type's raw bytes.
 
+pub(crate) mod column_decoder;
 pub mod decode;
 pub mod encode;
 pub mod from_python;
 pub mod into_python;
 pub mod python_classes;
+pub(crate) mod server_text_forms;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
-pub mod wire_scalar;
 
-pub(crate) use decode::{
-    check_pg_row_values, decode_pg_row_values, decode_value, get_raw_column, type_may_need_server_text_form,
-    ServerTextForms, SERVER_TEXT_FORMS_PER_QUERY,
-};
+pub(crate) use decode::{decode_pg_row_values, ServerTextForms};
 pub(crate) use encode::{BinaryParameter, RawWireValue};
 
 use std::error::Error;
@@ -70,6 +68,8 @@ pub struct NetworkValue {
 #[derive(Debug, Clone)]
 pub enum Value {
     Null,
+    /// Internal server-text request, replaced before publication or Python conversion.
+    DeferredText(usize),
     Bool(bool),
     Int(i64),
     /// A Python `int` outside the `i64` range, as its decimal text.

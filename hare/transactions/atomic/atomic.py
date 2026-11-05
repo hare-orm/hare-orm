@@ -29,8 +29,10 @@ class Atomic:
 
     Nested inside another transaction of the same connection it is a savepoint.
 
-    With ``retries`` it runs again after a ``TransactionRetryError``: the decorated function is
-    called again, and a block is run by ``async for attempt in atomic(retries=N): async with attempt:``.
+    With ``retries`` it runs again after a ``TransactionRetryError`` and a confirmed rollback:
+    the decorated function is called again, and a block is run by
+    ``async for attempt in atomic(retries=N): async with attempt:``. A committed transaction,
+    including one whose commit callback failed, or an unknown outcome is never repeated.
 
     Args:
         get_connection: Gives the connection the transaction runs on, when it starts.
@@ -98,8 +100,8 @@ class Atomic:
         """The connection a transaction runs on.
 
         Args:
-            using: The connection alias; None picks the only connection, or the one every app's
-                models use.
+            using: The connection alias; None picks the only connection, then the one every app's
+                models use, then the connection named 'default'.
 
         Returns:
             The connection.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.connection.postgresql_driver import PostgresqlDriver
 from hare.dialects.postgresql.constants import POSTGRES_CONNECTION_OPTIONS
 from hare.dialects.postgresql.drivers.asyncpg.constants import ASYNCPG_CONNECTION_OPTIONS
@@ -43,4 +42,4 @@ class AsyncpgDriver(PostgresqlDriver):
         return {"ssl": mode}
 
 
-DialectRegistry.register_driver(AsyncpgDriver())
+extension = AsyncpgDriver.get_contribution

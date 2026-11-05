@@ -8,8 +8,6 @@ from hare.query.expressions import Aggregate
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
-from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
-from hare.query.plans.enums import PlanPartType
 
 
 class StatisticResultAggregate(Aggregate):
@@ -18,31 +16,23 @@ class StatisticResultAggregate(Aggregate):
     (``Features.computes_integer_statistics_exactly``, ``computes_decimal_statistics_exactly``), else a
     float."""
 
-    plan_parts: ClassVar[DeclaredPlanParts] = (
-        *Aggregate.plan_parts,
-        # Read off the field's type on each build - the field is in the key.
-        ("aggregated_field", PlanPartType.NONE),
-    )
     populate_field_object = True
     #: What it computes - the database may compute an average in a wider type than another statistic.
     computation: ClassVar[ValueComputation] = ValueComputation.STATISTIC
 
-    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        """Resolves the statistic - of integers or Decimals the database's own decimal or float.
-
-        Args:
-            expression_context: Carries the model and virtual SQL table this aggregate is resolved
-                against.
-
-        Returns:
-            The resolved term, joins, and output field.
-        """
-        self.aggregated_field: Field[Any] | None = None
-        result = super().get_result(expression_context)
-        return self._get_statistic_result(result, self.aggregated_field, expression_context)
+    def _finalize_result(
+        self, result: ExpressionResult, function_arg: ExpressionResult, expression_context: ExpressionContext
+    ) -> ExpressionResult:
+        """Adapt the statistic after the aggregate's keyed term and NULL metadata are complete."""
+        result = super()._finalize_result(result, function_arg, expression_context)
+        if not NumericTyping.is_statistic_a_float(function_arg.output_field, expression_context.dialect):
+            return result
+        float_term = expression_context.dialect.renderers.get_statistic_as_float(result.term)
+        if float_term is result.term:
+            return result
+        return ExpressionResult(term=float_term, joins=result.joins, output_field=result.output_field)
 
     def _coerce_output_field(self, field_object: Field[Any], expression_context: ExpressionContext) -> Field[Any]:
-        self.aggregated_field = field_object
         return cast(
             "Field[Any]",
             NumericTyping.get_statistic_output_field(field_object, expression_context.dialect, self.computation),

@@ -48,15 +48,14 @@ class ReturnedValues:
         meta = model._meta
         field_names_by_column = meta.fields_db_projection_reverse
         fields_map = meta.fields_map
-        restores: list[tuple[Model, str, Any]] | None = [] if connection.is_transaction_client else None
         for column in row.keys() if columns is None else columns:
             field_name = field_names_by_column.get(column)
             if field_name is not None:
-                if restores is not None:
-                    restores.append((obj, field_name, obj.__dict__.get(field_name, ROLLBACK_RESTORE_UNSET)))
-                setattr(obj, field_name, types.get_python_value(fields_map[field_name], row[column]))
-        if restores:
-            RollbackRestores.register_rollback_restores(connection, restores)
+                value = types.get_python_value(fields_map[field_name], row[column])
+                RollbackRestores.register_rollback_restore(
+                    obj, connection, field_name, obj.__dict__.get(field_name, ROLLBACK_RESTORE_UNSET)
+                )
+                setattr(obj, field_name, value)
 
     @staticmethod
     def match_rows(
@@ -87,16 +86,15 @@ class ReturnedValues:
         instances = list(instances)
         instances_by_key: dict[tuple[Any, ...], TInstance] = {}
         for instance in instances:
-            instances_by_key.setdefault(tuple(getattr(instance, field_name) for field_name in field_names), instance)
+            key = tuple(ReturnedValues.get_hashable(getattr(instance, field_name)) for field_name in field_names)
+            instances_by_key.setdefault(key, instance)
         # Built at the first row no instance holds as given.
         instances_by_stored_key: dict[tuple[Any, ...], TInstance] | None = None
         matched_instance_ids: set[int] = set()
         for raw_row in rows:
             # A driver's row may have no .items()/.get() - read as a dict.
             row = dict(raw_row)
-            key = tuple(
-                types.get_python_value(field, row.get(column)) for field, column in zip(fields, columns, strict=True)
-            )
+            key = ReturnedValues.get_row_key(types, fields, columns, row)
             matched_instance = instances_by_key.get(key)
             if matched_instance is None or id(matched_instance) in matched_instance_ids:
                 if instances_by_stored_key is None:

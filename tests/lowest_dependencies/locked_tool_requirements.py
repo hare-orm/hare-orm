@@ -15,13 +15,17 @@ Usage:
 
 from __future__ import annotations
 
-import re
+import subprocess
+import sys
 import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 from tests.lowest_dependencies.constants import (
-    POETRY_LOCK_PATH,
     PYPROJECT_PATH,
-    REQUIREMENT_NAME_PATTERN,
+    REPOSITORY_DIRECTORY,
     TEST_TOOL_GROUP,
 )
 from tests.matrix.constants import SUITE_ENVIRONMENTS
@@ -30,16 +34,9 @@ from tests.matrix.constants import SUITE_ENVIRONMENTS
 class LockedToolRequirements:
     """The test tools pinned to their locked versions."""
 
-    def __init__(self) -> None:
-        with PYPROJECT_PATH.open("rb") as pyproject_file:
+    def __init__(self, pyproject_path: Path = PYPROJECT_PATH) -> None:
+        with pyproject_path.open("rb") as pyproject_file:
             self.pyproject = tomllib.load(pyproject_file)
-        with POETRY_LOCK_PATH.open("rb") as lock_file:
-            self.lock = tomllib.load(lock_file)
-
-    @staticmethod
-    def normalize_name(name: str) -> str:
-        """A package name in its PEP 503 normalized form."""
-        return re.sub(r"[-_.]+", "-", name).lower()
 
     def get_project_dependency_names(self) -> set[str]:
         """The normalized names of hare's dependencies, extras included."""
@@ -47,13 +44,7 @@ class LockedToolRequirements:
         requirements = list(project["dependencies"])
         for extra_requirements in project.get("optional-dependencies", {}).values():
             requirements.extend(extra_requirements)
-        names = set()
-        for requirement in requirements:
-            name_match = re.match(REQUIREMENT_NAME_PATTERN, requirement.strip())
-            if name_match is None:
-                raise SystemExit(f"Can't read the package name of {requirement!r} in pyproject.toml")
-            names.add(self.normalize_name(name_match.group(0)))
-        return names
+        return {canonicalize_name(Requirement(requirement).name) for requirement in requirements}
 
     @staticmethod
     def get_tool_groups() -> list[str]:
@@ -62,27 +53,57 @@ class LockedToolRequirements:
         return list(dict.fromkeys((TEST_TOOL_GROUP, *environment_groups)))
 
     def get_lines(self) -> list[str]:
-        """The pinned requirements, one per test tool that isn't one of hare's dependencies.
+        """Export locked tools with all platform/Python alternatives and their markers intact.
 
-        Raises:
-            SystemExit: A test tool isn't in ``poetry.lock``.
+        Poetry interprets its lock format. Only direct tools are pinned here; project
+        dependencies remain unconstrained so uv can select their declared lower bounds.
+        The tool environment, including Poetry's export plugin, is separate from the
+        target environment. Markers are evaluated by uv for that target, never here.
         """
-        locked_versions = {
-            self.normalize_name(package["name"]): package["version"] for package in self.lock["package"]
-        }
-        project_dependency_names = self.get_project_dependency_names()
+        groups = self.get_tool_groups()
+        exported = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "poetry",
+                "export",
+                "--only",
+                ",".join(groups),
+                "--format",
+                "requirements.txt",
+                "--without-hashes",
+            ],
+            cwd=REPOSITORY_DIRECTORY,
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        return self.select_tools(exported.stdout)
+
+    def select_tools(self, exported: str) -> list[str]:
+        """Keep every exported alternative of a direct tool, preserving sources and markers."""
         poetry_groups = self.pyproject["tool"]["poetry"]["group"]
-        tool_names = [
-            tool_name for group in self.get_tool_groups() for tool_name in poetry_groups[group]["dependencies"]
-        ]
+        tool_names = {
+            canonicalize_name(tool_name)
+            for group in self.get_tool_groups()
+            for tool_name in poetry_groups[group]["dependencies"]
+        } - self.get_project_dependency_names()
         lines = []
-        for tool_name in tool_names:
-            normalized_name = self.normalize_name(tool_name)
-            if normalized_name in project_dependency_names:
+        found = set()
+        for line in exported.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
                 continue
-            if normalized_name not in locked_versions:
-                raise SystemExit(f"The test tool {tool_name} isn't in poetry.lock")
-            lines.append(f"{normalized_name}=={locked_versions[normalized_name]}")
+            if line.startswith("--"):
+                lines.append(line)
+                continue
+            name = canonicalize_name(Requirement(line).name)
+            if name in tool_names:
+                found.add(name)
+                lines.append(line)
+        if missing := tool_names - found:
+            raise SystemExit(f"Test tools missing from Poetry's export: {', '.join(sorted(missing))}")
         return lines
 
 

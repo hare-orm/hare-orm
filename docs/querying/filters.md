@@ -155,6 +155,9 @@ datetime is read in it; datetimes still come back as the same moments. The zone 
 `ZoneInfo` — an unknown one, or a fixed offset without an IANA name, raises `ConfigurationError`. One
 expression takes its own zone with `tzinfo=` — see [Date functions](functions.md#date-functions).
 
+`Timezone.parse()` and `Timezone.default()` return the standard `zoneinfo.ZoneInfo`, also exported as
+`hare.time.ZoneInfo`. Its IANA name is available through `.key`.
+
 ## <a id="forward-foreignkeyfield-onetoonefield"></a>Forward `ForeignKeyField` / `OneToOneField`
 
 A lookup on the relation's own name works on its key column: `author__isnull=True`, `author__in=[author1,
@@ -162,9 +165,10 @@ author2]` (instances or key values, mixed freely), `author__not_in=[...]`, `auth
 `author__in=Author.objects.filter(...)` — in `filter()`, `exclude()`, `Q` and `When`, the same as
 `author_id__...`. An instance is replaced by its `to_field` value (the primary key unless the relation
 sets `to_field=`); an unsaved instance or an instance of another model — a concrete subclass of the
-related model too, whose rows are another table's — raises `QueryError` (on a to-many relation as well),
-and so does such a lookup on a relation with a composite key (filter each key column instead). A name
-that is a field of the related model (`author__name`) still filters through the join.
+related model too, whose rows are another table's — raises `QueryError` (on a to-many relation as well).
+A relation with a composite key supports equality, `__not`, `__in`, `__not_in`, `__isnull` and
+`__not_isnull`; ordering comparisons require filters on individual key columns. A name that is a field
+of the related model (`author__name`) still filters through the join.
 
 ## <a id="large-in-lists"></a>Large `__in` lists
 
@@ -261,8 +265,8 @@ await Author.objects.alias(in_print=in_print).values("name", "in_print__title").
   as does a condition through a further relation or an `Exists(...)`. A `relation_name` that isn't a
   relation raises `FieldError`, checked first. Both are checked when `alias()`/`annotate()` names the
   `FilteredRelation`, even one the query never reads.
-- A query with a filtered relation keeps no [plan](query-plan-cache.md): its condition is part of a
-  `JOIN`.
+- A filtered relation participates in [plan caching](query-plan-cache.md), including its `JOIN`
+  condition and bound values.
 
 ## <a id="lateral"></a>`Lateral`
 
@@ -596,8 +600,8 @@ A non-nullable column is unaffected — there's no NULL row for it to ever keep,
 unchanged.
 
 An aggregate annotation filtered in `HAVING` follows the same rule:
-`annotate(total=Sum("books__pages")) .exclude(total__gt=500)` keeps an author without books, whose `SUM`
-is `NULL`.
+`annotate(total=Sum("books__pages")).exclude(total__gt=500)` keeps an author without books. PostgreSQL
+and SQLite return `NULL` for that `SUM`; ClickHouse follows its aggregate's native empty-input result.
 
 The same "treat NULL like Python's `not in`/`!=` would" principle extends to two related lookups:
 
@@ -616,7 +620,8 @@ The same "treat NULL like Python's `not in`/`!=` would" principle extends to two
 
 ## <a id="field-names-from-user-input"></a>Field names from user input
 
-Values passed to `filter()`/`exclude()` are always bound as parameters, but field **names** —
+Ordinary values passed to `filter()`/`exclude()` are bound as parameters. `None` can produce a NULL
+predicate, and expressions produce SQL structure. Field **names** —
 `order_by()`, `values()`/`values_list()`, `filter()`/`exclude()` keys, `select_related()`/
 `prefetch_related()`, `only()` — are trusted: hare resolves every relation path you give it and puts no
 limit on its length. Every hop adds a JOIN (a many-to-many hop two), and a path crossing several to-many

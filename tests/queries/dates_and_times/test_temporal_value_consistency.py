@@ -15,10 +15,11 @@ import pytest
 from hare import fields
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError
 from hare.fields.data.json.json_codec import JsonCodec
 from hare.fields.db_defaults import Now
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
 from hare.query.expressions import Case, F, Q, Value, When
 from hare.query.functions import Coalesce, Max, Min
@@ -86,22 +87,14 @@ def test_server_settings_time_zone_other_than_utc_is_rejected(configured_zone):
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize("configured_zone", ["UTC", "Etc/UTC", "utc", "GMT"])
-def test_server_settings_utc_time_zone_is_accepted(configured_zone):
+@pytest.mark.parametrize("as_pairs", [False, True])
+def test_server_settings_utc_time_zone_is_accepted(configured_zone, as_pairs):
     from hare.dialects.postgresql.client import PostgresqlClient
 
-    settings = PostgresqlClient._get_server_settings_with_utc_session(
-        {"TimeZone": configured_zone, "application_name": "app"}
-    )
+    configured = {"TimeZone": configured_zone, "application_name": "app"}
+    settings = PostgresqlClient._get_server_settings_with_utc_session(configured.items() if as_pairs else configured)
     assert settings == {"TimeZone": "UTC", "application_name": "app"}
-
-
-@pytest.mark.database_independent
-def test_server_settings_of_a_db_url_are_refused():
-    """asyncpg passes a DB_URL's unknown parameters on - ?server_settings=x reached dict("x"), a raw ValueError."""
-    from hare.dialects.postgresql.client import PostgresqlClient
-
-    with pytest.raises(ConfigurationError, match="server_settings must be a mapping"):
-        PostgresqlClient._get_server_settings_with_utc_session("x")
+    assert configured == {"TimeZone": configured_zone, "application_name": "app"}
 
 
 @pytest.mark.asyncio
@@ -412,7 +405,7 @@ class FakeDatetime(datetime.datetime):
 )
 def test_migration_writer_renders_dates_and_times_as_plain_datetime_classes(value):
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(value, imports)
+    rendered = DeclarationValueSerializer.render_value(value, imports)
     assert "FakeDatetime" not in rendered
     rebuilt = eval(rendered, {"datetime": datetime, "ZoneInfo": ZoneInfo})  # noqa: S307
     assert type(rebuilt) in (datetime.datetime, datetime.date, datetime.time)

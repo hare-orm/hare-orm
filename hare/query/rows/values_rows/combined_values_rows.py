@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -82,7 +81,7 @@ class CombinedValuesRows:
         else:
             values_query = cast("ValuesQuery", branch)
             converters = ValuesOutput.get_column_converters(values_query)
-            value_fields = [output_field for *_names, output_field in values_query._get_output_columns()]
+            value_fields = [column[-1] for column in values_query._get_output_columns()]
         if not self.has_columns:
             self.has_columns = True
             self.column_converters = list(converters)
@@ -124,12 +123,8 @@ class CombinedValuesRows:
         """Runs the statement and builds the rows."""
         return await self.first_leaf._fetch_rows(query._connection, sql, parameters, self.column_converters)
 
-    async def stream_batches(
-        self, query: CombinedQuery, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
-    ) -> AsyncIterator[list[Any]]:
-        """Streams the rows off a server-side cursor, a batch at a time."""
-        async with contextlib.aclosing(connection.stream_batches(sql, parameters, chunk_size=chunk_size)) as batches:
-            async for batch in batches:
-                yield [
-                    self.first_leaf._convert_row(connection.row_to_dict(row), self.column_converters) for row in batch
-                ]
+    def stream_batches(
+        self, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
+    ) -> AsyncGenerator[list[Any]]:
+        """Stream combined rows through the first branch's result shape and shared decoder."""
+        return self.first_leaf._rows.stream_batches(connection, sql, parameters, self.column_converters, chunk_size)

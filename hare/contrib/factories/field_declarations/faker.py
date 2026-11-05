@@ -22,7 +22,7 @@ class Faker(Declaration):
     """
 
     #: A ``faker.Faker`` by locale - made on the first value of each.
-    fakers_by_locale: ClassVar[Cache[Any]] = Cache(FAKER_CACHE_MAX_SIZE, holds_sql=False, keyed_by_model=False)
+    fakers_by_locale: ClassVar[Cache[Any]] = Cache(FAKER_CACHE_MAX_SIZE, holds_sql=False)
 
     def __init__(self, provider: str, *, locale: str | None = None, **arguments: Any) -> None:
         self.provider = provider

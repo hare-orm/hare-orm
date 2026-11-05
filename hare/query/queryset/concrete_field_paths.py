@@ -19,9 +19,7 @@ class ConcreteFieldPaths:
 
     #: Per model, path -> the field paths it reads. A path crosses relations into other models, so a
     #: change of any model forgets every entry.
-    paths: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True, model_attribute="concrete_field_paths"
-    )
+    paths: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
 
     @staticmethod
     def get_paths(model: type[Model], field_path: str) -> tuple[str, ...]:
@@ -34,9 +32,7 @@ class ConcreteFieldPaths:
         Returns:
             The paths read - the path itself when it names a field or isn't a model field.
         """
-        paths: dict[str, tuple[str, ...]] | None = model._meta.concrete_field_paths
-        if paths is None:
-            paths = ConcreteFieldPaths.paths.get_model_bucket(model)
+        paths = ConcreteFieldPaths.paths.get_model_bucket(model)
         concrete_field_paths = paths.get(field_path)
         if concrete_field_paths is None:
             concrete_field_paths = paths[field_path] = ConcreteFieldPaths.read_paths(model, field_path)

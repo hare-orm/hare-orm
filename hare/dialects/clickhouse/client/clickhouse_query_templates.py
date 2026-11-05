@@ -15,7 +15,7 @@ class ClickhouseQueryTemplates:
 
     #: The format string and the index of the value of each ``{}``, by the statement's text.
     templates: ClassVar[Cache[tuple[str, tuple[int, ...]]]] = Cache(
-        CLICKHOUSE_QUERY_TEMPLATE_CACHE_MAX_SIZE, holds_sql=False, keyed_by_model=False
+        CLICKHOUSE_QUERY_TEMPLATE_CACHE_MAX_SIZE, holds_sql=False
     )
 
     @classmethod

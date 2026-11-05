@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.apps.model_connection_checks import ModelConnectionChecks
 from hare.core.apps.model_discovery import ModelDiscovery
 from hare.core.apps.relation_linking import RelationLinking
@@ -24,13 +26,13 @@ from hare.fields.relations.swappable_model_reference import SwappableModelRefere
 from hare.models import Model
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
-from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 from hare.sql import Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
-    from hare.core.apps.declarations import ModelReference
+    from hare.core.apps.declarations import ModelReference, TableIdentity
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class Apps:
@@ -61,7 +63,8 @@ class Apps:
         self._table_name_generator = table_name_generator
         self._validate_connections = validate_connections
         if self._config:
-            ModelDiscovery.load_from_config(self)
+            with ModelBindingGraph(self):
+                ModelDiscovery.load_from_config(self)
 
     def init_app(
         self,
@@ -82,18 +85,19 @@ class Apps:
         Raises:
             ConfigurationError: A module can't be imported, or a model is wrong.
         """
-        app_models: list[type[Model]] = []
-        for module in module_list:
-            app_models += ModelDiscovery.discover_models(module, label)
+        with ModelBindingGraph(self):
+            app_models: list[type[Model]] = []
+            for module in module_list:
+                app_models += ModelDiscovery.discover_models(module, label)
 
-        # Merged, not replaced: a second registration under the label keeps the earlier models, and
-        # the table name collision check sees them.
-        self.apps.setdefault(label, {}).update({model.__name__: model for model in app_models})
+            # Merged, not replaced: a second registration under the label keeps the earlier models, and
+            # the table name collision check sees them.
+            self.apps.setdefault(label, {}).update({model.__name__: model for model in app_models})
 
-        if init_relations:
-            self.init_relations()
+            if init_relations:
+                self.init_relations()
 
-        return self.apps[label]
+            return self.apps[label]
 
     def assign_default_connection(self, app_label: str, default_connection: str) -> None:
         """Points every model registered under ``app_label`` at ``default_connection``."""
@@ -109,12 +113,13 @@ class Apps:
         re-init that failed half-way, leaves the models bound to that configuration. Calling this
         on the registry that should own them puts them back.
         """
-        for name, info in self._config.items():
-            if name in self.apps:
-                self.assign_default_connection(name, info.get("default_connection", DEFAULT_CONNECTION_NAME))
-        self.init_relations()
-        if self._validate_connections:
-            self.build_initial_querysets()
+        with ModelBindingGraph(self):
+            for name, info in self._config.items():
+                if name in self.apps:
+                    self.assign_default_connection(name, info.get("default_connection", DEFAULT_CONNECTION_NAME))
+            self.init_relations()
+            if self._validate_connections:
+                self.build_initial_querysets()
 
     def build_initial_querysets(self) -> None:
         """Binds every registered model's ``basetable``/``basequery``/``basequery_all_fields`` to this
@@ -139,14 +144,27 @@ class Apps:
         queryset as SQL where no connection is opened."""
         for app in self.apps.values():
             for model in app.values():
-                model._meta.basetable = Table(
-                    name=model._meta.db_table,
-                    schema=model._meta.schema,
-                    table_options=tuple(model._meta.table_options),
-                )
-                basequery = model._meta.connection.query_class.from_(model._meta.basetable)
-                model._meta.basequery = basequery
-                model._meta.basequery_all_fields = basequery.select(*model._meta.db_fields)
+                self.bind_model_base_queries(model, model._meta.connection)
+
+    @staticmethod
+    def bind_model_base_queries(model: type[Model], connection: DatabaseClient) -> None:
+        """Build one model's table and base queries using the explicitly selected client.
+
+        The caller owns connection selection and model finalisation; historical registries
+        can use their captured connection handler without consulting the current context.
+
+        Args:
+            model: The model whose table metadata and database fields are ready.
+            connection: The client providing the query class for this binding.
+        """
+        model._meta.basetable = Table(
+            name=model._meta.db_table,
+            schema=model._meta.schema,
+            table_options=tuple(model._meta.table_options),
+        )
+        basequery = connection.query_class.from_(model._meta.basetable)
+        model._meta.basequery = basequery
+        model._meta.basequery_all_fields = basequery.select(*model._meta.db_fields)
 
     def get_swappable_label(self, setting: str) -> str:
         """The ``app_label.ModelName`` label a ``swappable`` setting points at - the configured
@@ -213,12 +231,12 @@ class Apps:
         """
         # Two models defaulting to one table name are rejected here, naming both - per (connection,
         # schema), as schema generation groups them.
-        model_by_table: dict[tuple[str | None, str | None, str], type[Model]] = {}
+        model_by_table: dict[TableIdentity, type[Model]] = {}
         for app in self.apps.values():
             for model in app.values():
                 if model._meta.swapped is not None:
                     continue
-                table_key = (model._meta.default_connection, model._meta.schema, model._meta.db_table)
+                table_key = self.get_table_identity(model, model._meta.schema, model._meta.db_table)
                 colliding_model = model_by_table.get(table_key)
                 if colliding_model is not None and colliding_model is not model:
                     raise ConfigurationError(
@@ -235,12 +253,11 @@ class Apps:
         for registered_model in self.get_models_iterable():
             if registered_model is model:
                 continue
-            if model in RelationLinking.get_relation_targets(registered_model):
-                meta = registered_model._meta
-                for field_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields | meta.many_to_many_fields):
-                    field = meta.fields_map[field_name]
-                    if getattr(field, "related_model", None) is model and not getattr(field, "_generated", False):
-                        references.append(f"{meta.full_name}.{field_name}")
+            meta = registered_model._meta
+            for field_name in sorted(meta.foreign_key_fields | meta.one_to_one_fields | meta.many_to_many_fields):
+                field = meta.fields_map[field_name]
+                if getattr(field, "related_model", None) is model and not getattr(field, "_generated", False):
+                    references.append(f"{meta.full_name}.{field_name}")
         return references
 
     def remove_models(self, models: Iterable[type[Model]]) -> None:
@@ -256,23 +273,24 @@ class Apps:
             ConfigurationError: A model isn't registered here, or a model outside ``models`` still
                 has a relation pointing at one of them.
         """
-        models_to_remove = list(dict.fromkeys(models))
-        for model in models_to_remove:
-            if self.get_registered_app_label(model) is None:
-                raise ConfigurationError(f"Model {model.__name__!r} is not registered.")
-        removed_model_names = {model._meta.full_name for model in models_to_remove}
-        for model in models_to_remove:
-            references = [
-                reference
-                for reference in self.get_models_referencing(model)
-                if reference.rsplit(".", 1)[0] not in removed_model_names
-            ]
-            if references:
-                raise ConfigurationError(
-                    f"Cannot unregister {model._meta.full_name!r} - still referenced by "
-                    f"{', '.join(references)}. Unregister the referencing model(s) first."
-                )
-        self.discard_models(models_to_remove)
+        with ModelBindingGraph(self):
+            models_to_remove = list(dict.fromkeys(models))
+            for model in models_to_remove:
+                if self.get_registered_app_label(model) is None:
+                    raise ConfigurationError(f"Model {model.__name__!r} is not registered.")
+            removed_model_names = {model._meta.full_name for model in models_to_remove}
+            for model in models_to_remove:
+                references = [
+                    reference
+                    for reference in self.get_models_referencing(model)
+                    if reference.rsplit(".", 1)[0] not in removed_model_names
+                ]
+                if references:
+                    raise ConfigurationError(
+                        f"Cannot unregister {model._meta.full_name!r} - still referenced by "
+                        f"{', '.join(references)}. Unregister the referencing model(s) first."
+                    )
+            self.discard_models(models_to_remove)
 
     def discard_models(self, models: Iterable[type[Model]]) -> None:
         """Undoes whatever registering ``models`` got done, with no precondition checks - also
@@ -369,8 +387,7 @@ class Apps:
             raise ConfigurationError(f"No model with name {model_name!r} registered in app {app_label!r}.")
 
     def get_models_iterable(self) -> Iterable[type[Model]]:
-        model_list_generator = (model_list for model_list in (app.values() for app in self.apps.values()))
-        return chain.from_iterable(model_list_generator)
+        return chain.from_iterable(app.values() for app in self.apps.values())
 
     def clear(self) -> None:
         self.apps.clear()
@@ -421,19 +438,18 @@ class Apps:
         """Wires the relations of every model and finalises each one - its lookups described; the querysets
         built before the models were set up become ordinary ones.
         """
-        self.link_relations()
-        # The models a Meta.change_capture names by its label, before the capture is worked out.
-        for app in self.apps.values():
-            for model in app.values():
-                if model._meta.change_capture is not None:
-                    model._meta.change_capture.link_models(self)
-        # Every model's lookups, once all relations are wired - its filters and orderings are
-        # described without a connection, right after early binding (Hare.bind_models()) too.
-        for app in self.apps.values():
-            for model in app.values():
-                model._meta.finalise_model()
-        # The querysets built before the models were set up become ordinary ones.
-        CallsBeforeSetup.apply_pending()
+        with ModelBindingGraph(self):
+            self.link_relations()
+            # The models a Meta.change_capture names by its label, before the capture is worked out.
+            for app in self.apps.values():
+                for model in app.values():
+                    if model._meta.change_capture is not None:
+                        model._meta.change_capture.link_models(self)
+            # Every model's lookups, once all relations are wired - its filters and orderings are
+            # described without a connection, right after early binding (Hare.bind_models()) too.
+            for app in self.apps.values():
+                for model in app.values():
+                    model._meta.finalise_model()
 
     def link_relations(self) -> None:
         """Wires the relations of every model not inited yet - both sides of each - and marks it
@@ -451,14 +467,14 @@ class Apps:
 
         self._check_object_names()
 
-        table_owners = RelationLinking.get_table_owners(self)
+        table_holders = RelationLinking.get_table_holders(self)
         for app_name, app in self.apps.items():
             for model_name, model in app.items():
                 if model._meta._inited:
                     continue
                 RelationLinking.ensure_foreign_key_or_one_to_one_inited(self, model)
                 for field in sorted(model._meta.many_to_many_fields):
-                    self._link_many_to_many(app_name, model_name, model, field, table_owners)
+                    self._link_many_to_many(app_name, model_name, model, field, table_holders)
                 for generic_field in model._meta.generic_foreign_key_fields.values():
                     if generic_field.branch_names:
                         generic_field.bind_branches()
@@ -488,7 +504,7 @@ class Apps:
                 ]
                 names.extend(index.name for index in model._meta.indexes if isinstance(index, Index) and index.name)
                 # Constraints and indexes share their names; a trigger and its function may share one.
-                repeated_names = sorted({name for name in names if names.count(name) > 1})
+                repeated_names = sorted(name for name, count in Counter(names).items() if count > 1)
                 if repeated_names:
                     raise ConfigurationError(
                         f"Model {model._meta.full_name!r} declares more than one constraint/index named "
@@ -528,7 +544,7 @@ class Apps:
         model_name: str,
         model: type[Model],
         field: str,
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
+        table_holders: dict[TableIdentity, tuple[type[Model], str | None]],
     ) -> None:
         """Links a many-to-many field declared on a model: its target, its through table and keys,
         its backward name, and the generated field of the other side.
@@ -538,7 +554,7 @@ class Apps:
             model_name: The model's name in it.
             model: The model.
             field: The field's name.
-            table_owners: Who holds each table name - ``RelationLinking.get_table_owners()``.
+            table_holders: Who holds each table name - ``RelationLinking.get_table_holders()``.
 
         Raises:
             ConfigurationError: A model of the relation has no primary key, a self-referential
@@ -577,7 +593,7 @@ class Apps:
             RelationLinking.check_related_name_not_reserved(related_model, backward_relation_name, model, field)
 
         self._set_many_to_many_through_table(
-            model, field, many_to_many_object, related_model, through_model, is_swapped, table_owners
+            model, field, many_to_many_object, related_model, through_model, is_swapped, table_holders
         )
 
         # The through model is passed as the class, with its reconciled on_delete.
@@ -602,6 +618,18 @@ class Apps:
         LookupInfoBuilder.forget_descriptions()
         if not is_swapped:
             related_model._meta.add_field(backward_relation_name, many_to_many_relation)
+
+    def get_table_identity(self, model: type[Model], schema: str | None, table: str) -> TableIdentity:
+        """Identify a physical table using the connection's identifier comparison rules.
+
+        Schema-less declarations retain None: their effective namespace is selected by
+        the connection. Historical registries without connections keep declared spellings.
+        """
+        return (
+            model._meta.default_connection,
+            self.get_identifier_key(model, schema) if schema is not None else None,
+            self.get_identifier_key(model, table),
+        )
 
     def get_identifier_key(self, model: type[Model], name: str) -> str:
         """What a name of a model's table is told apart by on the database of its connection.
@@ -715,7 +743,7 @@ class Apps:
         related_model: type[Model],
         through_model: type[Model] | None,
         is_swapped: bool,
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
+        table_holders: dict[TableIdentity, tuple[type[Model], str | None]],
     ) -> None:
         """Sets a many-to-many field's through table and schema - the through model's, else the
         declared table, else one named after both models.
@@ -727,7 +755,7 @@ class Apps:
             related_model: The target.
             through_model: The through model, None for a through table of its own.
             is_swapped: Whether the model is swapped out.
-            table_owners: Who holds each table name - the field's automatic through table added.
+            table_holders: Who holds each table name - the field's automatic through table added.
 
         Raises:
             ConfigurationError: The generated table name is taken.
@@ -751,6 +779,6 @@ class Apps:
                 # Shortened with a digest to fit the identifier limit.
                 through = Identifiers.get_within_limit(through)
                 if not is_swapped:
-                    RelationLinking.check_auto_through_table_name_free(table_owners, through, model, field)
+                    RelationLinking.check_auto_through_table_name_free(self, table_holders, through, model, field)
                 many_to_many_object.through = through
             many_to_many_object.through_schema = model._meta.schema

@@ -9,6 +9,8 @@ import pytest
 from hare import Hare, fields
 from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError, FieldError
 from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.inspectdb import (
@@ -16,7 +18,6 @@ from hare.inspectdb import (
     ModelFactory,
 )
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from tests.utils.model_source_generator import ModelSourceGenerator
@@ -289,7 +290,7 @@ async def test_pydantic_model_of_reregistered_class_points_at_the_new_class(db, 
 
 def render_deconstructed(value: Any) -> str:
     path, args, kwargs = value.deconstruct()
-    return MigrationWriter.render_call(path, list(args), dict(kwargs), ImportManager())
+    return DeclarationValueSerializer.render_call(path, list(args), dict(kwargs), ImportManager())
 
 
 def describe_model_class(model: type[Model]) -> dict[str, Any]:

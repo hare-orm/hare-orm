@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from hare.exceptions import QueryError
+from hare.exceptions import ConfigurationError, QueryError
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
-from hare.search.constants import TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
-from hare.search.search_features import SearchFeatures
+from hare.search.messages import GENERATED_VECTOR_CONFIG_REQUIRED
 from hare.search.types import ConfigInput, VectorInput, WeightInput
 from hare.search.vector.search_vector_combinable import SearchVectorCombinable
 
@@ -16,7 +17,7 @@ class SearchVector(SearchVectorCombinable, Expression):
     """The searchable text of one or more fields or expressions, concatenated. As the vector of
     ``SearchRank`` it names the ranked fields on every dialect; as a value of its own (an
     annotation, ``+``, a configuration, a weight) it is the database's own vector and needs
-    ``features.supports_text_search_configurations``.
+    ``features.text_search_operations.vector``.
 
     Args:
         expressions: Field names or expressions to concatenate into the vector.
@@ -26,6 +27,8 @@ class SearchVector(SearchVectorCombinable, Expression):
     Raises:
         QueryError: No expressions are given.
     """
+
+    structure = ExpressionStructure(positional_role=ArgumentRole.FIELD)
 
     #: A weight letter is written into the SQL text, any other weight bound.
     plan_parts: ClassVar[DeclaredPlanParts] = (
@@ -65,7 +68,12 @@ class SearchVector(SearchVectorCombinable, Expression):
         return self.expressions  # type: ignore[return-value]
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        SearchFeatures.raise_if_unsupported(
-            expression_context, "SearchVector", TEXT_SEARCH_CONFIGURATIONS_REQUIRED_FEATURE
-        )
-        return expression_context.dialect.text_search.get_vector_result(self, expression_context)
+        vector = self
+        if self.config is None:
+            if expression_context.requires_search_config and expression_context.text_search_config is None:
+                raise ConfigurationError(GENERATED_VECTOR_CONFIG_REQUIRED)
+            if expression_context.text_search_config is not None:
+                vector = SearchVector(
+                    *self.expressions, config=expression_context.text_search_config, weight=self.weight
+                )
+        return expression_context.dialect.text_search.get_vector_result(vector, expression_context)

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, date, datetime, time, timezone as dt_timezone, tzinfo
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, cast
-from zoneinfo import ZoneInfoNotFoundError, available_timezones
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.exceptions import ConfigurationError, NonExistentTimeError, QueryError
 from hare.time.constants import (
     DEFAULT_TIMEZONE,
@@ -20,7 +21,6 @@ from hare.time.system_clock import SystemClock
 
 if TYPE_CHECKING:
     from hare.core.hare_context import HareContext
-from hare.time.zone_info import ZoneInfo
 
 
 class Timezone:
@@ -28,17 +28,19 @@ class Timezone:
     converting/checking datetimes against them."""
 
     #: (zone name,) -> its zone.
-    ZONES: ClassVar[Cache[ZoneInfo]] = Cache(ZONE_CACHE_SIZE, keyed_by_model=False)
+    ZONES: ClassVar[Cache[ZoneInfo]] = Cache(ZONE_CACHE_SIZE)
     #: Keeps the owner bucket of ``ZONES`` below.
     cache_buckets: ClassVar[dict[int, Any]] = {}
     #: A context's configured zone name -> its zone - the owner bucket of ``ZONES`` read for every
     #: datetime assigned; taken on first use. The names are the few a configuration gives.
-    configured_zones: ClassVar[dict[str, tzinfo] | None] = None
+    configured_zones: ClassVar[CacheBucket[ZoneInfo] | None] = None
     #: The zone of the system's local time when it can't be read - found on first use.
     system_zone_fallback: ClassVar[tzinfo | None] = None
 
     #: The zone set for a block of code with ``override()``; None for Hare's configured zone.
-    current_override: ClassVar[ContextVar[str | None]] = ContextVar("hare_timezone_override", default=None)
+    current_override: ClassVar[ContextVar[Mapping[object | None, str]]] = ContextVar(
+        "hare_timezone_override", default=MappingProxyType({})
+    )
 
     #: ``hare.core.hare_context.HareContext``, bound on first use by ``get_current_context()`` - that
     #: package imports this module, so importing it here at module level would be circular.
@@ -144,7 +146,7 @@ class Timezone:
             return value.replace(tzinfo=Timezone.get_system_zone_fallback())
 
     @staticmethod
-    def parse(zone: str) -> tzinfo:
+    def parse(zone: str) -> ZoneInfo:
         """The time zone of a name, kept for the next call - spelled as the zone database spells it.
 
         Args:
@@ -224,10 +226,10 @@ class Timezone:
         Returns:
             The IANA zone name.
         """
-        override = Timezone.current_override.get()
+        context = Timezone.get_current_context()
+        override = Timezone.current_override.get().get(None if context is None else context.identity)
         if override is not None:
             return override
-        context = Timezone.get_current_context()
         return context._timezone if context is not None else DEFAULT_TIMEZONE
 
     @staticmethod
@@ -243,7 +245,7 @@ class Timezone:
         context = context_class.current_context.get() or context_class.global_context
         if context is not None and not context._use_timezone:
             return None
-        override = Timezone.current_override.get()
+        override = Timezone.current_override.get().get(None if context is None else context.identity)
         if override is not None:
             return override
         return context._timezone if context is not None else DEFAULT_TIMEZONE
@@ -260,13 +262,13 @@ class Timezone:
         context = context_class.current_context.get() or context_class.global_context
         if context is not None and not context._use_timezone:
             return None
-        override = Timezone.current_override.get()
+        override = Timezone.current_override.get().get(None if context is None else context.identity)
         if override is not None:
             return Timezone.parse(override)
         zone_name = context._timezone if context is not None else DEFAULT_TIMEZONE
         configured_zones = Timezone.configured_zones
         if configured_zones is None:
-            configured_zones = Timezone.configured_zones = Timezone.ZONES.get_owner_bucket(Timezone)
+            configured_zones = Timezone.configured_zones = Timezone.ZONES.get_bucket(Timezone)
         zone = configured_zones.get(zone_name)
         if zone is None:
             zone = configured_zones[zone_name] = Timezone.parse(zone_name)
@@ -289,7 +291,7 @@ class Timezone:
         if context is not None and not context._use_timezone:
             tzlocal = Timezone.get_tzlocal()
             return (NAIVE_DATETIMES_ZONE_KEY_MARK, tzlocal.get_localzone_name() if tzlocal is not None else None)
-        override = Timezone.current_override.get()
+        override = Timezone.current_override.get().get(None if context is None else context.identity)
         if override is not None:
             return override
         return context._timezone if context is not None else DEFAULT_TIMEZONE
@@ -328,7 +330,7 @@ class Timezone:
         it, and a naive datetime is read in it. Datetimes still come back as the same moments::
 
             with Timezone.override("Europe/Moscow"):
-                today = await Order.filter(created_at__date=moscow_today).count()
+                today = await Book.objects.filter(created_at__date=moscow_today).count()
 
         Args:
             zone: An IANA zone name or a ``ZoneInfo``.
@@ -336,7 +338,11 @@ class Timezone:
         Raises:
             ConfigurationError: The zone isn't a known IANA zone.
         """
-        token = Timezone.current_override.set(Timezone.get_zone_name(zone))
+        context = Timezone.get_current_context()
+        application = None if context is None else context.identity
+        token = Timezone.current_override.set(
+            MappingProxyType({**Timezone.current_override.get(), application: Timezone.get_zone_name(zone)})
+        )
         try:
             yield
         finally:
@@ -358,7 +364,7 @@ class Timezone:
         """
         if isinstance(zone, str):
             Timezone.validate(zone)
-            return cast("ZoneInfo", Timezone.parse(zone)).key
+            return Timezone.parse(zone).key
         zone_key = getattr(zone, "key", None)
         if isinstance(zone_key, str):
             return zone_key
@@ -523,10 +529,10 @@ class Timezone:
 
     @staticmethod
     def make_naive(value: datetime, timezone: tzinfo | str | None = None) -> datetime:
-        """
-        An aware datetime as the naive one of a time zone.
+        """An aware datetime as the naive one of a time zone.
 
-        :raises ValueError: when value is naive datetime
+        Raises:
+            QueryError: The given datetime is naive.
         """
         zone = Timezone._get_timezone(timezone)
         if Timezone.is_naive(value):

@@ -58,6 +58,6 @@ async def test_the_checker_tells_a_small_table_from_a_large_one(clickhouse_db):
     migration = Migration("0002_change", "models", operations=[AlterField("Team", "name", IntField())])
     for large_table_rows, expected_codes in [(3, [MigrationRiskCode.ALTER_FIELD_REWRITES_TABLE]), (4, [])]:
         risks = await MigrationSafetyChecker(large_table_rows=large_table_rows).check(
-            migration, state, dialect=connection.dialect, client=connection
+            migration, state, client=connection
         )
         assert [risk.code for risk in risks] == expected_codes

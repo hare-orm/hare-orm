@@ -10,7 +10,6 @@ from hare.contrib.test import requires_features
 from hare.dialects.base.client import TransactionClient
 from hare.exceptions import OperationalError, QueryError, TransactionManagementError
 from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.enums import TransactionEventType
 from hare.transactions.transactions import Transactions
@@ -22,10 +21,12 @@ READ_ONLY_REJECTION = re.compile(r"read-?only", re.IGNORECASE)
 @pytest.fixture(autouse=True)
 def _clear_instrumentation_hooks():
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
     yield
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
 
 
 def _dialect() -> str:

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from hare.core.log import logger
+from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -24,6 +25,14 @@ if TYPE_CHECKING:
 
 class HareOperation(Operation):
     """The base of hare's own operations - each changes the state, and the database on its own."""
+
+    def can_move_across(self, other: Operation, app_label: str) -> bool:
+        """Allow disjoint known model scopes; opaque SQL remains a barrier."""
+        if RawSQLTerm.is_in(self) or RawSQLTerm.is_in(other):
+            return False
+        labels = self.get_referenced_model_labels(app_label)
+        other_labels = other.get_referenced_model_labels(app_label)
+        return labels is not None and other_labels is not None and not labels.intersection(other_labels)
 
     def state_forward(self, app_label: str, state: State) -> None:
         return None
@@ -120,7 +129,9 @@ class HareOperation(Operation):
             await state_editor.schemas.drop_schema(schema_name)
 
     @staticmethod
-    def _runs_enum_types(state_editor: BaseSchemaEditor | None, operation_description: str) -> bool:
+    def _runs_enum_types(
+        state_editor: BaseSchemaEditor | None, operation_description: str
+    ) -> TypeGuard[BaseSchemaEditor]:
         """Whether an ``ENUM`` type operation runs on the migration's database - not without an editor,
         nor on a database without ``ENUM`` types: a migration file runs on any database, and such a
         database has no field of one.

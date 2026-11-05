@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.ddl.table_options import TableOptions
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 from hare.models import Model
@@ -14,19 +14,13 @@ class TablePartitions(SchemaEditorPart):
 
     __slots__ = ()
 
-    async def alter_table_options(
-        self, model: type[Model], old_options: TableOptions | None, new_options: TableOptions | None
-    ) -> None:
-        """Applies a change of the table's ``Meta.table_options`` for this dialect - by rebuilding
-        the table with the new options, which a dialect whose ALTER TABLE can change them in place
-        overrides.
+    async def alter_table_options(self, old_model: type[Model], new_model: type[Model]) -> None:
+        """Execute a prepared transition between both physical table declarations."""
+        await self.get_alter_table_options_plan(old_model, new_model).execute(self.editor)
 
-        Args:
-            model: The model rendered with its new options.
-            old_options: The dialect's previous options, None for none.
-            new_options: The dialect's new options, None for none.
-        """
-        await self.editor.table_rebuild.remake_table(model, model)
+    def get_alter_table_options_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Rebuild by default; dialects may compile supported in-place changes."""
+        return self.editor.table_rebuild.get_rebuild_plan(old_model, new_model)
 
     def get_partition_create_sqls(self, model: type[Model], safe: bool) -> list[str]:
         """The statements creating the partitions of a model's table, run right after its

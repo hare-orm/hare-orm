@@ -23,8 +23,8 @@ class PostgresqlJsonRenderers(JsonRenderers):
             f"JSONB_BUILD_ARRAY({','.join(function.get_arg_sql(argument, sql_context) for argument in function.args)})"
         )
 
-    @classmethod
-    def render_json_value(cls, function: functions.JsonValue, sql_context: SqlContext) -> str:
+    @staticmethod
+    def render_json_value(function: functions.JsonValue, sql_context: SqlContext) -> str:
         """The value as it is - a naive timestamp as its wall clock."""
         term_sql = function.get_arg_sql(function.args[0], sql_context)
         if function.value_type != JsonValueType.DATETIME or function.is_aware:

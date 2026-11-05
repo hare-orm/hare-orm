@@ -6,5 +6,7 @@ from hare.sql.terms.values.literal_value import LiteralValue
 class NullValue(LiteralValue):
     """``NULL``."""
 
+    structure_attributes = ()
+
     def __init__(self, alias: str | None = None) -> None:
         super().__init__("NULL", alias)

@@ -12,7 +12,7 @@ from tests.model_setup.connection_checks.models_letter_case_unicode import Lower
 
 PACKAGE = "tests.model_setup.connection_checks"
 DECLARATIONS = [
-    ("models_letter_case_tables", "tables 'Case_w1' and 'case_w1'"),
+    ("models_letter_case_tables", "CaseTableA.*CaseTableB.*both resolve to table 'case_w1'"),
     ("models_letter_case_columns", "columns 'Name' and 'name'"),
     ("models_letter_case_indexes", "constraints or indexes 'Uq_N6' and 'uq_n6'"),
 ]

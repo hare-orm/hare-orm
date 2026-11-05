@@ -3,31 +3,15 @@ import pytest
 from hare.contrib.test import capture_queries, requires_features
 from hare.contrib.test.conditions.not_eq import NotEQ
 from hare.exceptions import QueryError, UnSupportedError
-from tests.shared_models.testmodels import Tournament
+from tests.shared_models.testmodels import IntFields, Tournament
+from tests.utils.explain_plan_checks import ExplainPlanChecks
 
 
 @pytest.mark.asyncio
 async def test_explain(db):
-    """Test that explain() returns query plan information.
-
-    NOTE: we do not provide any guarantee on the format of the value
-    returned by `.explain()`, as it heavily depends on the database.
-    This test merely checks that one is able to run `.explain()`
-    without errors for each backend.
-    """
+    """The server returns a structured plan for reading the model's table."""
     plan = await Tournament.objects.all().explain()
-    # This should have returned *some* information.
-    assert len(str(plan)) > 20
-
-
-@pytest.mark.asyncio
-async def test_explain_rows_are_dicts_on_every_driver(db):
-    """The rows were the driver's own - sqlite3.Row, asyncpg Record, rust_pg PgRow - so the same
-    database gave another type per driver."""
-    for query in (Tournament.objects.all(), Tournament.objects.values_list("id", flat=True)):
-        plan = await query.explain()
-        assert plan
-        assert all(type(row) is dict and row for row in plan), plan
+    ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
 
 
 @pytest.mark.asyncio
@@ -35,11 +19,13 @@ async def test_explain_on_values_query(db):
     """explain() was only ever defined on QuerySet - .values()/.values_list() return
     ValuesQuery/ValuesListQuery, which subclass AwaitableQuery (not QuerySet) and had no
     explain() of their own at all, raising AttributeError rather than working."""
-    plan = await Tournament.objects.all().values("id", "name").explain()
-    assert len(str(plan)) > 20
-
-    plan = await Tournament.objects.all().values_list("id", "name").explain()
-    assert len(str(plan)) > 20
+    for query in (
+        Tournament.objects.values("id", "name"),
+        Tournament.objects.values_list("id", "name"),
+        Tournament.objects.values_list("id", flat=True),
+    ):
+        plan = await query.explain()
+        ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
 
 
 @pytest.mark.asyncio
@@ -51,7 +37,7 @@ async def test_explain_on_union_query(db):
     await Tournament.objects.create(name="A")
     await Tournament.objects.create(name="B")
     plan = await Tournament.objects.filter(name="A").union(Tournament.objects.filter(name="B")).explain()
-    assert len(str(plan)) > 20
+    ExplainPlanChecks.assert_read_plan(plan, Tournament.get_connection().dialect.name, Tournament._meta.db_table)
 
 
 @pytest.mark.parametrize(
@@ -88,11 +74,11 @@ async def test_explain_runs_the_statement_sql_explain_returns(db):
 
 @pytest.mark.asyncio
 async def test_bulk_writes_explain_their_statements(db):
-    tournament = await Tournament.objects.create(name="A")
-    tournament.name = "B"
+    obj = await IntFields.objects.create(intnum=1)
+    obj.intnum = 2
     for query in (
-        Tournament.objects.bulk_create([Tournament(name="C")]),
-        Tournament.objects.bulk_update([tournament], fields=["name"]),
+        IntFields.objects.bulk_create([IntFields(intnum=3)]),
+        IntFields.objects.bulk_update([obj], fields=["intnum"]),
     ):
         explain_sql = query.sql(explain=True)
         assert explain_sql.startswith("EXPLAIN")
@@ -100,7 +86,7 @@ async def test_bulk_writes_explain_their_statements(db):
             # A plain INSERT's plan can be empty - SQLite lists only the foreign key checks.
             assert isinstance(await query.explain(), list)
         assert ";".join(counter.queries) == explain_sql
-    assert await Tournament.objects.all().order_by("id").values_list("name", flat=True) == ["A"]
+    assert await IntFields.objects.all().order_by("id").values_list("intnum", flat=True) == [1]
 
 
 @pytest.mark.asyncio

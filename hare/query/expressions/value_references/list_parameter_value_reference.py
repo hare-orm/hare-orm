@@ -1,38 +1,33 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
-from hare.query.filters.lookups.value_encoders import ValueEncoders
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.parameters.list_parameter import ListParameter
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
     from hare.query.expressions.value_references.value_reference_types import ParameterValues
+    from hare.sql.terms.term import Term
 
 
 @dataclass(frozen=True)
 class ListParameterValueReference:
     """A plan value reference of an ``__in``/``__not_in`` list the dialect binds as one parameter
     (``ListParameter``): a plan binds a list of any length through it - the plan key holds no
-    length for such a list.
+    length for such a list. Publication replaces the temporary ``ListParameter`` source with
+    its immutable parameter slot and retains the encoder required by the dialect.
     """
 
-    list_parameter: ListParameter
+    list_parameter: ListParameter | None
     field: Field[Any]
     value_encoder: Callable[..., list[Any]]
-    #: The id of the term whose parameter holds the list.
-    parameter_source_id: int = dataclasses.field(init=False)
-    #: Whether the values are encoded as ``ValueEncoders.encode_list()`` encodes them.
-    encodes_plain_list: bool = dataclasses.field(init=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "parameter_source_id", id(self.list_parameter.get_parameter_source()))
-        object.__setattr__(self, "encodes_plain_list", self.value_encoder is ValueEncoders.encode_list)
+    parameter_slot: ParameterSlot | None = None
+    parameter_encoder: Callable[[list[Any]], Any] | None = None
 
     def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
         """The parameter of a new list - encoded the way the recorded one was, all of it in one
@@ -50,16 +45,21 @@ class ListParameterValueReference:
         if not isinstance(value, (list, tuple, set)):
             return None
         # A None in the list is an IS NULL test the plan's text holds - only the other values bind.
-        if self.encodes_plain_list:
-            encoded_values, holds_no_term = ValueEncoders.encode_bound_list(value, model, self.field, dialect)
+        encoded_values = [
+            encoded_value
+            for encoded_value in self.value_encoder(value, model, self.field, dialect)
+            if encoded_value is not None
+        ]
+        if self.parameter_encoder is not None:
+            parameter = self.parameter_encoder(encoded_values)
+            target: ParameterSlot | Term | None = self.parameter_slot
         else:
-            encoded_values = [
-                encoded_value
-                for encoded_value in self.value_encoder(value, model, self.field, dialect)
-                if encoded_value is not None
-            ]
-            holds_no_term = False
-        parameter = self.list_parameter.get_parameter(encoded_values, holds_no_term=holds_no_term)
+            # An unpublished reference retains its source until preparation replaces it with a slot.
+            assert self.list_parameter is not None  # nosec B101
+            parameter = self.list_parameter.get_parameter_encoder()(encoded_values)
+            target = self.list_parameter.get_parameter_source()
         if parameter is None:
             return None
-        return [(self.parameter_source_id, parameter, False)]
+        # Both reference states provide a target; this is not input validation.
+        assert target is not None  # nosec B101
+        return [(target, parameter, False)]

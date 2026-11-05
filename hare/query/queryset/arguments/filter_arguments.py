@@ -4,16 +4,19 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
-from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.query.expressions import Exists, Q, Subquery
+from hare.query.expressions.constants import CALL_SIGNATURE_DESCRIBED_KEY_SUFFIXES, PLAIN_VALUE_TYPES
 from hare.query.expressions.joins.lateral import Lateral
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.subqueries.declarations import KeyRowsQuery
 from hare.query.filters import FieldLookups
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
+from hare.query.plans.constants import CALL_SIGNATURE_DESCRIBED_VALUE_TYPES, SELECT_FOR_UPDATE_OPTION_NAMES
 from hare.query.plans.description.plannable import Plannable
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
+from hare.query.queryset.options.query_options import QueryOptions
 from hare.query.queryset.query_specification import QuerySpecification
+from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -54,7 +57,7 @@ class FilterArguments:
         model_name = queryset.model.__name__
         annotations = queryset._annotations
         # The keys described already - the filters of a model use a few keys over and over.
-        lookup_infos = meta.lookup_infos
+        lookup_infos = LookupInfoBuilder.lookup_infos.get_model_bucket(queryset.model)
         for key in keys:
             if not annotations and lookup_infos is not None and key in lookup_infos:
                 continue
@@ -190,13 +193,12 @@ class FilterArguments:
         Returns:
             True when they can.
         """
-        declared_names = GenericForeignKeyFieldInstance.declared_names
         for condition in conditions:
             if isinstance(condition, Exists):
                 continue
             if not isinstance(condition, Q):
                 return False
-            if declared_names and condition.names_generic_field(declared_names, queryset.model):
+            if condition.names_generic_field(queryset.model):
                 return False
             if not FilterArguments.takes_pending_condition(queryset, condition):
                 return False
@@ -258,3 +260,76 @@ class FilterArguments:
             not queryset._single or queryset._is_single_row_of_slice
         ):
             raise QueryError(message)
+
+    @staticmethod
+    def get_get_call(queryset: QuerySet[Any, Any], kwargs: dict[str, Any]) -> tuple[Any, ...] | None:
+        """The call ``get(**kwargs)`` of a queryset nothing else changed is in the call signature it
+        starts - its filter keys, the types of their values, the row lock and the rows seen, which
+        the queryset's other calls don't show. Its values are plain ones, each bound as given.
+
+        Args:
+            queryset: The queryset.
+            kwargs: The filters.
+
+        Returns:
+            The call; None when the queryset was changed otherwise, a filter is built and checked
+            right away, or a value is no plain one (a list, a None, a boolean, a query or an
+            expression) - ``get()`` then filters it as usual.
+        """
+        call_signature = queryset._call_signature
+        if call_signature is not None and len(call_signature) == 1:
+            # The manager's unchanged queryset (or its all()): every other call clones the queryset
+            # with no signature or extends it - no option, condition or row visibility is set.
+            if not FilterArguments.takes_pending_filters(queryset, kwargs):
+                return None
+            for key, value in kwargs.items():
+                if (
+                    type(value) not in PLAIN_VALUE_TYPES
+                    and (
+                        type(value) in CALL_SIGNATURE_DESCRIBED_VALUE_TYPES
+                        or isinstance(value, (Plannable, Term, QuerySpecification, Subquery))
+                    )
+                ) or key.endswith(CALL_SIGNATURE_DESCRIBED_KEY_SUFFIXES):
+                    return None
+            return ("get", tuple(kwargs), tuple(map(type, kwargs.values())), None, None)
+        options = queryset._options
+        lock_structure = None
+        if options is not QueryOptions.DEFAULT:
+            # A queryset whose only option is select_for_update() runs on the plan of its lock.
+            if not options.without(*SELECT_FOR_UPDATE_OPTION_NAMES).is_default():
+                return None
+            lock_structure = tuple([getattr(options, name) for name in SELECT_FOR_UPDATE_OPTION_NAMES])
+        if not (
+            not queryset._q_object_list
+            and not queryset._pending_filter_calls
+            and not queryset._annotations
+            and not queryset._select_related
+            and not queryset._prefetch_map
+            and not queryset._prefetch_queries
+            and not queryset._orderings
+            and queryset._limit is None
+            and not queryset._offset
+            and not queryset._distinct
+            and not queryset._is_none
+            and queryset._selection is None
+            and queryset._combination is None
+            and queryset.model._meta._inited
+            and FilterArguments.takes_pending_filters(queryset, kwargs)
+        ):
+            return None
+        for key, value in kwargs.items():
+            if (
+                type(value) in CALL_SIGNATURE_DESCRIBED_VALUE_TYPES
+                or isinstance(value, (Plannable, Term, QuerySpecification, Subquery))
+                or key.endswith(CALL_SIGNATURE_DESCRIBED_KEY_SUFFIXES)
+            ):
+                return None
+        visibility = queryset._visibility
+        # The default scope's structure is in the key; the rows seen through relations are not.
+        visibility_structure = (
+            None
+            if visibility is RowVisibility.DEFAULT
+            else (visibility.all_tenants, visibility.include_deleted, visibility.only_deleted)
+        )
+        value_types = tuple(map(type, kwargs.values()))
+        return ("get", tuple(kwargs), value_types, lock_structure, visibility_structure)

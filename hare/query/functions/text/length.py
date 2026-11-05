@@ -16,8 +16,7 @@ class Length(Function):
     refused_argument_value_types = NON_TEXT_VALUE_TYPES
     default_value_counts = (0, 0)
 
-    #: Shared, long-lived instance - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     LENGTH_OUTPUT_FIELD = IntField()
 
     value_field = LENGTH_OUTPUT_FIELD

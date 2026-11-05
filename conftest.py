@@ -6,21 +6,19 @@ Uses function-scoped fixtures for true test isolation.
 
 import gc
 import os
-import re
 import sqlite3
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation, truncate_all_models
-from hare.contrib.test.constants import REUSE_DATABASES_ENVIRONMENT_VARIABLE
+from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
-from hare.dialects.postgresql.client.constants import POSTGRES_KEPT_TEST_SCHEMA_COMMENT_PREFIX
 from hare.instrumentation.observers.observers import Observers
 from tests.matrix.constants import EVERY_SUITE_ENVIRONMENT, SUITE_ENVIRONMENT_OPTION
 from tests.matrix.suite_environments import SuiteEnvironments
@@ -28,6 +26,8 @@ from tests.plan_verification.constants import PLAN_VERIFICATION_AFTER_TEST_MARKE
 from tests.plan_verification.plan_coverage import PlanCoverage
 from tests.plan_verification.plan_parts_verification import PlanPartsVerification
 from tests.plan_verification.plan_verification import PlanVerification
+from tests.resources.constants import UNTAGGED_URL_ENVIRONMENT_VARIABLE
+from tests.resources.test_run_resources import TestRunResources
 from tests.sqlite_versions.constants import SQLITE_VERSION_ENVIRONMENT_VARIABLE
 from tests.utils.constants import (
     DECIMAL_FIELDS_MARKER,
@@ -40,7 +40,9 @@ from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.driver_classes import DriverClasses
 from tests.utils.kept_shared_test_database import KeptSharedTestDatabase
 from tests.utils.power_throttling import PowerThrottling
-from tests.utils.server_session import ServerSession
+
+if TYPE_CHECKING:
+    from hare.dialects.postgresql.client.postgresql_client import PostgresqlClient
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -92,261 +94,22 @@ def _reset_slow_query_threshold():
 # ============================================================================
 
 
-def _resolve_db_url() -> str:
-    """Reads HARE_TEST_DB and, if it contains a "{}" placeholder, fills it with a fresh
-    per-call UUID.
+def _get_test_database_url() -> str:
+    """Read HARE_TEST_DB and fill its optional "{}" placeholder with a per-call UUID.
 
-    Unescapes "\\{"/"\\}" to "{"/"}" first, mirroring DbUrlConfigGenerator.expand()
-    exactly - the Makefile's test_postgres_asyncpg
-    target sets HARE_TEST_DB to ".../test_\\{\\}" (backslash-escaped), and without this same
-    unescaping, "{}" in raw_db_url never matches, so the placeholder is never filled here. That
-    was the real root cause of the "database does not exist" CI failures traced through this
-    whole investigation: _shared_test_db_url handed out that STILL-templated string believing it
-    was one stable, already-resolved database name; every downstream hare_test_context() call
-    (once per test module, via db_module) runs the SAME raw URL through
-    DbUrlConfigGenerator.expand() again, which unconditionally re-substitutes ITS OWN fresh
-    uuid.uuid4().hex on every single call - so db_module was never actually reconnecting to the
-    one database _shared_test_db_url had created, but to a brand new, never-created random name
-    every time. Resolving (and de-templating) the URL exactly once, here, means every later
-    expand() call sees no "{}" left to substitute and is a no-op, so the same resolved name is
-    used consistently.
+    Unescape "\\{"/"\\}" first, as TestDatabaseConfig.from_url() does, accepting the Makefile's
+    shell-escaped URLs. The shared database fixture distributes this concrete URL to its
+    modules, which reconnect to the same database.
     """
     raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     raw_db_url = raw_db_url.replace("\\{", "{").replace("\\}", "}")
     return raw_db_url.format(uuid.uuid4().hex) if "{}" in raw_db_url else raw_db_url
 
 
-def _is_file_database(db_url: str) -> bool:
-    """Whether the DB_URL's driver keeps the database in a file (SQLite and the dialects built on
-    it) - each test context then opens a fresh ":memory:" database of its own, where a database
-    server's is created once per session and shared."""
-    from hare.dialects.dialect_registry import DialectRegistry
-
-    scheme = db_url.split("://", 1)[0]
-    return DialectRegistry.get_driver_for_url_scheme(scheme).path_credential == "file_path"
-
-
-def _get_dialect_name(db_url: str) -> str:
-    """The name of the dialect of the database a DB_URL connects to."""
-    from hare.dialects.dialect_registry import DialectRegistry
-
-    scheme = db_url.split("://", 1)[0]
-    return DialectRegistry.get_driver_for_url_scheme(scheme).dialect.name
-
-
-async def _reset_shared_db_for_module(ctx) -> None:
-    """Wipes every table holding rows (and, via CASCADE, every M2M through-table referencing one)
-    and restarts every sequence that gave out a value - restoring the same "this file starts from
-    a completely clean, freshly numbered database" guarantee db_module used to give by recreating
-    the whole database per file. Only what a previous file left behind is touched: a TRUNCATE ...
-    RESTART IDENTITY of the full ~130-model schema costs the server per table and sequence,
-    used or not.
-
-    Needed because db_module's own per-test isolation (the `db` fixture's transaction rollback)
-    only protects against a SINGLE test's own writes - a test using Transactions.autonomous() (a
-    genuinely separate, auto-committing connection, not rolled back by `db`) still leaves real,
-    permanent rows behind once its own file is done with them. Under the old one-database-
-    per-file scheme that was invisible (the next file got its own fresh database regardless);
-    sharing one physical database across files makes it visible unless undone here.
-    """
-    if not ctx.apps:
-        return
-    tables = list(dict.fromkeys(model._meta.db_table for model in ctx.apps.get_models_iterable()))
-    if not tables:
-        return
-    db = ctx.get_connection()
-    await db.dialect.schema_editor_class.table_clearing_class.clear_tables(
-        db, [db.dialect.literals.quote_identifier(table) for table in tables]
-    )
-    used_sequences = await db.execute_dicts(
-        "SELECT quote_ident(schemaname) || '.' || quote_ident(sequencename) AS sequence_name "
-        "FROM pg_sequences WHERE last_value IS NOT NULL"
-    )
-    if used_sequences:
-        await db.execute_script(
-            ";\n".join(f"ALTER SEQUENCE {row['sequence_name']} RESTART" for row in used_sequences)  # nosec
-        )
-
-
 # ============================================================================
 # PYTEST FIXTURES FOR TESTS
 # These fixtures provide different isolation patterns for test scenarios
 # ============================================================================
-
-
-class OwnedTestDatabases:
-    """Ties every Postgres test database a pytest process creates to that process's lifetime, so
-    the start-of-session sweep of leftover test databases only ever drops the ones whose creating
-    process is gone.
-
-    Each process picks a random run tag, embeds it in every database name it creates (by rewriting
-    HARE_TEST_DB's "{}" placeholder to "<run tag>_{}") and holds a session-level advisory lock keyed
-    by that tag on an admin connection for its whole lifetime. Postgres releases the lock as soon as
-    the process disconnects, however it ends (Ctrl-C, a killed agent, an OOM kill). A database whose
-    tag's lock can be taken belongs to a finished run; one whose lock is held belongs to a live run -
-    even while that run has no connection open to it (its shared database has none between two test
-    modules), which is exactly when a "zero connections means orphaned" rule would drop it from under
-    a concurrent run.
-    """
-
-    run_tag: str = uuid.uuid4().hex[:12]
-    OWNED_NAME_PATTERN = re.compile(r"^test_([0-9a-f]{12})_[0-9a-f]{32}$")
-    UNTAGGED_NAME_PATTERN = re.compile(r"^test_[0-9a-f]{32}$")
-    #: An untagged name comes from a run that predates run tags; with no owner to ask, it is only
-    #: dropped once it is far older than any real test run lasts.
-    UNTAGGED_MINIMUM_AGE_SECONDS = 3 * 60 * 60
-    UNTAGGED_URL_ENVIRONMENT_VARIABLE = "HARE_TEST_DB_UNTAGGED"
-    APPLICATION_NAME_PREFIX = "hare_test_run_"
-    #: The admin session holding this process's ownership lock for the whole session.
-    ownership_connection: ServerSession | None = None
-    #: The URL of the database under test - its server's sessions are opened through its driver.
-    server_url: str = ""
-
-    @classmethod
-    def get_lock_key(cls, run_tag: str) -> int:
-        return int(run_tag, 16)
-
-    @classmethod
-    def tag_database_url_template(cls) -> None:
-        """Rewrites HARE_TEST_DB's "{}" placeholder to "<run tag>_{}" for this process. The untagged
-        original is kept in its own environment variable, so an xdist worker - which inherits the
-        controller's already-tagged value - tags the original with its own run tag instead."""
-        untagged_url = os.environ.get(cls.UNTAGGED_URL_ENVIRONMENT_VARIABLE) or os.environ.get("HARE_TEST_DB")
-        if untagged_url is None:
-            return
-        os.environ[cls.UNTAGGED_URL_ENVIRONMENT_VARIABLE] = untagged_url
-        template = untagged_url.replace("\\{", "{").replace("\\}", "}")
-        if "{}" not in template or _is_file_database(template):
-            return
-        os.environ["HARE_TEST_DB"] = template.replace("{}", f"{cls.run_tag}_{{}}", 1)
-
-    @classmethod
-    async def connect(cls, database: str, application_name: str | None = None) -> ServerSession:
-        # A session-level lock holds a session - on the server itself, past a transaction pooler.
-        return await ServerSession.open(cls.server_url, database, application_name)
-
-    @classmethod
-    async def acquire_ownership(cls, raw_db_url: str) -> bool:
-        """Opens the admin connection and takes this run's ownership lock on it.
-
-        Returns:
-            False when there is nothing to own (no PostgreSQL database, or no reachable server).
-        """
-        # Another server's port never answers a PostgreSQL handshake - the connect would wait
-        # for its whole timeout.
-        if _get_dialect_name(raw_db_url) != "postgresql":
-            return False
-        cls.server_url = raw_db_url
-        try:
-            connection = await cls.connect("postgres", f"{cls.APPLICATION_NAME_PREFIX}{cls.run_tag}")
-        except Exception as exc:  # noqa: BLE001 - best-effort hygiene, never block the real test run
-            print(f"[OwnedTestDatabases] could not connect: {exc}", flush=True)
-            return False
-        await connection.execute("SELECT pg_advisory_lock($1)", cls.get_lock_key(cls.run_tag))
-        cls.ownership_connection = connection
-        return True
-
-    @classmethod
-    async def release_ownership(cls) -> None:
-        connection, cls.ownership_connection = cls.ownership_connection, None
-        if connection is not None:
-            await connection.close()
-
-    @classmethod
-    async def sweep_orphaned_databases(cls) -> None:
-        """Drops every leftover test database whose creating run is gone - a run killed before its
-        own DROP DATABASE ran, and every finished run's shared database (never dropped on exit, see
-        _shared_test_db_url). Best-effort: a failure is only logged, never raised."""
-        connection = cls.ownership_connection
-        if connection is None:
-            return
-        try:
-            # A database keeping its schema for the next run (KeptSharedTestDatabase) stays.
-            candidate_rows = await connection.fetch(
-                "SELECT datname FROM pg_database d WHERE datname LIKE 'test\\_%' "
-                "AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname) "
-                "AND coalesce(shobj_description(d.oid, 'pg_database'), '') NOT LIKE $1",
-                f"{POSTGRES_KEPT_TEST_SCHEMA_COMMENT_PREFIX}%",
-            )
-            dropped_count = 0
-            for row in candidate_rows:
-                if await cls.drop_database_if_orphaned(row["datname"]):
-                    dropped_count += 1
-            if dropped_count:
-                print(f"[OwnedTestDatabases] dropped {dropped_count} orphaned test database(s)", flush=True)
-        except Exception as exc:  # noqa: BLE001 - best-effort hygiene, never block the real test run
-            print(f"[OwnedTestDatabases] sweep failed: {exc}", flush=True)
-
-    @classmethod
-    async def drop_database_if_orphaned(cls, database_name: str) -> bool:
-        """Drops ``database_name`` if the run that created it is gone.
-
-        Returns:
-            Whether the database was dropped.
-        """
-        connection = cls.ownership_connection
-        if connection is None:
-            return False
-        owned_name_match = cls.OWNED_NAME_PATTERN.match(database_name)
-        if owned_name_match is not None:
-            owner_run_tag = owned_name_match.group(1)
-            if owner_run_tag == cls.run_tag:
-                return False
-            owner_lock_key = cls.get_lock_key(owner_run_tag)
-            if not await connection.fetchval("SELECT pg_try_advisory_lock($1)", owner_lock_key):
-                return False  # the owning run is still alive
-            try:
-                return await cls.drop_database(database_name)
-            finally:
-                await connection.execute("SELECT pg_advisory_unlock($1)", owner_lock_key)
-        if cls.UNTAGGED_NAME_PATTERN.match(database_name) is None:
-            return False
-        try:
-            is_old_enough = await connection.fetchval(
-                "SELECT (pg_stat_file('base/' || oid || '/PG_VERSION')).modification "
-                "< now() - make_interval(secs => $2) FROM pg_database WHERE datname = $1",
-                database_name,
-                float(cls.UNTAGGED_MINIMUM_AGE_SECONDS),
-            )
-        except Exception:  # noqa: BLE001 - no privilege to read the database's age: leave it alone
-            return False
-        if not is_old_enough:
-            return False
-        return await cls.drop_database(database_name)
-
-    @classmethod
-    async def drop_database(cls, database_name: str, force: bool = False) -> bool:
-        """Rolls back the database's leftover prepared transactions - they block DROP DATABASE and
-        hold slots of the server-wide max_prepared_transactions pool every run shares - then drops
-        the database.
-
-        Args:
-            database_name: The database.
-            force: Whether to end the sessions still open in it - a run that ended without closing
-                its connections leaves them to the server for a while.
-
-        Returns:
-            Whether the database was dropped.
-        """
-        connection = cls.ownership_connection
-        if connection is None:
-            return False
-        try:
-            prepared_rows = await connection.fetch(
-                "SELECT gid FROM pg_prepared_xacts WHERE database = $1", database_name
-            )
-            if prepared_rows:
-                database_connection = await cls.connect(database_name)
-                try:
-                    for prepared_row in prepared_rows:
-                        escaped_gid = prepared_row["gid"].replace("'", "''")
-                        await database_connection.execute(f"ROLLBACK PREPARED '{escaped_gid}'")
-                finally:
-                    await database_connection.close()
-            await connection.execute(f'DROP DATABASE IF EXISTS "{database_name}"{" WITH (FORCE)" if force else ""}')
-        except Exception:  # noqa: BLE001 - lost a race, or genuinely can't drop it right now
-            return False
-        return True
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -367,10 +130,9 @@ def pytest_configure(config: pytest.Config) -> None:
         PlanVerification.install()
         PlanCoverage.install()
         PlanPartsVerification.install()
-    OwnedTestDatabases.tag_database_url_template()
-    # Postgres test databases are reset and reused instead of created and dropped per context
-    # (every DROP DATABASE requests a checkpoint); set the variable to 0 to turn this off.
-    os.environ.setdefault(REUSE_DATABASES_ENVIRONMENT_VARIABLE, "1")
+    resources = TestRunResources()
+    config.stash[TestRunResources.key] = resources
+    resources.configure()
 
 
 @pytest.hookimpl(wrapper=True)
@@ -441,88 +203,57 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     gc.freeze()
 
 
+def pytest_unconfigure(config: pytest.Config) -> None:
+    resources = config.stash.get(TestRunResources.key, None)
+    if resources is not None:
+        resources.restore_environment()
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
-async def _orphaned_test_database_sweep():
-    """Runs once per session (once per xdist worker process), before any test database is
-    created, regardless of which db fixture a test requests: takes this run's ownership of the
-    databases it is about to create and drops the ones left behind by finished runs."""
-    if not await OwnedTestDatabases.acquire_ownership(os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")):
-        yield
-        return
-    await OwnedTestDatabases.sweep_orphaned_databases()
+async def test_run_resources(request: pytest.FixtureRequest):
+    """Keep session resources alive until every dependent database fixture has finished."""
+    resources = request.config.stash[TestRunResources.key]
+    await resources.start()
     try:
-        yield
+        yield resources
     finally:
-        await OwnedTestDatabases.release_ownership()
+        await resources.close()
 
 
 @pytest_asyncio.fixture(scope="session")
-async def _shared_test_db_url(_orphaned_test_database_sweep: None):
-    """
-    Creates the test database and generates its schema ONCE for the whole session - only
-    matters for Postgres (SQLite's in-memory case is already fast, and a fresh ":memory:" is a
-    genuinely separate, empty database each time anyway, so there's nothing to share).
+async def _shared_test_db_url(test_run_resources: TestRunResources):
+    """Share a concrete database URL without retaining an ambient HareContext.
 
-    Every db_module instance then connects to this SAME already-existing, already-schema'd
-    database instead of each repeating CREATE DATABASE + ~171 CREATE TABLE/INDEX/constraint
-    statements for the ~135 models in tests.shared_models.testmodels - measured directly at ~0.56s per
-    instance, which used to dominate the full Postgres suite's runtime (~85s of ~120s total,
-    across ~150+ test files).
-
-    Deliberately does NOT keep the creating HareContext open/"current" for the whole session the
-    way naively making db_module itself session-scoped did in an earlier attempt at this: that
-    left it as the ambient context for the entire run, and a test elsewhere that calls
-    Hare.init() directly (e.g. tests/cli/test_cli.py's sqlmigrate coverage) found it "already
-    current" and reinitialized it in place with unrelated (there, deliberately fake) connection
-    details - corrupting the shared fixture for the rest of the session. Here, the database is
-    created, the creating context exits immediately, and only the resulting connection URL (a
-    plain string) is shared - each db_module instance still opens and closes its OWN
-    short-lived HareContext, per module, exactly as before this fixture existed.
-
-    Sharing one physical database across files also means a row committed outside the `db`
-    fixture's own transaction rollback (most notably: a test using Transactions.autonomous(), a
-    genuinely separate, auto-committing connection) would otherwise leak from one file into every
-    later one - db_module's own postgres branch truncates every table (and resets every
-    sequence back to 1) once per module to restore the "this file starts completely clean"
-    guarantee a fresh-database-per-file used to give for free, at a fraction of the cost - see
-    _reset_shared_db_for_module().
-
-    Deliberately does NOT drop this database on exit (unlike a plain hare_test_context() call) -
-    a `--durations` report on the full Postgres suite showed 30-70s attributed to "teardown" on
-    whichever test happened to run last on a given xdist worker, which is this fixture's own
-    session-end DROP DATABASE (a real network round trip) getting misattributed by pytest, not
-    that test's own fault. Leaving the database in place here and letting the NEXT session's
-    OwnedTestDatabases sweep drop it once this run is gone (already autouse, already runs every
-    session regardless of which fixture a test requests - see _orphaned_test_database_sweep()) gets
-    the exact same eventual cleanup without paying a synchronous DROP DATABASE on every single worker's critical path.
+    File databases pass through to each module fixture. A server database eligible for a kept lease
+    is reused when its schema matches; otherwise this fixture creates one database for the session.
+    Module contexts reset rows and close their own clients. Kept leases and disposable databases
+    follow their resource owners' cleanup policies.
     """
     raw_db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    if _is_file_database(raw_db_url):
+    if DatabaseUnderTest.is_file_database(raw_db_url):
         yield raw_db_url
         return
 
-    untagged_db_url = os.environ.get(OwnedTestDatabases.UNTAGGED_URL_ENVIRONMENT_VARIABLE, raw_db_url)
+    untagged_db_url = os.environ.get(UNTAGGED_URL_ENVIRONMENT_VARIABLE, raw_db_url)
     untagged_db_url = untagged_db_url.replace("\\{", "{").replace("\\}", "}")
     # Past a transaction pooler none is kept: a kept database dropped and created again by a run going
     # straight to the server leaves the pooler its server connections to the dropped one.
     keeps_database = (
-        OwnedTestDatabases.ownership_connection is not None
+        test_run_resources.connection is not None
         and "{}" in untagged_db_url
         and not DatabaseUnderTest.pools_server_sessions(untagged_db_url)
     )
     if keeps_database:
-        resolved_db_url = await KeptSharedTestDatabase.acquire_url(
-            OwnedTestDatabases.ownership_connection, untagged_db_url
-        )
+        resolved_db_url = await KeptSharedTestDatabase.acquire_url(test_run_resources.connection, untagged_db_url)
         if await KeptSharedTestDatabase.take(resolved_db_url):
             print(f"[_shared_test_db_url] kept from an earlier run: {resolved_db_url}", flush=True)
             yield resolved_db_url
             return
-        await OwnedTestDatabases.drop_database(
+        await test_run_resources.drop_database(
             DbUrlConfigGenerator.expand(resolved_db_url)["credentials"]["database"], force=True
         )
     else:
-        resolved_db_url = _resolve_db_url()
+        resolved_db_url = _get_test_database_url()
     print(f"[_shared_test_db_url] creating {resolved_db_url}", flush=True)
     async with hare_test_context(
         modules=KeptSharedTestDatabase.get_modules(),
@@ -541,19 +272,15 @@ async def _shared_test_db_url(_orphaned_test_database_sweep: None):
 @pytest_asyncio.fixture(scope="module")
 async def db_module(_shared_test_db_url):
     """
-    Module-scoped fixture: Creates HareContext once per test module.
+    Module-scoped context that the function-scoped isolation fixtures share.
 
-    This is the base fixture that creates the database schema once per module.
-    Other fixtures build on top of this for different isolation strategies.
-
-    On Postgres, connects to the database _shared_test_db_url already created and schema'd for
-    the whole session instead of repeating that (expensive) work per module - see its own
-    docstring. On SQLite, unchanged: a fresh ":memory:" database, created and schema'd here, same
-    as before this fixture existed.
+    Server databases reuse the schema prepared by _shared_test_db_url, resetting rows on entry.
+    File databases use hare_test_context's creation and cleanup lifecycle; an in-memory SQLite
+    URL creates a fresh database and schema per module.
 
     Note: Uses connection_label="models" to match standard test infrastructure.
     """
-    if _is_file_database(_shared_test_db_url):
+    if DatabaseUnderTest.is_file_database(_shared_test_db_url):
         async with hare_test_context(
             modules=KeptSharedTestDatabase.get_modules(),
             db_url=_shared_test_db_url,
@@ -572,7 +299,7 @@ async def db_module(_shared_test_db_url):
         _generate_schemas=False,
         _drop_db_on_exit=False,
     ) as ctx:
-        await _reset_shared_db_for_module(ctx)
+        await ReusableTestSchemas.reset_rows(cast("PostgresqlClient", ctx.get_connection()))
         yield ctx
 
 
@@ -584,15 +311,15 @@ async def db(db_module):
     Each test runs inside a transaction that gets rolled back at the end,
     providing isolation without the overhead of schema recreation.
 
-    For databases that don't support transactions (e.g., MySQL MyISAM),
+    For databases that don't support transactions,
     falls back to truncation cleanup.
 
-    This is the FASTEST isolation method - use for most tests.
+    Use for tests that do not need a real commit or an independent transaction.
 
     Usage:
         @pytest.mark.asyncio
         async def test_something(db):
-            obj = await Model.create(name="test")
+            obj = await Book.objects.create(name="test")
             assert obj.id is not None
             # Changes are rolled back after test
     """
@@ -649,18 +376,15 @@ async def db_isolated():
 
 @pytest_asyncio.fixture(scope="function")
 async def db_isolated_no_schema():
-    """
-    Same lifecycle as db_isolated (full per-test CREATE DATABASE + DROP) but without generating
-    the ~135-model tests.shared_models.testmodels schema - for tests that need their own genuinely fresh
-    database/connection (e.g. to mutate connection-level config: SSL mode, application_name, GUC
-    server settings) but never touch a testmodels table, so paying for that schema on every test
-    is pure overhead (~0.56s each - see _shared_test_db_url's own docstring for how that number
-    was measured).
+    """An isolated database and context without generating the shared models' schema.
+
+    Uses the same creation or reusable-lease lifecycle as db_isolated. Lifecycle and
+    connection-only tests can change connection settings without creating unused tables.
 
     Usage:
         @pytest.mark.asyncio
         async def test_with_fresh_bare_db(db_isolated_no_schema):
-            # Completely fresh database, no tests.shared_models.testmodels schema
+            # Isolated database, no shared-model tables
             ...
     """
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
@@ -688,47 +412,9 @@ async def db_truncate(db_module):
     Usage:
         @pytest.mark.asyncio
         async def test_with_transactions(db_truncate):
-            async with atomic():
-                await Model.create(name="test")
+            async with Transactions.atomic():
+                await Book.objects.create(name="test")
             # Table truncated after test
     """
     yield db_module
-    await truncate_all_models()
-
-
-# ============================================================================
-# HELPER FIXTURES
-# ============================================================================
-
-
-def make_db_fixture(modules: list[str], app_label: str = "models", connection_label: str = "models"):
-    """
-    Factory function to create custom db fixtures with different modules.
-
-    Use this in subdirectory conftest.py files for tests that need
-    custom model modules.
-
-    Example usage in tests/fields/conftest.py:
-        db_array = make_db_fixture(["tests.fields.test_array"])
-
-    Args:
-        modules: List of module paths to discover models from.
-        app_label: The app label for the models, defaults to "models".
-        connection_label: The connection alias name, defaults to "models".
-
-    Returns:
-        An async fixture function.
-    """
-
-    @pytest_asyncio.fixture(scope="function")
-    async def _db_fixture():
-        db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-        async with hare_test_context(
-            modules=modules,
-            db_url=db_url,
-            app_label=app_label,
-            connection_label=connection_label,
-        ) as ctx:
-            yield ctx
-
-    return _db_fixture
+    await truncate_all_models(context=db_module, connections=db_module.connections.all())

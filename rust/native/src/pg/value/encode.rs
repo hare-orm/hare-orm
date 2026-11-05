@@ -6,11 +6,11 @@ use bytes::{BufMut, BytesMut};
 use chrono::{FixedOffset, Local, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use tokio_postgres::types::{to_sql_checked, Format, IsNull, Kind as TypeShape, ToSql, Type};
 
-use crate::pg::types::array::{
-    encode_array, is_text_format_array, member_type_is_text_compatible, write_text_array_literal,
-};
+use crate::json_string::write_json_string;
+use crate::pg::parameter_encoding::{PgParameterEncoding, PgParameterMode};
+use crate::pg::types::array::encode_array;
 use crate::pg::types::datetime::time_microseconds;
-use crate::pg::types::json::{write_json_float, write_json_string};
+use crate::pg::types::json::write_json_float;
 use crate::pg::types::numeric::{DecimalDigits, NonFiniteNumeric};
 use crate::pg::types::range::{encode_multirange, encode_range};
 use crate::pg::value::{domain_base_type, BoxError, Value};
@@ -19,34 +19,14 @@ impl Value {
     /// The PostgreSQL type to declare for this value as a bind parameter, so the server uses it
     /// instead of inferring from context. `None` lets the server infer it: a NULL has no type;
     /// a string may bind to any column type (a `JSONField` value arrives pre-encoded as a string, a
-    /// UUID/inet/geography string is parsed by the server); an int/decimal-text/array/range/JSON
+    /// UUID/inet/geography string is parsed by the server); an int/array/range/JSON
     /// value takes its real type from the target column or cast; a naive datetime must know
     /// whether it lands in TIMESTAMP or TIMESTAMPTZ (interpreted as the client's local time for the
     /// latter, like asyncpg). Fixing INT8 for ints would break overloads such as
-    /// `array_length(anyarray, int4)`. A float is FLOAT8 - hare has no float4 column type.
+    /// `array_length(anyarray, int4)`. Decimal values declare NUMERIC, including non-finite values.
+    /// A float declares FLOAT8.
     pub fn pg_type(&self) -> Option<Type> {
-        Some(match self {
-            Value::Bool(_) => Type::BOOL,
-            Value::Bytes(_) => Type::BYTEA,
-            Value::Uuid(_) => Type::UUID,
-            Value::Decimal(_) | Value::NonFiniteDecimal(_) => Type::NUMERIC,
-            Value::Float(_) => Type::FLOAT8,
-            Value::TimestampTz(_) => Type::TIMESTAMPTZ,
-            Value::Date(_) => Type::DATE,
-            Value::Time(_) => Type::TIME,
-            Value::TimeTz(..) => Type::TIMETZ,
-            Value::Interval(_) => Type::INTERVAL,
-            Value::Timestamp(_)
-            | Value::Null
-            | Value::Text(_)
-            | Value::Json(_)
-            | Value::Array(_)
-            | Value::Range(_)
-            | Value::Int(_)
-            | Value::BigInt(_)
-            | Value::Network(_)
-            | Value::Composite(_) => return None,
-        })
+        PgParameterEncoding::inferred_type(self)
     }
 
     /// The value's text form, used when the server resolved a text-family parameter type.
@@ -64,6 +44,7 @@ impl Value {
             Value::Time(value) => Some(value.format("%H:%M:%S%.6f").to_string()),
             Value::TimeTz(value, offset) => Some(format!("{}{}", value.format("%H:%M:%S%.6f"), offset)),
             Value::Null
+            | Value::DeferredText(_)
             | Value::Text(_)
             | Value::Bytes(_)
             | Value::Array(_)
@@ -78,6 +59,7 @@ impl Value {
     pub(crate) fn variant_type_name(&self) -> &'static str {
         match self {
             Value::Null => "NULL",
+            Value::DeferredText(_) => "deferred server text",
             Value::Bool(_) => "bool",
             Value::Int(_) | Value::BigInt(_) => "int",
             Value::Float(_) => "float",
@@ -132,17 +114,20 @@ impl Value {
             Value::Date(value) => write_json_string(&value.format("%Y-%m-%d").to_string(), out),
             Value::Time(value) => write_json_string(&iso_time_text(*value), out),
             Value::TimeTz(value, offset) => write_json_string(&format!("{}{}", iso_time_text(*value), offset), out),
-            Value::Bytes(_) | Value::Range(_) | Value::Interval(_) | Value::Network(_) | Value::Composite(_) => {
+            Value::DeferredText(_)
+            | Value::Bytes(_)
+            | Value::Range(_)
+            | Value::Interval(_)
+            | Value::Network(_)
+            | Value::Composite(_) => {
                 return Err(format!("a {} value is not JSON serialisable", self.variant_type_name()));
             }
         }
         Ok(())
     }
 
-    /// Encodes the value as a parameter of type `ty`, checking that the two match.
-    /// `top_level` is true for a bind parameter whose wire format `encode_format` negotiated, and
-    /// false wherever the binary format is required (array elements, range bounds, COPY).
-    pub(crate) fn encode(&self, postgres_type: &Type, out: &mut BytesMut, top_level: bool) -> Result<IsNull, BoxError> {
+    /// Encode a value where the binary format is required. Negotiation belongs to `PgParameterEncoding`.
+    pub(crate) fn encode_binary(&self, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         let postgres_type = domain_base_type(postgres_type);
         if matches!(*postgres_type, Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN) {
             if let Some(text) = self.as_pg_text() {
@@ -152,13 +137,13 @@ impl Value {
         }
         match self {
             Value::Null => Ok(IsNull::Yes),
-            Value::Bool(value) => self.encode_bool(*value, postgres_type, out, top_level),
+            Value::Bool(value) => self.encode_bool(*value, postgres_type, out),
             Value::Int(value) => {
                 encode_integer(*value, postgres_type, out).ok_or_else(|| self.wrong_type(postgres_type))?
             }
             Value::BigInt(text) => self.encode_big_integer(text, postgres_type, out),
             Value::Float(value) => self.encode_float(*value, postgres_type, out),
-            Value::Text(value) => Self::encode_text(value, postgres_type, out, top_level),
+            Value::Text(value) => Self::encode_text(value, postgres_type, out),
             Value::Bytes(value) => match *postgres_type {
                 Type::BYTEA => {
                     out.extend_from_slice(value);
@@ -167,7 +152,7 @@ impl Value {
                 _ => Err(self.wrong_type(postgres_type)),
             },
             Value::Json(text) => self.encode_json(text, postgres_type, out),
-            Value::Array(items) => self.encode_list(items, postgres_type, out, top_level),
+            Value::Array(items) => self.encode_list(items, postgres_type, out),
             Value::Range(range) => encode_range(range, postgres_type, out),
             Value::Uuid(value) => match *postgres_type {
                 Type::UUID => {
@@ -178,7 +163,7 @@ impl Value {
             },
             Value::Decimal(text) => self.encode_decimal_text(text, postgres_type, out),
             Value::NonFiniteDecimal(value) => Self::encode_non_finite_decimal(*value, postgres_type, out),
-            Value::Timestamp(value) => self.encode_timestamp(value, postgres_type, out, top_level),
+            Value::Timestamp(value) => self.encode_timestamp(value, postgres_type, out),
             // `datetime.max`/`date.max` are written as the moment and the day they are, not as
             // `infinity` - `EXTRACT`, `date_trunc` and comparisons of a year work on them.
             Value::TimestampTz(value) => match *postgres_type {
@@ -189,7 +174,7 @@ impl Value {
                 Type::DATE => value.to_sql(postgres_type, out),
                 _ => Err(self.wrong_type(postgres_type)),
             },
-            Value::Time(value) => self.encode_time(*value, postgres_type, out, top_level),
+            Value::Time(value) => self.encode_time(*value, postgres_type, out),
             Value::TimeTz(value, offset) => match *postgres_type {
                 Type::TIMETZ => {
                     out.put_i64(time_microseconds(*value));
@@ -208,24 +193,18 @@ impl Value {
                 }
                 _ => Err(self.wrong_type(postgres_type)),
             },
-            Value::Network(_) | Value::Composite(_) => Err(self.wrong_type(postgres_type)),
+            Value::DeferredText(_) | Value::Network(_) | Value::Composite(_) => Err(self.wrong_type(postgres_type)),
         }
     }
 
-    fn encode_bool(
-        &self,
-        value: bool,
-        postgres_type: &Type,
-        out: &mut BytesMut,
-        top_level: bool,
-    ) -> Result<IsNull, BoxError> {
+    fn encode_bool(&self, value: bool, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         match *postgres_type {
             Type::BOOL => {
                 out.put_u8(u8::from(value));
                 Ok(IsNull::No)
             }
             Type::INT2 | Type::INT4 | Type::INT8 | Type::NUMERIC | Type::FLOAT4 | Type::FLOAT8 => {
-                Value::Int(i64::from(value)).encode(postgres_type, out, top_level)
+                Value::Int(i64::from(value)).encode_binary(postgres_type, out)
             }
             _ => Err(self.wrong_type(postgres_type)),
         }
@@ -296,7 +275,7 @@ impl Value {
         }
     }
 
-    fn encode_text(text: &str, postgres_type: &Type, out: &mut BytesMut, top_level: bool) -> Result<IsNull, BoxError> {
+    fn encode_text(text: &str, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         match *postgres_type {
             Type::UUID => {
                 out.extend_from_slice(uuid::Uuid::parse_str(text)?.as_bytes());
@@ -313,9 +292,8 @@ impl Value {
                 out.extend_from_slice(text.as_bytes());
                 Ok(IsNull::No)
             }
-            // At the top level `encode_format` declared the text format, so the server parses
-            // the string with the type's own input function.
-            _ if top_level || member_type_is_text_compatible(postgres_type) => {
+            // Only types with a defined binary conversion accept textual values here.
+            _ if PgParameterEncoding::accepts_text_in_binary(postgres_type) => {
                 out.extend_from_slice(text.as_bytes());
                 Ok(IsNull::No)
             }
@@ -343,30 +321,18 @@ impl Value {
         }
     }
 
-    fn encode_list(
-        &self,
-        items: &[Value],
-        postgres_type: &Type,
-        out: &mut BytesMut,
-        top_level: bool,
-    ) -> Result<IsNull, BoxError> {
+    fn encode_list(&self, items: &[Value], postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         // A list bound to a json/jsonb parameter is a JSON array, not a Postgres array.
         if matches!(*postgres_type, Type::JSON | Type::JSONB) {
             let mut text = String::new();
             self.write_json(&mut text)?;
-            return Value::Json(text).encode(postgres_type, out, top_level);
+            return Value::Json(text).encode_binary(postgres_type, out);
         }
         if matches!(postgres_type.kind(), TypeShape::Multirange(_)) {
             return encode_multirange(items, postgres_type, out);
         }
         if !matches!(postgres_type.kind(), TypeShape::Array(_)) {
             return Err(format!("cannot bind a list to a parameter of non-array type {}", postgres_type.name()).into());
-        }
-        if top_level && is_text_format_array(self, postgres_type) {
-            let mut literal = String::new();
-            write_text_array_literal(items, &mut literal);
-            out.extend_from_slice(literal.as_bytes());
-            return Ok(IsNull::No);
         }
         encode_array(items, postgres_type, out)
     }
@@ -376,7 +342,6 @@ impl Value {
         value: &NaiveDateTime,
         postgres_type: &Type,
         out: &mut BytesMut,
-        top_level: bool,
     ) -> Result<IsNull, BoxError> {
         match *postgres_type {
             Type::TIMESTAMP => value.to_sql(postgres_type, out),
@@ -389,18 +354,12 @@ impl Value {
                 aware.with_timezone(&Utc).to_sql(postgres_type, out)
             }
             // A naive datetime bound to a date keeps its date, as asyncpg does.
-            Type::DATE => Value::Date(value.date()).encode(postgres_type, out, top_level),
+            Type::DATE => Value::Date(value.date()).encode_binary(postgres_type, out),
             _ => Err(self.wrong_type(postgres_type)),
         }
     }
 
-    fn encode_time(
-        &self,
-        value: NaiveTime,
-        postgres_type: &Type,
-        out: &mut BytesMut,
-        top_level: bool,
-    ) -> Result<IsNull, BoxError> {
+    fn encode_time(&self, value: NaiveTime, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
         match *postgres_type {
             Type::TIME => {
                 out.put_i64(time_microseconds(value));
@@ -409,11 +368,8 @@ impl Value {
             // A naive time where TIMETZ is required outright (a TIMETZ[] element, a COPY
             // column) gets UTC - what the server's own time -> timetz cast gives in the UTC
             // session every connection runs in.
-            Type::TIMETZ => Value::TimeTz(value, FixedOffset::east_opt(0).expect("zero is a valid offset")).encode(
-                postgres_type,
-                out,
-                top_level,
-            ),
+            Type::TIMETZ => Value::TimeTz(value, FixedOffset::east_opt(0).expect("zero is a valid offset"))
+                .encode_binary(postgres_type, out),
             _ => Err(self.wrong_type(postgres_type)),
         }
     }
@@ -493,7 +449,7 @@ fn iso_time_text(value: NaiveTime) -> String {
 
 impl ToSql for Value {
     fn to_sql(&self, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
-        self.encode(postgres_type, out, true)
+        PgParameterEncoding::new(self, postgres_type, PgParameterMode::Negotiated).encode(out)
     }
 
     fn accepts(_ty: &Type) -> bool {
@@ -501,16 +457,9 @@ impl ToSql for Value {
         true
     }
 
-    /// Must mirror `encode`'s own top-level branching - the server is told this format before it
-    /// sees the bytes. A string is sent in the text format (parsed by the type's own input
-    /// function) except where `encode` writes a binary encoding for it (UUID, json, jsonb).
+    /// Format and bytes are selected by the same parameter decision.
     fn encode_format(&self, postgres_type: &Type) -> Format {
-        let postgres_type = domain_base_type(postgres_type);
-        match self {
-            Value::Text(_) if !matches!(*postgres_type, Type::UUID | Type::JSON | Type::JSONB) => Format::Text,
-            Value::Array(_) if is_text_format_array(self, postgres_type) => Format::Text,
-            _ => Format::Binary,
-        }
+        PgParameterEncoding::new(self, postgres_type, PgParameterMode::Negotiated).format()
     }
 
     to_sql_checked!();
@@ -522,7 +471,7 @@ pub(crate) struct BinaryParameter<'a>(pub(crate) &'a Value);
 
 impl ToSql for BinaryParameter<'_> {
     fn to_sql(&self, postgres_type: &Type, out: &mut BytesMut) -> Result<IsNull, BoxError> {
-        self.0.encode(postgres_type, out, false)
+        PgParameterEncoding::new(self.0, postgres_type, PgParameterMode::BinaryRequired).encode(out)
     }
 
     fn accepts(_ty: &Type) -> bool {

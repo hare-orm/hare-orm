@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from hare.core.connections.connections import Connections
@@ -53,11 +54,11 @@ async def execute_sql(
         if single_client is None:
             raise connection_handler.get_ambiguous_connection_error()
         connection = single_client
-    sql, parameters = query.get_parameterized_sql(connection.query_class.SQL_CONTEXT)
+    sql, parameters = query.get_parameterized_sql(connection.sql_context)
     statement_result = await connection.execute(sql, parameters, rows_by_position=True)
     column_names = statement_result.column_names
     if len(set(column_names)) != len(column_names):
-        repeated_names = sorted({name for name in column_names if column_names.count(name) > 1})
+        repeated_names = sorted(name for name, count in Counter(column_names).items() if count > 1)
         raise QueryError(
             f"execute_sql(): the result has several columns named {', '.join(map(repr, repeated_names))} - a row "
             "can't hold them by name; give them aliases, or read the result with execute_described()"

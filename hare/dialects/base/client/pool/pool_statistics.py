@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from hare.instrumentation.constants import DURATION_RECORDS_CAPACITY
 from hare.instrumentation.pools.duration_records import DurationRecords
+from hare.instrumentation.pools.enums import PoolMetricEvent
 
 
 class PoolStatistics:
@@ -21,9 +25,10 @@ class PoolStatistics:
         "connect_failures",
         "wait_records",
         "connect_records",
+        "recorder",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, capacity: int = DURATION_RECORDS_CAPACITY) -> None:
         #: The tasks taking a connection right now - waiting for one when the pool has none free.
         self.acquiring = 0
         self.acquire_count = 0
@@ -31,8 +36,13 @@ class PoolStatistics:
         self.acquire_wait_seconds_total = 0.0
         self.connect_count = 0
         self.connect_failures = 0
-        self.wait_records = DurationRecords()
-        self.connect_records = DurationRecords()
+        self.wait_records = DurationRecords(capacity)
+        self.connect_records = DurationRecords(capacity)
+        self.recorder: Callable[[str, float], None] | None = None
+
+    def set_recorder(self, recorder: Callable[[str, float], None] | None) -> None:
+        """Set the event sink independently from bounded health-check observations."""
+        self.recorder = recorder
 
     def add_wait(self, seconds: float) -> None:
         """Counts a wait for a connection.
@@ -42,10 +52,16 @@ class PoolStatistics:
         """
         self.acquire_wait_seconds_total += seconds
         self.wait_records.add(seconds)
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.WAIT, seconds)
 
     def add_timeout(self) -> None:
         """Counts a wait for a connection that ran out of ``pool_acquire_timeout``."""
         self.acquire_timeouts += 1
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.TIMEOUT, 1)
 
     def add_connect(self, seconds: float) -> None:
         """Counts an opened connection.
@@ -55,10 +71,16 @@ class PoolStatistics:
         """
         self.connect_count += 1
         self.connect_records.add(seconds)
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.CONNECT, seconds)
 
     def add_connect_failure(self) -> None:
         """Counts a failure to open a connection."""
         self.connect_failures += 1
+        recorder = self.recorder
+        if recorder is not None:
+            recorder(PoolMetricEvent.CONNECT_FAILURE, 1)
 
     def get_counts(self) -> tuple[int, int, float, int, int]:
         """The counters.

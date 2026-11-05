@@ -7,6 +7,7 @@ import pytest
 from hare.contrib.outbox import OutboxWakeup
 from hare.contrib.outbox.constants import OUTBOX_KEY_MAX_LENGTH
 from hare.contrib.test import requires_features
+from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import (
     IntegrityError,
     QueryError,
@@ -270,7 +271,7 @@ class RecordingWakeup(OutboxWakeup):
     async def signal(self, topics: frozenset[str]) -> None:
         self.signalled.append(topics)
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         await asyncio.Event().wait()
 
 

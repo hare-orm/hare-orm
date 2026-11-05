@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import threading
-import weakref
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from operator import attrgetter
 from typing import TYPE_CHECKING
 
 from opentelemetry import metrics
@@ -31,7 +31,10 @@ from hare.contrib.opentelemetry.constants import (
     TIMEOUT_UNIT,
     USED_CONNECTION_STATE,
 )
+from hare.instrumentation.pools.declarations import PoolMeasurement
+from hare.instrumentation.pools.enums import PoolMetricEvent
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
+from hare.instrumentation.pools.pool_metrics_recorder import PoolMetricsRecorder
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 
 if TYPE_CHECKING:
@@ -46,9 +49,9 @@ class PoolMetricInstruments:
     (``PoolRegistry``), read when the metrics are collected, on the exporter's thread. Pools with
     the same attributes (one connection of several ``HareContext`` objects) are summed.
 
-    A histogram can't be observed: the waits for a connection and the connects each pool measured
-    (``DurationRecords``) are taken by a callback of the collection and recorded then - the histograms,
-    made after the observed instruments, are collected after them and carry them.
+    Completed measurements feed counters and histograms directly. Gauge exports only read
+    current occupancy; slow exporters and closing a pool cannot subtract accumulated events.
+    Multiple instruments subscribe independently for their own active lifetimes.
 
     Args:
         meter_provider: The MeterProvider to get a meter from - the global one by default.
@@ -59,10 +62,7 @@ class PoolMetricInstruments:
         #: Whether the instruments report - set by ``start()``, cleared by ``stop()``; OpenTelemetry
         #: has no way to remove an instrument.
         self.started = False
-        #: Each pool's cursors of its waits and connects - the pools are held weakly.
-        self.cursors: weakref.WeakKeyDictionary[DatabaseClient, tuple[int, int]] = weakref.WeakKeyDictionary()
-        #: Callbacks of one collection may run on several threads at once.
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         meter.create_observable_up_down_counter(
             CONNECTION_COUNT_METRIC, [self.observe_connection_counts], unit=CONNECTION_UNIT
         )
@@ -73,24 +73,49 @@ class PoolMetricInstruments:
         meter.create_observable_up_down_counter(
             CONNECTION_PENDING_REQUESTS_METRIC, [self.observe_pending_requests], unit=REQUEST_UNIT
         )
-        meter.create_observable_counter(CONNECTION_TIMEOUTS_METRIC, [self.observe_timeouts], unit=TIMEOUT_UNIT)
-        meter.create_observable_counter(CONNECT_FAILURES_METRIC, [self.observe_connect_failures], unit=FAILURE_UNIT)
+        self.timeouts = meter.create_counter(CONNECTION_TIMEOUTS_METRIC, unit=TIMEOUT_UNIT)
+        self.connect_failures = meter.create_counter(CONNECT_FAILURES_METRIC, unit=FAILURE_UNIT)
         self.wait_time = meter.create_histogram(CONNECTION_WAIT_TIME_METRIC, unit=SECONDS_UNIT)
         self.create_time = meter.create_histogram(CONNECTION_CREATE_TIME_METRIC, unit=SECONDS_UNIT)
 
     def start(self) -> None:
-        """Starts reporting, and measuring the waits for a connection (``PoolMetrics``)."""
-        if self.started:
-            return
-        PoolMetrics.enable()
-        self.started = True
+        """Subscribe once; measurement state belongs to this instrument's lifetime."""
+        with self.lock:
+            if self.started:
+                return
+            PoolMetrics.enable()
+            self.started = True
+            PoolMetricsRecorder.subscribe(self.record)
 
     def stop(self) -> None:
-        """Stops reporting, and measuring the waits for this user."""
-        if not self.started:
-            return
-        self.started = False
-        PoolMetrics.disable()
+        """Stop accepting new events; SDK counters keep their cumulative history."""
+        with self.lock:
+            if not self.started:
+                return
+            self.started = False
+            PoolMetricsRecorder.unsubscribe(self.record)
+            PoolMetrics.disable()
+
+    def record(self, measurement: PoolMeasurement) -> None:
+        """Record an event on its completion thread, using labels captured by the client."""
+        with self.lock:
+            if not self.started:
+                return
+            attributes = {
+                CONNECTION_POOL_NAME_ATTRIBUTE: measurement.connection_alias,
+                POOL_ROLE_ATTRIBUTE: measurement.role,
+                DB_SYSTEM_NAME_ATTRIBUTE: measurement.system,
+            }
+            if measurement.schema is not None:
+                attributes[POOL_SCHEMA_ATTRIBUTE] = measurement.schema
+            if measurement.event is PoolMetricEvent.WAIT:
+                self.wait_time.record(measurement.value, attributes)
+            elif measurement.event is PoolMetricEvent.CONNECT:
+                self.create_time.record(measurement.value, attributes)
+            self.timeouts.add(measurement.value if measurement.event is PoolMetricEvent.TIMEOUT else 0, attributes)
+            self.connect_failures.add(
+                measurement.value if measurement.event is PoolMetricEvent.CONNECT_FAILURE else 0, attributes
+            )
 
     def get_pools(self) -> list[tuple[DatabaseClient, PoolStatus]]:
         """Every open pool reporting its status.
@@ -154,7 +179,6 @@ class PoolMetricInstruments:
             The observations.
         """
         pools = self.get_pools()
-        self.record_durations(pools)
         values: list[tuple[dict[str, str], float]] = []
         for client, status in pools:
             attributes = PoolMetricInstruments.get_attributes(client, status)
@@ -163,19 +187,13 @@ class PoolMetricInstruments:
         return PoolMetricInstruments.get_summed_observations(values)
 
     def observe_max_sizes(self, options: CallbackOptions) -> list[Observation]:
-        return self.observe(lambda status: status.max_size)
+        return self.observe(attrgetter("max_size"))
 
     def observe_min_sizes(self, options: CallbackOptions) -> list[Observation]:
-        return self.observe(lambda status: status.min_size)
+        return self.observe(attrgetter("min_size"))
 
     def observe_pending_requests(self, options: CallbackOptions) -> list[Observation]:
-        return self.observe(lambda status: status.waiting)
-
-    def observe_timeouts(self, options: CallbackOptions) -> list[Observation]:
-        return self.observe(lambda status: status.acquire_timeouts)
-
-    def observe_connect_failures(self, options: CallbackOptions) -> list[Observation]:
-        return self.observe(lambda status: status.connect_failures)
+        return self.observe(attrgetter("waiting"))
 
     def observe(self, get_value: Callable[[PoolStatus], float]) -> list[Observation]:
         """One value of every pool, summed by attributes.
@@ -190,21 +208,3 @@ class PoolMetricInstruments:
             (PoolMetricInstruments.get_attributes(client, status), get_value(status))
             for client, status in self.get_pools()
         )
-
-    def record_durations(self, pools: list[tuple[DatabaseClient, PoolStatus]]) -> None:
-        """Records the waits and connects the pools measured since the previous collection.
-
-        Args:
-            pools: The pools.
-        """
-        with self.lock:
-            for client, status in pools:
-                attributes = PoolMetricInstruments.get_attributes(client, status)
-                wait_cursor, connect_cursor = self.cursors.get(client, (0, 0))
-                wait_cursor, waits, _ = client.pool_statistics.get_waits_since(wait_cursor)
-                connect_cursor, connects, _ = client.pool_statistics.get_connects_since(connect_cursor)
-                self.cursors[client] = (wait_cursor, connect_cursor)
-                for seconds in waits:
-                    self.wait_time.record(seconds, attributes)
-                for seconds in connects:
-                    self.create_time.record(seconds, attributes)

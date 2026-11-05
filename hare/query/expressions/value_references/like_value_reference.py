@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
 from hare.query.filters.lookups.lookups import Lookups
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
@@ -16,14 +17,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class LikeValueReference:
-    """A plan value reference of a case-sensitive ``__contains``/``__startswith``/``__endswith``: the
-    pattern's ``ValueWrapper``, the encoder converting the raw value, the field, and the
+    """A plan value reference of ``__contains``/``__startswith``/``__endswith`` and their insensitive variants: the
+    pattern's parameter slot, the encoder converting the raw value, the field, and the
     ``prefix``/``suffix`` wildcard flags. A plan hit encodes the new value and builds its escaped
-    pattern again. The case-insensitive lookups wrap the pattern in ``UPPER(...)`` and aren't
-    referenced this way.
+    pattern again. Case-insensitive lookups share the same source inside their SQL case conversion.
+    Preparation identifies a ``ValueWrapper``; publication replaces it with a ``ParameterSlot``.
     """
 
-    wrapper: ValueWrapper
+    wrapper: ParameterSlot | ValueWrapper
     field: Field[Any]
     value_encoder: Callable[..., str]
     prefix: bool
@@ -43,4 +44,4 @@ class LikeValueReference:
         """
         encoded = self.value_encoder(value, model, self.field, dialect)
         pattern = Lookups.get_like_pattern_text(encoded, prefix=self.prefix, suffix=self.suffix)
-        return [(id(self.wrapper), pattern, False)]
+        return [(self.wrapper, pattern, False)]

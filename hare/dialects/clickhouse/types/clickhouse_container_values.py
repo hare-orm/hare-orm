@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 class ClickhouseContainerValues:
     """How ClickHouse stores containers - ``Array(T)``, ``Map(K, V)``, ``Tuple(T, ...)`` of the
     ClickHouse types of the held fields, to any depth. A held field with ``null=True`` is
-    ``Nullable(T)``; a container itself is never ``Nullable`` - a NULL container is written as an
-    empty one (an empty array, an empty map), and a tuple, which has no empty value, holds no NULL. An
+    ``Nullable(T)`` when that held type supports NULL. A container itself is never ``Nullable``:
+    nullable declarations and None values are refused for arrays, maps and tuples. An
     empty container is bound with its type, at any depth - its literal alone has none; so is a signed
     integer of an array, a map or a tuple read as a ``UInt64`` from its literal."""
 

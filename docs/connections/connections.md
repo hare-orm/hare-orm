@@ -1,5 +1,12 @@
 # Connections
 
+Shared clients belong to the application’s connection handler. Transaction bindings live in an
+immutable task context: child tasks inherit active bindings, and ending a transaction releases
+its binding in every inherited context. Looking up a main client never returns a transaction
+wrapper. Shutdown stops the application’s listeners before closing its clients and waits for
+pending resource releases even when its caller is cancelled. It does not close another
+application’s clients or background resources.
+
 `Connections` holds the open connections of a context: a connection by its alias, reconnecting after the
 database was replaced, checking that a server answers. How to connect to each database — drivers, URL
 parameters, TLS — is on that database's page: [PostgreSQL](../dialects/postgresql/connecting.md),
@@ -46,6 +53,8 @@ class ConnectionHandler:
         self,
         connection_alias: str,
         credential_overrides: Mapping[str, Any] | None = None,
+        *,
+        config: ConnectionConfig | None = None,
     ) -> DatabaseClient: ...
 
     def all(self) -> list[DatabaseClient]: ...
@@ -54,6 +63,10 @@ class ConnectionHandler:
 
     async def close_all(self, discard: bool = True) -> None: ...
 ```
+
+`create_independent()` uses the alias's configured settings unless `config` supplies the captured
+settings of a source client. With `config`, the alias only names the new client; credential overrides
+apply to those settings. The caller closes the independent client.
 
 `get_client(using)` is the connection a `using=` argument names — an alias's client, the client itself,
 or `None`. `get_pool_statuses()` lists the open pools ([Pool metrics and
@@ -94,9 +107,9 @@ run again with `read_retry_max_retries`), and the pool replaces the connection.
 
 - The connection objects and their names stay the same — code holding `Connections.get("default")` keeps
   working.
-- Call it with no transaction open. A query that already holds a connection finishes on it; one still
-  waiting for a connection when the old pool closes runs on the new pool — queries running meanwhile in
-  other tasks don't fail.
+- Call it with no transaction open. Closing follows the configured shutdown deadline; after it
+  completes, queries can open a new pool. Alias lookups during shutdown raise `ConfigurationError`;
+  reconnecting does not guarantee uninterrupted queries in other tasks.
 - Each process reconnects its own connections; a worker pool calls it in every worker.
 - Without an active context it raises `ConfigurationError`.
 
@@ -115,7 +128,10 @@ server that stopped answering without closing the socket (network partition, fro
 driver raise, so an unbounded call would hang forever. It returns `False` on `DBConnectionError`,
 `OperationalError` and on timeout; anything else still propagates. Works the same on every database.
 
-Ordinary queries have no such bound by default — a long migration or bulk operation must not be cut off.
-On PostgreSQL a bound is opted into with `command_timeout` (seconds) in the credentials or the URL
+On PostgreSQL ordinary queries have no such bound by default. A bound is opted into with
+`command_timeout` (seconds) in the credentials or the URL
 (`?command_timeout=30`): a command that outlives it is cancelled and raises `TimeoutError`, and the
 connection stays usable — see [`command_timeout`](../dialects/postgresql/connecting.md#command-timeout).
+
+ClickHouse uses `send_receive_timeout` (300 seconds by default) and sets the server execution limit
+from it — see [ClickHouse connection settings](../dialects/clickhouse/connecting.md).

@@ -8,7 +8,7 @@ class HareMigrationError(HareError):
 
 
 class UnknownMigrationError(HareMigrationError, LookupError):
-    """Raised when an app label, a migration or a migration target names nothing that exists."""
+    """An app label or migration target is unknown, or a migration-name prefix is ambiguous."""
 
 
 class IrreversibleMigrationError(HareMigrationError):
@@ -24,7 +24,7 @@ class CircularDependencyError(HareMigrationError):
 
 
 class MigrationLoadError(HareMigrationError):
-    """Raised when a migration file on disk can't be imported."""
+    """Migration loading fails: an import, duplicate node, dependency or replacement is invalid."""
 
 
 class PartiallyAppliedMigrationError(HareMigrationError):

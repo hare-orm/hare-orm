@@ -1,5 +1,4 @@
-"""Reads the rows of a model query two ways - a rust.native.pg PgResult read by its decoded values,
-and the same result's PgRow objects - for tests checking that both give the same instances."""
+"""Compare positional and named model hydration of native PostgreSQL rows."""
 
 import datetime
 from decimal import Decimal
@@ -7,8 +6,7 @@ from typing import Any
 
 import pytest
 
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from hare.time import Timezone
+from hare.query.rows.model_rows.model_columns import ModelColumns
 from tests.utils.database_under_test import DatabaseUnderTest
 from tests.utils.model_rows_queries import get_model_rows_query
 
@@ -36,12 +34,11 @@ class PgResultReading:
         _, rows = await compiler._connection.execute(sql, values)
         if not isinstance(rows, pg.PgResult):
             pytest.skip("reads the rows of a rust_pg connection")
-        reader = HydrateAccelerator.get_model_reader(
+        reader = ModelColumns(
             model,
             compiler._decode_plan,
+            tuple(range(len(compiler._decode_plan))),
             compiler._decode_plan_is_partial,
-            compiler._connection.dialect.types,
-            Timezone.get_aware_zone_name(),
         )
         return rows, reader, [name for name, *_ in compiler._decode_plan]
 
@@ -79,8 +76,11 @@ class PgResultReading:
         """
         await model.objects.bulk_create([model(**kwargs) for kwargs in create_kwargs_list])
         rows, reader, names = await PgResultReading.fetch_result(model)
-        from_result = reader.read(rows)
-        from_row_objects = reader.read(list(rows))
+        named_reader = ModelColumns(
+            model, reader.entries, tuple(model._meta.fields_db_projection[name] for name in names), reader.is_partial
+        )
+        from_result = [reader.hydrate(row, None) for row in rows]
+        from_row_objects = [named_reader.hydrate(row, None) for row in rows]
         assert len(from_result) == len(from_row_objects)
         for result_instance, row_instance in zip(from_result, from_row_objects, strict=True):
             for name in names:

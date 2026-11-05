@@ -5,6 +5,14 @@
 применяет само. Всё ниже импортируется из `hare.migrations`: `Migration`, `State`, `MigrationRunner`,
 `MigrationRecorder`, `MigrationWriter`, `OperationEffect`, `OperationPlan`.
 
+При создании `State` фиксирует обработчик соединений приложения, настройки `swappable` и объявления
+unmanaged-моделей. Отложенный рендеринг и `clone()` сохраняют это `MigrationEnvironment`, даже если
+текущим стал другой `HareContext`. Копии состояния используют общие соединения, не владеют ими и не
+закрывают их; объявления и отрисованные классы моделей остаются независимыми. Для явного окружения
+импортируйте `MigrationEnvironment` из `hare.migrations.state.migration_environment` и передайте
+`environment=` в `State` или `State.from_models()`. `MigrationEnvironment()` создаёт пустое окружение
+для работы без базы, а `MigrationEnvironment.capture()` фиксирует текущее приложение.
+
 ```python
 class Migration:
     def __init__(
@@ -16,8 +24,8 @@ class Migration:
         dependencies: Iterable[tuple[str, str]] | None = None,
     ) -> None: ...
 
-    @classmethod
-    def from_source(cls, source: str, *, name: str, app_label: str) -> Migration: ...
+    @staticmethod
+    def from_source(source: str, *, name: str, app_label: str) -> Migration: ...
 
 class State:
     @classmethod
@@ -27,6 +35,7 @@ class State:
         *,
         app_label: str | None = None,
         default_connections: dict[str, str] | None = None,
+        environment: MigrationEnvironment | None = None,
     ) -> State: ...
 
     def get_operations(
@@ -34,7 +43,7 @@ class State:
     ) -> OperationPlan: ...
 
 class Operation(ABC):
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect: ...
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect: ...
 
 class MigrationRunner:
     def __init__(
@@ -49,7 +58,7 @@ class MigrationRunner:
 
     async def apply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State: ...
 
-    async def unapply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State: ...
+    async def unapply(self, migration: Migration, state_before: State, *, dry_run: bool = False) -> State: ...
 
     async def record(
         self,
@@ -81,24 +90,37 @@ class MigrationRecorder:
   `Migration`, даёт `hare.migrations.exceptions.MigrationLoadError`.
 - `State.from_models()` — состояние схемы по классам моделей, как они объявлены. Приложение модели — её
   `Meta.app`, иначе `app_label`; модель без того и другого даёт `ConfigurationError`.
+  Обращение к `state.apps` публикует граф исторических моделей только после успешного связывания.
+  Если добавленная или изменённая модель не связывается, прежние классы и отметки изменений сохраняются;
+  после исправления объявления следующее обращение повторит те же изменения.
 - `old_state.get_operations(new_state, app_label)` возвращает
   `OperationPlan(operations, warnings, data_loss_warnings)` — операции, которые `makemigrations` записал
-  бы для приложения, с его предупреждениями. Переименование делается, только когда его подтверждают
-  `rename_questions` (`RenameQuestions({"content.Book.title": "name"})` — см.
-  [Переименования](migrations.ru.md#renames)); без них переименованное поле или модель удаляются и
-  добавляются.
+  бы для приложения, с его предупреждениями. Однозначные совпадения полей по колонке или сигнатуре
+  связи распознаются автоматически. Остальные кандидаты требуют `rename_questions`
+  (`RenameQuestions({"content.Book.title": "name"})` — см. [Переименования](migrations.ru.md#renames));
+  неподтверждённый кандидат удаляется и добавляется.
 - `Operation.get_effect()` возвращает
   `OperationEffect(operation, reversible, rewrites_table, loses_data, reason)`: можно ли откатить
   операцию, переписывает ли база всю таблицу (время растёт с числом строк), могут ли пропасть значения
-  или строки, и почему. `RemoveField` и `DeleteModel` теряют данные. `AlterField` теряет данные, когда
-  меняет тип колонки, и переписывает таблицу, когда диалект делает так для этого изменения, — см.
+  или строки, и почему. `RemoveField` и `DeleteModel` теряют данные. Для `AlterField` флаг `loses_data`
+  консервативно отмечает любое изменение объявленного типа колонки, в том числе расширение; он не
+  доказывает потерю существующих значений. Передайте настроенный `BaseSchemaEditor`: метод готовит
+  тот же план, что и исполнение, без обращений к базе и вычисления runtime-defaults. Эффект перезаписи
+  включает зависимые таблицы и преобразования хранимых значений — см.
   [`alter_field_rewrites_table`](zero-downtime.ru.md#alter-field-rewrites-table).
 - `MigrationRunner` применяет одну миграцию на `connection` так же, как `hare migrate`: атомарную — в
   одной транзакции вместе с записью в журнале, с проверкой ограничений перед фиксацией. `lock_timeout` —
   [ограничение ожидания блокировок](migrations.ru.md#lock-timeout) для её команд.
+  Исполнитель сохраняет обработчик подключений переданного клиента; для самостоятельного клиента
+  без обработчика фиксирует текущий. Активная транзакция используется только для того же исходного
+  клиента. Независимый клиент или клиент схемы не заменяется другим клиентом с таким же alias.
     - `ensure_journal()` создаёт таблицу журнала, если её ещё нет.
     - `apply()` возвращает состояние после миграции; `unapply()` принимает состояние до её применения и
-      возвращает его. С `dry_run=True` оба выполняют операции, не трогая ни базу, ни журнал.
+      возвращает его новую копию. Оба сохраняют переданное состояние неизменным, в том числе при ошибке.
+      С `dry_run=True` возвращают результат пробного применения без исполнения операций миграции
+      и изменения журнала. Подключение или транзакция при этом могут открываться.
+      Тот же вход можно затем передать настоящему запуску. Для отката передавайте сохранённое
+      состояние до применения явно: `unapply(migration, state_before=before)`.
     - `record()` отмечает миграцию в журнале применённой или откаченной. Без `recorder` ничего не делает
       — как и записи в журнал внутри `apply()`/`unapply()`.
     - `collect_sql()` возвращает SQL миграции (или её отката, при `backward=True`), не выполняя его; у

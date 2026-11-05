@@ -83,7 +83,7 @@ class TaskTenantLabels:
             The scope, as ``Tenancy.scope()`` takes it.
 
         Raises:
-            ConfigurationError: A scope given model by model names a model no app registers.
+            ConfigurationError: A mapping label names no supported tenant-scope form.
         """
         if not isinstance(label_value, dict):
             return label_value

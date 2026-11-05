@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.exceptions import ConfigurationError
@@ -17,6 +16,7 @@ from hare.migrations.operations.fields.field_like import FieldLike
 from hare.migrations.operations.fields.remove_field import RemoveField
 from hare.migrations.operations.fields.rename_field import RenameField
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.state import State
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ class AddField(FieldAddRemoveOperation):
         """The added field."""
         return [self.field]
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """A later change of the same field folds into the addition - a removal cancels it."""
         if isinstance(other, (AlterField, RemoveField, RenameField)) and self.is_same_model_name(
             self.model_name, other.model_name
@@ -66,19 +66,23 @@ class AddField(FieldAddRemoveOperation):
                     and isinstance(other.field, DIRECT_RELATION_FIELDS)
                     and getattr(other.field, "db_constraint", False)
                 )
-                return [AddField(self.model_name, self.name, other.field, not_valid=keeps_not_valid)]
+                return OperationRewrite(
+                    (AddField(self.model_name, self.name, other.field, not_valid=keeps_not_valid),)
+                )
             if isinstance(other, RemoveField) and other.name == self.name:
-                return []
+                return OperationRewrite(())
             if isinstance(other, RenameField) and other.old_name == self.name:
-                return [AddField(self.model_name, other.new_name, self.field, not_valid=self.not_valid)]
-        return super().reduce(other, app_label)
+                return OperationRewrite(
+                    (AddField(self.model_name, other.new_name, self.field, not_valid=self.not_valid),)
+                )
+        return super().get_rewrite(other, app_label)
 
     def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
         return [OperationDependency.of_field(app_label, self.model_name, self.name, DependencyType.CREATED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         """The model and fields the relation needs, and the field's ENUM type."""
-        dependencies = RelationDependencies.get_required_for_relation(app_label, self.model_name, self.field)
+        dependencies = RelationDependencies.get_required_for_relation(app_label, self.model_name, self.field, state)
         enum_type = getattr(self.field, "requires_enum_type", None)
         if enum_type is not None:
             dependencies.append(
@@ -97,8 +101,8 @@ class AddField(FieldAddRemoveOperation):
         if self.name in model_state.fields:
             raise IncompatibleStateError(f"Field {self.name} already present on model {app_label}.{self.model_name}")
 
-        model_state.set_field(self.name, cast("Field[Any]", deepcopy(self.field)))
-        state.mark_models_changed(self.get_changed_model_keys(app_label, self.field))
+        model_state.set_field(self.name, cast("Field[Any]", self.field).snapshot())
+        state.mark_models_changed(self.get_changed_model_keys(app_label, self.field, state))
 
     async def database_forward(
         self,

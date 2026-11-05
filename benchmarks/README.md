@@ -5,14 +5,26 @@
 `bench.py` compares hare-orm with SQLAlchemy, tortoise-orm, yara-orm and Django on the same scenarios, on PostgreSQL, SQLite and ClickHouse. The results and charts are on the
 [Benchmarks](https://hare-orm.github.io/hare-orm/benchmarks/) pages of the documentation.
 
+Runs accept `--seed` (default `1`); each round records its seed and shuffles targets reproducibly.
+Scenario results retain every timed repetition and use the median, with preparation outside the
+timer. Cold start measures connection initialization and the first `SELECT 1`, without DDL.
+Load results record actual operation latency samples as well as duration and throughput; workers
+finish or are cancelled before database cleanup.
+
+`results.json` is a versioned snapshot of scenario labels, targets, workload sizes, units, conditions,
+package versions and raw observations. Unsupported, failed and unmeasured scenarios remain distinct.
+`charts` renders that snapshot without consulting current workload declarations; reports without a
+supported snapshot must be collected again. All SVG, Markdown and JSON artifacts are generated and
+staged before publication, then each destination is replaced atomically.
+
 ## What is measured
 
 | Database | Target | What runs |
 |---|---|---|
 | PostgreSQL | `hare-rust` | hare-orm on its Rust PostgreSQL driver (`postgresql://`) |
 | | `hare-asyncpg` | hare-orm on asyncpg (`postgresql+asyncpg://`) |
-| | `sqlalchemy` | SQLAlchemy 2 async ORM on asyncpg; a session runs its statements in a transaction and commits it — SQLAlchemy's default |
-| | `sqlalchemy-autocommit` | the same, the engine in `AUTOCOMMIT`: every statement commits on its own, as in hare and Django; the transaction scenarios still run in a real transaction |
+| | `sqlalchemy` | SQLAlchemy 2 async ORM on asyncpg; normal transactional sessions, with writes committed explicitly at the scenario's boundaries |
+| | `sqlalchemy-autocommit` | the same, the engine in `AUTOCOMMIT`: every statement commits individually; transaction and streaming scenarios use transactional sessions |
 | | `tortoise` | tortoise-orm on asyncpg |
 | | `yara-orm` | yara-orm |
 | | `django` | Django's async ORM on psycopg 3 with its connection pool |
@@ -56,29 +68,32 @@ them:
 ## How it is measured
 
 <!-- benchmark-method:start -->
-- On PostgreSQL every ORM gets a pool of 50 connections, all opened before anything is timed.
+- On PostgreSQL every ORM has a pool limit of 50 connections. The driver determines how many
+  connections open; cold start is measured before warmup.
 - On PostgreSQL every table gets a `VACUUM (FULL, ANALYZE)`, untimed, before each group of scenarios
   and each load test, and autovacuum is off for them: every group starts from compact tables.
   Otherwise autovacuum clears the dead rows the writes leave at a random moment of the run, and
   whether it has come by decides the query plan — with a parallel scan or without.
-- Before a load test, every connection of the pool runs every operation of the load, untimed: the
-  test measures an application that has been running, not one just started — each connection is open
-  and has prepared its statements.
-- Within a run, a scenario is repeated 3–5 times and its fastest repetition counts; the rows a write
-  scenario puts back are cleared before each repetition, untimed. The deletes and the many-to-many
-  `add()` change the data for good and run once.
+- Before a load test, concurrent workers run every operation of the load, untimed. This warms the
+  operations without guaranteeing preparation on each physical connection.
+- Most scenarios repeat 3–5 times; their median counts and all samples are retained. Before
+  each bulk insert or `get_or_create()` repetition, that scenario's rows are cleared outside
+  the timer. Sequential inserts accumulate rows until the next group; updates reuse the
+  changed rows. Deletes, many-to-many `add()` and the cold start run once.
 - Each ORM runs in a process of its own. The runs go round after round, the ORMs in a shuffled order
   each round; a scenario's result is the median over the runs.
 - On Windows a run's process turns off its power throttling (EcoQoS): the scheduler otherwise may
   move a process without a window onto a hybrid processor's efficiency cores, where it runs at half
   the speed.
-- SQLAlchemy runs twice on PostgreSQL and SQLite: with a transaction around each session (its
-  default) and with the engine in autocommit mode, where every statement commits on its own, as in
-  hare and Django.
-- A scenario an ORM has no way to write is marked “not in this ORM” on its chart and left out of its
-  average.
+- SQLAlchemy runs twice on PostgreSQL and SQLite: with normal transactional sessions whose write
+  scenarios commit explicitly, and in autocommit mode with each statement committed individually.
+  Transaction and streaming scenarios use transactional sessions.
+- Unsupported scenarios, failures and missing measurements have distinct labels; comparisons use
+  only measured scenarios shared by both ORMs.
 - The start is the library's init and its first query, timed with the library already imported; it
-  is left out of the average.
+  excludes table creation and is left out of the average.
+- JSON retains raw samples, the seed, conditions and versions. Load latency measures each operation
+  from start to completion, including its wait for a connection.
 - On SQLite every ORM runs on one file the way it does by default; SQLAlchemy's connections wait up
   to 30 s for the file's write lock instead of the default 5 s — its pool of five otherwise stops
   the write load at “database is locked”. `select_for_update()` isn't measured on SQLite, which has

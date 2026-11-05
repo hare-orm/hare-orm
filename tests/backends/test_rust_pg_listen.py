@@ -15,8 +15,6 @@ from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
 from hare.exceptions import ValidationError
 from tests.utils.waiting import wait_until
 
-REQUIRES = ("native",)
-
 
 def _rust_pg_client_or_skip() -> RustPgClient:
     client = Connections.get("models")

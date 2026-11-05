@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.declarations import PoolStatus
 
-    DBConfigType = dict[str, Any]
 from hare.core.connections.connection_handler import ConnectionHandler
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 
@@ -17,8 +16,9 @@ TaskResult = TypeVar("TaskResult")
 
 class Connections:
     """The connections of the current context - ``Connections.get(connection_alias)`` is
-    ``HareContext.require_current().connections.get(connection_alias)``. Every method needs an active
-    ``HareContext`` and raises a clear error without one.
+    ``HareContext.require_current().connections.get(connection_alias)``. Alias lookups require an
+    active context. ``get_client(client_or_none)`` needs none; background task creation also works
+    without a current context.
     """
 
     @staticmethod
@@ -126,7 +126,11 @@ class Connections:
         context = HareContext.get_current()
         if context is None:
             return asyncio.ensure_future(coroutine)
-        return context.connections.create_task_outside_transactions(coroutine)
+        token = HareContext.current_context.set(context)
+        try:
+            return context.connections.create_task_outside_transactions(coroutine)
+        finally:
+            HareContext.current_context.reset(token)
 
 
 # Imported last: the context module imports this one.

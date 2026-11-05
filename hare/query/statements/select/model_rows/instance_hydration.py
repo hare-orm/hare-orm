@@ -83,14 +83,16 @@ class InstanceHydration:
         Returns:
             The reader.
         """
+        plan = query._statement_plan
         return ModelRows(
             query.model,
             query._connection,
             select_related_buckets=query._select_related_positions,
             decode_plan=query._decode_plan,
             decode_plan_is_partial=query._decode_plan_is_partial,
+            decode_plan_key=plan.decode_plan_key if plan is not None else query._decode_plan_key,
             # An .alias() key is never selected - there's no column to read it from.
-            annotations=list(query._annotations.keys() - query._alias_keys),
+            annotations=[name for name in query._annotations if name not in query._alias_keys],
             annotation_fields=QueryAnnotations.get_annotation_fields(query),
         )
 
@@ -107,16 +109,7 @@ class InstanceHydration:
         """
         if not (query._prefetch_map or query._prefetch_queries):
             return None
-        return PrefetchRequest(
-            query._prefetch_map,
-            query._prefetch_queries,
-            visibility=query._visibility,
-            select_for_update=query._select_for_update,
-            select_for_update_nowait=query._select_for_update_nowait,
-            select_for_update_skip_locked=query._select_for_update_skip_locked,
-            select_for_update_strength=query._select_for_update_strength,
-            db_explicitly_chosen=query._connection_explicitly_chosen,
-        )
+        return PrefetchRequest.from_query(query, query._prefetch_map, query._prefetch_queries)
 
     @staticmethod
     def build_decode_plan(

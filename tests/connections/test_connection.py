@@ -18,13 +18,6 @@ def conn_handler():
 
 
 @pytest.mark.database_independent
-def test_init_constructor(conn_handler):
-    assert conn_handler._db_config is None
-    assert conn_handler._create_db is False
-    assert conn_handler._get_storage() == {}
-
-
-@pytest.mark.database_independent
 @pytest.mark.asyncio
 @patch("hare.core.connections.connection_handler.ConnectionHandler._init_connections")
 async def test_init(mocked_init_connections, conn_handler):
@@ -50,24 +43,6 @@ def test_db_config_not_present(conn_handler):
     )
     with pytest.raises(ConfigurationError, match=err_msg):
         _ = conn_handler.db_config
-
-
-@pytest.mark.database_independent
-def test_get_storage(conn_handler):
-    expected_ret_val = {"default": DatabaseClient("default")}
-    conn_handler._storage_var.set(expected_ret_val)
-    ret_val = conn_handler._get_storage()
-    assert ret_val == expected_ret_val
-    assert ret_val is conn_handler._get_storage()
-
-
-@pytest.mark.database_independent
-def test_copy_storage(conn_handler):
-    original_storage = {"default": DatabaseClient("default")}
-    conn_handler._storage_var.set(original_storage)
-    ret_val = conn_handler._copy_storage()
-    assert ret_val == original_storage
-    assert ret_val is not original_storage
 
 
 @pytest.mark.database_independent
@@ -208,15 +183,37 @@ def test_create_connection_db_info_not_str(
 @pytest.mark.database_independent
 def test_get_alias_present(conn_handler):
     mock_conn = Mock(_check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False)
-    conn_handler._storage_var.set({"default": mock_conn})
+    conn_handler.root_clients.update({"default": mock_conn})
     ret_val = conn_handler.get("default")
     assert ret_val is mock_conn
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize("direct_constructor", [False, True])
+def test_derived_client_keeps_source_database_and_driver_settings(conn_handler, direct_constructor):
+    from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClientWithRegexpSupport
+
+    conn_handler._init_config({"default": "sqlite+aiosqlite://:memory:"})
+    settings = {"file_path": "source.sqlite3", "install_regexp_functions": True}
+    if direct_constructor:
+        source = AiosqliteClientWithRegexpSupport(connection_alias="default", **settings)
+        source.connection_handler = conn_handler
+    else:
+        source = conn_handler.create_independent("default", settings)
+
+    derived = source.create_independent_client()
+    assert derived.filename == "source.sqlite3"
+    assert isinstance(derived, AiosqliteClientWithRegexpSupport)
+    assert derived.connection_handler is conn_handler
+    assert derived.create_independent_client({"file_path": "other.sqlite3"}).filename == "other.sqlite3"
+    assert source.filename == "source.sqlite3"
+    assert conn_handler.db_config["default"] == "sqlite+aiosqlite://:memory:"
+
+
+@pytest.mark.database_independent
 @patch("hare.core.connections.connection_handler.ConnectionHandler._create_connection")
 def test_get_alias_not_present(mocked_create_connection, conn_handler):
-    conn_handler._storage_var.set({"default": "some_connection"})
+    conn_handler.root_clients.update({"default": "some_connection"})
     other_connection = Mock(tenant_schema_template=None, tenant_row_level_security=False)
     mocked_create_connection.return_value = other_connection
     ret_val = conn_handler.get("other")
@@ -226,85 +223,52 @@ def test_get_alias_not_present(mocked_create_connection, conn_handler):
 
 
 @pytest.mark.database_independent
-def test_set(conn_handler):
-    conn_handler._storage_var.set({"default": "existing_conn"})
-    token = conn_handler.set("other", "some_conn")
-    assert conn_handler._get_storage() == {"default": "existing_conn", "other": "some_conn"}
-    assert token is not None
-
-
-@pytest.mark.database_independent
 def test_discard(conn_handler):
-    conn_handler._storage_var.set({"default": "some_conn", "other": "other_conn"})
+    conn_handler.root_clients.update({"default": "some_conn", "other": "other_conn"})
     ret_val = conn_handler.discard("default")
     assert ret_val == "some_conn"
     assert conn_handler._get_storage() == {"other": "other_conn"}
 
 
 @pytest.mark.database_independent
-def test_reset_restores_original_connection_for_swapped_alias(conn_handler):
-    """A set()/reset() round trip restores the alias's original connection."""
-    conn_handler._storage_var.set({"default": "original_conn"})
-    token = conn_handler.set("default", "txn_conn")
-    assert conn_handler._get_storage()["default"] == "txn_conn"
-    conn_handler.reset(token)
-    assert conn_handler._get_storage() == {"default": "original_conn"}
-
-
-@pytest.mark.database_independent
 def test_reset_preserves_alias_created_during_transaction(conn_handler):
-    """Regression test: set() installs a COPY of storage for the duration of a transaction on
-    one alias ("default" here) - but .get() mutates whatever storage is currently ambient IN
-    PLACE, so a different alias lazily touched for the first time while that transaction is open
-    (e.g. connect=False skipped the usual eager warm-up of every alias) gets created
-    into that copy, not the original dict reset() restores. Previously that connection was
-    silently dropped when reset() discarded the copy - unreachable via any future .get(alias),
-    and never closed."""
-    conn_handler._storage_var.set({"default": "original_default_conn"})
-    token = conn_handler.set("default", "txn_conn")
-    # Mirrors what ConnectionHandler.get() itself does for a real, not-yet-created alias:
-    # mutate the currently-ambient (transaction-scoped) storage dict in place.
-    conn_handler._get_storage()["other"] = "new_other_conn"
-    conn_handler.reset(token)
-    assert conn_handler._get_storage() == {"default": "original_default_conn", "other": "new_other_conn"}
+    root = Mock(_check_loop=Mock(return_value=True))
+    created = Mock(_check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False)
+    conn_handler.root_clients["default"] = root
+    with patch.object(conn_handler, "_create_connection", return_value=created) as factory:
+        token = conn_handler.set("default", object())
+        assert conn_handler.get("other") is created
+        token.reset()
+        assert conn_handler.get("other") is created
+        assert conn_handler.get_main("default") is root
+        factory.assert_called_once_with("other")
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_reset_closes_own_connection_when_a_concurrent_task_raced_the_same_new_alias(conn_handler):
-    """Regression test for a leak sibling to test_reset_preserves_alias_created_during_transaction
-    above: that fix assumed only ONE side (the transaction) ever lazily creates a given
-    not-yet-warmed alias while set() is active. If a DIFFERENT, concurrently-running task
-    independently touches the SAME alias (its own get() mutates the pre-set() dict directly, in
-    place, exactly like the transaction's own get() mutates its private copy), both sides end up
-    with their own real client for it. reset()'s own "alias not in restored_storage" check is
-    then false (the concurrent task's entry got there first) - previously this silently dropped
-    the transaction's OWN connection (the one actually used for queries inside it) with no
-    close() at all, a real leaked pool/socket, not just an unreferenced object."""
-    conn_handler._storage_var.set({"default": "original_default_conn"})
-    # set() installs a COPY for the transaction (_copy_storage() -> dict(...), a genuinely new
-    # object) - this reference to the dict active BEFORE set() is what a sibling task with no
-    # transaction of its own would still see as its own ambient storage.
-    pre_transaction_storage = conn_handler._get_storage()
-    token = conn_handler.set("default", "txn_conn")
-    # Mirrors what ConnectionHandler.get() itself does for a real, not-yet-created alias, from
-    # INSIDE the transaction (mutates the ambient, transaction-scoped copy in place).
-    txn_side_conn = AsyncMock(spec=DatabaseClient)
-    conn_handler._get_storage()["other"] = txn_side_conn
+async def test_tasks_share_one_lazily_created_root_across_transaction_frames(conn_handler):
+    root = Mock(_check_loop=Mock(return_value=True))
+    created = Mock(_check_loop=Mock(return_value=True), close=AsyncMock())
+    conn_handler.root_clients["default"] = root
+    ready = asyncio.Event()
 
-    # A different, concurrently-running task's own get() on that SAME alias - never having
-    # called set() itself, so it mutates the pre-transaction dict directly, not the copy above.
-    concurrent_conn = AsyncMock(spec=DatabaseClient)
-    pre_transaction_storage["other"] = concurrent_conn
+    async def in_transaction():
+        token = conn_handler.set("default", object())
+        try:
+            await ready.wait()
+            return conn_handler.get_main("other")
+        finally:
+            token.reset()
 
-    conn_handler.reset(token)
+    async def outside_transaction():
+        ready.set()
+        return conn_handler.get_main("other")
 
-    # The concurrent task's own entry is what the restored, going-forward storage keeps.
-    assert conn_handler._get_storage()["other"] is concurrent_conn
-    # The transaction's own connection must not simply vanish unclosed - reset() is sync and
-    # can't await close() itself, so give its fire-and-forget cleanup task a chance to run.
-    await asyncio.sleep(0)
-    txn_side_conn.close.assert_awaited_once()
+    with patch.object(conn_handler, "_create_connection", return_value=created) as factory:
+        first, second = await asyncio.gather(in_transaction(), outside_transaction())
+        assert first is second is created
+        factory.assert_called_once_with("other")
+        created.close.assert_not_awaited()
 
 
 @pytest.mark.database_independent
@@ -319,7 +283,7 @@ def test_aliases(mocked_db_config, conn_handler):
 def test_all(mocked_db_config, conn_handler):
     mock_conn_1 = Mock(_check_loop=Mock(return_value=True))
     mock_conn_2 = Mock(_check_loop=Mock(return_value=True))
-    conn_handler._storage_var.set({"default": mock_conn_1, "other": mock_conn_2})
+    conn_handler.root_clients.update({"default": mock_conn_1, "other": mock_conn_2})
     mocked_db_config.return_value = {"default": {}, "other": {}}
     ret_val = conn_handler.all()
     assert set(ret_val) == {mock_conn_1, mock_conn_2}
@@ -330,7 +294,7 @@ def test_all(mocked_db_config, conn_handler):
 @patch("hare.core.connections.connection_handler.ConnectionHandler.db_config", new_callable=PropertyMock)
 async def test_close_all_with_discard(mocked_db_config, conn_handler):
     conn_1, conn_2 = AsyncMock(spec=DatabaseClient), AsyncMock(spec=DatabaseClient)
-    conn_handler._storage_var.set({"default": conn_1, "other": conn_2})
+    conn_handler.root_clients.update({"default": conn_1, "other": conn_2})
     conn_handler._db_config = {
         "default": {},
         "other": {},
@@ -347,7 +311,7 @@ async def test_close_all_with_discard(mocked_db_config, conn_handler):
 @patch("hare.core.connections.connection_handler.ConnectionHandler.db_config", new_callable=PropertyMock)
 async def test_close_all_without_discard(mocked_db_config, conn_handler):
     conn_1, conn_2 = AsyncMock(spec=DatabaseClient), AsyncMock(spec=DatabaseClient)
-    conn_handler._storage_var.set({"default": conn_1, "other": conn_2})
+    conn_handler.root_clients.update({"default": conn_1, "other": conn_2})
     conn_handler._db_config = {
         "default": {},
         "other": {},
@@ -369,7 +333,7 @@ async def test_close_all_discards_every_alias_even_if_one_close_fails(mocked_db_
     conn_1 = AsyncMock(spec=DatabaseClient)
     conn_1.close.side_effect = RuntimeError("simulated close failure")
     conn_2 = AsyncMock(spec=DatabaseClient)
-    conn_handler._storage_var.set({"default": conn_1, "other": conn_2})
+    conn_handler.root_clients.update({"default": conn_1, "other": conn_2})
     conn_handler._db_config = {"default": {}, "other": {}}
     mocked_db_config.return_value = {"default": {}, "other": {}}
 
@@ -424,7 +388,7 @@ def test_get_reconnects_on_loop_change(mocked_create_connection, conn_handler):
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )
     mocked_create_connection.return_value = fresh_conn
-    conn_handler._storage_var.set({"default": stale_conn})
+    conn_handler.root_clients.update({"default": stale_conn})
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -452,7 +416,7 @@ async def test_get_closes_stale_connection_on_loop_change(mocked_create_connecti
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )
     mocked_create_connection.return_value = fresh_conn
-    conn_handler._storage_var.set({"default": stale_conn})
+    conn_handler.root_clients.update({"default": stale_conn})
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", HareLoopSwitchWarning)
@@ -479,33 +443,12 @@ async def test_connections_aliases_passes_through_to_current_handler(db):
 
 @pytest.mark.database_independent
 def test_reset_keeps_an_alias_discarded_while_the_transaction_was_open(conn_handler):
-    """close_all(discard=True) while a transaction is open drops the alias - resetting the
-    transaction's token afterwards must not put the finished transaction client back."""
-    conn_handler._storage_var.set({"default": "original_conn"})
-    # What another task's close_all(discard=True) sees and discards from: the storage in place
-    # before set() installed the transaction's own copy.
-    pre_transaction_storage = conn_handler._get_storage()
-    token = conn_handler.set("default", "txn_conn")
-    pre_transaction_storage.pop("default")
-    conn_handler.reset(token)
+    root = object()
+    conn_handler.root_clients["default"] = root
+    token = conn_handler.set("default", object())
+    assert conn_handler.discard("default") is root
+    token.reset()
     assert "default" not in conn_handler._get_storage()
-
-
-@pytest.mark.database_independent
-@pytest.mark.asyncio
-async def test_reset_from_another_task_restores_the_alias_there(conn_handler):
-    """A transaction context exited in a task other than the one that entered it resets a token
-    created in another context - that must restore the alias instead of raising ValueError."""
-    conn_handler._storage_var.set({"default": "original_conn"})
-    token = conn_handler.set("default", "txn_conn")
-
-    async def reset_in_another_task() -> dict:
-        conn_handler.reset(token)
-        return dict(conn_handler._get_storage())
-
-    storage_seen_by_other_task = await asyncio.ensure_future(reset_in_another_task())
-    assert storage_seen_by_other_task == {"default": "original_conn"}
-    assert token._used is True
 
 
 @pytest.mark.database_independent
@@ -535,7 +478,7 @@ async def test_a_stale_connection_of_a_running_loop_is_closed_on_that_loop(mocke
         mocked_create_connection.return_value = Mock(
             _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
         )
-        conn_handler._storage_var.set({"default": stale_conn})
+        conn_handler.root_clients.update({"default": stale_conn})
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", HareLoopSwitchWarning)
             conn_handler.get("default")
@@ -564,7 +507,7 @@ async def test_a_stale_connection_of_a_closed_loop_abandons_its_connections(mock
     mocked_create_connection.return_value = Mock(
         _check_loop=Mock(return_value=True), tenant_schema_template=None, tenant_row_level_security=False
     )
-    conn_handler._storage_var.set({"default": stale_conn})
+    conn_handler.root_clients.update({"default": stale_conn})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", HareLoopSwitchWarning)
         conn_handler.get("default")

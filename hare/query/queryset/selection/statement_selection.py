@@ -7,16 +7,15 @@ from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
 from hare.query.queryset.arguments.values_arguments import ValuesArguments
 from hare.query.queryset.combination.queryset_combination import QuerySetCombination
-from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.selection.values_selection import ValuesSelection
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
-from hare.query.statements.select.rows_query import RowsQuery
 from hare.sql import Order
 
 if TYPE_CHECKING:
     from hare.query.queryset.queryset import QuerySet
     from hare.query.statements.select.combined_query import CombinedQuery
+    from hare.query.statements.select.select_query import SelectQuery
     from hare.query.statements.select.values_query import ValuesQuery
 
 
@@ -29,7 +28,7 @@ class StatementSelection:
     of their keys or of one field."""
 
     @staticmethod
-    def get_select_query(queryset: QuerySet[Any, Any]) -> RowsQuery[Any]:
+    def get_select_query(queryset: QuerySet[Any, Any]) -> SelectQuery[Any] | CombinedQuery:
         """The query of this queryset's rows, made for the caller alone.
 
         Args:
@@ -160,18 +159,13 @@ class StatementSelection:
         return rows_queryset
 
     @staticmethod
-    def get_rows_query_if_rows_repeat(
-        queryset: QuerySet[Any, Any], *, counts_changed_rows: bool = True
-    ) -> ValuesQuery | None:
+    def get_rows_query_if_rows_repeat(queryset: QuerySet[Any, Any]) -> ValuesQuery | None:
         """The unsliced primary key query of the rows, when they repeat a primary key,
-        ``.distinct(<fields>)`` picks one row per group or a call of the dialect's QuerySet method
-        changes which rows are returned (``QuerySetExtension.changes_rows``) - ``count()``/``exists()``
-        count them as returned.
+        ``.distinct(<fields>)`` picks one row per group so summaries count them as returned. Dialect-specific
+        extension effects are selected separately after binding the summary to its connection.
 
         Args:
             queryset: The queryset.
-            counts_changed_rows: Whether a call changing which rows are returned makes the query - not
-                for an ``aggregate()`` of a slice, which reads the rows by their primary key.
 
         Returns:
             The query, or None when the rows are the plain matching rows.
@@ -193,7 +187,6 @@ class StatementSelection:
                 )
             )
             and not StatementSelection.get_distinct_row_multiplying_annotation_names(queryset)
-            and not (counts_changed_rows and queryset._extension_calls and QuerySetExtensions.changes_rows(queryset))
         ):
             return None
         unsliced_queryset = queryset._clone()

@@ -3,7 +3,9 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any
 
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.tables.table_partitions import TablePartitions
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.schema.constants import (
@@ -13,7 +15,6 @@ from hare.dialects.clickhouse.schema.constants import (
 )
 
 if TYPE_CHECKING:
-    from hare.ddl.table_options import TableOptions
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.models import Model
 
@@ -27,9 +28,11 @@ class ClickhouseTablePartitions(TablePartitions):
 
     editor: ClickhouseSchemaEditor
 
-    async def alter_table_options(
-        self, model: type[Model], old_options: TableOptions | None, new_options: TableOptions | None
-    ) -> None:
+    def get_alter_table_options_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Choose and compile the entire options transition before schema execution."""
+        model = new_model
+        old_options = old_model._meta.get_table_options(self.editor.client.dialect)
+        new_options = new_model._meta.get_table_options(self.editor.client.dialect)
         old = old_options if isinstance(old_options, ClickhouseTableOptions) else ClickhouseTableOptions()
         new = new_options if isinstance(new_options, ClickhouseTableOptions) else ClickhouseTableOptions()
         # The options a table is altered to are checked as those it is created with.
@@ -45,12 +48,11 @@ class ClickhouseTablePartitions(TablePartitions):
             changed_options - CLICKHOUSE_ALTERABLE_TABLE_OPTIONS
             or changed_settings & CLICKHOUSE_CREATION_ONLY_TABLE_SETTINGS
         ):
-            await self.editor.table_rebuild.remake_table(model, model)
-            return
-        # Checked as a created table's options are - the remade table is.
-        new.raise_if_unsupported(model, self.editor.client.features)
-        for statement in self.get_alter_sqls(model, old, new):
-            await self.editor.run_sql(statement)
+            return self.editor.table_rebuild.get_rebuild_plan(old_model, new_model)
+        recovery = self.editor.get_schema_recovery(model)
+        return SchemaChangePlan(
+            tuple(SchemaStatement(statement, recovery=recovery) for statement in self.get_alter_sqls(model, old, new))
+        )
 
     def get_alter_sqls(
         self, model: type[Model], old: ClickhouseTableOptions, new: ClickhouseTableOptions
@@ -66,10 +68,9 @@ class ClickhouseTablePartitions(TablePartitions):
             The statements.
         """
         quote = self.editor.quote
-        meta = model._meta
-        table_sql = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        table_sql = self.editor.get_storage_table_sql(model)
         changes: list[str] = []
-        if not ComparableValues.are_equal(old.ttl, new.ttl):
+        if not DeclarationValues.are_equal(old.ttl, new.ttl):
             changes.append(
                 "REMOVE TTL"
                 if new.ttl is None
@@ -98,7 +99,7 @@ class ClickhouseTablePartitions(TablePartitions):
         changes.extend(
             f"DROP PROJECTION {quote(name)}"
             for name, projection in old_projections.items()
-            if not ComparableValues.are_equal(new_projections.get(name), projection)
+            if not DeclarationValues.are_equal(new_projections.get(name), projection)
         )
         if old.get_projection_settings_sql() and not new.projections:
             # The settings the projections were taken with go with the last of them - once it is dropped.
@@ -112,7 +113,7 @@ class ClickhouseTablePartitions(TablePartitions):
         added_projections = [
             projection
             for name, projection in new_projections.items()
-            if not ComparableValues.are_equal(old_projections.get(name), projection)
+            if not DeclarationValues.are_equal(old_projections.get(name), projection)
         ]
         changes.extend(
             f"ADD PROJECTION {projection.get_definition_sql(model, self.editor)}" for projection in added_projections
@@ -142,7 +143,7 @@ class ClickhouseTablePartitions(TablePartitions):
         column_definitions = self.editor.column_definitions
         changes = []
         for field_name, value in new_values.items():
-            if field_name in old_values and ComparableValues.are_equal(old_values[field_name], value):
+            if field_name in old_values and DeclarationValues.are_equal(old_values[field_name], value):
                 continue
             field = meta.fields_map[field_name]
             # With its type: a clause right after the column's name is read as its type.
@@ -197,8 +198,7 @@ class ClickhouseTablePartitions(TablePartitions):
         Returns:
             The statements.
         """
-        meta = model._meta
-        table_sql = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        table_sql = self.editor.get_storage_table_sql(model)
         return [f"ALTER TABLE {table_sql} DROP PROJECTION {self.editor.quote(name)}" for name in names]
 
     def get_projection_add_sqls(self, model: type[Model], names: list[str]) -> list[str]:
@@ -212,7 +212,7 @@ class ClickhouseTablePartitions(TablePartitions):
             The statements.
         """
         meta = model._meta
-        table_sql = self.editor.qualify_table_name(meta.db_table, meta.schema)
+        table_sql = self.editor.get_storage_table_sql(model)
         options = meta.get_table_options(self.editor.client.dialect)
         projections = (
             [projection for projection in options.projections if projection.name in names]

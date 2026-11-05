@@ -6,8 +6,10 @@ import contextvars
 import pytest
 
 from hare.core.connections.connections import Connections
+from hare.core.resource_completion import ResourceCompletion
 from hare.migrations.execution.connections_plan import ConnectionsPlan
 from hare.migrations.execution.executor import MigrationExecutor
+from tests.utils.migration_lock_waiter import MigrationLockWaiter
 
 
 def write_migrations(tmp_path, app_label: str) -> str:
@@ -34,20 +36,6 @@ def write_migrations(tmp_path, app_label: str) -> str:
     return f"{app_label}.migrations"
 
 
-async def wait_until_the_lock_is_awaited(client, migrate: asyncio.Task) -> None:
-    """Waits until a session waits for the migration lock the client holds - the migrate under test - before
-    a timeout: a fixed pause passed on a slow machine before migrate reached the lock."""
-    for _ in range(300):
-        rows = await client.execute_dicts(
-            "SELECT count(*) AS waiting FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-        )
-        if rows[0]["waiting"]:
-            return
-        assert not migrate.done()
-        await asyncio.sleep(0.1)
-    raise AssertionError("migrate never waited for the migration lock")
-
-
 @pytest.mark.asyncio
 async def test_migrate_waits_for_the_migration_lock(db_isolated_no_schema, tmp_path, monkeypatch):
     connection = db_isolated_no_schema.get_connection()
@@ -66,16 +54,24 @@ async def test_migrate_waits_for_the_migration_lock(db_isolated_no_schema, tmp_p
     # The concurrent migrate runs as another process would - outside the holder's transaction.
     migrate_context = contextvars.copy_context()
     holder = Connections.current().create_independent(connection.connection_alias)
+    migrate = None
     try:
         async with holder._in_transaction() as holder_client:
             await holder_client.execute(lock_sql)
+            waiter = MigrationLockWaiter(holder_client, lock_sql, monkeypatch)
             migrate = asyncio.create_task(
                 MigrationExecutor(connection, apps_config).migrate(), context=migrate_context
             )
-            await wait_until_the_lock_is_awaited(holder_client, migrate)
+            await waiter.wait(migrate)
         await asyncio.wait_for(migrate, timeout=30)
     finally:
-        await holder.close()
+        try:
+            if migrate is not None:
+                if not migrate.done():
+                    migrate.cancel()
+                await ResourceCompletion.wait(asyncio.gather(migrate, return_exceptions=True))
+        finally:
+            await ResourceCompletion.wait(holder.close())
 
     assert await connection.execute_dicts(f'SELECT * FROM "{app_label}_widget"') == []
 
@@ -108,20 +104,28 @@ async def test_a_migrate_waiting_for_the_lock_leaves_out_what_the_holder_applied
 
     migrate_context = contextvars.copy_context()
     holder = Connections.current().create_independent(connection.connection_alias)
+    migrate = None
     try:
         async with holder._in_transaction() as holder_client:
             await holder_client.execute(lock_sql)
+            waiter = MigrationLockWaiter(holder_client, lock_sql, monkeypatch)
             migrate = asyncio.create_task(
                 ConnectionsPlan({connection.connection_alias: executor}).migrate(reporter=reporter),
                 context=migrate_context,
             )
-            await wait_until_the_lock_is_awaited(holder_client, migrate)
+            await waiter.wait(migrate)
             # The holder applies the migration, as another process's migrate would.
             await holder_client.execute_script(f'CREATE TABLE "{app_label}_widget" ("id" INT PRIMARY KEY)')
             await executor.recorder.record_applied(app_label, "0001_initial", connection=holder_client)
         await asyncio.wait_for(migrate, timeout=30)
     finally:
-        await holder.close()
+        try:
+            if migrate is not None:
+                if not migrate.done():
+                    migrate.cancel()
+                await ResourceCompletion.wait(asyncio.gather(migrate, return_exceptions=True))
+        finally:
+            await ResourceCompletion.wait(holder.close())
 
     assert reported == [[]]
     assert await connection.execute_dicts(f'SELECT * FROM "{app_label}_widget"') == []

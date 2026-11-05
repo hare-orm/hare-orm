@@ -14,6 +14,8 @@ from hare.contrib.pydantic import (
     pydantic_queryset_creator,
 )
 from hare.contrib.pydantic.creation.pydantic_model_creator import PydanticModelCreator
+from hare.core.caching.cache import Cache
+from hare.core.caching.caches import Caches
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, NoValuesFetched, QueryError
 from hare.models import Model
@@ -46,8 +48,6 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import ValidatorModel
 from tests.shared_models.testmodels_pydantic import CamelCaseAliasPerson, PydanticJSONFields
-
-REQUIRES = ("pydantic",)
 
 
 # Fixtures for TestPydantic
@@ -892,7 +892,7 @@ async def test_from_queryset_single_reads_one_row(db, pydantic_setup):
     Event_Pydantic = pydantic_setup["Event_Pydantic"]
     event = pydantic_setup["event"]
     assert (await Event_Pydantic.from_queryset_single(Event.objects.get(event_id=event.event_id))).name == event.name
-    with pytest.raises(DoesNotExist, match="reads no Event row"):
+    with pytest.raises(DoesNotExist, match="reads no row"):
         await Event_Pydantic.from_queryset_single(Event.objects.filter(event_id=-1).first())
     with pytest.raises(QueryError, match=r"from_queryset\(\) takes that"):
         await Event_Pydantic.from_queryset_single(Event.objects.all())
@@ -1270,10 +1270,10 @@ def test_json_field_nullable_without_default_is_optional():
 def test_override_default_model_config_by_config_class(db):
     """Pydantic meta's config_class should be able to override default config."""
     # Save original value to restore after test
-    original_value = CamelCaseAliasPerson.PydanticMeta.model_config.get("from_attributes")
+    original_value = CamelCaseAliasPerson.Meta.pydantic.model_config.get("from_attributes")
     try:
         # Set class pydantic config's from_attributes to False
-        CamelCaseAliasPerson.PydanticMeta.model_config["from_attributes"] = False
+        CamelCaseAliasPerson.Meta.pydantic.model_config["from_attributes"] = False
 
         ModelPydantic = pydantic_model_creator(CamelCaseAliasPerson, name="AutoAliasPersonOverriddenORMMode")
 
@@ -1281,9 +1281,9 @@ def test_override_default_model_config_by_config_class(db):
     finally:
         # Restore original value to avoid polluting other tests
         if original_value is None:
-            CamelCaseAliasPerson.PydanticMeta.model_config.pop("from_attributes", None)
+            CamelCaseAliasPerson.Meta.pydantic.model_config.pop("from_attributes", None)
         else:
-            CamelCaseAliasPerson.PydanticMeta.model_config["from_attributes"] = original_value
+            CamelCaseAliasPerson.Meta.pydantic.model_config["from_attributes"] = original_value
 
 
 def test_override_meta_pydantic_config_by_model_creator(db):
@@ -1312,7 +1312,7 @@ def test_config_classes_merge_all_configs(db):
     # Should set min_anystr_length from pydantic_model_creator's config
     assert ModelPydantic.model_config["str_min_length"] == model_config["str_min_length"]
     # Should set title from model PydanticMeta's config
-    assert ModelPydantic.model_config["title"] == CamelCaseAliasPerson.PydanticMeta.model_config["title"]
+    assert ModelPydantic.model_config["title"] == CamelCaseAliasPerson.Meta.pydantic.model_config["title"]
     # Should set orm_mode from base pydantic model configuration
     assert ModelPydantic.model_config["from_attributes"] == PydanticModel.model_config["from_attributes"]
 
@@ -1412,15 +1412,17 @@ def test_two_distinct_classes_from_the_same_factory_get_distinct_schemas(db):
     ],
 )
 @pytest.mark.database_independent
-def test_a_model_index_evicts_its_oldest_entry_past_max_size(monkeypatch, index_name, creator, name_suffix):
+def test_a_model_index_evicts_its_oldest_entry_past_max_size(request, monkeypatch, index_name, creator, name_suffix):
     """MODEL_INDEX used to be a plain dict - every distinct pydantic_model_creator() config ever
     called added a permanent entry, growing unbounded for the life of the process. Now a bounded
     LRU, like QUERYSET_MODEL_INDEX: shrink the limit to 2 for this test and confirm the oldest of 3
     distinct configs gets evicted, while a config touched again (move_to_end on hit) survives past
     ones that would otherwise have been older."""
-    model_index = getattr(PydanticModelCreator, index_name)
-    monkeypatch.setattr(model_index, "max_size", 2)
-    model_index.clear()
+    storage = Cache(2, holds_sql=False)
+    request.addfinalizer(lambda: Caches.registered.remove(storage))
+    request.addfinalizer(storage.clear)
+    monkeypatch.setattr(PydanticModelCreator, index_name, storage)
+    model_index = storage.get_model_bucket(IntFields)
 
     # IntFields (no relational fields) - pydantic_model_creator() recurses into related models'
     # own configurations too (Address has a relation, which would add its own extra MODEL_INDEX
@@ -1456,7 +1458,7 @@ def test_pydantic_queryset_creator_caches_identical_calls(db):
     second = pydantic_queryset_creator(Address)
 
     assert first is second
-    assert len(PydanticModelCreator.QUERYSET_MODEL_INDEX) == 1
+    assert len(PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(Address)) == 1
 
 
 def test_pydantic_queryset_creator_distinct_configs_get_distinct_classes(db):
@@ -1593,28 +1595,13 @@ def test_vector_field_annotation_keeps_element_type():
 
 
 @pytest.mark.database_independent
-def test_postgis_field_annotation_keeps_element_type():
-    """PostGISField.field_type is plain, unparameterized `tuple` (same root cause as VectorField/
-    ArrayField above) - the generated pydantic field collapsed to bare `tuple` (accepting any
-    array of anything) instead of tuple[float, float] for a (latitude, longitude) column."""
-    from hare.dialects.postgresql.fields.postgis_field import PostGISField
-
-    class PostGISFieldPydanticModel(Model):
-        id = fields.IntField(primary_key=True)
-        location = PostGISField()
-
-    ModelPydantic = pydantic_model_creator(PostGISFieldPydanticModel, name="PostGISFieldPydanticModel")
-
-    assert ModelPydantic.model_fields["location"].annotation == tuple[float, float]
-
-
-@pytest.mark.database_independent
-def test_geometry_field_is_a_geo_json_geometry():
+@pytest.mark.parametrize("geography", [False, True])
+def test_geometry_field_is_a_geo_json_geometry(geography):
     from hare.gis import Point, PointField, Polygon
 
     class GeometryFieldPydanticModel(Model):
         id = fields.IntField(primary_key=True)
-        location = PointField()
+        location = PointField(geography=geography)
 
     ModelPydantic = pydantic_model_creator(GeometryFieldPydanticModel, name="GeometryFieldPydanticModel")
 
@@ -2896,8 +2883,8 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
         class Meta:
             abstract = True
 
-        class PydanticMeta:
-            exclude = ("secret_a",)
+            class pydantic:
+                exclude = ("secret_a",)
 
     class PydanticMetaAbstractB(Model):
         name = fields.CharField(max_length=20, null=True)
@@ -2905,11 +2892,11 @@ def test_multiple_inheritance_from_two_unrelated_abstract_bases_merges_both_pyda
         class Meta:
             abstract = True
 
+            class pydantic:
+                computed = ("double_name",)
+
         def double_name(self) -> str:
             return (self.name or "") * 2
-
-        class PydanticMeta:
-            computed = ("double_name",)
 
     # mypy flags the two bases' independently-declared Meta/PydanticMeta classes as
     # incompatible - correct at the type level (neither is a subtype of the other), but both

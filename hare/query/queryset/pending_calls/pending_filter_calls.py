@@ -76,7 +76,7 @@ class PendingFilterCalls:
             conditions: Its conditions.
             generation: The filter-call generation of the call.
         """
-        q_objects = specification._q_objects
+        q_objects = specification._q_object_list
         if not negate:
             q_objects.extend(conditions)
         elif len(conditions) == 1:

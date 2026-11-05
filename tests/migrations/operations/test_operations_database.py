@@ -187,7 +187,7 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     state = State()
 
     # One migration - the relation's target and through model come with it.
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -229,7 +229,7 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
     assert m2m_field.backward_keys == ("person_id",)
 
     # AddField on the through model itself (an ordinary extra column) - normal ADD COLUMN DDL.
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         AddField(model_name="Membership", name="note", field=fields.CharField(max_length=10, null=True)),
@@ -240,7 +240,12 @@ async def test_m2m_through_model_migration_lifecycle_emits_no_extra_through_tabl
 
     # Removing the M2M field itself must NOT drop the through model's table - it's still a real,
     # independently-tracked model.
-    await apply_operations("models", state, RemoveField(model_name="Person", name="groups"), schema_editor=editor)
+    state = await apply_operations(
+        "models",
+        state,
+        RemoveField(model_name="Person", name="groups"),
+        schema_editor=editor,
+    )
     assert client.executed == []
     client.executed.clear()
 
@@ -257,7 +262,7 @@ async def test_delete_model_with_m2m_through_model_does_not_redundantly_drop_thr
     editor = TestSchemaEditor(client)
     state = State()
 
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -609,7 +614,7 @@ async def test_run_sql_forward_and_backward() -> None:
     )
 
     # Forward
-    await apply_operations("models", state, op, schema_editor=editor)
+    state = await apply_operations("models", state, op, schema_editor=editor)
 
     assert len(client.executed) == 1
     assert client.executed[0] == 'CREATE INDEX "idx_widget_name" ON "widget" ("name")'

@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import string
 import uuid
 from collections.abc import AsyncGenerator, Collection, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from hare.core.connections.connections import Connections
+from hare.dialects.base.client.schema_cache_invalidation import SchemaCacheInvalidation
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.exceptions import (
-    ConfigurationError,
     DistributedTransactionCommitAmbiguousError,
     DistributedTransactionPartiallyCommittedError,
     OperationalError,
@@ -21,20 +19,18 @@ from hare.exceptions import (
 )
 from hare.transactions.atomic.atomic import Atomic
 from hare.transactions.constants import (
-    DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
-    DISTRIBUTED_DECISIONS_TABLE_NAME,
     DISTRIBUTED_TRANSACTION_XID_PREFIX,
     DISTRIBUTED_TRANSACTION_XID_UNIQUE_PART_LENGTH,
 )
-from hare.transactions.enums import DistributedTransactionResolution, TransactionEventType
+from hare.transactions.enums import TransactionEventType, TransactionOutcome
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
     from hare.dialects.base.transactions.two_phase_commit import TwoPhaseCommit
 from hare.transactions.distributed.declarations import OpenDistributedTransaction
+from hare.transactions.distributed.distributed_decision_store import DistributedDecisionStore
 from hare.transactions.distributed.distributed_transactions import DistributedTransactions
-from hare.transactions.distributed.stale_prepared_transaction import StalePreparedTransaction
 
 
 class DistributedCoordinator:
@@ -75,34 +71,6 @@ class DistributedCoordinator:
         if two_phase_commit is None:
             raise UnSupportedError(f"The {connection.dialect} dialect has no two-phase commit")
         return two_phase_commit
-
-    @staticmethod
-    async def _ensure_distributed_decisions_table(client: DatabaseClient) -> None:
-        """Creates the decision log table on the coordinator unless it exists.
-
-        Args:
-            client: A connection to the coordinator alias.
-        """
-        await client.execute(
-            DistributedCoordinator._get_two_phase_commit(client).get_decisions_table_sql(
-                client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
-            )
-        )
-
-    @staticmethod
-    async def mark_decision_resolved(client: DatabaseClient, xid: str) -> None:
-        """Marks a decision resolved - every participant of ``xid`` committed.
-
-        Args:
-            client: A connection to the coordinator alias.
-            xid: The logical xid.
-        """
-        await client.execute(
-            DistributedCoordinator._get_two_phase_commit(client).get_finish_decision_sql(
-                client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
-            ),
-            [xid],
-        )
 
     @staticmethod
     def _make_xid(coordinator: str) -> str:
@@ -209,7 +177,10 @@ class DistributedCoordinator:
             xid: The logical xid.
         """
         gid_literal = DistributedCoordinator._get_gid_literal(client, connection_alias, xid)
-        await client.execute(DistributedCoordinator._get_two_phase_commit(client).get_commit_prepared_sql(gid_literal))
+        async with SchemaCacheInvalidation.run(client):
+            await client.execute(
+                DistributedCoordinator._get_two_phase_commit(client).get_commit_prepared_sql(gid_literal)
+            )
 
     @staticmethod
     async def rollback_prepared(client: DatabaseClient, connection_alias: str, xid: str) -> None:
@@ -221,9 +192,10 @@ class DistributedCoordinator:
             xid: The logical xid.
         """
         gid_literal = DistributedCoordinator._get_gid_literal(client, connection_alias, xid)
-        await client.execute(
-            DistributedCoordinator._get_two_phase_commit(client).get_rollback_prepared_sql(gid_literal)
-        )
+        async with SchemaCacheInvalidation.run(client):
+            await client.execute(
+                DistributedCoordinator._get_two_phase_commit(client).get_rollback_prepared_sql(gid_literal)
+            )
 
     @staticmethod
     async def _xid_is_prepared(client: DatabaseClient, connection_alias: str, xid: str) -> bool:
@@ -244,33 +216,43 @@ class DistributedCoordinator:
         return len(rows) > 0
 
     @staticmethod
-    async def _get_prepared_on_fresh_connection(connection_alias: str, xid: str, *, commit: bool) -> None:
+    async def _get_prepared_on_fresh_connection(
+        client: TransactionClient, connection_alias: str, xid: str, *, commit: bool
+    ) -> None:
         """Commits or rolls back a prepared transaction on a new connection - the participant's own
-        client is already finalized by PREPARE and refuses statements.
+        client is already finalized by PREPARE and refuses statements. The original pool supplies
+        the connection settings and receives schema invalidation even if the ambient context changed.
         """
-        connection = Connections.current().create_independent(connection_alias)
+        source = client.get_non_transactional_client()
+        connection = source.create_independent_client()
         try:
-            if commit:
-                await DistributedCoordinator.commit_prepared(connection, connection_alias, xid)
-            else:
-                await DistributedCoordinator.rollback_prepared(connection, connection_alias, xid)
+            async with SchemaCacheInvalidation.run(source):
+                if commit:
+                    await DistributedCoordinator.commit_prepared(connection, connection_alias, xid)
+                else:
+                    await DistributedCoordinator.rollback_prepared(connection, connection_alias, xid)
         finally:
             await connection.close()
 
     @staticmethod
-    async def _roll_back_if_prepared_on_fresh_connection(connection_alias: str, xid: str) -> None:
+    async def _roll_back_if_prepared_on_fresh_connection(
+        client: TransactionClient, connection_alias: str, xid: str
+    ) -> None:
         """Rolls back the prepared transaction of a participant whose prepare's outcome is
         unknown (it failed or was interrupted without marking the wrapper prepared) - only if the
         prepared transaction really exists.
 
         Args:
+            client: The participant's transaction client, retaining the original pool and its settings.
             connection_alias: The participant's connection alias.
             xid: The distributed transaction's logical xid.
         """
-        connection = Connections.current().create_independent(connection_alias)
+        source = client.get_non_transactional_client()
+        connection = source.create_independent_client()
         try:
             if await DistributedCoordinator._xid_is_prepared(connection, connection_alias, xid):
-                await DistributedCoordinator.rollback_prepared(connection, connection_alias, xid)
+                async with SchemaCacheInvalidation.run(source):
+                    await DistributedCoordinator.rollback_prepared(connection, connection_alias, xid)
         finally:
             await connection.close()
 
@@ -282,6 +264,8 @@ class DistributedCoordinator:
         coordinator_client: TransactionClient,
         xid: str | None,
         prepare_attempted_aliases: Collection[str] = (),
+        *,
+        cause: BaseException,
     ) -> None:
         """The cleanup of every failure path of ``distributed()``: rolls back every participant in
         reverse order - the prepared transaction of a prepared one - then the coordinator, each step
@@ -289,13 +273,16 @@ class DistributedCoordinator:
         the real failure or leaves the coordinator's transaction open. ``xid`` is read only for a
         finalized client - None before one exists. A participant in ``prepare_attempted_aliases``
         not marked prepared may have prepared anyway - the database's prepared transactions are checked.
+        Every context exits with ``cause`` even if an explicit rollback failed: cleanup must
+        never select a commit for a still-open transaction.
         """
         for connection_alias, client in reversed(participant_clients.items()):
+            prepared = client.transaction_state.outcome is TransactionOutcome.PREPARED
             try:
-                if client._finalized:
+                if prepared:
                     assert xid is not None  # nosec B101
                     await DistributedCoordinator._abort_prepared_participant(connection_alias, client, xid)
-                else:
+                elif not client.transaction_state.finished:
                     await client.rollback()
             except BaseException:  # never let one dead participant block the rest
                 client.log.exception(
@@ -305,9 +292,11 @@ class DistributedCoordinator:
                     xid,
                     connection_alias,
                 )
-            if xid is not None and connection_alias in prepare_attempted_aliases and not client._finalized:
+            if xid is not None and connection_alias in prepare_attempted_aliases and not prepared:
                 try:
-                    await DistributedCoordinator._roll_back_if_prepared_on_fresh_connection(connection_alias, xid)
+                    await DistributedCoordinator._roll_back_if_prepared_on_fresh_connection(
+                        client, connection_alias, xid
+                    )
                 except BaseException:  # see above
                     client.log.exception(
                         "Failed to check for a prepared transaction left by an interrupted PREPARE "
@@ -316,7 +305,7 @@ class DistributedCoordinator:
                         connection_alias,
                     )
             try:
-                await participant_contexts[connection_alias].__aexit__(None, None, None)
+                await participant_contexts[connection_alias].__aexit__(type(cause), cause, cause.__traceback__)
             except BaseException:  # see above
                 client.log.exception(
                     "Failed to exit the transaction context while cleaning up distributed "
@@ -325,14 +314,14 @@ class DistributedCoordinator:
                     connection_alias,
                 )
         try:
-            if not coordinator_client._finalized:
+            if not coordinator_client.transaction_state.finished:
                 await coordinator_client.rollback()
         except BaseException:  # see above
             coordinator_client.log.exception(
                 "Failed to roll back the distributed transaction coordinator during cleanup (xid=%s).", xid
             )
         try:
-            await coordinator_context.__aexit__(None, None, None)
+            await coordinator_context.__aexit__(type(cause), cause, cause.__traceback__)
         except BaseException:  # see above
             coordinator_client.log.exception(
                 "Failed to exit the coordinator's transaction context while cleaning up "
@@ -347,7 +336,8 @@ class DistributedCoordinator:
         ``on_rollback()`` callbacks run, the ROLLBACK event recorded. A failing callback is logged,
         never masking the reason of the abort.
         """
-        await DistributedCoordinator._get_prepared_on_fresh_connection(connection_alias, xid, commit=False)
+        await DistributedCoordinator._get_prepared_on_fresh_connection(client, connection_alias, xid, commit=False)
+        client.transaction_state.finish(TransactionOutcome.ROLLED_BACK)
         try:
             await TransactionEnding.finish_top_level_operation(client, TransactionEventType.ROLLBACK)
         except BaseException:  # see docstring above
@@ -376,9 +366,9 @@ class DistributedCoordinator:
         xid = DistributedCoordinator._make_xid(coordinator)
         try:
             yield DistributedTransactions(coordinator, coordinator_client, participant_clients)
-        except BaseException:
+        except BaseException as error:
             await DistributedCoordinator._roll_back_distributed_transaction(
-                participant_contexts, participant_clients, coordinator_context, coordinator_client, xid
+                participant_contexts, participant_clients, coordinator_context, coordinator_client, xid, cause=error
             )
             raise
 
@@ -481,11 +471,11 @@ class DistributedCoordinator:
                 context = connection._in_transaction()
                 participant_contexts[connection_alias] = context
                 participant_clients[connection_alias] = await context.__aenter__()
-        except BaseException:
+        except BaseException as error:
             # Reversed: each context set the same ContextVar, and the tokens must be reset
             # last-in-first-out. Nothing is prepared yet - no xid.
             await DistributedCoordinator._roll_back_distributed_transaction(
-                participant_contexts, participant_clients, coordinator_context, coordinator_client, None
+                participant_contexts, participant_clients, coordinator_context, coordinator_client, None, cause=error
             )
             raise
         return participant_contexts, participant_clients
@@ -495,7 +485,8 @@ class DistributedCoordinator:
         transaction: OpenDistributedTransaction,
     ) -> None:
         """Prepares every participant's transaction, then records the decision to commit in the
-        coordinator's transaction - everything rolled back when either fails.
+        coordinator's transaction. Failure triggers rollback cleanup; unconfirmed prepared
+        rollbacks remain for recovery.
 
         Args:
             transaction: The distributed transaction.
@@ -507,6 +498,8 @@ class DistributedCoordinator:
             try:
                 await DistributedCoordinator._prepare_participant(client, connection_alias, transaction.xid)
             except BaseException as error:  # re-raised below once everything's rolled back
+                if DistributedCoordinator._get_two_phase_commit(client).is_prepare_conflict(error):
+                    prepare_attempted_aliases.discard(connection_alias)
                 prepare_failure = error
                 break
 
@@ -518,18 +511,15 @@ class DistributedCoordinator:
                 transaction.coordinator_client,
                 transaction.xid,
                 prepare_attempted_aliases,
+                cause=prepare_failure,
             )
             raise prepare_failure
 
         try:
-            await DistributedCoordinator._ensure_distributed_decisions_table(transaction.coordinator_client)
-            await transaction.coordinator_client.execute(
-                DistributedCoordinator._get_two_phase_commit(transaction.coordinator_client).get_decision_insert_sql(
-                    transaction.coordinator_client.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME)
-                ),
-                [transaction.xid, transaction.coordinator, json.dumps(list(transaction.participants))],
+            await DistributedDecisionStore(transaction.coordinator_client).record(
+                transaction.xid, transaction.coordinator, transaction.participants
             )
-        except BaseException:
+        except BaseException as error:
             # Nothing durable has happened yet - the coordinator's own transaction (holding the
             # decision-row INSERT) is still open. Safe to roll back every participant's prepared
             # state along with it, exactly like the prepare-failure path above.
@@ -539,6 +529,7 @@ class DistributedCoordinator:
                 transaction.coordinator_context,
                 transaction.coordinator_client,
                 transaction.xid,
+                cause=error,
             )
             raise
 
@@ -563,11 +554,11 @@ class DistributedCoordinator:
             await transaction.coordinator_client.commit()
         except BaseException as error:
             coordinator_client = transaction.coordinator_client
-            if coordinator_client._commit_landed:
+            if coordinator_client.transaction_state.outcome is TransactionOutcome.COMMITTED:
                 # The COMMIT landed; only a callback failed - the participants still get COMMIT
                 # PREPARED.
                 callback_errors.append(error)
-            elif coordinator_client._finalized and not coordinator_client._commit_outcome_unknown:
+            elif coordinator_client.transaction_state.outcome is TransactionOutcome.ROLLED_BACK:
                 # The COMMIT surely didn't land, nor did the decision row it held - the prepared
                 # participants are rolled back.
                 await DistributedCoordinator._roll_back_distributed_transaction(
@@ -576,6 +567,7 @@ class DistributedCoordinator:
                     transaction.coordinator_context,
                     coordinator_client,
                     transaction.xid,
+                    cause=error,
                 )
                 raise
             else:
@@ -601,10 +593,10 @@ class DistributedCoordinator:
                     )
                 except Exception:  # nosec B110
                     # The connection itself is genuinely broken (not just the ambiguous COMMIT) -
-                    # nothing more to do here; _finalized is forced True below regardless so
+                    # nothing more to do here; the local phase is finished below regardless so
                     # __aexit__ doesn't try anything against it again.
                     pass
-                transaction.coordinator_client._finalized = True
+                transaction.coordinator_client.transaction_state.finish(TransactionOutcome.UNKNOWN)
                 try:
                     await transaction.coordinator_context.__aexit__(None, None, None)
                 except BaseException:
@@ -643,7 +635,9 @@ class DistributedCoordinator:
         remaining_participants = iter(participant_clients.items())
         for connection_alias, client in remaining_participants:
             try:
-                await DistributedCoordinator._get_prepared_on_fresh_connection(connection_alias, xid, commit=True)
+                await DistributedCoordinator._get_prepared_on_fresh_connection(
+                    client, connection_alias, xid, commit=True
+                )
             except asyncio.CancelledError as error:
                 # A cancellation stops the loop; this and the remaining participants are reported as
                 # unresolved, like a failed commit of a prepared transaction.
@@ -657,6 +651,7 @@ class DistributedCoordinator:
             try:
                 # Finished like a top-level commit: the connection given back before the on_commit()
                 # callbacks run, then the COMMIT event recorded.
+                client.transaction_state.finish(TransactionOutcome.COMMITTED)
                 await TransactionEnding.finish_top_level_operation(client, TransactionEventType.COMMIT)
             except BaseException as error:
                 # This participant committed; only a callback failed.
@@ -688,9 +683,11 @@ class DistributedCoordinator:
         try:
             if not pending_aliases:
                 # The coordinator's client is finalized - this UPDATE gets its own connection.
-                coordinator_followup = Connections.current().create_independent(transaction.coordinator)
+                coordinator_followup = (
+                    transaction.coordinator_client.get_non_transactional_client().create_independent_client()
+                )
                 try:
-                    await DistributedCoordinator.mark_decision_resolved(coordinator_followup, transaction.xid)
+                    await DistributedDecisionStore(coordinator_followup).complete(transaction.xid)
                 finally:
                     await coordinator_followup.close()
         finally:
@@ -740,102 +737,3 @@ class DistributedCoordinator:
                 f"{len(callback_errors)} on_commit() callback(s) failed",
                 callback_errors,
             )
-
-    @staticmethod
-    async def detect_stale_prepared_transactions(
-        coordinator: str, older_than_seconds: int = DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS
-    ) -> list[StalePreparedTransaction]:
-        """Scans for ``Transactions.distributed()`` prepared transactions that never finished
-        resolving - the read-only half of ``hare distributed-recover``. Returns what SHOULD
-        happen to each (commit vs rollback) without acting on anything.
-
-        Args:
-            coordinator: connection_alias holding the ``hare_distributed_decisions`` decision log.
-            older_than_seconds: skip anything younger than this - it may still be mid-flight;
-                0 skips nothing.
-
-        Raises:
-            UnSupportedError: if ``coordinator`` has no two-phase commit.
-        """
-        coordinator_connection = Atomic.get_connection(coordinator)
-        DistributedCoordinator._require_distributed_capability(coordinator_connection, coordinator)
-        await DistributedCoordinator._ensure_distributed_decisions_table(coordinator_connection)
-        coordinator_two_phase_commit = DistributedCoordinator._get_two_phase_commit(coordinator_connection)
-        # No age filter at all for 0: a server clock stepped backwards (NTP, VM time sync) makes a
-        # just-written row look younger than zero seconds.
-        _, decision_rows = await coordinator_connection.execute(
-            coordinator_two_phase_commit.get_pending_decisions_sql(
-                coordinator_connection.get_shared_table_name(DISTRIBUTED_DECISIONS_TABLE_NAME),
-                with_age_limit=bool(older_than_seconds),
-            ),
-            [older_than_seconds] if older_than_seconds else None,
-        )
-
-        stale: list[StalePreparedTransaction] = []
-        xids_with_decisions: set[str] = set()
-        for row in decision_rows:
-            if not DistributedCoordinator._xid_belongs_to_coordinator(row["xid"], coordinator):
-                continue
-            xids_with_decisions.add(row["xid"])
-            for participant_alias in json.loads(row["participant_aliases"]):
-                try:
-                    participant_connection = Atomic.get_connection(participant_alias)
-                except ConfigurationError:
-                    # An connection_alias recorded in the decision row may be gone from the configuration -
-                    # reported as its own entry instead of failing the detection.
-                    stale.append(
-                        StalePreparedTransaction(
-                            xid=row["xid"],
-                            participant_alias=participant_alias,
-                            resolution=DistributedTransactionResolution.COMMIT,
-                            reason=(
-                                f"coordinator {coordinator!r} already committed this decision, but "
-                                f"connection alias {participant_alias!r} is no longer configured - "
-                                "cannot connect to commit its prepared transaction"
-                            ),
-                        )
-                    )
-                    continue
-                if await DistributedCoordinator._xid_is_prepared(
-                    participant_connection, participant_alias, row["xid"]
-                ):
-                    stale.append(
-                        StalePreparedTransaction(
-                            xid=row["xid"],
-                            participant_alias=participant_alias,
-                            resolution=DistributedTransactionResolution.COMMIT,
-                            reason=(
-                                f"coordinator {coordinator!r} already committed this decision - "
-                                "the participant's prepared transaction still needs its commit"
-                            ),
-                        )
-                    )
-
-        for connection_alias in Connections.aliases():
-            connection = Atomic.get_connection(connection_alias)
-            two_phase_commit = connection.dialect.two_phase_commit
-            if not connection.features.supports_two_phase_commit or two_phase_commit is None:
-                continue
-            gid_pattern = DistributedCoordinator._get_participant_gid_like_pattern(
-                connection_alias, two_phase_commit.like_escape_character
-            )
-            _, orphaned_rows = await connection.execute(
-                two_phase_commit.get_prepared_listing_sql(with_age_limit=bool(older_than_seconds)),
-                [gid_pattern, older_than_seconds] if older_than_seconds else [gid_pattern],
-            )
-            for row in orphaned_rows:
-                logical_xid = row["gid"].removesuffix(f":{connection_alias}")
-                if not DistributedCoordinator._xid_belongs_to_coordinator(logical_xid, coordinator):
-                    # Prepared by another coordinator - its own recovery run handles it.
-                    continue
-                if logical_xid in xids_with_decisions:
-                    continue
-                stale.append(
-                    StalePreparedTransaction(
-                        xid=logical_xid,
-                        participant_alias=connection_alias,
-                        resolution=DistributedTransactionResolution.ROLLBACK,
-                        reason="no decision row found for this xid - presumed abort",
-                    )
-                )
-        return stale

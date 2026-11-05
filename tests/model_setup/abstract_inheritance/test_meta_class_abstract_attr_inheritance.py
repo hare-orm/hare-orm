@@ -98,14 +98,7 @@ def test_a_concrete_model_with_the_meta_of_an_abstract_one_hands_none_of_it_down
 
 @pytest.mark.database_independent
 def test_abstract_meta_indexes_not_aliased_across_sibling_concrete_models():
-    """Every attribute value inherited from an abstract ancestor's Meta used to be copied by
-    bare REFERENCE, not value - harmless for immutable content, but an Index(...) entry in
-    Meta.indexes is a plain mutable object whose own get_expressions() permanently memoizes its
-    resolved SQL terms against whichever model calls it FIRST (Index._expressions_compiled).
-    Two sibling concrete models sharing the identical Index object out of an inherited abstract
-    Meta.indexes used to mean the SECOND sibling's own DDL silently kept referencing the FIRST
-    sibling's own table/columns forever - confirmed live to generate a UNIQUE index referencing
-    a column that doesn't even exist on the second sibling's real table."""
+    """Sibling models keep separate index declarations and use their own physical columns."""
 
     class AbstractBase(Model):
         id = fields.IntField(primary_key=True)

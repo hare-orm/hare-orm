@@ -46,13 +46,21 @@ Each `MigrationRisk` names the rule (`code`, a `MigrationRiskCode`), the migrati
 `describe()` writes it), what goes wrong (`message`) and the safe way (`safe_alternative`); `exempted` is
 True for a risk its migration accepts.
 
-- A table the same migration creates is new and empty — none of the lock rules apply to it.
+- A table the same migration physically creates starts empty. Renames retain its row estimate;
+  deleting and recreating a table starts a new estimate. `RunSQL` and `RunPython` make subsequent
+  estimates unknown because their data changes are not executed or inferred during the check.
+  State-only creation does not prove that a physical table is empty.
 - In a [`SeparateDatabaseAndState`](operations.md#separate-database-and-state), the database operations
   are checked by the lock rules; the rules about running code (renamed and removed fields and models)
   don't apply — such an operation is how the code and the database are kept in step by hand.
+  Migration-wide lock rules inspect all executed operations together, including nested database
+  branches, so a `RunPython` outside a container is checked against schema changes inside it.
 - `MigrationSafetyChecker(large_table_rows=...)` (`hare.migrations.safety`) checks one migration on a
-  given state: `await checker.check(migration, state, dialect=..., client=...)` — without `client`, every
-  existing table may be large.
+  given state: `await checker.check(migration, state, client=...)`. To prepare the same schema plans
+  without reading the database, pass `read_catalog=False`; every existing table then may be large.
+  Backfill and row-rewrite warnings use the effects of the prepared field plan, including Python
+  value conversions and dialect-specific materialization. Preparing these plans does not evaluate
+  callable defaults or read the clock.
 
 ### <a id="exempting-a-risk"></a>Exempting a risk
 
@@ -72,7 +80,7 @@ class Migration(migrations.Migration):
     operations = [ops.RunSQL("UPDATE library_settings SET value = 'on' WHERE key = 'beta'")]
 ```
 
-An entry that isn't a `MigrationRiskCode` raises `ConfigurationError`.
+Use `MigrationRiskCode` members to name exemptions; their matching string values are also accepted.
 
 ## <a id="rules"></a>The rules
 
@@ -82,9 +90,9 @@ more.
 
 | Code | Databases | Found |
 | --- | --- | --- |
-| `add_field_backfills_rows` | all | A NOT NULL field with only a Python default added to a large table |
-| `add_field_without_default` | all | A NOT NULL field with no default at all added to a table that may hold rows |
-| `add_field_volatile_default` | PostgreSQL | A field with a volatile database default added to a large table |
+| `add_field_backfills_rows` | all | An added field whose prepared schema plan fills rows in a large table |
+| `add_field_without_default` | PostgreSQL, SQLite | A NOT NULL field with no default added to a table that may hold rows |
+| `add_field_volatile_default` | PostgreSQL | A field with a volatile or unknown-volatility database default added to a large table |
 | `alter_field_rewrites_table` | all | A field change that rewrites a large table |
 | `add_index_without_concurrently` | PostgreSQL | An index built on a large table while its writes wait |
 | `add_check_constraint_validates_rows` | PostgreSQL | A CHECK constraint added to a large table without `not_valid=True` |
@@ -100,39 +108,49 @@ more.
 
 ### <a id="add-field-backfills-rows"></a>`add_field_backfills_rows`
 
-`AddField` of a NOT NULL field whose only default is a Python `default=` (or `auto_now`) adds the column
-nullable, updates every existing row, then makes it NOT NULL — all inside the migration, holding the
-table. **Safely:** add it nullable, fill it with
-[`BackfillColumn`](#backfillcolumn-and-altercolumnnotnullsafe) in a migration with `atomic = False`, then
-make it NOT NULL with `AlterColumnNotNullSafe` ([pattern 1](#adding-a-required-column)) — or give it a
-constant `db_default`, which the database stores once without touching the rows.
+The prepared `AddField` plan fills existing rows, recorded as its `BACKFILL_ROWS` effect.
+This includes a Python default or `auto_now` backfill and ClickHouse materialization of a `db_default`.
+**Safely:** choose an addition plan without row filling, then fill the column separately using
+the database's supported strategy, or apply the change while the table is not in use.
+For PostgreSQL and SQLite, a nullable column followed by
+[`BackfillColumn`](#backfillcolumn-and-altercolumnnotnullsafe) and `AlterColumnNotNullSafe` separates
+these steps ([pattern 1](#adding-a-required-column)). A constant `db_default` avoids row filling
+only when the dialect's addition plan supports that; it is not a universal shortcut.
 
 ### <a id="add-field-without-default"></a>`add_field_without_default`
 
-`AddField` of a NOT NULL field with neither a `default=` (or `auto_now`) nor a `db_default`: the database has
+On PostgreSQL and SQLite, `AddField` of a NOT NULL field with neither `default=` (or `auto_now`) nor
+`db_default` leaves the database with
 no value for the rows the table holds, and the migration fails on any table that isn't empty. It is
-reported for every table the migration doesn't create — by `makemigrations` and by `checkmigrations`
-without a connection, for one holding rows when the database is read. **Safely:** give the field a
-`default=` or a `db_default`, or add it nullable, fill it, then make it NOT NULL
+reported for every table the migration doesn't create when checking without reading the database
+(`makemigrations` or `MigrationSafetyChecker.check(..., read_catalog=False)`). The `checkmigrations`
+command reads the database and reports tables holding rows or whose row count is unknown.
+**Safely:** give the field a `default=` or a `db_default`, or add it nullable, fill it, then make it NOT NULL
 ([pattern 1](#adding-a-required-column)).
+ClickHouse supplies native type defaults, so this rule does not apply there.
 
 ### <a id="add-field-volatile-default"></a>`add_field_volatile_default`
 
-A database default calling a volatile function — `random()`, `gen_random_uuid()`, `uuidv7()`,
-`clock_timestamp()`, `nextval()`... — is evaluated for every existing row: PostgreSQL rewrites the table.
-A constant or a stable function (`Now()`) is stored once. **Safely:** add the field nullable without
-`db_default`, set the `db_default` with `AlterField` (new rows get it), fill the existing rows with
-`BackfillColumn`, then `AlterColumnNotNullSafe`.
+A known volatile declaration (`RandomHex()` or `UuidV7()`) is evaluated for every existing row:
+PostgreSQL rewrites the table. A literal value or the stable `Now()` declaration does not trigger
+this warning. Raw `SqlDefault` and custom SQL declarations have unknown volatility: the check warns
+that a rewrite may be needed and requires manual review, without parsing SQL or classifying functions
+by their names. This includes raw SQL spelling a stable function or constant; use the corresponding
+structured declaration or exempt the risk after reviewing it. **Safely:** add the field nullable without
+`db_default`, set the `db_default` with `AlterField` (new rows get it), fill the existing rows in batches,
+then use `AlterColumnNotNullSafe`. Use `BackfillColumn` for a shared value or a data migration for
+values generated separately for each row.
 
 ### <a id="alter-field-rewrites-table"></a>`alter_field_rewrites_table`
 
-A field change the database makes by rewriting the table, which can't be read or written meanwhile. The
-dialect's schema editor tells which (`rewrites_table_on_alter()`): PostgreSQL rewrites for a column type
+A field change whose prepared schema plan rewrites stored rows. Locking depends on the database and
+the steps involved; a rewrite does not universally block readers. PostgreSQL rewrites for a column type
 change, except to a type that holds every old value as it is — a longer or unlimited `varchar`, `varchar`
 to `text` and back to an unlimited one, `numeric` with more digits and the same scale, `cidr` to `inet`;
 SQLite rebuilds the table for every change but a plain rename and one that leaves the column declared as
 it was (a Python-side option such as `sensitive`, the field's own index); ClickHouse rewrites for every
-column type change. **Safely:** add a field of the new definition, fill it in batches, switch the code to
+column type change. Python conversions of stored values and copies into replacement or through tables
+also carry this effect. **Safely:** add a field of the new definition, fill it in batches, switch the code to
 it, and remove the old one ([pattern 2](#renaming-a-column)).
 
 ### <a id="add-index-without-concurrently"></a>`add_index_without_concurrently`
@@ -162,7 +180,7 @@ constraint added `NOT VALID` by `RunSQL`.
 
 `AddConstraint` of a `UniqueConstraint`, and a field added or altered with `unique=True`, build the
 constraint's unique index while the table's writes wait. **Safely:** build the index first with
-`AddIndex(..., unique=True, concurrently=True)`, then let the constraint take it over with
+`AddIndex(..., Index(..., unique=True), concurrently=True)`, then let the constraint take it over with
 `AddConstraint(..., using_index=...)` ([pattern 4](#adding-a-constraint)). A unique constraint with a
 `condition` can't take over an index — declare it as a unique `PartialIndex` instead.
 
@@ -218,9 +236,12 @@ class AlterColumnNotNullSafe:
     def __init__(self, model_name: str, field_name: str) -> None: ...
 ```
 
-`BackfillColumn` runs a loop of bounded `UPDATE`s (at most `batch_size` rows per statement, repeated
-until none remain) instead of one giant `UPDATE` across the whole table. `value` is either a literal or a
-zero-argument callable; the callable is evaluated **once** (not once per row), so it's for "the value to
+On PostgreSQL and SQLite, `BackfillColumn` runs bounded `UPDATE`s, at most `batch_size` rows per
+statement, until no matching rows remain. ClickHouse uses one mutation over all matching rows;
+`batch_size` does not limit it. `value` is either a literal or a zero-argument callable.
+`sqlmigrate` never calls it: the preview shows the dialect's SQL template and
+describes the value computed during execution. The callable is evaluated **once** (not once per row), so
+it's for "the value to
 use for this migration run" (e.g. a timestamp captured at run time), not a per-row-derived value — it
 can't reference another column. It only changes data, so `state_forward()` is a no-op, and it's not
 meaningfully reversible (the NULLs it overwrote aren't recoverable) — `migrate` to an earlier migration
@@ -281,7 +302,7 @@ class Migration(Migration):
 
 ## <a id="renaming-a-column"></a>Pattern 2: renaming a column via dual-write
 
-There's no `RenameColumnSafe` operation — a real zero-downtime rename is a 4-step recipe built from
+There's no `RenameColumnSafe` operation — a real zero-downtime rename is a 5-step recipe built from
 existing operations (`AddField`/`RemoveField`) plus `BackfillColumn`, with an application-code dual-write
 period in between that's not hare's concern at all:
 
@@ -291,7 +312,22 @@ period in between that's not hare's concern at all:
    operations = [AddField("Loan", "reader_email", CharField(max_length=255, null=True))]
    ```
 
-2. **Backfill** — populate the new column for existing rows. `BackfillColumn` fits when every row gets
+2. **Dual-write** — deploy application code that writes both columns for a while, so old and new readers
+   both see current data (a `Model.save()` override, or the equivalent wherever rows get written).
+   Before backfilling, wait for all old writers to stop; cover background tasks, bulk operations,
+   QuerySet.update() and direct SQL as well:
+
+   ```python
+   class Loan(Model):
+       email = fields.CharField(max_length=255)
+       reader_email = fields.CharField(max_length=255, null=True)
+
+       async def save(self, *args, **kwargs):
+           self.reader_email = self.email
+           await super().save(*args, **kwargs)
+   ```
+
+3. **Backfill** — populate the new column for existing rows. `BackfillColumn` fits when every row gets
    the same value (a shared default/placeholder); when the new column has to carry each row's *own* value
    copied from the old one, use a `RunPython` data migration issuing a batched
    `UPDATE ... SET reader_email = email WHERE reader_email IS NULL` instead — `BackfillColumn` only ever
@@ -310,24 +346,17 @@ period in between that's not hare's concern at all:
    operations = [RunPython(backfill_reader_email, RunPython.noop)]
    ```
 
-3. **Dual-write** — deploy application code that writes both columns for a while, so old and new readers
-   both see current data (a plain `Model.save()` override, or the equivalent wherever rows get written):
+4. **Switch readers** — after backfilling every row, deploy readers of the new column.
+   Keep writing both columns while old readers remain active.
 
-   ```python
-   class Loan(Model):
-       email = fields.CharField(max_length=255)
-       reader_email = fields.CharField(max_length=255, null=True)
+5. **Contract** — after all old readers and writers have stopped, stop writing the old column
+   and remove it as described in [pattern 5](#removing-a-field).
 
-       async def save(self, *args, **kwargs):
-           self.reader_email = self.email
-           await super().save(*args, **kwargs)
-   ```
-
-4. **Contract** — once every reader/writer has shipped and every row has been backfilled, remove the old
-   column the way [pattern 5](#removing-a-field) does.
-
-Each step ships and bakes in production before the next one runs — that's what makes the whole thing
-zero-downtime, not any machinery inside hare itself.
+Each stage requires the preceding rollout to finish. The `save()` override above illustrates only
+full single-object saves without `update_fields`. For a partial save that writes `email`, include
+`reader_email` in `update_fields` too. The override does not cover `QuerySet.update()`, bulk operations
+or direct SQL.
+Check every write path before backfilling, or an old writer can leave the columns out of sync.
 
 ## <a id="adding-an-index"></a>Pattern 3: adding an index
 
@@ -343,8 +372,10 @@ class Migration(Migration):
     ]
 ```
 
-A build that fails — a duplicate under a unique index, a cancelled statement — leaves the index in the
-database `INVALID`: kept, used by no query, enforcing nothing. `hare drift` reports it as differing from
+A failed concurrent build can leave an `INVALID` index. The planner ignores it, but it can still add
+write overhead; a unique index can keep enforcing uniqueness after a failure during the second scan
+(see [PostgreSQL concurrent index builds](https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY)).
+`hare drift` reports it as differing from
 the declared index and `inspectdb` flags it with a `# TODO`; the migration's `AddIndex` run again fails
 on its name. Drop it first (`RunSQL("DROP INDEX CONCURRENTLY IF EXISTS loan_status")` in a
 non-atomic migration, or by hand), then migrate again.

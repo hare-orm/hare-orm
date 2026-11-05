@@ -13,7 +13,6 @@ from hare.dialects.postgresql.connection.constants import (
 from hare.dialects.postgresql.constants import (
     POSTGRES_DEFAULT_PORT,
     POSTGRESQL_DIALECT,
-    REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL,
 )
 from hare.exceptions import ConfigurationError
 
@@ -89,11 +88,3 @@ class PostgresqlDriver(Driver):
         Raises:
             UnSupportedError: If the driver doesn't support the mode.
         """
-
-    def get_testing_path(self, path: str, reuse_databases: bool) -> tuple[str, dict[str, Any]]:
-        if not reuse_databases or "{}" not in path:
-            return super().get_testing_path(path, reuse_databases)
-        from hare.contrib.test.databases.reusable_test_databases import ReusableTestDatabases
-
-        path, lease_number = ReusableTestDatabases.acquire(path)
-        return path, {REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL: lease_number}

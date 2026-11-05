@@ -116,7 +116,7 @@ class ExclusionConstraint:
     using: ExclusionConstraintUsing = ExclusionConstraintUsing.GIST
     condition: Q | RawSQLTerm | None = None
     include: tuple[str, ...] = ()        # non-key INCLUDE columns of the constraint's index
-    deferrable: bool = False             # checked at commit (or after SET CONSTRAINTS ... DEFERRED)
+    deferrable: bool = False             # permits SET CONSTRAINTS ... DEFERRED
     initially_deferred: bool = False     # requires deferrable=True
 ```
 
@@ -144,8 +144,9 @@ An element of `expressions` is a field's name (a relation means its key column),
 over the model's fields — `(Lower("code"), "=")` — written in PostgreSQL's SQL and renamed with the
 fields it reads, or a `RawSQLTerm` written as it is.
 
-A deferrable exclusion constraint lets a transaction pass through an overlapping state — moving two loans
-past each other, say — as long as none overlap when it commits.
+A deferrable exclusion constraint can be postponed with `SET CONSTRAINTS ... DEFERRED`, or starts
+deferred with `initially_deferred=True`. Once deferred, it lets a transaction pass through an
+overlapping state — moving two loans past each other, say — as long as none overlap when it commits.
 
 GiST has no operator class of its own for a plain scalar column (the `book` key above, a number, text, a
 date, a uuid, ...) — that comes from the `btree_gist` extension. A GiST `ExclusionConstraint` naming such

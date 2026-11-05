@@ -6,6 +6,12 @@ from hare.lazy_loading.lazy_pattern import LazyPattern
 
 #: PRAGMA values SQLite itself treats as "enabled" for a boolean pragma such as foreign_keys.
 SQLITE_PRAGMA_ENABLED_VALUES = frozenset({"1", "on", "true", "yes"})
+SPATIALITE_CREATION_FAILED = "{description} wasn't created: {reason}"
+SPATIALITE_CREATION_FAILURE_REASONS = (
+    "SpatiaLite refused to register the column - a row's geometry is of another type, "
+    "SRID or dimensions than the field declares",
+    "SpatiaLite refused to create its R*Tree",
+)
 
 #: Lists every row whose foreign key points at a missing parent row.
 SQLITE_FOREIGN_KEY_CHECK_SQL = "PRAGMA foreign_key_check"
@@ -31,12 +37,10 @@ SQLITE_COPY_REBUILT_TABLE_SEQUENCE_SQL = (
     "WHERE seq IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = {new_table})"
 )
 
-#: Renaming a rebuilt table into place with the legacy behavior switched on: the modern rename
-#: re-validates every view and trigger of the schema, and one naming the table being replaced
-#: fails while that table is briefly missing.
-SQLITE_ENABLE_LEGACY_ALTER_TABLE_SQL = "PRAGMA legacy_alter_table = ON"
-
-SQLITE_DISABLE_LEGACY_ALTER_TABLE_SQL = "PRAGMA legacy_alter_table = OFF"
+SQLITE_LEGACY_RENAME_PREVIEW = (
+    "-- Enable legacy_alter_table for the following rename, then restore its previous value."
+)
+SQLITE_KEPT_VALUES_CHECK_PREVIEW = "-- Check stored values of {table}.{column} against its changed field declaration."
 
 #: Expressions converting a column's stored value to the storage format of the new field when a
 #: table rebuild changes the field's type. A value the conversion can't read is refused before the

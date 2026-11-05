@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
-from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
-from hare.fields.constants import ROLLBACK_RESTORE_UNSET
-from hare.transactions.atomic.atomic import Atomic
-from hare.transactions.transactions import Transactions
+from hare.models.write.declarations import RollbackRestoreLayer
+from hare.models.write.instance_snapshot import InstanceSnapshot
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.client.transaction_client import TransactionClient
+    from hare.dialects.base.transactions.savepoints.savepoint_span import SavepointSpan
     from hare.models.model import Model
 
 
@@ -40,24 +40,7 @@ class RollbackRestores:
             field_name: The written field.
             old_value: Its value before the write - ``ROLLBACK_RESTORE_UNSET`` when it wasn't loaded.
         """
-        if not using.is_transaction_client:
-            return
-        registered_on = Atomic.get_connection(using.connection_alias)
-        layer, is_new_layer = RollbackRestores.get_rollback_restore_layer(
-            obj, registered_on, current_savepoint_span.get()
-        )
-        if is_new_layer:
-
-            def _on_rollback() -> None:
-                RollbackRestores.restore_rollback_layer(obj, layer)
-
-            def _on_commit() -> None:
-                RollbackRestores.pop_pending_rollback_restore_layer(obj, layer)
-
-            Transactions.on_rollback(_on_rollback, using=using.connection_alias)
-            RollbackRestores.drop_layers_on_commit(registered_on, _on_commit)
-        if field_name not in layer["pending"]:
-            layer["pending"][field_name] = old_value
+        RollbackRestores.register_rollback_restores(using, ((obj, field_name, old_value),))
 
     @staticmethod
     def register_rollback_restores(using: DatabaseClient, restores: Iterable[tuple[Model, str, Any]]) -> None:
@@ -71,49 +54,33 @@ class RollbackRestores:
         """
         if not using.is_transaction_client:
             return
-        registered_on = Atomic.get_connection(using.connection_alias)
-        current_span = current_savepoint_span.get()
-        new_layers: list[tuple[Model, dict[str, Any]]] = []
+        transaction = cast("TransactionClient", using)
+        registered_on = transaction._get_top_level_transaction()
+        current_span = TransactionCallbacks.get_registration_span(transaction)
+        new_layers: list[tuple[Model, RollbackRestoreLayer]] = []
         for instance, field_name, old_value in restores:
             layer, is_new_layer = RollbackRestores.get_rollback_restore_layer(instance, registered_on, current_span)
             if is_new_layer:
                 new_layers.append((instance, layer))
-            if field_name not in layer["pending"]:
-                layer["pending"][field_name] = old_value
+            layer.snapshot.remember(field_name, old_value)
         if not new_layers:
             return
 
         def _on_rollback() -> None:
+            snapshots: list[InstanceSnapshot] = []
             for instance, layer in new_layers:
-                RollbackRestores.restore_rollback_layer(instance, layer)
+                snapshots.extend(RollbackRestores.take_rollback_snapshots(instance, layer))
+            InstanceSnapshot.restore_all(snapshots)
 
         def _on_commit() -> None:
             for instance, layer in new_layers:
                 RollbackRestores.pop_pending_rollback_restore_layer(instance, layer)
 
-        Transactions.on_rollback(_on_rollback, using=using.connection_alias)
-        RollbackRestores.drop_layers_on_commit(registered_on, _on_commit)
+        TransactionCallbacks.add_on_rollback_callback(transaction, _on_rollback)
+        TransactionCallbacks.add_on_commit_callback(transaction, _on_commit, is_user_callback=False)
 
     @staticmethod
-    def drop_layers_on_commit(registered_on: DatabaseClient, callback: Callable[[], None]) -> None:
-        """Runs the drop of the layers once the transaction commits - at once when it ended - as
-        hare's own callback, which ``RollbackIsolation.capture_on_commit()`` doesn't hand out.
-
-        Args:
-            registered_on: The transaction's client.
-            callback: The drop of the layers.
-        """
-        if registered_on.is_transaction_client and not registered_on._is_transaction_finished():  # type: ignore[attr-defined]
-            TransactionCallbacks.add_on_commit_callback(
-                registered_on,  # type: ignore[arg-type]
-                callback,
-                is_user_callback=False,
-            )
-            return
-        callback()
-
-    @staticmethod
-    def pop_pending_rollback_restore_layer(obj: Model, layer: dict[str, Any]) -> None:
+    def pop_pending_rollback_restore_layer(obj: Model, layer: RollbackRestoreLayer) -> None:
         """Removes ``layer`` from this obj's pending-rollback-restore stack - by identity: two
         layers can hold equal content.
 
@@ -121,7 +88,7 @@ class RollbackRestores:
             obj: The model obj.
             layer: The layer to remove.
         """
-        stack: list[dict[str, Any]] = obj._pending_rollback_restore_stack or []
+        stack = obj._pending_rollback_restore_stack or []
         for index, entry in enumerate(stack):
             if entry is layer:
                 del stack[index]
@@ -129,8 +96,8 @@ class RollbackRestores:
 
     @staticmethod
     def get_rollback_restore_layer(
-        obj: Model, registered_on: DatabaseClient, current_span: Any
-    ) -> tuple[dict[str, Any], bool]:
+        obj: Model, registered_on: TransactionClient, current_span: SavepointSpan | None
+    ) -> tuple[RollbackRestoreLayer, bool]:
         """The layer of this obj's pending-rollback-restore stack a write in ``current_span``
         registers its old values in - the top one when it is of that span, else a new one pushed.
         Layers of finalized connections are dropped first.
@@ -144,76 +111,34 @@ class RollbackRestores:
             The layer, and whether it is new - its rollback and commit callbacks are then still to
             be registered.
         """
-        stack: list[dict[str, Any]] = obj._pending_rollback_restore_stack or []
-        while stack and stack[-1]["client"]._finalized:
-            stack.pop()
-        if stack and stack[-1]["span"] is current_span:
-            return stack[-1], False
-        layer: dict[str, Any] = {"span": current_span, "client": registered_on, "pending": {}}
+        stack = obj._pending_rollback_restore_stack or []
+        stack[:] = [entry for entry in stack if not entry.client.transaction_state.finished]
+        for entry in reversed(stack):
+            if entry.client is registered_on and entry.span is current_span:
+                return entry, False
+        layer = RollbackRestoreLayer(registered_on, current_span, InstanceSnapshot(obj))
         stack.append(layer)
         object.__setattr__(obj, "_pending_rollback_restore_stack", stack)
         return layer, True
 
     @staticmethod
-    def restore_rollback_layer(obj: Model, layer: dict[str, Any]) -> None:
-        """Puts back the old values of a layer whose transaction or savepoint rolled back, and drops
-        the layer - with the layers above it of the same transaction first, newest first: those of
-        savepoints released into it, whose rollback callbacks run after this one's.
+    def take_rollback_snapshots(obj: Model, layer: RollbackRestoreLayer) -> list[InstanceSnapshot]:
+        """Detach a layer and later layers of the same transaction in capture order.
+
+        Released savepoints still belong to their outer transaction. Its rollback must
+        undo their snapshots before its earlier snapshot; their later callbacks become
+        no-ops. Detaching first also prevents a failing setter from leaving stale layers.
 
         Args:
             obj: The model obj.
             layer: The layer.
         """
-        stack: list[dict[str, Any]] = obj._pending_rollback_restore_stack or []
+        stack = obj._pending_rollback_restore_stack or []
         index = next((index for index, entry in enumerate(stack) if entry is layer), None)
         if index is None:
             # Restored already, by the rollback of the transaction its savepoint was released into.
-            return
-        rolled_back = [entry for entry in stack[index:] if entry["client"] is layer["client"]]
-        for entry in reversed(rolled_back):
+            return []
+        rolled_back = [entry for entry in stack[index:] if entry.client is layer.client]
+        for entry in rolled_back:
             RollbackRestores.pop_pending_rollback_restore_layer(obj, entry)
-            RollbackRestores.apply_rollback_layer(obj, entry)
-
-    @staticmethod
-    def apply_rollback_layer(obj: Model, layer: dict[str, Any]) -> None:
-        """Puts back the old values a layer holds.
-
-        Args:
-            obj: The model obj.
-            layer: The layer.
-        """
-        # Local import: soft deletion registers its writes for a rollback restore here.
-        from hare.models.deletion.soft_deletion import SoftDeletion
-
-        for name, value in layer["pending"].items():
-            if name == obj._meta.soft_delete_field:
-                SoftDeletion.restore_soft_delete_field(
-                    obj,
-                    value is not ROLLBACK_RESTORE_UNSET,
-                    None if value is ROLLBACK_RESTORE_UNSET else value,
-                )
-            else:
-                RollbackRestores.restore_field_value(obj, name, value)
-
-    @staticmethod
-    def restore_field_value(obj: Model, field_name: str, old_value: Any) -> None:
-        """Puts ``field_name`` back to what it held before a write that didn't take effect.
-
-        Args:
-            obj: The model obj.
-            field_name: The attribute to restore.
-            old_value: The previous value, or ``ROLLBACK_RESTORE_UNSET`` if the attribute wasn't
-                loaded at all (a ``.only()``/``.defer()`` obj) - it goes back to unloaded
-                instead of gaining a made-up value.
-        """
-        # Local import: the fields' package imports the models' package.
-        from hare.fields.database_default import DatabaseDefault
-
-        if old_value is ROLLBACK_RESTORE_UNSET:
-            if hasattr(obj, field_name):
-                object.__delattr__(obj, field_name)
-        elif isinstance(old_value, DatabaseDefault):
-            # The marker of a field left to its db_default - no value a field takes through its setter.
-            obj.__dict__[field_name] = old_value
-        else:
-            setattr(obj, field_name, old_value)
+        return [entry.snapshot for entry in rolled_back]

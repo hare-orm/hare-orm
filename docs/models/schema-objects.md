@@ -108,6 +108,9 @@ them, or deletes its table, drops the view before and creates it again after, it
 not — PostgreSQL refuses to change the type of a column a view reads. A raw SQL view without
 `read_columns` is left alone while its declaration doesn't change.
 
+Ordinary and materialized views share this dependency order. Removing a table or rebuilding its
+dependent objects drops readers before the views they read, regardless of the two views' types.
+
 Changing a view drops it and creates the new version, then grants the model's `Meta.grants` on it again —
 a view created anew has no privileges. A view or materialized view whose `read_columns` name the changed
 view is dropped before it and created again after it, through any chain of such views; one reading it
@@ -119,12 +122,13 @@ only from raw SQL without `read_columns` isn't known — remove it in the same m
 @dataclass(frozen=True)
 class MaterializedView(View):
     name: str
-    query: RawSQLTerm | QuerySet | Callable[[], QuerySet]
+    query: RawSQLTerm | QuerySet | ModelQuery
     with_data: bool = True
     unique_columns: tuple[str, ...] = ()
 ```
 
-The rows of a query, kept in the database until refreshed. `with_data=False` creates the view empty and
+The rows of a query, kept in the database until refreshed. On PostgreSQL, `with_data=False` creates it
+empty and
 unreadable until its first refresh. `unique_columns` — columns of the view, not fields of the model — get
 a unique index named `<view>_unique`, renamed with the view; a concurrent refresh needs it.
 
@@ -136,10 +140,13 @@ await Invoice.objects.refresh_materialized_view("invoice_totals", concurrently=T
 ```
 
 The refresh runs on the connection the model writes to (`.using(...)` picks another one), inside the
-current transaction when there is one. `concurrently=True` keeps the view readable while it refreshes —
+current transaction when there is one. On PostgreSQL, `concurrently=True` keeps it readable while it
+refreshes —
 it needs `unique_columns` and a view filled before (`ConfigurationError` without `unique_columns`). A
 view the model doesn't declare raises `QueryError`. A migration
 refreshes one with [`RefreshMaterializedView`](../migrations/operations.md#schema-objects).
+
+ClickHouse has its own [materialized-view creation and refresh rules](../dialects/clickhouse/schema-objects.md).
 
 Changing a materialized view drops it and creates the new version — filled anew unless `with_data=False`
 — and grants the model's grants on it again.
@@ -160,13 +167,18 @@ class DatabaseFunction:
 
 A function stored in the database, called from SQL — a view, a policy condition, a raw query, a column
 default. `body` is `RawSQLTerm` of the function's body (plain text raises `ConfigurationError`);
-`returns`, `arguments` and `body` are written into the DDL as given, so they aren't portable. The body is
-dollar-quoted (`$hare_function$`); a body holding that quote raises `ConfigurationError`. `language` is a
+`returns`, `arguments` and `body` are written into `CREATE FUNCTION` as given, so they aren't portable.
+The body is escaped as a string literal, preserving its quotes and backslashes. `language` is a
 plain name; `volatility` — `VOLATILE`, `STABLE` or `IMMUTABLE` — is what the function promises the
 planner; `security_definer=True` runs it with its owner's privileges.
 
-The function is known by its name and argument types. A change that keeps both and the result type
-replaces it in place (`CREATE OR REPLACE FUNCTION`), keeping its privileges; a change of the arguments or
+PostgreSQL argument declarations may include `DEFAULT expression` or `= expression`. Addressing the
+function for removal, renaming, schema moves and grants omits those defaults, preserving names and
+modes.
+
+The function is known by its name and argument types. A change that keeps the complete argument
+declarations and result type replaces it in place (`CREATE OR REPLACE FUNCTION`), keeping its privileges;
+a change of the arguments (including their defaults) or
 the result type drops it and creates the new one, granting the model's grants on it again. A function a
 view or policy depends on can't be dropped that way — change those in the same migration first. A
 `LANGUAGE sql` function is checked against the tables it reads when created, so it can only read tables
@@ -190,9 +202,9 @@ class DatabaseSequence:
 
 A counter handing out numbers. Each number is a 64-bit integer; `increment` can't be 0 (negative counts
 down), `minimum` must be below `maximum`, `start` within them, and `cache` — how many numbers a session
-takes in advance — within 1..1 000 000. Without `start` the sequence starts at `minimum` counting up (1
-by default) and at `maximum` counting down. `owned_by` names a field of the model: the sequence is
-dropped with that column, and the field must have a column of its own.
+takes in advance — must be positive and fit in a signed 64-bit integer. Without `start` the sequence
+starts at `minimum` counting up (1 by default) and at `maximum` counting down. `owned_by` names a field
+of the model: the sequence is dropped with that column, and the field must have a column of its own.
 
 A model's sequences are created before its table, so a column default can take from one; the owner column
 is set once the table exists. The next number is read at runtime on the connection the model writes to:

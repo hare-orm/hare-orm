@@ -42,12 +42,11 @@ class IndexObjectType(SchemaObjectType):
             for index in indexes:
                 if isinstance(index, Index) and not index.name:
                     model = get_model()
-                    index.get_expressions(model)
-                    if index.get_generated_expression_name(model._meta.db_table) == name:
+                    if index.get_generated_name(model) == name:
                         return index
         if fields:
             for index in indexes:
-                if isinstance(index, Index) and list(index.field_names) == list(fields):
+                if isinstance(index, Index) and list(index.fields) == list(fields):
                     return index
                 if not isinstance(index, Index) and list(index) == list(fields):
                     return index

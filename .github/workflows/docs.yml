@@ -29,10 +29,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
+      - id: catalog
+        run: python3 -c 'from tests.matrix.matrix_catalog import MatrixCatalog; print("python=" + MatrixCatalog.get("versions.python")[-1])' >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
-          python-version: '3.14'
+          python-version: ${{ steps.catalog.outputs.python }}
       - name: Build docs
         run: make docs
       - uses: actions/configure-pages@v6

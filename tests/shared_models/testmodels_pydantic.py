@@ -8,8 +8,6 @@ from pydantic import BaseModel, ConfigDict
 from hare import fields
 from hare.models import Model
 
-REQUIRES = ("pydantic",)
-
 
 class TestSchemaForJSONField(BaseModel):
     foo: int
@@ -56,12 +54,13 @@ class CamelCaseAliasPerson(Model):
     last_name = fields.CharField(max_length=255)
     full_address = fields.TextField(null=True)
 
-    class PydanticMeta:
-        """Defines the default config for pydantic model generator."""
+    class Meta:
+        class pydantic:
+            """Defines the default config for pydantic model generator."""
 
-        model_config = ConfigDict(
-            title="My custom title",
-            extra="ignore",
-            alias_generator=camelize_var,
-            populate_by_name=True,
-        )
+            model_config = ConfigDict(
+                title="My custom title",
+                extra="ignore",
+                alias_generator=camelize_var,
+                populate_by_name=True,
+            )

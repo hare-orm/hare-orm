@@ -14,7 +14,6 @@ class ModelManagers:
 
     @staticmethod
     def get_default_manager(
-        name: str,
         attributes: dict[str, Any],
         declares_objects: bool,
         meta_class: type,
@@ -25,7 +24,6 @@ class ModelManagers:
         else the ``objects`` of a base model, else a plain ``Manager``.
 
         Args:
-            name: The model's name.
             attributes: The attributes collected for the class - a base model's managers copied in.
             declares_objects: Whether the class body itself assigns ``objects``.
             meta_class: The model's ``Meta``, with its abstract ancestors' options merged in.

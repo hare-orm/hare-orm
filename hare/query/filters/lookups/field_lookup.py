@@ -24,15 +24,12 @@ class FieldLookup:
         compares_json_path_text: Whether the lookup matches the text of the value at a JSON path.
         is_tsvector: Whether a ``__search`` matches a stored text search vector as it is.
         search_config: The text search configuration of that vector.
+        requires_search_query_config: Reject an implicit query configuration for a computed vector
+            whose declaration has no common configuration.
         searched_field: The field a ``__search`` matches - a dialect searching through a
             full-text index finds the field's index by it.
         required_feature: The ``Features`` flag a connection needs to run the lookup; the query
             raises ``UnSupportedError`` before any SQL on a connection without it.
-        binds_by_rebuild: Whether a query plan binds a later value by building the criterion
-            again from it - for an operator that derives what it compares from the value (a JSON
-            ``__filter``, a transformed value). The SQL text it builds must depend on nothing of
-            the value but its type and a list's length - the plan key holds those (and a JSON
-            ``__filter`` dict's keys).
     """
 
     operator: Callable[..., Any]
@@ -43,9 +40,9 @@ class FieldLookup:
     compares_json_path_text: bool = False
     is_tsvector: bool = False
     search_config: str | None = None
+    requires_search_query_config: bool = False
     searched_field: Field[Any] | None = None
     required_feature: str | None = None
-    binds_by_rebuild: bool = False
 
     def with_changes(self, **changes: Any) -> FieldLookup:
         """A copy with some attributes replaced.

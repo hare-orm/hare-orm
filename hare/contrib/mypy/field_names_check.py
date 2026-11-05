@@ -175,7 +175,9 @@ class FieldNamesCheck:
 
     @staticmethod
     def check_select_related(mypy_types: MypyTypes, model: type[Model], name: str, call: CallExpr) -> None:
-        """Reports a path of ``select_related()`` that isn't made of forward relations.
+        """Report a path that cannot be joined through single-valued relations.
+
+        Reverse one-to-one relations are accepted, and generic relation paths are expanded.
 
         Args:
             mypy_types: The types of the call.

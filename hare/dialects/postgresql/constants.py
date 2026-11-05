@@ -9,6 +9,7 @@ from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.base.connection.constants import PASSWORD_PROVIDER_OPTIONS
 from hare.dialects.enums import ConnectionOptionType, ParameterPosition
+from hare.dialects.postgresql.connection.search_path_option import SearchPathOption
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.lazy_loading.lazy_pattern import LazyPattern
 
@@ -26,76 +27,29 @@ DEFAULT_CONNECT_RETRY_BACKOFF_BASE_SECONDS = 0.1
 DEFAULT_READ_QUERY_MAX_RETRIES = 0
 DEFAULT_READ_QUERY_RETRY_BACKOFF_BASE_SECONDS = 0.1
 
-#: Sanity ceiling (one day, in seconds) for the ``command_timeout`` credential - not a business
-#: limit, just a guard against a typo (e.g. milliseconds passed as seconds) silently disabling
-#: the timeout in practice.
-MAX_COMMAND_TIMEOUT_SECONDS = 86400.0
-
-#: Sanity ceiling for the ``min_size``/``max_size`` pool credentials - far above any real
-#: Postgres ``max_connections``, only a guard against a typo.
-MAX_POOL_SIZE = 10000
-
-#: Sanity ceiling (one day, in seconds) for the ``pool_acquire_timeout`` credential.
-MAX_POOL_ACQUIRE_TIMEOUT_SECONDS = 86400.0
-
-#: Sanity ceilings for the ``connect_max_retries``/``read_retry_max_retries`` credentials (the
-#: backoff doubles on every attempt, so a larger count never finishes in practice) and for their
-#: ``*_backoff_base_seconds`` counterparts (one hour).
-MAX_CONNECT_RETRIES = 100
-MAX_READ_QUERY_RETRIES = 100
-MAX_RETRY_BACKOFF_BASE_SECONDS = 3600.0
-
-
-#: Valid TCP port range for the ``port`` credential.
-MIN_POSTGRES_PORT = 1
-MAX_POSTGRES_PORT = 65535
-
-#: Sanity ceiling for the ``statement_cache_size`` credential (both drivers).
-MAX_STATEMENT_CACHE_SIZE = 1_000_000
-
 #: The port setting of a PostgreSQL connection.
-POSTGRES_PORT_OPTION = ConnectionOption(
-    "port", ConnectionOptionType.WHOLE_NUMBER, minimum=MIN_POSTGRES_PORT, maximum=MAX_POSTGRES_PORT
-)
+POSTGRES_PORT_OPTION = ConnectionOption("port", ConnectionOptionType.WHOLE_NUMBER)
 
 #: The settings both PostgreSQL drivers take besides host, port, user, password and database.
 POSTGRES_CONNECTION_OPTIONS = (
     ConnectionOptions(
-        ConnectionOption("min_size", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=MAX_POOL_SIZE),
-        ConnectionOption("max_size", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=MAX_POOL_SIZE),
-        ConnectionOption(
-            "connect_max_retries", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=MAX_CONNECT_RETRIES
-        ),
-        ConnectionOption(
-            "connect_retry_backoff_base_seconds", ConnectionOptionType.SECONDS, maximum=MAX_RETRY_BACKOFF_BASE_SECONDS
-        ),
-        ConnectionOption(
-            "read_retry_max_retries", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=MAX_READ_QUERY_RETRIES
-        ),
-        ConnectionOption(
-            "read_retry_backoff_base_seconds", ConnectionOptionType.SECONDS, maximum=MAX_RETRY_BACKOFF_BASE_SECONDS
-        ),
-        ConnectionOption(
-            "statement_cache_size", ConnectionOptionType.WHOLE_NUMBER, minimum=0, maximum=MAX_STATEMENT_CACHE_SIZE
-        ),
-        ConnectionOption(
-            "pool_acquire_timeout",
-            ConnectionOptionType.SECONDS,
-            positive=True,
-            maximum=MAX_POOL_ACQUIRE_TIMEOUT_SECONDS,
-        ),
-        ConnectionOption(
-            "command_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=MAX_COMMAND_TIMEOUT_SECONDS
-        ),
+        ConnectionOption("min_size", ConnectionOptionType.WHOLE_NUMBER),
+        ConnectionOption("max_size", ConnectionOptionType.WHOLE_NUMBER),
+        ConnectionOption("connect_max_retries", ConnectionOptionType.WHOLE_NUMBER),
+        ConnectionOption("connect_retry_backoff_base_seconds", ConnectionOptionType.SECONDS),
+        ConnectionOption("read_retry_max_retries", ConnectionOptionType.WHOLE_NUMBER),
+        ConnectionOption("read_retry_backoff_base_seconds", ConnectionOptionType.SECONDS),
+        ConnectionOption("statement_cache_size", ConnectionOptionType.WHOLE_NUMBER),
+        ConnectionOption("pool_acquire_timeout", ConnectionOptionType.SECONDS),
+        ConnectionOption("command_timeout", ConnectionOptionType.SECONDS),
         ConnectionOption("schema", ConnectionOptionType.TEXT),
+        SearchPathOption(),
         ConnectionOption("application_name", ConnectionOptionType.TEXT),
         ConnectionOption("tenant_schema_template", ConnectionOptionType.TEXT),
         ConnectionOption("tenant_row_level_security", ConnectionOptionType.BOOLEAN),
         ConnectionOption("transaction_pooling", ConnectionOptionType.BOOLEAN),
         ConnectionOption("direct_host", ConnectionOptionType.TEXT),
-        ConnectionOption(
-            "direct_port", ConnectionOptionType.WHOLE_NUMBER, minimum=MIN_POSTGRES_PORT, maximum=MAX_POSTGRES_PORT
-        ),
+        ConnectionOption("direct_port", ConnectionOptionType.WHOLE_NUMBER),
     )
     + PASSWORD_PROVIDER_OPTIONS
 )
@@ -111,6 +65,7 @@ POSTGRES_CONNECTION_OPTION_DEFAULTS: dict[str, Any] = {
     "pool_acquire_timeout": None,
     "command_timeout": None,
     "schema": None,
+    "search_path": None,
     "application_name": None,
     "tenant_schema_template": None,
     "tenant_row_level_security": False,
@@ -124,11 +79,6 @@ POSTGRES_CONNECTION_OPTION_DEFAULTS: dict[str, Any] = {
 
 #: Default Postgres server port.
 POSTGRES_DEFAULT_PORT = 5432
-
-
-#: Connection credential carrying the lease number of a database leased from the reusable test
-#: database pool - its db_create()/db_delete() reset the database instead of creating/dropping it.
-REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL = "reusable_test_database_lease"
 
 
 POSTGRES_SERVER_VERSION_NUMBER_COLUMN = "server_version_number"
@@ -219,12 +169,10 @@ POSTGRESQL_TYPE_MAP: list[tuple[str, str, dict[str, Any]]] = [
     ("text", "hare.fields.data.text.TextField", {}),
 ]
 
-#: The field of an extension type's column, by the type's name (udt_name) - PostGIS's geography is
-#: ``geography(Point,4326)``, PostGISField's only supported shape.
+#: The field of a nonspatial extension column, by its catalog type name.
 POSTGRESQL_EXTENSION_TYPE_FIELD_PATHS = {
     "citext": "hare.dialects.postgresql.fields.citext_field.CitextField",
     "hstore": "hare.dialects.postgresql.fields.hstore.HStoreField",
-    "geography": "hare.dialects.postgresql.fields.postgis_field.PostGISField",
     "ltree": "hare.dialects.postgresql.fields.ltree_field.LtreeField",
 }
 
@@ -279,7 +227,7 @@ POSTGRESQL_ARRAY_ELEMENT_TYPE_MAP: dict[str, tuple[str, dict[str, Any]]] = {
     "tstzrange": ("hare.dialects.postgresql.fields.ranges.DateTimeRangeField", {}),
     "citext": ("hare.dialects.postgresql.fields.citext_field.CitextField", {}),
     "hstore": ("hare.dialects.postgresql.fields.hstore.HStoreField", {}),
-    "geography": ("hare.dialects.postgresql.fields.postgis_field.PostGISField", {}),
+    "geography": ("hare.gis.fields.GeometryField", {"geography": True}),
 }
 
 #: The texts PostgreSQL's jsonb holds a non-finite float as - JSON has no number for one.
@@ -312,7 +260,6 @@ POSTGRESQL_SEARCH_PATH_SQL = "SELECT current_schema() AS default_schema, current
 #: Creates the shadow's schema.
 POSTGRESQL_SHADOW_SCHEMA_CREATE_TEMPLATE = "CREATE SCHEMA {schema}"
 #: Puts the shadow's schema first on the search path, for the rest of the transaction.
-POSTGRESQL_SHADOW_SEARCH_PATH_TEMPLATE = "SET LOCAL search_path TO {schema}, {search_path}"
 #: The names of the database's schemas, sorted.
 POSTGRESQL_SCHEMA_NAMES_SQL = "SELECT nspname AS schema_name FROM pg_catalog.pg_namespace ORDER BY nspname"
 
@@ -420,6 +367,28 @@ POSTGRESQL_COLUMNS_SQL = """
 SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, c.character_maximum_length,
        c.numeric_precision, c.numeric_scale, c.column_default,
        c.is_generated, c.generation_expression, c.is_identity, c.identity_generation, c.domain_name,
+       c.domain_schema, c.collation_schema, c.collation_name,
+       COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+               'name', sequence_class.relname, 'schema', sequence_namespace.nspname,
+               'type', format_type(sequence_options.seqtypid, NULL),
+               'start', sequence_options.seqstart, 'increment', sequence_options.seqincrement,
+               'minimum', sequence_options.seqmin, 'maximum', sequence_options.seqmax,
+               'cache', sequence_options.seqcache, 'cycle', sequence_options.seqcycle,
+               'dependency_type', dependency.deptype::text,
+               'is_column_default', c.column_default = format(
+                   'nextval(%L::regclass)', sequence_class.oid::regclass::text
+               )
+           ) ORDER BY sequence_namespace.nspname, sequence_class.relname)
+           FROM pg_depend dependency
+           JOIN pg_sequence sequence_options ON sequence_options.seqrelid = dependency.objid
+           JOIN pg_class sequence_class ON sequence_class.oid = sequence_options.seqrelid
+           JOIN pg_namespace sequence_namespace ON sequence_namespace.oid = sequence_class.relnamespace
+           WHERE dependency.classid = 'pg_class'::regclass
+               AND dependency.refclassid = 'pg_class'::regclass
+               AND dependency.refobjid = tc.oid AND dependency.refobjsubid = a.attnum
+               AND dependency.deptype IN ('a', 'i')
+       ), '[]'::jsonb) AS column_sequences,
        col_description(tc.oid, c.ordinal_position) AS description,
        format_type(a.atttypid, a.atttypmod) AS full_type, a.attgenerated::text AS attgenerated, a.attndims,
        (
@@ -461,6 +430,7 @@ SELECT tc.relname AS table_name, con.conname,
            WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT'
        END AS update_rule,
        con.condeferrable AS is_deferrable, con.condeferred AS is_initially_deferred,
+       con.confmatchtype::text AS match_type, con.convalidated AS is_valid,
        (
            SELECT array_agg(pa.attname ORDER BY target_key.position)
            FROM pg_constraint pkc
@@ -482,7 +452,7 @@ WHERE ns.nspname = $1 AND tc.relname = ANY($2::text[]) AND con.contype = 'f'
         WHERE parent_con.oid = con.conparentid AND parent_con.conrelid = con.conrelid
     )
 GROUP BY tc.relname, con.oid, con.conname, target.relname, target_ns.nspname, con.confdeltype, con.confupdtype,
-    con.condeferrable, con.condeferred, con.confrelid
+    con.condeferrable, con.condeferred, con.confrelid, con.confmatchtype, con.convalidated
 ORDER BY tc.relname, con.conname
 """
 
@@ -520,8 +490,8 @@ WHERE ns.nspname = $1 AND ($2 OR NOT tc.relispartition)
 ORDER BY tc.relname
 """
 
-#: Whether a schema exists.
-POSTGRESQL_SCHEMA_EXISTS_SQL = "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1"
+#: Schema existence for catalog inspection and tenant clients, independent of schema privileges.
+POSTGRESQL_SCHEMA_EXISTS_SQL = "SELECT 1 AS found FROM pg_catalog.pg_namespace WHERE nspname = $1"
 
 #: Table comments, whether the schema is the connection's default one, and storage (persistence,
 #: storage parameters, tablespace - NULL for the database's default one, named in
@@ -565,15 +535,20 @@ WHERE ns.nspname = $1 AND tc.relname = ANY($2::text[])
 ORDER BY tc.relname, child.relname
 """
 
-#: User-defined triggers as Postgres's own canonical CREATE TRIGGER/CREATE FUNCTION text -
+#: User-defined triggers with canonical CREATE TRIGGER text and structured function attributes.
 #: tgisinternal leaves out the hidden triggers enforcing a FOREIGN KEY constraint.
 POSTGRESQL_TRIGGERS_SQL = """
 SELECT tc.relname AS table_name, t.tgname AS name, pg_get_triggerdef(t.oid, false) AS trigger_def,
-       pg_get_functiondef(p.oid) AS function_def, t.tgenabled <> 'D' AS enabled
+       t.tgenabled <> 'D' AS enabled, t.tgenabled::text AS enabled_mode,
+       p.prosrc AS body, p.probin AS library, l.lanname AS language,
+       p.provolatile::text AS volatility, p.prosecdef AS security_definer,
+       p.proisstrict AS strict, p.proleakproof AS leakproof, p.proparallel::text AS parallel,
+       p.proconfig AS configuration, p.procost AS cost
 FROM pg_trigger t
 JOIN pg_class tc ON tc.oid = t.tgrelid
 JOIN pg_namespace ns ON ns.oid = tc.relnamespace
 JOIN pg_proc p ON p.oid = t.tgfoid
+JOIN pg_language l ON l.oid = p.prolang
 WHERE ns.nspname = $1 AND tc.relname = ANY($2::text[]) AND NOT t.tgisinternal
 ORDER BY tc.relname, t.tgname
 """
@@ -591,75 +566,6 @@ ORDER BY tc.relname, con.conname
 
 #: pg_constraint.contype of an EXCLUDE constraint.
 POSTGRESQL_EXCLUSION_CONSTRAINT_TYPE = "x"
-
-#: Postgres type names drift compares a column's type by - every spelling Postgres accepts for one
-#: of them (``int4``, ``varchar``, ``timestamptz``, ``serial``, ...) mapped to the name
-#: ``format_type()`` reports it under. A type outside these values is never compared.
-POSTGRESQL_CANONICAL_TYPE_NAMES: dict[str, str] = {
-    "int": "integer",
-    "int4": "integer",
-    "integer": "integer",
-    "serial": "integer",
-    "serial4": "integer",
-    "int2": "smallint",
-    "smallint": "smallint",
-    "smallserial": "smallint",
-    "serial2": "smallint",
-    "int8": "bigint",
-    "bigint": "bigint",
-    "bigserial": "bigint",
-    "serial8": "bigint",
-    "bool": "boolean",
-    "boolean": "boolean",
-    "varchar": "character varying",
-    "character varying": "character varying",
-    "char": "character",
-    "character": "character",
-    "bpchar": "character",
-    "text": "text",
-    "decimal": "numeric",
-    "numeric": "numeric",
-    "float": "double precision",
-    "float8": "double precision",
-    "double precision": "double precision",
-    "float4": "real",
-    "real": "real",
-    "timestamptz": "timestamp with time zone",
-    "timestamp with time zone": "timestamp with time zone",
-    "timestamp": "timestamp without time zone",
-    "timestamp without time zone": "timestamp without time zone",
-    "timetz": "time with time zone",
-    "time with time zone": "time with time zone",
-    "time": "time without time zone",
-    "time without time zone": "time without time zone",
-    "date": "date",
-    "uuid": "uuid",
-    "json": "json",
-    "jsonb": "jsonb",
-    "bytea": "bytea",
-}
-
-#: A Postgres type name in its own parameter-free spelling - ``timestamp(3) with time zone`` keeps
-#: its precision apart from the time zone suffix.
-POSTGRESQL_TYPE_RE = LazyPattern(
-    r"^(?P<name>[a-z_][a-z0-9_ ]*?)\s*(?:\((?P<parameters>[^)]*)\))?"
-    r"(?P<time_zone>\s+with(?:out)?\s+time\s+zone)?(?P<array>(?:\s*\[\s*\])*)$"
-)
-
-#: The length Postgres gives a ``character`` column declared without one.
-POSTGRESQL_DEFAULT_CHARACTER_LENGTH = "1"
-
-
-#: format_type(atttypid, atttypmod)'s own rendering of a pgvector column, e.g. "vector(768)" -
-#: information_schema has no dedicated column for this (vector is an extension type), so the
-#: dimension count is parsed out of this text instead.
-VECTOR_DIMENSIONS_RE = LazyPattern(r"^vector\((\d+)\)$")
-
-#: format_type()'s text of a numeric[] column ("numeric(10,2)[]") - information_schema reports no size
-#: for an array column.
-ARRAY_ELEMENT_NUMERIC_SIZE_RE = LazyPattern(r"^numeric\((\d+),(\d+)\)\[\]$")
-#: format_type()'s text of a varchar[]/char[] column ("character varying(20)[]") - the same.
-ARRAY_ELEMENT_CHAR_LENGTH_RE = LazyPattern(r"^character(?: varying)?\((\d+)\)\[\]$")
 
 EXCLUSION_CONSTRAINT_DEF_RE = LazyPattern(
     r"^EXCLUDE USING (?P<using>\w+) \((?P<expressions>.+?)\)(?: INCLUDE \((?P<include>[^)]*)\))?"
@@ -696,11 +602,6 @@ POSTGRES_TRIGGERDEF_RE = LazyPattern(
         (?:WHEN\s+\((?P<when>.+?)\)\s+)?
         EXECUTE\s+(?:FUNCTION|PROCEDURE)\s+\S+\([^)]*\)\s*;?\s*$""",
     re.IGNORECASE | re.VERBOSE,
-)
-
-POSTGRES_FUNCTIONDEF_RE = LazyPattern(
-    r"LANGUAGE\s+(?P<language>\w+).*?AS\s+\$(?P<tag>\w*)\$(?P<body>.*)\$(?P=tag)\$",
-    re.IGNORECASE | re.DOTALL,
 )
 
 #: Strips the BEGIN...END the trigger function template wraps the body in.
@@ -751,7 +652,9 @@ POSTGRESQL_FUNCTIONS_SQL = """
 SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS arguments,
        pg_get_function_arguments(p.oid) AS full_arguments,
        pg_get_function_result(p.oid) AS returns, p.prosrc AS body, l.lanname AS language,
-       p.provolatile::text AS volatility, p.prosecdef AS security_definer
+       p.provolatile::text AS volatility, p.prosecdef AS security_definer,
+       p.proisstrict AS strict, p.proleakproof AS leakproof, p.proparallel::text AS parallel,
+       p.proconfig AS configuration, p.procost AS cost, p.prorows AS rows, p.probin AS library
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 JOIN pg_language l ON l.oid = p.prolang
@@ -896,6 +799,7 @@ ORDER BY s.sequencename
 #: inspectdb names them in a note.
 POSTGRESQL_INSPECTED_FUNCTIONS_SQL = """
 SELECT p.proname AS name, pg_get_function_arguments(p.oid) AS arguments,
+       pg_get_function_identity_arguments(p.oid) AS identity_arguments,
        pg_get_function_result(p.oid) AS returns, p.prosrc AS body, l.lanname AS language,
        p.provolatile::text AS volatility, p.prosecdef AS security_definer
 FROM pg_proc p
@@ -911,7 +815,8 @@ ORDER BY p.proname, arguments
 #: The privileges granted on the functions of a schema to roles other than each function's owner -
 #: inspectdb names them with the function.
 POSTGRESQL_INSPECTED_FUNCTION_PRIVILEGES_SQL = """
-SELECT p.proname AS object_name, coalesce(r.rolname, 'PUBLIC') AS role, acl.privilege_type, acl.is_grantable
+SELECT p.proname AS object_name, pg_get_function_identity_arguments(p.oid) AS arguments,
+       coalesce(r.rolname, 'PUBLIC') AS role, acl.privilege_type, acl.is_grantable
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 CROSS JOIN LATERAL aclexplode(p.proacl) acl

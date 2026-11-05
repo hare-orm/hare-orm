@@ -4,14 +4,16 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, cast
 
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
-from hare.ddl.table_options import TableOptions
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.base.schema.tables.table_partitions import TablePartitions
 from hare.dialects.postgresql.partitioning.partitioning import BoundValueRenderer, Partitioning
 from hare.dialects.postgresql.partitioning.partitions.partition import Partition
 from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOptions
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_PARTITION_CREATE_TEMPLATE,
-    POSTGRESQL_SET_DEFAULT_TABLESPACE_SQL,
+    POSTGRESQL_SET_DEFAULT_TABLESPACE_BODY,
 )
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models import Model
@@ -28,42 +30,37 @@ class PostgresqlTablePartitions(TablePartitions):
 
     editor: PostgresqlSchemaEditor
 
-    async def alter_table_options(
-        self, model: type[Model], old_options: TableOptions | None, new_options: TableOptions | None
-    ) -> None:
-        """Changes a table's storage in place: ``SET TABLESPACE``, ``SET LOGGED``/``SET UNLOGGED``,
-        ``SET (...)``/``RESET (...)`` of the storage parameters that changed - on each partition of
-        a partitioned table, which holds none itself - and the partitions added or removed. A change
-        of how the table is partitioned (to or from a partitioned table, another strategy or key,
-        another count of hash partitions) can't be made in place: the table is created anew and
-        its rows are copied.
+    def get_alter_table_options_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Compile partition and storage changes from the complete before/after models.
 
-        Args:
-            model: The model rendered with its new options.
-            old_options: The previous ``PostgresqlTableOptions``, None for none.
-            new_options: The new ``PostgresqlTableOptions``, None for none.
+        Changing the partitioning strategy uses the same rebuild plan as execution
+        and preview. In-place changes are fully rendered before any partition is
+        detached, including bounds and options of partitions added later.
         """
-        old = cast("PostgresqlTableOptions", old_options or PostgresqlTableOptions())
-        new = cast("PostgresqlTableOptions", new_options or PostgresqlTableOptions())
+        model = new_model
+        dialect = self.editor.client.dialect
+        old = cast("PostgresqlTableOptions", old_model._meta.get_table_options(dialect) or PostgresqlTableOptions())
+        new = cast("PostgresqlTableOptions", new_model._meta.get_table_options(dialect) or PostgresqlTableOptions())
+        new.raise_if_unsupported(model, self.editor.client.features)
         if old.with_partitions({}).partitioning != new.with_partitions({}).partitioning:
-            await self.recreate_table(model)
-            return
+            return self.editor.table_rebuild.get_rebuild_plan(old_model, new_model)
         old_partitions, new_partitions = old.get_partitions(), new.get_partitions()
+        steps: list[SchemaStep] = []
         for name, partition in old_partitions.items():
             if new_partitions.get(name) != partition:
-                await self.remove_partition(model, partition)
+                steps.extend(self.get_remove_partition_plan(old_model, partition).steps)
         qualified_table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
-        # A partition added below is created with the new options already.
         added_partition_names = {
             name for name, partition in new_partitions.items() if old_partitions.get(name) != partition
         }
         stored_tables = self.get_stored_table_names(model, new, skipped_partition_names=added_partition_names)
         if old.tablespace != new.tablespace:
-            # A partitioned table's own tablespace is the one its new partitions are created in.
             for table in dict.fromkeys([qualified_table, *stored_tables]):
-                await self.set_tablespace(table, new.tablespace)
+                steps.append(SchemaStatement(self.get_tablespace_sql(table, new.tablespace)))
         if old.unlogged != new.unlogged:
-            await self.editor.run_sql(f"ALTER TABLE {qualified_table} SET {'UNLOGGED' if new.unlogged else 'LOGGED'}")
+            steps.append(
+                SchemaStatement(f"ALTER TABLE {qualified_table} SET {'UNLOGGED' if new.unlogged else 'LOGGED'}")
+            )
         removed_parameters = [name for name in old.storage_parameters if name not in new.storage_parameters]
         changed_parameters = {
             name: value
@@ -72,14 +69,18 @@ class PostgresqlTablePartitions(TablePartitions):
         }
         for stored_table in stored_tables:
             if removed_parameters:
-                await self.editor.run_sql(f"ALTER TABLE {stored_table} RESET ({', '.join(removed_parameters)})")
+                steps.append(SchemaStatement(f"ALTER TABLE {stored_table} RESET ({', '.join(removed_parameters)})"))
             if changed_parameters:
-                await self.editor.run_sql(
-                    f"ALTER TABLE {stored_table} SET ({new.get_storage_parameters_sql(changed_parameters)})"
+                steps.append(
+                    SchemaStatement(
+                        f"ALTER TABLE {stored_table} "
+                        f"SET ({new.get_storage_parameters_sql(changed_parameters, self.editor)})"
+                    )
                 )
         for name, partition in new_partitions.items():
             if old_partitions.get(name) != partition:
-                await self.add_partition(model, partition)
+                steps.extend(self.get_add_partition_plan(model, partition).steps)
+        return SchemaChangePlan(tuple(steps))
 
     def get_partition_create_sqls(self, model: type[Model], safe: bool) -> list[str]:
         options = self.editor.get_partitioned_options(model)
@@ -109,6 +110,9 @@ class PostgresqlTablePartitions(TablePartitions):
         ]
 
     async def add_partition(self, model: type[Model], partition: Partition) -> None:
+        await self.get_add_partition_plan(model, partition).execute(self.editor)
+
+    def get_add_partition_plan(self, model: type[Model], partition: Partition) -> SchemaChangePlan:
         """Creates a partition of a model's partitioned table.
 
         Args:
@@ -123,9 +127,14 @@ class PostgresqlTablePartitions(TablePartitions):
             raise ConfigurationError(f"{model.__name__}: a partition can only be added to a partitioned table")
         partitioning = cast("Partitioning", options.partitioning)
         bound_sql = partition.get_bound_sql(self.get_bound_value_renderer(model, partitioning))
-        await self.editor.run_sql(self.get_partition_create_sql(model, options, partition.name, bound_sql, safe=False))
+        return SchemaChangePlan(
+            (SchemaStatement(self.get_partition_create_sql(model, options, partition.name, bound_sql, safe=False)),)
+        )
 
     async def remove_partition(self, model: type[Model], partition: Partition) -> None:
+        await self.get_remove_partition_plan(model, partition).execute(self.editor)
+
+    def get_remove_partition_plan(self, model: type[Model], partition: Partition) -> SchemaChangePlan:
         """Detaches a partition from a model's table and drops it - with its rows.
 
         Args:
@@ -137,8 +146,12 @@ class PostgresqlTablePartitions(TablePartitions):
             Partitioning.get_partition_table_name(model._meta.db_table, partition.name), schema
         )
         qualified_table = self.editor.qualify_table_name(model._meta.db_table, schema)
-        await self.editor.run_sql(f"ALTER TABLE {qualified_table} DETACH PARTITION {qualified_partition}")
-        await self.editor.run_sql(f"DROP TABLE {qualified_partition}")
+        return SchemaChangePlan(
+            (
+                SchemaStatement(f"ALTER TABLE {qualified_table} DETACH PARTITION {qualified_partition}"),
+                SchemaStatement(f"DROP TABLE {qualified_partition}"),
+            )
+        )
 
     def get_bound_value_renderer(self, model: type[Model], partitioning: Partitioning) -> BoundValueRenderer:
         """How the values of a partition's bound are written for a model's key columns.
@@ -183,7 +196,7 @@ class PostgresqlTablePartitions(TablePartitions):
             partition=self.editor.qualify_table_name(partition_table, schema),
             table=self.editor.qualify_table_name(model._meta.db_table, schema),
             bound=bound_sql,
-            storage=options.get_storage_sql(self.editor.quote),
+            storage=options.get_storage_sql(self.editor),
         )
 
     def get_stored_table_names(
@@ -208,24 +221,9 @@ class PostgresqlTablePartitions(TablePartitions):
             if name not in skipped_partition_names
         ]
 
-    async def set_tablespace(self, qualified_table: str, tablespace: str | None) -> None:
-        """Moves a table to a tablespace.
-
-        Args:
-            qualified_table: The table.
-            tablespace: The tablespace, None for the database's default one.
-        """
+    def get_tablespace_sql(self, qualified_table: str, tablespace: str | None) -> str:
+        """Compile a named tablespace move or the server's runtime default lookup."""
         if tablespace:
-            await self.editor.run_sql(f"ALTER TABLE {qualified_table} SET TABLESPACE {self.editor.quote(tablespace)}")
-        else:
-            table_literal = "'" + qualified_table.replace("'", "''") + "'"
-            await self.editor.run_sql(POSTGRESQL_SET_DEFAULT_TABLESPACE_SQL.format(table=table_literal))
-
-    async def recreate_table(self, model: type[Model]) -> None:
-        """Creates a model's table anew with its rows - for a change PostgreSQL can't make in
-        place, such as how the table is partitioned.
-
-        Args:
-            model: The model rendered from the state the table is created to.
-        """
-        await self.editor.table_rebuild.remake_table(model, model)
+            return f"ALTER TABLE {qualified_table} SET TABLESPACE {self.editor.quote(tablespace)}"
+        table_literal = self.editor.client.dialect.literals.get_string_literal_sql(qualified_table)
+        return self.editor.get_anonymous_block_sql(POSTGRESQL_SET_DEFAULT_TABLESPACE_BODY.format(table=table_literal))

@@ -8,12 +8,16 @@ from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
 from hare.dialects.base.schema.data.referencing_key_columns import ReferencingKeyColumns
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.relation_target_precondition import RelationTargetPrecondition
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.migrations.exceptions import ForeignKeyTargetChangeError
 from hare.models import Model
 
 
@@ -23,139 +27,115 @@ class ForeignKeyRebuild(SchemaEditorPart):
 
     __slots__ = ()
 
-    async def alter_referenced_field(
+    def get_referenced_field_change_plan(
         self,
         model: type[Model],
         old_field: Field[Any],
         new_field: Field[Any],
         referencing_key_columns: list[ReferencingKeyColumns],
-    ) -> None:
-        """Changes a referenced column's type together with every key column referencing it.
-
-        The referencing foreign key constraints are dropped first, since both sides pass through
-        incompatible types on the way, and rebuilt once every column carries the new type.
-
-        Args:
-            model: The model owning the referenced column.
-            old_field: The referenced field's previous definition.
-            new_field: The referenced field's new definition.
-            referencing_key_columns: The key columns storing the referenced column's values.
-        """
-        for referencing in referencing_key_columns:
-            await self.drop_relation_foreign_keys(referencing.model, referencing.relation_field)
-        await self.editor.alter_column(model, old_field, new_field)
-        remade_tables = [
-            referencing
+    ) -> SchemaChangePlan:
+        """Prepare both sides of a key-type change and all affected indexes."""
+        steps: list[SchemaStep] = [
+            step
             for referencing in referencing_key_columns
-            if await self.editor.table_rebuild.remake_for_referencing_key_columns(referencing)
+            for step in self.get_relation_foreign_key_drop_plan(referencing.model, referencing.relation_field).steps
         ]
-        # A remade table holds its indexes already.
-        altered_key_columns = [
-            referencing for referencing in referencing_key_columns if referencing not in remade_tables
-        ]
-        held_indexes = await self.drop_referencing_indexes(altered_key_columns)
-        for referencing in altered_key_columns:
-            for column, sql_type in referencing.key_columns:
-                changes = self.editor.ALTER_FIELD_TYPE_TEMPLATE.format(
-                    column=self.editor.quote(column), sql_type=sql_type
-                )
-                await self.editor.run_sql(
-                    self.editor.ALTER_FIELD_TEMPLATE.format(table=referencing.qualified_table, changes=changes)
-                )
-        for referencing_model, index in held_indexes:
-            if isinstance(index, Index):
-                await self.editor.add_index(referencing_model, index)
+        steps.extend(self.editor.get_alter_column_plan(model, old_field, new_field).steps)
+        altered = []
+        for referencing in referencing_key_columns:
+            rebuild = self.editor.table_rebuild.get_referencing_key_rebuild_plan(referencing)
+            if rebuild is None:
+                altered.append(referencing)
             else:
-                await self.editor.run_sql(index)
-        for referencing in referencing_key_columns:
-            await self.rebuild_relation_foreign_keys(referencing.model, referencing.relation_field)
+                steps.extend(rebuild.steps)
+        drops, restores = self.get_referencing_index_plans(altered)
+        steps.extend(drops.steps)
+        dialect = self.editor.client.dialect
+        effects = (
+            frozenset({SchemaEffect.REWRITE_ROWS})
+            if self.editor.column_type_changes.column_type_change_rewrites_table(
+                old_field.get_column_type(dialect), new_field.get_column_type(dialect)
+            )
+            else frozenset()
+        )
+        for referencing in altered:
+            for column, sql_type in referencing.key_columns:
+                changes = self.editor.column_type_changes.get_type_change_sql(
+                    old_field, new_field, self.editor.quote(column), sql_type
+                )
+                steps.append(
+                    SchemaStatement(
+                        self.editor.ALTER_FIELD_TEMPLATE.format(table=referencing.qualified_table, changes=changes),
+                        effects,
+                    )
+                )
+        steps.extend(restores.steps)
+        steps.extend(
+            step
+            for referencing in referencing_key_columns
+            for step in self.get_relation_foreign_key_rebuild_plan(referencing.model, referencing.relation_field).steps
+        )
+        return SchemaChangePlan(tuple(steps))
 
-    async def drop_referencing_indexes(
-        self, referencing_key_columns: list[ReferencingKeyColumns]
-    ) -> list[tuple[type[Model], Index | str]]:
-        """Drops the indexes covering the referencing relations' key columns on a database that
-        changes no indexed column's type (``Features.alters_indexed_columns``).
-
-        Args:
-            referencing_key_columns: The key columns about to change their type.
-
-        Returns:
-            Each dropped index with its model, to create again after the change - an automatic
-            through table's as the statement creating it.
-        """
+    def get_referencing_index_plans(
+        self, references: list[ReferencingKeyColumns]
+    ) -> tuple[SchemaChangePlan, SchemaChangePlan]:
+        """Compile temporary index removal and restoration around key-column changes."""
         if self.editor.client.features.alters_indexed_columns:
-            return []
-        held_indexes: list[tuple[type[Model], Index | str]] = []
+            return SchemaChangePlan(()), SchemaChangePlan(())
+        drops: list[SchemaStep] = []
+        restores: list[SchemaStep] = []
         index_statements = self.editor.index_statements
-        for referencing in referencing_key_columns:
-            relation_field = referencing.relation_field
-            if isinstance(relation_field, ManyToManyFieldInstance):
-                held_indexes.extend(await self.drop_through_table_indexes(referencing.model, relation_field))
-                continue
-            if not isinstance(relation_field, ForeignKeyFieldInstance):
-                continue
-            is_composite = len(relation_field.source_fields) > 1
-            # A relation to a composite key has one index over all its key columns.
-            composite_key_indexes = (
-                [Index(fields=(relation_field.model_field_name,))] if is_composite and relation_field.index else []
-            )
-            # An index of the relation may be listed in Meta.indexes too - dropped once.
-            dropped_names: set[str] = set()
-            for index in composite_key_indexes + index_statements.get_indexes_covering_field(
-                referencing.model, relation_field, relation_field.index and not is_composite
-            ):
-                name = index_statements.index_name_for_model(referencing.model, index)
-                if name in dropped_names:
+        seen = set()
+        for reference in references:
+            field = reference.relation_field
+            model = reference.model
+            schema = model._meta.schema
+            if isinstance(field, ManyToManyFieldInstance):
+                if field.through_model_class is not None:
                     continue
-                dropped_names.add(name)
-                await self.editor.remove_index(referencing.model, index)
-                held_indexes.append((referencing.model, index))
-        return held_indexes
+                for columns in field.get_through_index_keys():
+                    name = GeneratedNames.get_index_name(GeneratedNamePrefix.INDEX, field.through, columns)
+                    identity = (schema, field.through, name)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    drops.append(
+                        SchemaStatement(
+                            self.editor.DROP_INDEX_TEMPLATE.format(
+                                name=self.editor.qualify_table_name(name, schema),
+                                table=self.editor.qualify_table_name(field.through, schema),
+                            )
+                        )
+                    )
+                    restores.append(
+                        SchemaStatement(index_statements.get_table_index_sql(field.through, columns, schema=schema))
+                    )
+                continue
+            if not isinstance(field, ForeignKeyFieldInstance):
+                continue
+            composite = len(field.source_fields) > 1
+            indexes = [Index(fields=(field.model_field_name,))] if composite and field.index else []
+            indexes.extend(index_statements.get_indexes_covering_field(model, field, field.index and not composite))
+            for index in indexes:
+                identity = (schema, model._meta.db_table, index_statements.index_name_for_model(model, index))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                drops.append(SchemaStatement(index_statements.get_index_drop_sql(model, index)))
+                restores.extend(self.editor.get_add_index_plan(model, index).steps)
+        return SchemaChangePlan(tuple(drops)), SchemaChangePlan(tuple(restores))
 
-    async def drop_through_table_indexes(
-        self, model: type[Model], relation_field: ManyToManyFieldInstance[Model]
-    ) -> list[tuple[type[Model], Index | str]]:
-        """Drops the key indexes of a relation's automatic through table.
+    def get_relation_foreign_key_drop_plan(self, model: type[Model], relation_field: Field[Any]) -> SchemaChangePlan:
+        """Prepare removal where foreign keys are separate schema objects."""
+        return SchemaChangePlan(())
 
-        Args:
-            model: The model declaring the relation.
-            relation_field: The relation.
-
-        Returns:
-            The statement creating each index again, with the model.
-        """
-        if relation_field.through_model_class is not None:
-            return []
-        schema = model._meta.schema
-        dropped: list[tuple[type[Model], Index | str]] = []
-        for index_keys in relation_field.get_through_index_keys():
-            index_name = GeneratedNames.get_index_name(GeneratedNamePrefix.INDEX, relation_field.through, index_keys)
-            await self.editor.run_sql(
-                self.editor.DROP_INDEX_TEMPLATE.format(
-                    name=self.editor.qualify_table_name(index_name, schema),
-                    table=self.editor.qualify_table_name(relation_field.through, schema),
-                )
-            )
-            dropped.append(
-                (
-                    model,
-                    self.editor.index_statements.get_table_index_sql(
-                        relation_field.through, index_keys, schema=schema
-                    ),
-                )
-            )
-        return dropped
-
-    async def drop_relation_foreign_keys(self, model: type[Model], relation_field: Field[Any]) -> None:
-        """Drops the database FK constraint(s) behind a relation field, if any. No-op by default -
-        a schema editor rebuilding whole tables instead of altering constraints in place has nothing to drop."""
-
-    async def drop_composite_relation_index_for_key_change(
+    def get_composite_index_drop_plan(
         self,
         model: type[Model],
         old_field: ForeignKeyFieldInstance[Model],
         key_field_pairs: list[tuple[Field[Any], Field[Any]]],
-    ) -> bool:
+    ) -> SchemaChangePlan:
         """Drops the one index over all key columns of a relation to a composite primary key
         before a key column's type or nullability changes, on a database changing no indexed column
         (``Features.alters_indexed_columns``).
@@ -166,32 +146,40 @@ class ForeignKeyRebuild(SchemaEditorPart):
             key_field_pairs: Each key column's field before and after the change.
 
         Returns:
-            Whether the index was dropped - ``alter_composite_relation_index()`` creates it again.
+            The removal plan; its nonempty steps tell the restoration plan to recreate the index.
         """
         if (
             self.editor.client.features.alters_indexed_columns
             or len(old_field.source_fields) < 2
             or not old_field.index
         ):
-            return False
+            return SchemaChangePlan(())
         dialect = self.editor.client.dialect
         if not any(
             old_key_field.null != new_key_field.null
             or old_key_field.get_column_type(dialect) != new_key_field.get_column_type(dialect)
             for old_key_field, new_key_field in key_field_pairs
         ):
-            return False
-        await self.editor.remove_index(model, Index(fields=(old_field.model_field_name,)))
-        return True
+            return SchemaChangePlan(())
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.index_statements.get_index_drop_sql(
+                        model,
+                        Index(fields=(old_field.model_field_name,)),
+                    )
+                ),
+            )
+        )
 
-    async def alter_composite_relation_index(
+    def get_composite_index_change_plan(
         self,
         model: type[Model],
         old_field: ForeignKeyFieldInstance[Model],
         new_field: ForeignKeyFieldInstance[Model],
         *,
         index_dropped: bool = False,
-    ) -> None:
+    ) -> SchemaChangePlan:
         """Creates or drops the one index over all key columns of a relation to a composite
         primary key when its ``db_index`` flips - a single key column's index follows its shadow
         key field instead.
@@ -203,17 +191,14 @@ class ForeignKeyRebuild(SchemaEditorPart):
             index_dropped: Whether the index was dropped for a change of the key columns - created
                 again while the relation keeps one.
         """
-        if index_dropped:
-            if new_field.index:
-                await self.editor.add_index(model, Index(fields=(new_field.model_field_name,)))
-            return
-        if len(new_field.source_fields) < 2 or old_field.index == new_field.index:
-            return
         index = Index(fields=(new_field.model_field_name,))
+        if index_dropped:
+            return self.editor.get_add_index_plan(model, index) if new_field.index else SchemaChangePlan(())
+        if len(new_field.source_fields) < 2 or old_field.index == new_field.index:
+            return SchemaChangePlan(())
         if new_field.index:
-            await self.editor.add_index(model, index)
-        else:
-            await self.editor.remove_index(model, index)
+            return self.editor.get_add_index_plan(model, index)
+        return SchemaChangePlan((SchemaStatement(self.editor.index_statements.get_index_drop_sql(model, index)),))
 
     def get_referencing_key_columns(
         self, target_model: type[Model], target_field_name: str, candidate_models: Sequence[type[Model]]
@@ -291,113 +276,68 @@ class ForeignKeyRebuild(SchemaEditorPart):
                         )
         return referencing_key_columns
 
-    async def restore_relation_foreign_keys(self, model: type[Model], relation_field: Field[Any]) -> None:
-        """Re-creates the FK constraint(s) of a relation whose key column was just altered.
+    def get_relation_foreign_key_restore_plan(
+        self, model: type[Model], relation_field: Field[Any]
+    ) -> SchemaChangePlan:
+        """Prepare constraints after altering their key columns."""
+        return self.get_relation_foreign_key_rebuild_plan(model, relation_field)
 
-        Args:
-            model: The model owning `relation_field`, rendered from the new state.
-            relation_field: The altered relation field.
-        """
-        await self.rebuild_relation_foreign_keys(model, relation_field)
-
-    async def alter_foreign_key_on_delete(
+    def get_foreign_key_change_plan(
         self,
         model: type[Model],
-        db_field: str,
-        old_foreign_key_field: ForeignKeyFieldInstance[Model],
-        new_foreign_key_field: ForeignKeyFieldInstance[Model],
-    ) -> None:
-        """Applies an ``on_delete=`` change to the foreign key constraint. A no-op by default - a
-        dialect altering tables in place replaces the constraint.
-        """
+        old_field: ForeignKeyFieldInstance[Model],
+        new_field: ForeignKeyFieldInstance[Model],
+    ) -> SchemaChangePlan:
+        """Prepare an in-place constraint change where the dialect supports it."""
+        return SchemaChangePlan(())
 
-    async def rebuild_relation_foreign_keys(self, model: type[Model], field: Field[Any]) -> None:
-        """Re-emits the database FK constraint(s) behind a relation field from its current
-        metadata (ON DELETE action and db_constraint), replacing whatever the database has now.
-
-        Args:
-            model: The model owning ``field``.
-            field: A FK/O2O field, or an M2M field with an auto-managed through table (anything
-                else is left untouched). Nothing happens on a database without foreign keys.
-        """
+    def get_relation_foreign_key_rebuild_plan(self, model: type[Model], field: Field[Any]) -> SchemaChangePlan:
+        """Prepare relation constraints, excluding declared through models and generated sides."""
         if not self.editor.client.features.supports_foreign_keys:
-            return
+            return SchemaChangePlan(())
         if isinstance(field, ManyToManyFieldInstance):
             if field._generated or field.through_model is not None:
-                return
-            await self.rebuild_many_to_many_through_foreign_keys(model, field)
-            return
+                return SchemaChangePlan(())
+            return self.get_many_to_many_rebuild_plan(model, field)
         if isinstance(field, ForeignKeyFieldInstance):
-            await self.rebuild_foreign_key_constraints(model, field)
+            return self.get_foreign_key_rebuild_plan(model, field)
+        return SchemaChangePlan(())
 
-    async def rebuild_foreign_key_constraints(
-        self, model: type[Model], foreign_key_field: ForeignKeyFieldInstance[Model]
-    ) -> None:
-        """Replaces a FK/O2O field's own constraint - see rebuild_relation_foreign_keys()."""
-        await self.alter_foreign_key_on_delete(
-            model, foreign_key_field.source_fields[0], foreign_key_field, foreign_key_field
-        )
+    def get_foreign_key_rebuild_plan(
+        self, model: type[Model], field: ForeignKeyFieldInstance[Model]
+    ) -> SchemaChangePlan:
+        """Prepare replacement of an existing relation's constraint."""
+        return self.get_foreign_key_change_plan(model, field, field)
 
-    async def rebuild_many_to_many_through_foreign_keys(
-        self,
-        model: type[Model],
-        field: ManyToManyFieldInstance[Model],
-    ) -> None:
-        """Replaces both FK constraints of an auto-managed M2M through table - see
-        rebuild_relation_foreign_keys().
-
-        Args:
-            model: The model owning the relation.
-            field: The relation as it is now.
-
-        Raises:
-            UnSupportedError: On a dialect without its own implementation.
-        """
+    def get_many_to_many_rebuild_plan(
+        self, model: type[Model], field: ManyToManyFieldInstance[Model]
+    ) -> SchemaChangePlan:
+        """Prepare both constraints of an automatic through table when supported."""
         raise UnSupportedError(
             f"Rebuilding M2M through-table constraints is not supported on {self.editor.client.dialect.name}"
         )
 
-    async def raise_if_relation_values_need_remapping(
+    def get_relation_target_check_plan(
         self,
         model: type[Model],
-        old_foreign_key_field: ForeignKeyFieldInstance[Model],
-        new_foreign_key_field: ForeignKeyFieldInstance[Model],
-    ) -> None:
-        """Refuses to repoint a FK/O2O at another target column while rows still store key values.
-
-        Stored values name rows through the old target column - kept as they are, they'd silently
-        point at the wrong rows (or none) through the new one.
-
-        Args:
-            model: The model owning the relation, rendered from the current state.
-            old_foreign_key_field: The relation's current definition.
-            new_foreign_key_field: The relation's new definition.
-
-        Raises:
-            ForeignKeyTargetChangeError: At least one row stores a key value.
-        """
-        if self.editor.collect_sql:
-            return
-        columns = [
-            model._meta.fields_db_projection[key_field_name] for key_field_name in old_foreign_key_field.source_fields
-        ]
-        qualified_table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
+        old_field: ForeignKeyFieldInstance[Model],
+        new_field: ForeignKeyFieldInstance[Model],
+    ) -> SchemaChangePlan:
+        """Compile the stored-key check and diagnostic names without reading rows."""
+        columns = [model._meta.fields_db_projection[name] for name in old_field.source_fields]
+        table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
         predicate = " OR ".join(f"{self.editor.quote(column)} IS NOT NULL" for column in columns)
-        rows = await self.editor.client.execute_dicts(
-            f"SELECT count(*) AS stored_count FROM {qualified_table} WHERE {predicate}"  # nosec B608
-        )
-        stored_count = rows[0]["stored_count"]
-        if not stored_count:
-            return
-        _old_schema, old_table, old_columns = self.get_relation_target_columns(old_foreign_key_field)
-        _new_schema, new_table, new_columns = self.get_relation_target_columns(new_foreign_key_field)
-        raise ForeignKeyTargetChangeError(
-            f"Cannot repoint {model.__name__}.{old_foreign_key_field.model_field_name} from "
-            f"{old_table}({', '.join(old_columns)}) to {new_table}({', '.join(new_columns)}) - "
-            f"{stored_count} row(s) store values of the old target column, which would silently "
-            "refer to the wrong rows (or none) afterwards. Migrate the data by hand instead: add a "
-            "new relation field targeting the new column, fill it with RunPython/RunSQL, then "
-            "remove the old field."
+        _, old_table, old_columns = self.get_relation_target_columns(old_field)
+        _, new_table, new_columns = self.get_relation_target_columns(new_field)
+        return SchemaChangePlan(
+            (
+                RelationTargetPrecondition(
+                    f"SELECT count(*) AS stored_count FROM {table} WHERE {predicate}",  # nosec B608
+                    f"{model.__name__}.{old_field.model_field_name}",
+                    f"{old_table}({', '.join(old_columns)})",
+                    f"{new_table}({', '.join(new_columns)})",
+                ),
+            )
         )
 
     @staticmethod
@@ -465,13 +405,14 @@ class ForeignKeyRebuild(SchemaEditorPart):
             bool(getattr(relation_field, "db_constraint", False)) and self.editor.client.features.supports_foreign_keys
         )
 
-    async def add_foreign_key_constraint_not_valid(self, model: type[Model], constraint: ForeignKeyConstraint) -> None:
-        """Adds a FOREIGN KEY that only new and updated rows must satisfy - the existing rows are
-        checked later, by ``validate_constraint()``. A dialect that can't leave the existing rows
-        unchecked (``Features.supports_not_valid_constraints`` False) adds the constraint as usual.
+    def get_foreign_key_not_valid_plan(self, model: type[Model], constraint: ForeignKeyConstraint) -> SchemaChangePlan:
+        """Prepare a foreign key for later validation of existing rows.
+
+        New and updated rows must satisfy the constraint immediately. The base validates
+        existing rows when adding it; dialects supporting deferred validation override this plan.
 
         Args:
             model: The model whose table gets the constraint.
             constraint: The foreign key constraint.
         """
-        await self.editor.add_constraint(model, constraint)
+        return self.editor.get_add_constraint_plan(model, constraint)

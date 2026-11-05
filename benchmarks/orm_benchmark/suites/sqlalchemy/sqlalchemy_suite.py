@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 
 # At module level: SQLAlchemy reads the models' Mapped[...] annotations from the module's names.
@@ -12,9 +11,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from orm_benchmark.constants import CATEGORIES, LOAD_CONCURRENCY, LOAD_OPERATIONS, POOL_MAX_SIZE
 from orm_benchmark.declarations.databases import DATABASE_BY_KEY
+from orm_benchmark.definitions.measurement import Measurement
 from orm_benchmark.definitions.target import Target
+from orm_benchmark.measuring.benchmark_scenario_run import BenchmarkScenarioRun
 from orm_benchmark.measuring.load_test import LoadTest
-from orm_benchmark.measuring.timing import Timing
 from orm_benchmark.measuring.workload import Workload
 
 
@@ -23,9 +23,9 @@ class SqlAlchemySuite:
     the way its documentation writes them: a fresh session per timed repetition, ``select()`` with
     loader options, ORM bulk INSERT/UPDATE, the dialect's ``on_conflict_do_update()``.
 
-    By default a session runs its statements in a transaction it commits (SQLAlchemy's own default).
-    In the autocommit targets the engine commits every statement on its own - as hare and Django do -
-    and the scenarios that need a transaction open a real one with the server's default isolation.
+    Normal sessions are transactional; write scenarios commit explicitly at their declared boundaries.
+    In autocommit targets each statement commits individually. Transaction and streaming scenarios
+    use transactional sessions with the server's default isolation.
     """
 
     def __init__(self, target: Target, database: Any) -> None:
@@ -127,33 +127,41 @@ class SqlAlchemySuite:
 
         return engine
 
-    async def run(self, rows: int) -> dict[str, float | None]:
+    async def run(self, rows: int) -> dict[str, Measurement | None]:
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import async_sessionmaker
         from sqlalchemy.orm import configure_mappers
 
-        start = time.perf_counter()
-        engine = self.create_engine()
-        configure_mappers()
-        async with engine.begin() as connection:
-            await connection.run_sync(self.base.metadata.create_all)
-        cold_start = (time.perf_counter() - start) * 1000
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        # In autocommit, Session.begin() sends no BEGIN - the transaction scenarios take their sessions
-        # from the same pool with the server's default isolation instead.
-        default_isolation = "SERIALIZABLE" if self.is_sqlite else "READ COMMITTED"
-        transactional_factory = (
-            async_sessionmaker(engine.execution_options(isolation_level=default_isolation), expire_on_commit=False)
-            if self.autocommit
-            else session_factory
-        )
+        engine = None
 
-        async def touch() -> None:
+        async def connect() -> None:
+            nonlocal engine
+            engine = self.create_engine()
+            configure_mappers()
             async with engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
 
-        await asyncio.gather(*[touch() for __ in range(POOL_MAX_SIZE)])
         try:
+            cold_start = await BenchmarkScenarioRun.measure(connect, 1)
+            async with engine.begin() as connection:
+                await connection.run_sync(self.base.metadata.create_all)
+            session_factory = async_sessionmaker(engine, expire_on_commit=False)
+            # In autocommit, Session.begin() sends no BEGIN - the transaction scenarios take their sessions
+            # from the same pool with the server's default isolation instead.
+            default_isolation = "SERIALIZABLE" if self.is_sqlite else "READ COMMITTED"
+            transactional_factory = (
+                async_sessionmaker(engine.execution_options(isolation_level=default_isolation), expire_on_commit=False)
+                if self.autocommit
+                else session_factory
+            )
+
+            async def touch() -> None:
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+
+            async with asyncio.TaskGroup() as warmup:
+                for _ in range(POOL_MAX_SIZE):
+                    warmup.create_task(touch())
             results = await self.run_scenarios(session_factory, transactional_factory, rows)
             results["cold_start"] = cold_start
             await self.database.settle()
@@ -161,7 +169,8 @@ class SqlAlchemySuite:
             await self.database.settle()
             results.update(await self.run_write_load_test(session_factory))
         finally:
-            await engine.dispose()
+            if engine is not None:
+                await engine.dispose()
         return results
 
     @staticmethod
@@ -196,8 +205,8 @@ class SqlAlchemySuite:
 
     async def run_scenarios(
         self, session_factory: Any, transactional_factory: Any, rows: int
-    ) -> dict[str, float | None]:
-        results: dict[str, float | None] = {}
+    ) -> dict[str, Measurement | None]:
+        results: dict[str, Measurement | None] = {}
         for run_group in (
             self.run_insert_scenarios,
             self.run_read_scenarios,
@@ -213,7 +222,7 @@ class SqlAlchemySuite:
         return results
 
     async def run_insert_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The inserts - in bulk, of many rows and one by one."""
         from sqlalchemy import delete, insert, select
@@ -221,7 +230,7 @@ class SqlAlchemySuite:
         widget_class = self.widget
         gadget_class = self.gadget
         tag_class = self.tag
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         async def clear_widgets() -> None:
@@ -230,13 +239,14 @@ class SqlAlchemySuite:
         async def bulk_create() -> None:
             await self.run_and_commit(session_factory, insert(widget_class), self.make_rows("widget", rows))
 
-        results["bulk_create"] = await best(bulk_create, 3, clear_widgets)
+        results["bulk_create"] = await measure(bulk_create, 3, clear_widgets)
         await clear_widgets()
         await self.run_and_commit(session_factory, insert(widget_class), self.make_rows("widget", rows))
         async with session_factory() as session:
             widgets = (await session.scalars(select(widget_class))).all()
             await session.execute(
-                insert(gadget_class), [{"widget_id": w.id, "label": f"gadget-of-{w.name}"} for w in widgets]
+                insert(gadget_class),
+                [{"widget_id": widget.id, "label": f"gadget-of-{widget.name}"} for widget in widgets],
             )
             tags = [tag_class(name=f"tag{index}") for index in range(5)]
             session.add_all(tags)
@@ -255,7 +265,7 @@ class SqlAlchemySuite:
                 session_factory, insert(widget_class), self.make_rows("large", Workload.get_large_rows(rows))
             )
 
-        results["bulk_create_large"] = await best(bulk_create_large, 3, clear_large)
+        results["bulk_create_large"] = await measure(bulk_create_large, 3, clear_large)
         await clear_large()
 
         async def single_insert() -> None:
@@ -266,16 +276,16 @@ class SqlAlchemySuite:
                     )
                     await session.commit()
 
-        results["single_insert"] = await best(single_insert, 3)
+        results["single_insert"] = await measure(single_insert, 3)
 
     async def run_read_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The reads of one model's rows - by key, the first, a page."""
         from sqlalchemy import delete, select
 
         widget_class = self.widget
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         await self.run_and_commit(session_factory, delete(widget_class).where(widget_class.name.startswith("single-")))
@@ -284,7 +294,7 @@ class SqlAlchemySuite:
             async with session_factory() as session:
                 (await session.scalars(select(widget_class))).all()
 
-        results["fetch_all"] = await best(fetch_all, 5)
+        results["fetch_all"] = await measure(fetch_all, 5)
         ids = await self.get_ids(session_factory, widget_class, batch)
 
         async def get_by_pk() -> None:
@@ -292,7 +302,7 @@ class SqlAlchemySuite:
                 for primary_key in ids:
                     await session.get(widget_class, primary_key)
 
-        results["get_by_pk"] = await best(get_by_pk, 3)
+        results["get_by_pk"] = await measure(get_by_pk, 3)
 
         async def first_row() -> None:
             async with session_factory() as session:
@@ -305,7 +315,7 @@ class SqlAlchemySuite:
                     )
                     (await session.scalars(statement)).first()
 
-        results["first_row"] = await best(first_row, 3)
+        results["first_row"] = await measure(first_row, 3)
         page_size = max(5, rows // 10)
 
         async def paginated_fetch() -> None:
@@ -313,16 +323,16 @@ class SqlAlchemySuite:
                 statement = select(widget_class).order_by(widget_class.id).offset(page_size * 2).limit(page_size)
                 (await session.scalars(statement)).all()
 
-        results["paginated_fetch"] = await best(paginated_fetch, 5)
+        results["paginated_fetch"] = await measure(paginated_fetch, 5)
 
         async def top_ten() -> None:
             async with session_factory() as session:
                 (await session.scalars(select(widget_class).order_by(widget_class.value.desc()).limit(10))).all()
 
-        results["top_ten"] = await best(top_ten, 5)
+        results["top_ten"] = await measure(top_ten, 5)
 
     async def run_filter_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The filtered reads of one model's rows."""
         from sqlalchemy import exists, or_, select
@@ -330,7 +340,7 @@ class SqlAlchemySuite:
 
         widget_class = self.widget
         gadget_class = self.gadget
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
 
         async def filter_rows() -> None:
             async with session_factory() as session:
@@ -339,31 +349,31 @@ class SqlAlchemySuite:
                 )
                 (await session.scalars(statement)).all()
 
-        results["filter"] = await best(filter_rows, 5)
+        results["filter"] = await measure(filter_rows, 5)
 
         async def icontains_search() -> None:
             async with session_factory() as session:
                 (await session.scalars(select(widget_class).where(widget_class.name.icontains("GET-1")))).all()
 
-        results["icontains_search"] = await best(icontains_search, 5)
+        results["icontains_search"] = await measure(icontains_search, 5)
 
         async def exists_check() -> None:
             async with session_factory() as session:
                 await session.scalar(select(exists().where(widget_class.category == CATEGORIES[0])))
 
-        results["exists_check"] = await best(exists_check, 5)
+        results["exists_check"] = await measure(exists_check, 5)
 
         async def values_list_flat() -> None:
             async with session_factory() as session:
                 (await session.scalars(select(widget_class.id).where(widget_class.value >= rows // 4))).all()
 
-        results["values_list_flat"] = await best(values_list_flat, 5)
+        results["values_list_flat"] = await measure(values_list_flat, 5)
 
         async def distinct_values() -> None:
             async with session_factory() as session:
                 (await session.scalars(select(widget_class.category).distinct())).all()
 
-        results["distinct_values"] = await best(distinct_values, 5)
+        results["distinct_values"] = await measure(distinct_values, 5)
 
         async def only_fields() -> None:
             async with session_factory() as session:
@@ -374,7 +384,7 @@ class SqlAlchemySuite:
                 )
                 (await session.scalars(statement)).all()
 
-        results["only_fields"] = await best(only_fields, 5)
+        results["only_fields"] = await measure(only_fields, 5)
 
         async def complex_filter() -> None:
             async with session_factory() as session:
@@ -391,7 +401,7 @@ class SqlAlchemySuite:
                 )
                 (await session.scalars(statement)).all()
 
-        results["complex_filter"] = await best(complex_filter, 5)
+        results["complex_filter"] = await measure(complex_filter, 5)
         large_in_ids = await self.get_ids(session_factory, widget_class, Workload.get_in_count(rows))
 
         async def large_in_filter() -> None:
@@ -399,10 +409,10 @@ class SqlAlchemySuite:
                 statement = select(widget_class).where(widget_class.id.in_(large_in_ids)).order_by(widget_class.id)
                 (await session.scalars(statement)).all()
 
-        results["large_in_filter"] = await best(large_in_filter, 5)
+        results["large_in_filter"] = await measure(large_in_filter, 5)
 
     async def run_relation_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The reads across relations."""
         from sqlalchemy import select
@@ -411,7 +421,7 @@ class SqlAlchemySuite:
         widget_class = self.widget
         gadget_class = self.gadget
         tag_class = self.tag
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         async def iterate_chunks() -> None:
@@ -420,7 +430,7 @@ class SqlAlchemySuite:
                 async for widget in await session.stream_scalars(statement):
                     widget.name  # noqa: B018 - read, as a caller would
 
-        results["iterate_chunks"] = await best(iterate_chunks, 5)
+        results["iterate_chunks"] = await measure(iterate_chunks, 5)
         prefetch_ids = await self.get_ids(session_factory, widget_class, batch)
 
         async def prefetch_related() -> None:
@@ -433,7 +443,7 @@ class SqlAlchemySuite:
                 for widget in (await session.scalars(statement)).all():
                     list(widget.gadgets)
 
-        results["prefetch_related"] = await best(prefetch_related, 5)
+        results["prefetch_related"] = await measure(prefetch_related, 5)
 
         async def prefetch_many_to_many() -> None:
             async with session_factory() as session:
@@ -445,7 +455,7 @@ class SqlAlchemySuite:
                 for widget in (await session.scalars(statement)).all():
                     list(widget.tags)
 
-        results["prefetch_many_to_many"] = await best(prefetch_many_to_many, 5)
+        results["prefetch_many_to_many"] = await measure(prefetch_many_to_many, 5)
 
         async def n_plus_one() -> None:
             async with session_factory() as session:
@@ -454,7 +464,7 @@ class SqlAlchemySuite:
                 ).all():
                     await widget.awaitable_attrs.gadgets
 
-        results["n_plus_one"] = await best(n_plus_one, 3)
+        results["n_plus_one"] = await measure(n_plus_one, 3)
         gadget_ids = await self.get_ids(session_factory, gadget_class, batch)
 
         async def select_related() -> None:
@@ -467,7 +477,7 @@ class SqlAlchemySuite:
                 for gadget in (await session.scalars(statement)).all():
                     gadget.widget.name  # noqa: B018 - already joined
 
-        results["select_related_join"] = await best(select_related, 5)
+        results["select_related_join"] = await measure(select_related, 5)
 
         async def related_filter() -> None:
             async with session_factory() as session:
@@ -476,17 +486,17 @@ class SqlAlchemySuite:
                 )
                 (await session.scalars(statement)).all()
 
-        results["related_filter"] = await best(related_filter, 5)
+        results["related_filter"] = await measure(related_filter, 5)
 
         async def many_to_many_filter() -> None:
             async with session_factory() as session:
                 statement = select(widget_class).join(widget_class.tags).where(tag_class.name == "tag1")
                 (await session.scalars(statement)).all()
 
-        results["many_to_many_filter"] = await best(many_to_many_filter, 5)
+        results["many_to_many_filter"] = await measure(many_to_many_filter, 5)
 
     async def run_aggregate_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The annotations and the aggregates."""
         from sqlalchemy import case, exists, func, select
@@ -494,7 +504,7 @@ class SqlAlchemySuite:
         widget_class = self.widget
         gadget_class = self.gadget
         tag_class = self.tag
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
 
         async def annotate_count() -> None:
             async with session_factory() as session:
@@ -505,14 +515,14 @@ class SqlAlchemySuite:
                 )
                 (await session.execute(statement)).all()
 
-        results["annotate_count"] = await best(annotate_count, 5)
+        results["annotate_count"] = await measure(annotate_count, 5)
 
         async def exists_annotation() -> None:
             async with session_factory() as session:
                 has_gadget = exists().where(gadget_class.widget_id == widget_class.id).label("has_gadget")
                 (await session.execute(select(widget_class.id, has_gadget))).all()
 
-        results["exists_annotation"] = await best(exists_annotation, 5)
+        results["exists_annotation"] = await measure(exists_annotation, 5)
 
         async def count() -> None:
             async with session_factory() as session:
@@ -520,7 +530,7 @@ class SqlAlchemySuite:
                     select(func.count()).select_from(widget_class).where(widget_class.value >= rows // 2)
                 )
 
-        results["count"] = await best(count, 5)
+        results["count"] = await measure(count, 5)
 
         async def aggregate() -> None:
             async with session_factory() as session:
@@ -532,13 +542,13 @@ class SqlAlchemySuite:
                 )
                 (await session.execute(statement)).one()
 
-        results["aggregate"] = await best(aggregate, 5)
+        results["aggregate"] = await measure(aggregate, 5)
 
         async def conditional_count() -> None:
             async with session_factory() as session:
                 await session.scalar(select(func.count(widget_class.id).filter(widget_class.value >= rows // 2)))
 
-        results["conditional_count"] = await best(conditional_count, 5)
+        results["conditional_count"] = await measure(conditional_count, 5)
 
         async def group_by() -> None:
             async with session_factory() as session:
@@ -547,7 +557,7 @@ class SqlAlchemySuite:
                 ).group_by(widget_class.category)
                 (await session.execute(statement)).all()
 
-        results["group_by"] = await best(group_by, 5)
+        results["group_by"] = await measure(group_by, 5)
         having_threshold = rows * rows // 20
 
         async def having() -> None:
@@ -560,7 +570,7 @@ class SqlAlchemySuite:
                 )
                 (await session.execute(statement)).all()
 
-        results["having"] = await best(having, 5)
+        results["having"] = await measure(having, 5)
 
         async def annotate_values() -> None:
             async with session_factory() as session:
@@ -572,14 +582,14 @@ class SqlAlchemySuite:
                 )
                 (await session.execute(statement)).all()
 
-        results["annotate_values"] = await best(annotate_values, 5)
+        results["annotate_values"] = await measure(annotate_values, 5)
 
         async def case_when() -> None:
             async with session_factory() as session:
                 bucket = case((widget_class.value >= rows // 2, "high"), else_="low").label("bucket")
                 (await session.execute(select(widget_class.id, bucket))).all()
 
-        results["case_when_conditional"] = await best(case_when, 5)
+        results["case_when_conditional"] = await measure(case_when, 5)
 
         async def window_rank() -> None:
             async with session_factory() as session:
@@ -590,10 +600,10 @@ class SqlAlchemySuite:
                 )
                 (await session.execute(select(widget_class.id, rank))).all()
 
-        results["window_rank"] = await best(window_rank, 5)
+        results["window_rank"] = await measure(window_rank, 5)
 
     async def run_update_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The updates and the upserts."""
         from sqlalchemy import delete, select, update
@@ -603,7 +613,7 @@ class SqlAlchemySuite:
         widget_class = self.widget
         tag_class = self.tag
         dialect_insert = sqlite_insert if self.is_sqlite else postgresql_insert
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         async def update_bulk() -> None:
@@ -611,7 +621,7 @@ class SqlAlchemySuite:
                 session_factory, update(widget_class).where(widget_class.category == CATEGORIES[1]).values(value=0)
             )
 
-        results["update_bulk"] = await best(update_bulk, 3)
+        results["update_bulk"] = await measure(update_bulk, 3)
 
         async def update_expression() -> None:
             await self.run_and_commit(
@@ -621,7 +631,7 @@ class SqlAlchemySuite:
                 .values(value=widget_class.value + 1),
             )
 
-        results["update_expression"] = await best(update_expression, 3)
+        results["update_expression"] = await measure(update_expression, 3)
         loop_ids = await self.get_ids(session_factory, widget_class, batch)
 
         async def update_by_pk() -> None:
@@ -632,7 +642,7 @@ class SqlAlchemySuite:
                     )
                     await session.commit()
 
-        results["update_by_pk"] = await best(update_by_pk, 3)
+        results["update_by_pk"] = await measure(update_by_pk, 3)
 
         async def update_loop() -> None:
             async with session_factory() as session:
@@ -641,17 +651,18 @@ class SqlAlchemySuite:
                     widget.value = widget.value + 1
                     await session.commit()
 
-        results["update_loop"] = await best(update_loop, 3)
+        results["update_loop"] = await measure(update_loop, 3)
 
         async def bulk_update() -> None:
             async with session_factory() as session:
                 widgets_to_update = (await session.scalars(select(widget_class).limit(batch))).all()
                 await session.execute(
-                    update(widget_class), [{"id": w.id, "value": w.value + 100} for w in widgets_to_update]
+                    update(widget_class),
+                    [{"id": widget.id, "value": widget.value + 100} for widget in widgets_to_update],
                 )
                 await session.commit()
 
-        results["bulk_update"] = await best(bulk_update, 3)
+        results["bulk_update"] = await measure(bulk_update, 3)
         async with session_factory() as many_to_many_session:
             many_to_many_widgets = (await many_to_many_session.scalars(select(widget_class).limit(batch))).all()
             extra_tag = tag_class(name="tag_extra")
@@ -663,7 +674,7 @@ class SqlAlchemySuite:
                     (await widget.awaitable_attrs.tags).append(extra_tag)
                     await many_to_many_session.commit()
 
-            results["many_to_many_add"] = await best(many_to_many_add, 1)
+            results["many_to_many_add"] = await measure(many_to_many_add, 1)
             await many_to_many_session.execute(
                 delete(self.widget_tags).where(self.widget_tags.c.tag_id == extra_tag.id)
             )
@@ -674,8 +685,14 @@ class SqlAlchemySuite:
         async def upsert() -> None:
             statement = dialect_insert(widget_class).values(
                 [
-                    {"id": w.id, "name": w.name, "category": w.category, "value": w.value + 1, "score": w.score}
-                    for w in upsert_widgets
+                    {
+                        "id": widget.id,
+                        "name": widget.name,
+                        "category": widget.category,
+                        "value": widget.value + 1,
+                        "score": widget.score,
+                    }
+                    for widget in upsert_widgets
                 ]
             )
             statement = statement.on_conflict_do_update(
@@ -683,16 +700,16 @@ class SqlAlchemySuite:
             )
             await self.run_and_commit(session_factory, statement)
 
-        results["upsert"] = await best(upsert, 3)
+        results["upsert"] = await measure(upsert, 3)
 
     async def run_delete_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """get_or_create() and the deletes."""
         from sqlalchemy import delete, insert, select
 
         widget_class = self.widget
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         async def clear_get_or_create() -> None:
@@ -712,7 +729,7 @@ class SqlAlchemySuite:
                         )
                         await session.commit()
 
-        results["get_or_create"] = await best(get_or_create, 3, clear_get_or_create)
+        results["get_or_create"] = await measure(get_or_create, 3, clear_get_or_create)
         await clear_get_or_create()
 
         async def delete_bulk() -> None:
@@ -720,7 +737,7 @@ class SqlAlchemySuite:
                 session_factory, delete(widget_class).where(widget_class.category == CATEGORIES[2])
             )
 
-        results["delete_bulk"] = await best(delete_bulk, 1)
+        results["delete_bulk"] = await measure(delete_bulk, 1)
         await self.run_and_commit(
             session_factory, insert(widget_class), self.make_rows("refill", rows // 10 + 1, category_offset=2)
         )
@@ -732,16 +749,16 @@ class SqlAlchemySuite:
                     await session.delete(await session.get(widget_class, primary_key))
                     await session.commit()
 
-        results["delete_loop"] = await best(delete_loop, 1)
+        results["delete_loop"] = await measure(delete_loop, 1)
 
     async def run_transaction_scenarios(
-        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, float | None]
+        self, session_factory: Any, transactional_factory: Any, rows: int, results: dict[str, Measurement | None]
     ) -> None:
         """The concurrent reads, the transactions and the JSON values."""
         from sqlalchemy import insert, select, update
 
         widget_class = self.widget
-        best = Timing.get_best
+        measure = BenchmarkScenarioRun.measure
         batch = Workload.get_batch(rows)
 
         await self.run_and_commit(session_factory, insert(widget_class), self.make_rows("widget", batch))
@@ -752,9 +769,11 @@ class SqlAlchemySuite:
                 await session.get(widget_class, primary_key)
 
         async def concurrent_get() -> None:
-            await asyncio.gather(*[get_in_separate_session(primary_key) for primary_key in concurrent_ids])
+            await BenchmarkScenarioRun.concurrent(
+                get_in_separate_session(primary_key) for primary_key in concurrent_ids
+            )
 
-        results["concurrent_get"] = await best(concurrent_get, 3)
+        results["concurrent_get"] = await measure(concurrent_get, 3)
         atomic_ids = await self.get_ids(session_factory, widget_class, batch)
 
         async def atomic_update_loop() -> None:
@@ -763,7 +782,7 @@ class SqlAlchemySuite:
                     widget = await session.get(widget_class, primary_key)
                     widget.value = widget.value + 1
 
-        results["atomic_update_loop"] = await best(atomic_update_loop, 3)
+        results["atomic_update_loop"] = await measure(atomic_update_loop, 3)
 
         async def nested_transaction_loop() -> None:
             async with transactional_factory.begin() as session:
@@ -772,7 +791,7 @@ class SqlAlchemySuite:
                         widget = await session.get(widget_class, primary_key)
                         widget.value = widget.value + 1
 
-        results["nested_transaction_loop"] = await best(nested_transaction_loop, 3)
+        results["nested_transaction_loop"] = await measure(nested_transaction_loop, 3)
 
         async def select_for_update_loop() -> None:
             for primary_key in atomic_ids:
@@ -782,7 +801,7 @@ class SqlAlchemySuite:
                     widget.value = widget.value + 1
 
         if "select_for_update_loop" not in self.excluded:
-            results["select_for_update_loop"] = await best(select_for_update_loop, 3)
+            results["select_for_update_loop"] = await measure(select_for_update_loop, 3)
 
         async def json_write() -> None:
             await self.run_and_commit(
@@ -792,25 +811,19 @@ class SqlAlchemySuite:
                 .values(payload={"updated": True, "items": list(range(20))}),
             )
 
-        results["json_write"] = await best(json_write, 5)
+        results["json_write"] = await measure(json_write, 5)
 
         async def json_read() -> None:
             async with session_factory() as session:
                 for widget in (await session.scalars(select(widget_class))).all():
                     len(widget.payload)
 
-        results["json_read"] = await best(json_read, 5)
+        results["json_read"] = await measure(json_read, 5)
 
-    async def get_load_ids(self, session_factory: Any) -> list[int]:
+    async def run_load_test(self, session_factory: Any) -> dict[str, Measurement]:
         from sqlalchemy import select
 
-        async with session_factory() as session:
-            return list((await session.scalars(select(self.widget.id).limit(200))).all())
-
-    async def run_load_test(self, session_factory: Any) -> dict[str, float]:
-        from sqlalchemy import select
-
-        widget_class, ids = self.widget, await self.get_load_ids(session_factory)
+        widget_class, ids = self.widget, await self.get_ids(session_factory, self.widget, 200)
 
         async def operation(index: int) -> None:
             operation_slot = index % 20
@@ -827,8 +840,8 @@ class SqlAlchemySuite:
 
         return await LoadTest.run("load_test", operation, LOAD_CONCURRENCY, LOAD_OPERATIONS)
 
-    async def run_write_load_test(self, session_factory: Any) -> dict[str, float]:
-        widget_class, ids = self.widget, await self.get_load_ids(session_factory)
+    async def run_write_load_test(self, session_factory: Any) -> dict[str, Measurement]:
+        widget_class, ids = self.widget, await self.get_ids(session_factory, self.widget, 200)
 
         async def operation(index: int) -> None:
             async with session_factory() as session:

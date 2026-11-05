@@ -16,6 +16,8 @@ from hare.ddl.enums import TriggerEvent
 from hare.ddl.indexes import Index, PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.trigger import Trigger
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.fields import Range
 from hare.exceptions import ConfigurationError
 from hare.migrations.operations import (
@@ -38,7 +40,10 @@ from hare.migrations.operations import (
     RunPython,
     RunSQL,
 )
-from hare.migrations.writer import ImportManager, MigrationWriter
+from hare.migrations.writer import MigrationWriter
+from hare.models import Model
+from hare.query.expressions import ConditionValue, Exists, F, Q
+from hare.query.queryset import QuerySet
 
 pytestmark = pytest.mark.database_independent
 
@@ -819,7 +824,7 @@ def test_render_value_timedelta_preserves_microsecond_precision() -> None:
 
     imports = ImportManager()
     td = datetime.timedelta(days=100000, microseconds=1)
-    rendered = MigrationWriter.render_value(td, imports)
+    rendered = DeclarationValueSerializer.render_value(td, imports)
     assert eval(rendered) == td  # noqa: S307
 
 
@@ -832,7 +837,7 @@ def test_render_value_refuses_an_object_its_text_doesnt_rebuild() -> None:
 
     for value in (_NoDeconstruct(), fractions.Fraction(1, 3), collections.deque([1]), array.array("i", [1])):
         with pytest.raises(ConfigurationError, match="can't be written into a migration"):
-            MigrationWriter.render_value(value, ImportManager())
+            DeclarationValueSerializer.render_value(value, ImportManager())
 
 
 def test_render_value_writes_ip_addresses_and_sets_as_code() -> None:
@@ -851,7 +856,7 @@ def test_render_value_writes_ip_addresses_and_sets_as_code() -> None:
         3 + 4j,
     ):
         imports = ImportManager()
-        rendered = MigrationWriter.render_value(value, imports)
+        rendered = DeclarationValueSerializer.render_value(value, imports)
         namespace = {"ipaddress": ipaddress}
         assert eval(rendered, namespace) == value  # noqa: S307
         assert type(eval(rendered, namespace)) is type(value)  # noqa: S307
@@ -861,7 +866,7 @@ def test_render_value_uses_deconstruct_protocol_for_arbitrary_objects() -> None:
     """Any object without explicit support (e.g. a Crypto instance passed as
     EncryptedJSONField(crypto=...)) used to serialize as an invalid repr()."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(_Deconstructable("x"), imports)
+    rendered = DeclarationValueSerializer.render_value(_Deconstructable("x"), imports)
     assert rendered == "_Deconstructable('x')"
     assert "_Deconstructable" in imports.imports.get("tests.migrations.migration_files.test_writer", set())
 
@@ -871,7 +876,7 @@ def test_render_value_prefers_migration_import_path_over_deconstruct() -> None:
     constructor again (critical for secrets like Crypto: reconstructing it would mean writing the
     encryption key literally into the migration file)."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(_SingletonRef(), imports)
+    rendered = DeclarationValueSerializer.render_value(_SingletonRef(), imports)
     assert rendered == "some_singleton"
     assert "some_singleton" in imports.imports.get("app.utils.crypto", set())
 
@@ -1021,8 +1026,8 @@ def test_functions_of_one_name_from_two_modules_stay_two_values(tmp_path, monkey
     from defaults_shop_b.defaults import make_code as make_b
 
     imports = ImportManager()
-    first = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_a), imports)
-    second = MigrationWriter.render_value(fields.CharField(max_length=5, default=make_b), imports)
+    first = DeclarationValueSerializer.render_value(fields.CharField(max_length=5, default=make_a), imports)
+    second = DeclarationValueSerializer.render_value(fields.CharField(max_length=5, default=make_b), imports)
     namespace: dict[str, object] = {}
     exec("\n".join([*imports.render(), f"first = {first}", f"second = {second}"]), namespace)  # noqa: S102
 
@@ -1043,7 +1048,20 @@ def test_functions_of_one_name_from_two_modules_stay_two_values(tmp_path, monkey
 def test_a_range_default_is_written_as_the_call_building_it(value) -> None:
     """A Range had no deconstruct() - makemigrations refused a range field's default."""
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(value, imports)
+    rendered = DeclarationValueSerializer.render_value(value, imports)
     namespace: dict[str, object] = {}
     exec("\n".join([*imports.render(), f"value = {rendered}"]), namespace)  # noqa: S102
     assert namespace["value"] == value
+
+
+@pytest.mark.parametrize("predicate", ["field", "condition_value", "exists"])
+def test_writer_rejects_expression_predicates_in_conditions(predicate):
+    if predicate == "exists":
+        condition = Q(Exists(QuerySet(Model)))
+    elif predicate == "condition_value":
+        condition = Q.from_expression(ConditionValue(Q(is_active=True)))
+    else:
+        condition = Q.from_expression(F("is_active"))
+    for value in (condition, ~condition & Q(name="visible")):
+        with pytest.raises(ConfigurationError, match="Q expression predicate can't be written into a migration"):
+            DeclarationValueSerializer.render_condition(value, ImportManager())

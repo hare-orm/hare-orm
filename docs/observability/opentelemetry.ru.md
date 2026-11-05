@@ -57,7 +57,7 @@ class OpenTelemetryInstrumentor:
 |---|---|
 | `tracer_provider` | `TracerProvider` интервалов — глобальный (`opentelemetry.trace.get_tracer_provider()`), если не передан; настройте его (`TracerProvider` из SDK со своим экспортёром) до вызова `instrument()` |
 | `meter_provider` | `MeterProvider` метрик пула — глобальный (`opentelemetry.metrics.get_meter_provider()`), если не передан |
-| `record_sql_statement` | `True` (по умолчанию) задаёт атрибут интервала `db.query.text` — текст SQL с местами для параметров, hare никогда не вставляет в него значения; `False` его не записывает, если секретно даже устройство запроса |
+| `record_sql_statement` | `True` (по умолчанию) записывает отправленный SQL в `db.query.text`, включая литералы в raw SQL или DDL. Значения привязанных параметров отдельно не записываются. `False` отключает атрибут |
 | `query_spans` | Запускает ли `instrument()` интервалы трассировки (`QuerySpans`) |
 | `pool_metrics` | Запускает ли `instrument()` метрики пула (`PoolMetricInstruments`) и на время работы `PoolMetrics` — замер каждого ожидания соединения — см. [Метрики пула и здоровье](pool-health.ru.md#opentelemetry-metrics) |
 

@@ -22,7 +22,7 @@ async def test_insert_values_match_the_field_by_field_conversion(db):
     instance = testmodels_postgres.DecimalFields(decimal=Decimal("1.23456"), decimal_nodec=Decimal("7"))
     connection = testmodels_postgres.DecimalFields.get_connection()
     executor = InstanceWriter(testmodels_postgres.DecimalFields, connection)
-    for columns in (executor.regular_columns, executor.regular_columns_all):
+    for columns in (executor.templates.insert_fields, executor.templates.explicit_key_fields):
         if "id" in columns:
             instance.id = 5
         expected = [
@@ -31,7 +31,7 @@ async def test_insert_values_match_the_field_by_field_conversion(db):
             )
             for name in columns
         ]
-        assert executor._get_insert_values(instance, columns) == expected
+        assert executor._get_instance_values(instance, columns) == expected
     created = await testmodels_postgres.DecimalFields.objects.create(
         decimal=Decimal("1.23456"), decimal_nodec=Decimal("7")
     )

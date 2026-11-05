@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from hare.exceptions import UnSupportedError
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 from hare.sql.terms.term_identity_text import TermIdentityText
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 
 
 class Function(Criterion):
     """A SQL function call - ``name(arguments...)``."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ("args", "name", "schema")
+    has_repeatable_value = False
 
     #: Whether the function has no standard SQL of its own - rendered only by a dialect's renderer.
     requires_dialect_renderer: ClassVar[bool] = False
@@ -29,10 +26,8 @@ class Function(Criterion):
         self.args: list[Term] = [self.wrap_constant(parameter) for parameter in args]
         self.schema = kwargs.get("schema")
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        for arg in self.args:
-            yield from arg.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from self.args
 
     @property
     def is_aggregate(self) -> bool | None:  # type:ignore[override]
@@ -43,22 +38,6 @@ class Function(Criterion):
             when every argument fits either way (constants).
         """
         return Term.get_combined_is_aggregate([arg.is_aggregate for arg in self.args])
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Useful when reusing fields across queries.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the criterion with the tables replaced.
-        """
-        self.args = [parameter.replace_table(current_table, new_table) for parameter in self.args]
-        return self
 
     def get_special_parameters_sql(self, sql_context: SqlContext) -> Any:
         """The SQL a function writes after its arguments inside the parentheses (``AS type`` of a cast) -
@@ -108,8 +87,6 @@ class Function(Criterion):
         )
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        # self.name is never user-controlled - every Function subclass/call site passes a
-        # hardcoded literal function name, so it needs no identifier quoting/escaping here.
         renderer = sql_context.dialect.renderers.get(
             type(self)
         ) or sql_context.dialect.renderers.get_function_renderer(self.name)

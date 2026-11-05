@@ -70,7 +70,7 @@ class SqliteDatePartExtraction:
         if native_functions is not None:
             extract = native_functions.DateFunctions(
                 ZoneInfo,
-                Timezone.ZONES.get_owner_bucket(SqliteDatePartExtraction),
+                Timezone.ZONES.get_bucket(SqliteDatePartExtraction),
                 extract,
                 function_errors.wrap(DateTruncation.truncate),
             ).extract

@@ -32,6 +32,10 @@ class RegionAccount(Model):
 class Passport(Model):
     code = fields.CharField(max_length=50, primary_key=True, sensitive=True)
     name = fields.CharField(max_length=50, default="")
+    deleted_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        soft_delete_field = "deleted_at"
 
 
 class Visa(Model):

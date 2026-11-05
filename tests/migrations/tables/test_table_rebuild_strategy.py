@@ -24,7 +24,7 @@ async def test_rebuilt_table_keeps_its_rows_indexes_and_unique_constraints(db_is
     )
     indexes_before = set(await round_trip.get_index_definitions("rebuilt_widget"))
 
-    await round_trip.editor.table_rebuild.remake_table(widget, widget)
+    await round_trip.editor.table_rebuild.get_rebuild_plan(widget, widget).execute(round_trip.editor)
 
     rows = await round_trip.connection.execute_dicts("SELECT id, code, size FROM rebuilt_widget ORDER BY id")
     assert rows == [{"id": 1, "code": "a", "size": 1}, {"id": 2, "code": "b", "size": 2}]
@@ -47,7 +47,7 @@ async def test_rebuilt_table_keeps_its_table_and_column_comments(db_isolated_no_
     widget._no_comments = False  # type: ignore[attr-defined]
     await round_trip.migrate_to(widget)
 
-    await round_trip.editor.table_rebuild.remake_table(widget, widget)
+    await round_trip.editor.table_rebuild.get_rebuild_plan(widget, widget).execute(round_trip.editor)
 
     (row,) = await round_trip.connection.execute_dicts(
         "SELECT obj_description('commented_widget'::regclass, 'pg_class') AS table_comment, "

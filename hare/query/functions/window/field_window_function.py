@@ -7,6 +7,9 @@ from hare.exceptions import FieldError, QueryError
 from hare.query.expressions import Aggregate, Expression, Q
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.compatibility.result_branch import ResultBranch
+from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value import Value
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -24,6 +27,8 @@ class FieldWindowFunction(WindowFunction):
     """Base for window functions that aggregate/read a single model field - or an expression, and
     only the rows matching a condition, when built from an aggregate (``Window(Sum("salary"))``)."""
 
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("field", ArgumentRole.FIELD),))
+
     #: The aggregate of ``hare.query.functions`` computing the same value over a whole group.
     aggregate_class: ClassVar[type[Aggregate] | None] = None
 
@@ -39,7 +44,7 @@ class FieldWindowFunction(WindowFunction):
         self.condition = condition
 
     @classmethod
-    def from_aggregate(cls, aggregate: Aggregate) -> FieldWindowFunction:
+    def from_aggregate(cls, aggregate: Aggregate) -> WindowFunction:
         """The window function computing an aggregate over the window, like Django's
         ``Window(Sum("salary"))``.
 
@@ -70,7 +75,7 @@ class FieldWindowFunction(WindowFunction):
                 "window aggregate."
             )
         if not window_function_classes:
-            # Local import: the class is a subclass of this one.
+            # Import the aggregate adapter only when no specialized window function applies.
             from hare.query.functions.window.aggregate_window_function import AggregateWindowFunction
 
             return AggregateWindowFunction(aggregate)
@@ -117,7 +122,7 @@ class FieldWindowFunction(WindowFunction):
             condition_modifier = self.condition.get_result(expression_context)
             Aggregate.raise_if_filter_reads_aggregate(type(self).__name__, condition_modifier)
             analytic_term = analytic_term.filter(condition_modifier.where_criterion)
-            joins = joins + [join for join in condition_modifier.joins if join not in joins]
+            joins = ExpressionResult.dedup_joins(joins, condition_modifier.joins)
         return analytic_term, joins, output_field
 
     def _raise_if_value_type_refused(self, value_field: Field[Any] | None) -> None:

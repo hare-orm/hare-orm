@@ -1,7 +1,4 @@
-"""Bulk writes on a driver that binds the parameters rust.native.rows.ModelWriter writes
-(Features.binds_written_parameters): the rows round-trip the same, a value that can't be bound fails
-where a list of the values fails, and whatever is given the parameters to look at still gets a
-list."""
+"""Native PostgreSQL writes preserve values, binding failures and observable parameters."""
 
 import datetime
 import uuid
@@ -10,9 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
+from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_client import RustPgClient
 from hare.instrumentation import Observers, QueryExecuted
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from rust.native import pg
+from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from tests.shared_models.testmodels import (
     DatetimeFields,
     IntFields,
@@ -22,24 +19,22 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
 
-REQUIRES = ("native",)
 
-
-def skip_unless_written_parameters(model) -> None:
-    if not model.get_connection().features.binds_written_parameters:
-        pytest.skip("for a driver that binds written parameters")
+def skip_unless_native_postgresql(model) -> None:
+    if not isinstance(model.get_connection(), RustPgClient):
+        pytest.skip("requires the native PostgreSQL driver")
 
 
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
-async def test_bulk_create_binds_written_parameters_and_round_trips(db):
-    skip_unless_written_parameters(JSONFields)
+async def test_bulk_create_binds_serialized_values_and_round_trips(db):
+    skip_unless_native_postgresql(JSONFields)
     db_client = JSONFields.get_connection()
     with patch.object(type(db_client), "execute", autospec=True, side_effect=type(db_client).execute) as execute:
         await JSONFields.objects.bulk_create(
             [JSONFields(data={"a": [1, 2.5, "x"]}, data_null=None), JSONFields(data=[], data_null={"b": None})]
         )
-    assert isinstance(execute.call_args.args[2], pg.PgParameters)
+    assert isinstance(execute.call_args.args[2], list)
     assert [(item.data, item.data_null) for item in await JSONFields.objects.all().order_by("id")] == [
         ({"a": [1, 2.5, "x"]}, None),
         ([], {"b": None}),
@@ -57,7 +52,7 @@ async def test_bulk_create_binds_written_parameters_and_round_trips(db):
 
 @pytest.mark.asyncio
 async def test_bulk_update_binds_the_values_before_and_after_the_rows(db):
-    skip_unless_written_parameters(LazySelectSoftDeleteParent)
+    skip_unless_native_postgresql(LazySelectSoftDeleteParent)
     parents = [
         await LazySelectSoftDeleteParent.objects.create(name="a"),
         await LazySelectSoftDeleteParent.objects.create(name="b"),
@@ -69,22 +64,22 @@ async def test_bulk_update_binds_the_values_before_and_after_the_rows(db):
 
 @pytest.mark.asyncio
 async def test_written_parameter_rows_run_once_per_instance(db):
-    skip_unless_written_parameters(IntFields)
+    skip_unless_native_postgresql(IntFields)
     db_client = IntFields.get_connection()
-    writer = HydrateAccelerator.get_model_writer(IntFields, ("intnum",), db_client.dialect.types)
-    rows = writer.write_parameter_rows([IntFields(intnum=1), IntFields(intnum=2)], [])
+    rows = BulkWriteBatches.serialize_instances(
+        IntFields, db_client.dialect.types, [IntFields(intnum=1), IntFields(intnum=2)], ["intnum"]
+    )
     assert len(rows) == 2
     await db_client.execute_many('INSERT INTO "intfields" ("intnum") VALUES ($1)', rows)
     assert await IntFields.objects.all().order_by("intnum").values_list("intnum", flat=True) == [1, 2]
 
 
 @pytest.mark.asyncio
-async def test_a_value_that_cant_be_bound_fails_as_in_a_list(db):
-    skip_unless_written_parameters(IntFields)
+async def test_unbindable_values_fail_for_lists_and_tuples(db):
+    skip_unless_native_postgresql(IntFields)
     db_client = IntFields.get_connection()
-    writer = HydrateAccelerator.get_model_writer(IntFields, ("intnum",), db_client.dialect.types)
     unbindable = object()
-    parameters = writer.write_parameters([], [unbindable], [])
+    parameters = (unbindable,)
     with pytest.raises(Exception) as from_list:
         await db_client.execute("SELECT $1", [unbindable])
     with pytest.raises(Exception) as from_parameters:
@@ -95,7 +90,7 @@ async def test_a_value_that_cant_be_bound_fails_as_in_a_list(db):
 
 @pytest.mark.asyncio
 async def test_an_observer_gets_a_list_of_the_parameters(db):
-    skip_unless_written_parameters(IntFields)
+    skip_unless_native_postgresql(IntFields)
     seen: list[object] = []
     with Observers.observing(QueryExecuted, lambda event: seen.append(event.parameters)):
         await IntFields.objects.bulk_create([IntFields(intnum=5), IntFields(intnum=6)])

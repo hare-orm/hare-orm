@@ -5,7 +5,8 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.core.registries import Registries
+from hare.core.caching.cache_bucket import CacheBucket
+from hare.core.extensions.snapshot_mapping import SnapshotMapping
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -35,8 +36,8 @@ class TermRenderers:
 
     #: The renderer and the name renderer each set of renderers found for a term class through the
     #: class's bases, kept in a bucket of the set.
-    found_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
-    found_name_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
+    found_name_renderers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -44,17 +45,15 @@ class TermRenderers:
             dialect: The dialect whose terms are rendered.
         """
         self.dialect = dialect
-        #: The buckets of the caches these renderers read (``Cache.get_owner_bucket()``).
+        #: The buckets of the caches these renderers read (``Cache.get_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
-        self.renderers: dict[type, TermRenderer] = {}
-        self.name_renderers: dict[type, FunctionNameRenderer] = {}
-        self.renderers_by_term_class: dict[type, TermRenderer | None] = TermRenderers.found_renderers.get_owner_bucket(
-            self
+        self.renderers: SnapshotMapping[type, TermRenderer] = SnapshotMapping()
+        self.name_renderers: SnapshotMapping[type, FunctionNameRenderer] = SnapshotMapping()
+        self.renderers_by_term_class: CacheBucket[TermRenderer | None] = TermRenderers.found_renderers.get_bucket(self)
+        self.name_renderers_by_term_class: CacheBucket[FunctionNameRenderer | None] = (
+            TermRenderers.found_name_renderers.get_bucket(self)
         )
-        self.name_renderers_by_term_class: dict[type, FunctionNameRenderer | None] = (
-            TermRenderers.found_name_renderers.get_owner_bucket(self)
-        )
-        self.function_renderers: dict[str, TermRenderer] = {}
+        self.function_renderers: SnapshotMapping[str, TermRenderer] = SnapshotMapping()
         #: The renderers of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
         self.mirrors: list[TermRenderers] = []
 
@@ -65,11 +64,9 @@ class TermRenderers:
             term_class: The term class.
             renderer: A ``(term, sql_context) -> sql``.
         """
-        self.renderers[term_class] = renderer
-        TermRenderers.found_renderers.forget_owner(self)
-        for mirror in self.mirrors:
-            mirror.register(term_class, renderer)
-        Registries.changed()
+        self.renderers.register(term_class, renderer, tuple(mirror.renderers for mirror in self.mirrors))
+        if not self.renderers.sealed:
+            TermRenderers.found_renderers.forget_holder(self)
 
     def register_function(self, function_name: str, renderer: TermRenderer) -> None:
         """Sets how the dialect renders every function called ``function_name`` that has no
@@ -79,10 +76,9 @@ class TermRenderers:
             function_name: The SQL function's name, as hare writes it (``"LENGTH"``).
             renderer: A ``(function, sql_context) -> sql``.
         """
-        self.function_renderers[function_name] = renderer
-        for mirror in self.mirrors:
-            mirror.register_function(function_name, renderer)
-        Registries.changed()
+        self.function_renderers.register(
+            function_name, renderer, tuple(mirror.function_renderers for mirror in self.mirrors)
+        )
 
     def get_function_renderer(self, function_name: str) -> TermRenderer | None:
         """The renderer of the functions called ``function_name``, None for none."""
@@ -95,27 +91,29 @@ class TermRenderers:
             function_class: The function class.
             name_renderer: A ``(function, sql_context) -> name``; an empty name keeps the function's own.
         """
-        self.name_renderers[function_class] = name_renderer
-        TermRenderers.found_name_renderers.forget_owner(self)
-        for mirror in self.mirrors:
-            mirror.register_name(function_class, name_renderer)
-        Registries.changed()
+        self.name_renderers.register(
+            function_class, name_renderer, tuple(mirror.name_renderers for mirror in self.mirrors)
+        )
+        if not self.name_renderers.sealed:
+            TermRenderers.found_name_renderers.forget_holder(self)
 
     def get(self, term_class: type) -> TermRenderer | None:
         """The renderer of ``term_class``, None when the term renders its own SQL."""
-        if term_class not in self.renderers_by_term_class:
-            self.renderers_by_term_class[term_class] = next(
-                (self.renderers[base] for base in term_class.__mro__ if base in self.renderers), None
-            )
-        return self.renderers_by_term_class[term_class]
+        try:
+            return self.renderers_by_term_class[term_class]
+        except KeyError:
+            renderer = next((self.renderers[base] for base in term_class.__mro__ if base in self.renderers), None)
+            return self.renderers_by_term_class.store(term_class, renderer)
 
     def get_name_renderer(self, function_class: type) -> FunctionNameRenderer | None:
         """The name renderer of ``function_class``, None when the function keeps its own name."""
-        if function_class not in self.name_renderers_by_term_class:
-            self.name_renderers_by_term_class[function_class] = next(
+        try:
+            return self.name_renderers_by_term_class[function_class]
+        except KeyError:
+            renderer = next(
                 (self.name_renderers[base] for base in function_class.__mro__ if base in self.name_renderers), None
             )
-        return self.name_renderers_by_term_class[function_class]
+            return self.name_renderers_by_term_class.store(function_class, renderer)
 
     def get_distinct_from_sql(self, left_sql: str, right_sql: str) -> str:
         """A NULL-safe inequality - true when the two differ, one NULL included, false when both are

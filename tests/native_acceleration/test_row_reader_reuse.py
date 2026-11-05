@@ -1,4 +1,4 @@
-"""Row readers are compiled once per query shape and shared by every query of that shape - each
+"""Column layouts are prepared once per query shape and shared by every query of that shape - each
 query still reads its own rows correctly, also when many run at once."""
 
 import asyncio
@@ -6,21 +6,16 @@ import asyncio
 import pytest
 
 from hare.contrib.test.isolated_contexts import hare_test_context
-from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.shared_models.testmodels import Author, Book, IntFields
-
-
-def get_compiled_reader_count() -> int:
-    return len(StatementPlans.hydrate_functions)
+from tests.utils.statement_plan_checks import StatementPlanChecks
 
 
 @pytest.mark.asyncio
 async def test_repeated_get_reuses_its_reader(db):
     await IntFields.objects.create(intnum=1)
     await IntFields.objects.get(intnum=1)
-    reader_count = get_compiled_reader_count()
-    await IntFields.objects.get(intnum=1)
-    assert get_compiled_reader_count() == reader_count
+    with StatementPlanChecks.assert_decode_plans_reused(IntFields):
+        assert (await IntFields.objects.get(intnum=1)).intnum == 1
 
 
 @pytest.mark.asyncio
@@ -28,9 +23,9 @@ async def test_prefetch_related_reuses_its_readers(db):
     author = await Author.objects.create(name="a")
     await Book.objects.create(name="b", author=author, rating=1.0)
     await Book.objects.all().prefetch_related("author")
-    reader_count = get_compiled_reader_count()
-    await Book.objects.all().prefetch_related("author")
-    assert get_compiled_reader_count() == reader_count
+    with StatementPlanChecks.assert_decode_plans_reused(Book, Author):
+        rows = await Book.objects.all().prefetch_related("author")
+        assert rows[0].author.name == "a"
 
 
 @pytest.mark.asyncio

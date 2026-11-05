@@ -29,6 +29,7 @@ class TimeField(Field[TTime]):
     without it an offset is dropped."""
 
     field_type = datetime.time
+    accepted_value_types = (str,)
     date_function_source = DateTruncSource.TIME
 
     keeps_native_db_values = True
@@ -156,7 +157,7 @@ class TimeField(Field[TTime]):
 
     def to_db_value(
         self,
-        value: datetime.time | datetime.timedelta | None,
+        value: Any,
         instance: type[Model] | Model | None,
     ) -> datetime.time | None:
         if value is not None:

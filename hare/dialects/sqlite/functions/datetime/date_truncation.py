@@ -108,7 +108,7 @@ class DateTruncation:
 
             truncate = native_functions.DateFunctions(
                 ZoneInfo,
-                Timezone.ZONES.get_owner_bucket(cls),
+                Timezone.ZONES.get_bucket(cls),
                 function_errors.wrap(SqliteDatePartExtraction.extract),
                 truncate,
             ).truncate

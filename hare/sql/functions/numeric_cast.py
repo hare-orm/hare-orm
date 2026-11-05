@@ -12,5 +12,7 @@ class NumericCast(Cast):
     Such a NUMERIC may not be exact: a fractional value keeps ~15 significant digits.
     """
 
+    structure_attributes = ()
+
     def __init__(self, term: Any, alias: str | None = None) -> None:
         super().__init__(term, SqlTypes.NUMERIC, alias=alias)

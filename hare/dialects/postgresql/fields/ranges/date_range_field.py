@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 from typing import Any, ClassVar
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.fields import Field
 from hare.fields.data.temporal.date_field import DateField
@@ -16,14 +15,13 @@ class DateRangeField(RangeField):
     SQL_TYPE = "daterange"
     ELEMENT_SQL_TYPE = "date"
 
-    #: Shared field a bound is read through - the statement plans hold output fields weakly.
+    #: Shared field used to read date bounds and describe their output type.
     BOUND_FIELD: ClassVar[DateField[Any]] = DateField()
 
     def get_bound_field(self) -> Field[Any]:
         return self.BOUND_FIELD
 
     DISCRETE_STEP = datetime.timedelta(days=1)
-    NATIVE_BOUND_TYPE = RangeBoundType.DATE
 
     def parse_bound_text(self, text: str) -> Any:
         # `infinity`/`-infinity` read as date.max/date.min, the way the drivers decode them.

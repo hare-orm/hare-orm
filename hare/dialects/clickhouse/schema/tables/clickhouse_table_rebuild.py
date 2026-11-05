@@ -1,25 +1,52 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from hare.dialects.base.schema.plans.column_copy import ColumnCopy
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_cleanup import SchemaCleanup
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.client.constants import CLICKHOUSE_DEFAULT_DATABASE
+from hare.dialects.clickhouse.cluster.clickhouse_placement_plan import ClickhousePlacementPlan
 from hare.dialects.clickhouse.cluster.constants import (
     CLICKHOUSE_CLUSTER_HOSTS_SQL,
+    CLICKHOUSE_DATABASE_ENGINE_SQL,
     CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE,
-    CLICKHOUSE_REPLICATED_ENGINE_PREFIX,
     CLICKHOUSE_SHARD_MACRO,
     CLICKHOUSE_UUID_MACRO,
 )
+from hare.dialects.clickhouse.introspection.clickhouse_catalog_engine import ClickhouseCatalogEngine
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
-from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_TABLE_ENGINE_SQL
-from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
-from hare.exceptions import UnSupportedError
+from hare.dialects.clickhouse.introspection.constants import (
+    CLICKHOUSE_DISTRIBUTED_ENGINE_NAME,
+    CLICKHOUSE_ENGINE_CLAUSES,
+    CLICKHOUSE_REPLICA_DEFAULTS_SQL,
+    CLICKHOUSE_TABLE_ENGINE_SQL,
+)
+from hare.dialects.clickhouse.schema.constants import (
+    CLICKHOUSE_EXCHANGE_DATABASE_ENGINES,
+    CLICKHOUSE_EXCHANGE_TABLES_TEMPLATE,
+    CLICKHOUSE_FLUSH_DISTRIBUTED_TEMPLATE,
+    CLICKHOUSE_REBUILD_TARGET_SQL,
+)
+from hare.dialects.clickhouse.schema.messages import (
+    ENGINE_FIXED_DEFAULT_REPLICA_PATH,
+    ENGINE_RAW_REBUILD_PATH,
+    REBUILD_DATABASE_ENGINE_UNSUPPORTED,
+    REBUILD_STORAGE_TARGET_EXISTS,
+    REBUILD_STORAGE_TO_ROUTER,
+)
+from hare.dialects.clickhouse.schema.tables.clickhouse_rebuild_check import ClickhouseRebuildCheck
+from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models import Model
+from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.data.referencing_key_columns import ReferencingKeyColumns
@@ -27,24 +54,27 @@ if TYPE_CHECKING:
 
 
 class ClickhouseTableRebuild(TableRebuild):
-    """TableRebuild as ClickHouse does it - the views and the dictionaries a model declares are dropped
-    before its table is remade and created again over the new one: a view follows the inserts of the
-    table it was created over, and would take the copied rows a second time; the server drops no table
-    a dictionary reads. The rows of a table distributed over a cluster are copied through it, each to
-    its shard."""
+    """Copy rows into a staging table before dropping views and dictionaries for the exchange.
+
+    A failed copy leaves the original table and its dependencies in place. Views and dictionaries
+    are recreated over the replacement before the old table is removed. Distributed rows are copied
+    through the cluster, each to its shard; the exchange is not atomic across servers.
+    """
 
     __slots__ = ()
 
     editor: ClickhouseSchemaEditor
 
-    async def remake_table(
+    def get_rebuild_plan(
         self,
         old_model: type[Model],
         new_model: type[Model],
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
-    ) -> None:
-        """Rebuilds the table, the model's views and dictionaries created again over it - a
-        materialized view's own storage filled by its query, a table one writes to left with its rows.
+    ) -> SchemaChangePlan:
+        """Prepares the table rebuild and recreation of its views and dictionaries.
+
+        Execution fills a materialized view's storage from its query and preserves rows in a
+        table it writes to. Placement and database-engine checks run when the plan executes.
 
         Args:
             old_model: The model the table matches now - its views and dictionaries are dropped.
@@ -52,44 +82,168 @@ class ClickhouseTableRebuild(TableRebuild):
             altered_fields: (old, new) fields paired otherwise than by name - a renamed field.
 
         Raises:
-            UnSupportedError: The table keeps rows of its own on several servers of the connection's
-                cluster - neither replicated nor distributed; its replicated engine names a replica path
-                without ``{uuid}``.
+            UnSupportedError: Storage would become a distributed router, or the replicated engine
+                names a fixed replica path without ``{uuid}``.
         """
+        dialect = self.editor.client.dialect
+        old_options = ClickhouseTableOptions.get_for_model(old_model, dialect)
+        new_options = ClickhouseTableOptions.get_for_model(new_model, dialect)
+        if (
+            new_options.get_engine_name() == CLICKHOUSE_DISTRIBUTED_ENGINE_NAME
+            and old_options.get_engine_name() != CLICKHOUSE_DISTRIBUTED_ENGINE_NAME
+        ):
+            raise UnSupportedError(REBUILD_STORAGE_TO_ROUTER)
         self.raise_if_replica_path_is_fixed(new_model)
-        await self.raise_if_rows_are_scattered(new_model)
-        materialized_views = self.editor.materialized_views
-        await materialized_views.drop_model_materialized_views(old_model)
-        await self.editor.dictionaries.drop_model_dictionaries(old_model)
-        await self.editor.views.drop_model_views(old_model)
-        await super().remake_table(old_model, new_model, altered_fields)
-        meta = new_model._meta
-        for view in meta.views:
-            await self.editor.views.create_view(new_model, view)
-        for dictionary in meta.dictionaries:
-            await self.editor.dictionaries.create_dictionary(new_model, dictionary)
-        for materialized_view in meta.materialized_views:
-            await materialized_views.create_materialized_view_again(new_model, materialized_view)
+        plan = super().get_rebuild_plan(old_model, new_model, altered_fields)
+        return SchemaChangePlan(
+            (
+                *self.editor.table_creation.get_replica_check_plan(new_model).steps,
+                ClickhouseRebuildCheck(old_model, new_model),
+                *self.get_distributed_flush_plan(old_model).steps,
+                *plan.steps,
+            ),
+            before=plan.before,
+            after=plan.after,
+        )
 
-    async def remake_for_referencing_key_columns(self, referencing: ReferencingKeyColumns) -> bool:
-        """Remakes the table of a relation whose key columns are keys of the table - the server changes
+    def get_distributed_flush_plan(self, model: type[Model]) -> SchemaChangePlan:
+        """Drain existing routing queues before copying rows or replacing a router.
+
+        Queue delivery is local to each server, even when the database replicates
+        DDL. Use the full connection cluster, independently of schema placement.
+        Writers must remain stopped throughout the rebuild.
+        """
+        client = self.editor.client
+        options = ClickhouseTableOptions.get_for_model(model, client.dialect)
+        if options.distributed_over is None and options.get_engine_name() != CLICKHOUSE_DISTRIBUTED_ENGINE_NAME:
+            return SchemaChangePlan(())
+        cluster = client.cluster.name if client.cluster is not None else None
+        sql = CLICKHOUSE_FLUSH_DISTRIBUTED_TEMPLATE.format(
+            table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+            on_cluster=ClickhousePlacementPlan.get_cluster_sql(cluster, client.sql_context),
+        )
+        return SchemaChangePlan((SchemaStatement(sql),))
+
+    @staticmethod
+    def get_rebuilt_table_name(table_name: str) -> str:
+        """Keep failed or uncertain replacements separate from subsequent attempts."""
+        return Identifiers.get_within_limit(f"{table_name} rebuild {uuid4().hex}")
+
+    def get_before_replace_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Drop dependencies only after the replacement table's row copy succeeds."""
+        old_options = ClickhouseTableOptions.get_for_model(old_model, self.editor.client.dialect)
+        companion_drop = (
+            (f"DROP TABLE {self.editor.get_schema_table_sql(old_model._meta.db_table, old_model._meta.schema)}",)
+            if old_options.distributed_over is not None
+            else ()
+        )
+        return SchemaChangePlan(
+            tuple(
+                SchemaStatement(sql)
+                for sql in (
+                    *self.editor.get_model_view_drop_sqls(old_model),
+                    *self.editor.dictionaries.get_model_drop_sqls(old_model),
+                    *companion_drop,
+                )
+            )
+        )
+
+    def get_replace_plan(
+        self,
+        table_name: str,
+        rebuilt_table_name: str,
+        schema: str | None,
+        fields: Iterable[Field[Any]],
+    ) -> SchemaChangePlan:
+        """Exchange table identities without first deleting the original data.
+
+        A failed or unacknowledged exchange leaves both names for inspection. The
+        previous table is dropped only after dependent objects are recreated.
+        Cluster execution has no cross-host atomicity guarantee.
+        """
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    CLICKHOUSE_EXCHANGE_TABLES_TEMPLATE.format(
+                        table=self.editor.qualify_table_name(table_name, schema),
+                        replacement=self.editor.qualify_table_name(rebuilt_table_name, schema),
+                        on_cluster=self.editor.get_schema_cluster_sql(schema),
+                    ),
+                    frozenset({SchemaEffect.REPLACE_TABLE}),
+                ),
+            )
+        )
+
+    def get_rebuild_finalization_plan(
+        self,
+        old_model: type[Model],
+        new_model: type[Model],
+        rebuilt_table_name: str,
+    ) -> SchemaChangePlan:
+        """Restore dependent objects before releasing the previous table's contents."""
+        sqls = [
+            *(
+                sql
+                for view in new_model._meta.views
+                for sql in self.editor.views.get_view_create_sqls(new_model, view)
+            ),
+            *(
+                sql
+                for dictionary in new_model._meta.dictionaries
+                for sql in self.editor.dictionaries.get_dictionary_create_sqls(new_model, dictionary)
+            ),
+            *(
+                sql
+                for view in new_model._meta.materialized_views
+                for sql in self.editor.materialized_views.get_recreation_sqls(new_model, view)
+            ),
+            f"DROP TABLE {self.editor.get_schema_table_sql(rebuilt_table_name, new_model._meta.schema)}",
+        ]
+        return SchemaChangePlan(tuple(SchemaStatement(sql) for sql in sqls))
+
+    async def check_database_exchange(self, model: type[Model]) -> None:
+        """Reject unsupported database engines before creating or dropping anything."""
+        database = model._meta.schema or self.editor.client.database or CLICKHOUSE_DEFAULT_DATABASE
+        engine = self.editor.get_database_engine(database)
+        if engine is None:
+            rows = await self.editor.client.execute_dicts(CLICKHOUSE_DATABASE_ENGINE_SQL, [database])
+            engine = str(rows[0]["engine"]) if rows else None
+        if engine not in CLICKHOUSE_EXCHANGE_DATABASE_ENGINES:
+            raise UnSupportedError(REBUILD_DATABASE_ENGINE_UNSUPPORTED.format(database=database, engine=engine))
+
+    async def check_storage_target(self, old_model: type[Model], new_model: type[Model]) -> None:
+        """Refuse an unrelated existing destination before copying or removing dependencies."""
+        old_storage = self.get_storage_table_name(old_model)
+        new_storage = self.get_storage_table_name(new_model)
+        if old_storage == new_storage:
+            return
+        old_options = ClickhouseTableOptions.get_for_model(old_model, self.editor.client.dialect)
+        if old_options.distributed_over is not None and new_storage == old_model._meta.db_table:
+            return  # This declared companion is explicitly dropped before replacement.
+        database = new_model._meta.schema or self.editor.client.database or CLICKHOUSE_DEFAULT_DATABASE
+        if await self.editor.client.execute_dicts(CLICKHOUSE_REBUILD_TARGET_SQL, [database, new_storage]):
+            raise ConfigurationError(REBUILD_STORAGE_TARGET_EXISTS.format(database=database, table=new_storage))
+
+    def get_referencing_key_rebuild_plan(self, referencing: ReferencingKeyColumns) -> SchemaChangePlan | None:
+        """Prepares a rebuild for a relation whose key columns are keys of the table - the server changes
         no key column in place.
 
         Args:
             referencing: The relation key columns, with their new types.
 
         Returns:
-            Whether the table was remade.
+            The prepared rebuild plan, or None when no rebuild is needed.
         """
         if not isinstance(referencing.relation_field, ForeignKeyFieldInstance) or not any(
             self.is_key_column(referencing.model, column) for column, __ in referencing.key_columns
         ):
-            return False
-        await self.remake_table(referencing.model, referencing.model)
-        return True
+            return None
+        return self.get_rebuild_plan(referencing.model, referencing.model)
 
-    async def remake_for_column_change(self, model: type[Model], old_field: Field[Any], new_field: Field[Any]) -> bool:
-        """Remakes the table for a new type or nullability of a column of its keys - the server changes
+    def get_column_change_rebuild_plan(
+        self, model: type[Model], old_field: Field[Any], new_field: Field[Any]
+    ) -> SchemaChangePlan | None:
+        """Prepares a rebuild for a new type or nullability of a key column - the server changes
         no key column in place.
 
         Args:
@@ -98,18 +252,17 @@ class ClickhouseTableRebuild(TableRebuild):
             new_field: The field after it.
 
         Returns:
-            Whether the table was remade.
+            The prepared rebuild plan, or None when no rebuild is needed.
         """
         dialect = self.editor.client.dialect
         if (
             old_field.get_column_type(dialect) == new_field.get_column_type(dialect)
             and old_field.null == new_field.null
         ):
-            return False
+            return None
         if not self.is_key_column(model, new_field.source_field or new_field.model_field_name):
-            return False
-        await self.remake_table(model, model, altered_fields=[(old_field, new_field)])
-        return True
+            return None
+        return self.get_rebuild_plan(model, model, altered_fields=[(old_field, new_field)])
 
     def is_key_column(self, model: type[Model], column_name: str) -> bool:
         """Whether a column is one of the table's keys.
@@ -165,24 +318,41 @@ class ClickhouseTableRebuild(TableRebuild):
         Raises:
             UnSupportedError: The table's replicated engine names a replica path without ``{uuid}``.
         """
-        engine = ClickhouseTableOptions.get_for_model(model, self.editor.client.dialect).engine
-        if not engine.startswith(CLICKHOUSE_REPLICATED_ENGINE_PREFIX):
+        engine = ClickhouseTableOptions.get_for_model(model, self.editor.client.dialect).get_engine()
+        if not engine.is_replicated():
             return
-        arguments = ClickhouseTypeNames.get_type_parts(engine)[1]
-        if not arguments or not arguments[0].strip().startswith("'"):
+        if engine.sql is not None:
+            raise UnSupportedError(ENGINE_RAW_REBUILD_PATH)
+        if engine.replica_path is None:
             return
-        if CLICKHOUSE_UUID_MACRO not in ClickhouseSqlParts.get_string_text(arguments[0].strip()):
+        if CLICKHOUSE_UUID_MACRO not in engine.replica_path:
             raise UnSupportedError(
                 f"{model.__name__}: the change remakes the table, whose replica path names no "
                 f"{CLICKHOUSE_UUID_MACRO} - the new table would take the path of the old one. Declare the engine "
                 f"without its path (the server's default_replica_path), or with a path naming {CLICKHOUSE_UUID_MACRO}"
             )
 
-    async def raise_if_rows_are_scattered(self, model: type[Model]) -> None:
+    async def raise_if_default_replica_path_is_fixed(self, model: type[Model]) -> str | None:
+        """Validate and return the new table's explicit or server-default replica path."""
+        engine = ClickhouseTableOptions.get_for_model(model, self.editor.client.dialect).get_engine()
+        if not engine.is_replicated() or engine.replica_path is not None:
+            return engine.replica_path
+        defaults = {
+            str(row["name"]): str(row["value"])
+            for row in await self.editor.client.execute_dicts(CLICKHOUSE_REPLICA_DEFAULTS_SQL)
+        }
+        if CLICKHOUSE_UUID_MACRO not in defaults.get("default_replica_path", ""):
+            raise UnSupportedError(
+                ENGINE_FIXED_DEFAULT_REPLICA_PATH.format(model=model.__name__, uuid=CLICKHOUSE_UUID_MACRO)
+            )
+        return defaults["default_replica_path"]
+
+    async def raise_if_rows_are_scattered(self, model: type[Model], *, replica_path: str | None = None) -> None:
         """Refuses to remake a table whose rows the connection's server holds only a part of.
 
         Args:
             model: The model.
+            replica_path: The new table's replica path, or None to inspect the existing table.
 
         Raises:
             UnSupportedError: The table isn't distributed, and the connection's cluster has several servers
@@ -194,13 +364,13 @@ class ClickhouseTableRebuild(TableRebuild):
         if client.cluster is None or self.editor.collect_sql:
             return
         options = ClickhouseTableOptions.get_for_model(model, client.dialect)
-        if options.distributed_over is not None:
+        if options.distributed_over is not None or options.get_engine_name() == CLICKHOUSE_DISTRIBUTED_ENGINE_NAME:
             return
         rows = await client.execute_dicts(CLICKHOUSE_CLUSTER_HOSTS_SQL, [client.cluster.name])
         if not rows:
             return
-        if options.engine.startswith(CLICKHOUSE_REPLICATED_ENGINE_PREFIX):
-            if int(rows[0]["shards"]) > 1 and await self.is_replicated_per_shard(model):
+        if options.get_engine().is_replicated():
+            if int(rows[0]["shards"]) > 1 and await self.is_replicated_per_shard(model, replica_path=replica_path):
                 raise UnSupportedError(
                     f"{model.__name__}: the change remakes the table, whose replicas keep rows of their own on each "
                     f"shard of the cluster {client.cluster.name!r} - the copy would read the rows of one shard. "
@@ -213,44 +383,92 @@ class ClickhouseTableRebuild(TableRebuild):
                 "by a Replicated engine, or distribute it (ClickhouseTableOptions(distributed_over=...))"
             )
 
-    async def is_replicated_per_shard(self, model: type[Model]) -> bool:
+    async def is_replicated_per_shard(self, model: type[Model], *, replica_path: str | None = None) -> bool:
         """Whether the replicas of a replicated table are those of one shard - its replica path names the
         shard (``{shard}``, as the server's default path does) - rather than every server of the cluster.
 
         Args:
             model: The model.
+            replica_path: A prepared destination path; None reads the source's catalog engine.
 
         Returns:
             Whether they are.
         """
+        if replica_path is not None:
+            return CLICKHOUSE_SHARD_MACRO in replica_path
         client = self.editor.client
         meta = model._meta
         rows = await client.execute_dicts(
             CLICKHOUSE_TABLE_ENGINE_SQL, [meta.schema or client.database or CLICKHOUSE_DEFAULT_DATABASE, meta.db_table]
         )
-        return not rows or CLICKHOUSE_SHARD_MACRO in str(rows[0]["engine_full"])
+        if not rows:
+            return True
+        clauses = ClickhouseSqlParts.get_clauses(str(rows[0]["engine_full"]), CLICKHOUSE_ENGINE_CLAUSES)
+        engine = ClickhouseCatalogEngine.get(clauses[""])
+        if isinstance(engine, str) or engine.sql is not None or engine.replica_path is None:
+            return True
+        return CLICKHOUSE_SHARD_MACRO in engine.replica_path
 
-    async def copy_table_rows(
-        self, model: type[Model], new_table_name: str, old_table_name: str, column_mapping: dict[str, str]
-    ) -> None:
-        """Copies the rows; those of a distributed table through a distributed table over the new
-        local ones - read from every shard, written each to its shard."""
+    def get_copy_source_table(self, model: type[Model]) -> str:
+        """The original logical table reads every source shard through its existing engine."""
+        return model._meta.db_table
+
+    def get_copy_plan(
+        self, model: type[Model], new_table_name: str, source_sql: str, columns: tuple[ColumnCopy, ...]
+    ) -> SchemaChangePlan:
+        """Prepare a distributed copy with a private temporary table and guaranteed cleanup.
+
+        CREATE never replaces an existing table. Cleanup is entered only after the
+        temporary table was successfully created, and completes before a failed or
+        cancelled copy returns. The generated name belongs to this plan alone.
+        """
         client = self.editor.client
         options = ClickhouseTableOptions.get_for_model(model, client.dialect)
+        if options.get_engine_name() == CLICKHOUSE_DISTRIBUTED_ENGINE_NAME:
+            # The replacement routes to existing storage; copying would insert its rows again.
+            return SchemaChangePlan(())
         if options.distributed_over is None or client.cluster is None:
-            await super().copy_table_rows(model, new_table_name, old_table_name, column_mapping)
-            return
-        meta = model._meta
-        distributed_copy_name = f"new__{meta.db_table}"
-        distributed_copy_sql = self.editor.qualify_table_name(distributed_copy_name, meta.schema)
-        await self.editor.run_sql(
-            CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE.format(
-                or_replace="OR REPLACE ",
+            copy_plan = super().get_copy_plan(model, new_table_name, source_sql, columns)
+        else:
+            meta = model._meta
+            distributed_copy_name = Identifiers.get_within_limit(f"{meta.db_table} copy {uuid4().hex}")
+            distributed_copy_sql = self.editor.get_schema_table_sql(distributed_copy_name, meta.schema)
+            create_sql = CLICKHOUSE_DISTRIBUTED_TABLE_TEMPLATE.format(
+                or_replace="",
                 exists="",
                 table=distributed_copy_sql,
                 local_table=self.editor.qualify_table_name(new_table_name, meta.schema),
                 engine=options.get_distributed_engine_sql(model, self.editor, client.cluster.name, new_table_name),
             )
+            copy_plan = SchemaChangePlan(
+                (
+                    SchemaStatement(create_sql),
+                    SchemaCleanup(
+                        super().get_copy_plan(model, distributed_copy_name, source_sql, columns),
+                        SchemaChangePlan((SchemaStatement(f"DROP TABLE {distributed_copy_sql}"),)),
+                    ),
+                )
+            )
+        return copy_plan
+
+    def get_staging_plan(
+        self,
+        model: type[Model],
+        rebuilt_table_name: str,
+        preparation: SchemaChangePlan,
+    ) -> SchemaChangePlan:
+        """Release the acquired staging table if its setup or row copy fails.
+
+        This boundary ends before dependencies are dropped or names exchanged, so
+        cleanup never guesses which table a failed exchange left under each name.
+        """
+        replacement_sql = self.editor.get_schema_table_sql(rebuilt_table_name, model._meta.schema)
+        return SchemaChangePlan(
+            (
+                SchemaCleanup(
+                    preparation,
+                    SchemaChangePlan((SchemaStatement(f"DROP TABLE {replacement_sql}"),)),
+                    release_on_success=False,
+                ),
+            )
         )
-        await super().copy_table_rows(model, distributed_copy_name, meta.db_table, column_mapping)
-        await self.editor.run_sql(f"DROP TABLE {distributed_copy_sql}")

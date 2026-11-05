@@ -7,7 +7,6 @@ import asyncio
 import os
 import shutil
 import sqlite3
-import traceback
 from contextlib import closing
 from pathlib import Path
 
@@ -16,10 +15,12 @@ import pytest
 from hare.contrib.test import requires_features
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.connections.connections import Connections
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import DBConnectionError
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
+from tests.utils.connection_acquisition_gate import ConnectionAcquisitionGate
 
 
 @pytest.mark.sqlite_only
@@ -74,25 +75,13 @@ async def test_queries_running_through_a_reconnect_all_finish(db_isolated):
     """A query that had no connection yet when the pool closed failed - "pool is closing" with
     asyncpg, "Pool has been closed" with rust_pg - instead of running on the new pool."""
     await Tournament.objects.create(id=1, name="Spring")
-    stop = asyncio.Event()
-    errors: list[BaseException] = []
 
-    async def query_until_stopped() -> None:
-        while not stop.is_set():
-            try:
-                await Tournament.objects.count()
-            except Exception as error:  # noqa: BLE001 - every failure is reported
-                errors.append(error)
-            await asyncio.sleep(0)
+    async def count(worker: int) -> int:
+        return await Tournament.objects.count()
 
-    workers = [asyncio.create_task(query_until_stopped()) for _ in range(8)]
-    await asyncio.sleep(0.1)
-    for _ in range(5):
-        await Connections.reconnect()
-        await asyncio.sleep(0.02)
-    stop.set()
-    await asyncio.gather(*workers)
-    assert errors == [], "\n".join("".join(traceback.format_exception(error)) for error in errors)
+    for _ in range(3):
+        gate = ConnectionAcquisitionGate()
+        assert await gate.run(Connections.get("models"), count, Connections.reconnect) == [1] * gate.workers
 
 
 @requires_features(dialect="postgresql")
@@ -124,28 +113,23 @@ async def test_queries_running_through_a_repeated_init_all_finish(db_isolated):
             "connections": {"models": context.connections.db_config["models"]},
             "apps": {"models": {"models": ["tests.shared_models.testmodels"], "default_connection": "models"}},
         }
-        stop = asyncio.Event()
-        errors: list[BaseException] = []
 
-        async def write_until_stopped() -> None:
-            while not stop.is_set():
-                try:
-                    tournament = await Tournament.objects.create(name="written")
-                    await Tournament.objects.filter(id=tournament.id).count()
-                except Exception as error:  # noqa: BLE001 - every failure is reported
-                    errors.append(error)
-                await asyncio.sleep(0)
+        async def write(worker: int) -> int:
+            tournament = await Tournament.objects.create(name=f"worker-{worker}")
+            assert await Tournament.objects.filter(id=tournament.id).count() == 1
+            return tournament.id
 
-        workers = [asyncio.create_task(write_until_stopped()) for _ in range(16)]
-        await asyncio.sleep(0.1)
-        clients = [context.connections.get("models")]
-        for _ in range(20):
+        async def reinitialize() -> None:
             await context.init(config)
+
+        clients = [context.connections.get("models")]
+        written: list[int] = []
+        for _ in range(3):
+            await Tournament.objects.count()
+            written.extend(await ConnectionAcquisitionGate().run(clients[-1], write, reinitialize))
             clients.append(context.connections.get("models"))
-            await asyncio.sleep(0.005)
-        stop.set()
-        await asyncio.gather(*workers)
-        assert errors == [], "\n".join("".join(traceback.format_exception(error)) for error in errors)
+        assert set(await Tournament.objects.values_list("id", flat=True)) == set(written)
+        assert len(set(written)) == len(written)
         # A query taking a connection of a pool closing meanwhile listed the closed client as a pool
         # failing to open - the pool metrics went on counting it.
         registered = {id(client) for client in PoolRegistry.get_clients()}
@@ -162,26 +146,20 @@ async def test_queries_running_through_a_reconnect_of_a_sqlite_file_all_finish(t
         db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.sqlite3'}?synchronous=OFF",
         connection_label="models",
     ):
-        stop = asyncio.Event()
-        errors: list[BaseException] = []
 
-        async def write_until_stopped() -> None:
-            while not stop.is_set():
-                try:
-                    tournament = await Tournament.objects.create(name="written")
-                    await Tournament.objects.filter(id=tournament.id).count()
-                except Exception as error:  # noqa: BLE001 - every failure is reported
-                    errors.append(error)
-                await asyncio.sleep(0)
+        async def write(worker: int) -> int:
+            tournament = await Tournament.objects.create(name=f"worker-{worker}")
+            assert await Tournament.objects.filter(id=tournament.id).count() == 1
+            return tournament.id
 
-        workers = [asyncio.create_task(write_until_stopped()) for _ in range(16)]
-        await asyncio.sleep(0.1)
-        for _ in range(20):
-            await Connections.reconnect()
-            await asyncio.sleep(0.005)
-        stop.set()
-        await asyncio.gather(*workers)
-        assert errors == [], "\n".join("".join(traceback.format_exception(error)) for error in errors)
+        written: list[int] = []
+        for _ in range(3):
+            await Tournament.objects.count()
+            written.extend(
+                await ConnectionAcquisitionGate().run(Connections.get("models"), write, Connections.reconnect)
+            )
+        assert set(await Tournament.objects.values_list("id", flat=True)) == set(written)
+        assert len(set(written)) == len(written)
 
 
 @requires_features(dialect="postgresql")
@@ -194,11 +172,13 @@ async def test_a_pool_opened_while_a_close_waits_keeps_its_settings(db_isolated,
     client_type = type(client)
     close_tenant_clients = client_type.close_tenant_clients
     create_pool_with_retry = client_type._create_pool_with_retry
+    close_entered = asyncio.Event()
     close_may_go_on = asyncio.Event()
     pool_may_open = asyncio.Event()
     pool_opening = asyncio.Event()
 
     async def close_tenant_clients_when_let(self):
+        close_entered.set()
         await close_may_go_on.wait()
         await close_tenant_clients(self)
 
@@ -209,45 +189,48 @@ async def test_a_pool_opened_while_a_close_waits_keeps_its_settings(db_isolated,
 
     monkeypatch.setattr(client_type, "close_tenant_clients", close_tenant_clients_when_let)
     monkeypatch.setattr(client_type, "_create_pool_with_retry", create_pool_when_let)
-    closing = asyncio.ensure_future(client.close())
-    await asyncio.sleep(0)
-    counting = asyncio.ensure_future(Tournament.objects.count())
-    await pool_opening.wait()
-    close_may_go_on.set()
-    await closing
-    pool_may_open.set()
-    assert await counting == 0
+    tasks = [asyncio.create_task(client.close())]
+    try:
+        async with asyncio.timeout(30):
+            await close_entered.wait()
+            counting = asyncio.ensure_future(Tournament.objects.count())
+            tasks.append(counting)
+            await pool_opening.wait()
+            close_may_go_on.set()
+            await tasks[0]
+            pool_may_open.set()
+            assert await counting == 0
+    finally:
+        close_may_go_on.set()
+        pool_may_open.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await ResourceCompletion.wait(asyncio.gather(*tasks, return_exceptions=True))
     monkeypatch.undo()
     assert await Tournament.objects.count() == 0
 
 
-async def run_transactions_through_reconnects() -> list[BaseException]:
-    """Transactions and a stream inside one, in other tasks, while the connections reconnect - the errors."""
-    stop = asyncio.Event()
-    errors: list[BaseException] = []
+async def run_transactions_through_reconnects() -> None:
+    """Reopen connections while transactions are waiting to acquire them, then verify committed rows."""
 
-    async def transactions_until_stopped(worker: int) -> None:
-        number = 0
-        while not stop.is_set():
-            number += 1
-            try:
-                async with Transactions.atomic():
-                    tournament = await Tournament.objects.create(name=f"w{worker}-{number}")
-                    await Tournament.objects.filter(id=tournament.id).update(desc="written")
-                    async for _ in Tournament.objects.filter(id=tournament.id).stream(chunk_size=1):
-                        await asyncio.sleep(0)
-            except Exception as error:  # noqa: BLE001 - every failure is reported
-                errors.append(error)
-            await asyncio.sleep(0)
+    async def transact(worker: int) -> int:
+        async with Transactions.atomic():
+            tournament = await Tournament.objects.create(name=f"worker-{worker}")
+            await Tournament.objects.filter(id=tournament.id).update(desc="written")
+            rows = [obj async for obj in Tournament.objects.filter(id=tournament.id).stream(chunk_size=1)]
+            assert [(obj.id, obj.desc) for obj in rows] == [(tournament.id, "written")]
+        return tournament.id
 
-    workers = [asyncio.create_task(transactions_until_stopped(worker)) for worker in range(6)]
-    await asyncio.sleep(0.05)
-    for _ in range(10):
-        await Connections.reconnect()
-        await asyncio.sleep(0.02)
-    stop.set()
-    await asyncio.gather(*workers)
-    return errors
+    written: list[int] = []
+    for _ in range(3):
+        await Tournament.objects.count()
+        written.extend(
+            await ConnectionAcquisitionGate().run(Connections.get("models"), transact, Connections.reconnect)
+        )
+    assert set(await Tournament.objects.values_list("id", flat=True)) == set(written)
+    assert len(set(written)) == len(written)
+    assert await Tournament.objects.filter(desc="written").count() == len(written)
 
 
 @requires_features(dialect="postgresql")
@@ -255,8 +238,7 @@ async def run_transactions_through_reconnects() -> list[BaseException]:
 async def test_transactions_running_through_a_reconnect_all_finish(db_isolated):
     """asyncpg handed a transaction waiting for a connection one of the closing pool, which closed it under
     the transaction ("the underlying connection is closed", "unknown protocol state")."""
-    errors = await run_transactions_through_reconnects()
-    assert errors == [], "\n".join("".join(traceback.format_exception(error)) for error in errors)
+    await run_transactions_through_reconnects()
 
 
 @pytest.mark.sqlite_only
@@ -269,5 +251,4 @@ async def test_transactions_running_through_a_reconnect_of_a_sqlite_file_all_fin
         db_url=f"sqlite+aiosqlite:///{tmp_path / 'live.sqlite3'}?synchronous=OFF",
         connection_label="models",
     ):
-        errors = await run_transactions_through_reconnects()
-        assert errors == [], "\n".join("".join(traceback.format_exception(error)) for error in errors)
+        await run_transactions_through_reconnects()

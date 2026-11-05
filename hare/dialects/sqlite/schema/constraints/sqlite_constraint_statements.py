@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.dialects.base.schema.constraints.constraint_statements import ConstraintStatements
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -22,11 +23,11 @@ class SqliteConstraintStatements(ConstraintStatements):
         # index of its name.
         return None
 
-    async def add_unique_constraint_using_index(
+    def get_unique_constraint_using_index_plan(
         self, model: type[Model], constraint: UniqueConstraint, index_name: str
-    ) -> None:
+    ) -> SchemaChangePlan:
         # A SQLite unique constraint is a unique index of its own name - an index of that name
         # already is the constraint.
         if index_name == constraint.name:
-            return
-        await super().add_unique_constraint_using_index(model, constraint, index_name)
+            return SchemaChangePlan(())
+        return super().get_unique_constraint_using_index_plan(model, constraint, index_name)

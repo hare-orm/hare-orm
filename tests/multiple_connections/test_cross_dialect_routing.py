@@ -10,8 +10,8 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.exceptions import QueryError
 from hare.models import Model
 from hare.query.expressions import Case, Exists, F, OuterReference, Q, Subquery, Value, When
@@ -88,7 +88,7 @@ async def routed_context(request):
             config={
                 "connections": {
                     "lite": "sqlite+aiosqlite://:memory:?install_regexp_functions=True",
-                    "pg": DbUrlConfigGenerator.expand(postgresql_url, testing=True),
+                    "pg": DatabaseConfig.from_url(postgresql_url).config,
                 },
                 "apps": {"cross_dialect": {"models": [MODULE_NAME], "default_connection": default_alias}},
             },

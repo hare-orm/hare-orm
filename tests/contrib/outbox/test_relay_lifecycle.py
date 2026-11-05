@@ -4,10 +4,14 @@ transaction joined."""
 
 import asyncio
 import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
 from hare.contrib.outbox import InProcessWakeup, OutboxRelay
+from hare.contrib.outbox.relay.claimed_batch import ClaimedBatch
 from hare.contrib.test import requires_features
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import DemoOutboxEvent
@@ -17,6 +21,168 @@ from tests.utils.waiting import WAIT_DEADLINE_SECONDS, wait_until
 
 async def no_op_deliver(_event: DemoOutboxEvent) -> None:
     pass
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["subscription", "context", "listener"])
+async def test_outbox_work_and_release_failures_are_both_retained(monkeypatch, boundary):
+    failure, release_failure = RuntimeError("work"), RuntimeError("release")
+    wakeup = InProcessWakeup()
+    relay = OutboxRelay(DemoOutboxEvent, no_op_deliver, wakeup=wakeup)
+
+    if boundary == "subscription":
+        relay._store = SimpleNamespace(
+            client=SimpleNamespace(
+                features=SimpleNamespace(
+                    supports_row_updates=True, supports_returning=True, supports_correlated_subqueries=True
+                )
+            )
+        )
+        monkeypatch.setattr(wakeup, "subscribe", AsyncMock(side_effect=failure))
+        monkeypatch.setattr(wakeup, "unsubscribe", AsyncMock(side_effect=release_failure))
+        operation = relay.start()
+    elif boundary == "context":
+        monkeypatch.setattr(relay, "stop", AsyncMock(side_effect=release_failure))
+        operation = relay.__aexit__(type(failure), failure, None)
+    else:
+
+        async def fail():
+            raise failure
+
+        listener = asyncio.create_task(fail())
+        await asyncio.gather(listener, return_exceptions=True)
+        monkeypatch.setattr(wakeup, "close", AsyncMock(side_effect=release_failure))
+        operation = wakeup._stop_listening(listener)
+    with pytest.raises(BaseExceptionGroup) as captured:
+        await operation
+    assert captured.value.exceptions == (failure, release_failure)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_stop", [False, True])
+async def test_new_subscription_waits_for_the_previous_transport_to_close(monkeypatch, cancel_stop):
+    wakeup = InProcessWakeup()
+    closing, release = asyncio.Event(), asyncio.Event()
+    closed = []
+
+    async def close():
+        closing.set()
+        await release.wait()
+        closed.append(True)
+
+    monkeypatch.setattr(wakeup, "close", close)
+    first, second = lambda topics: None, lambda topics: None
+    await wakeup.subscribe(first, "models")
+    listener = wakeup.listen_task
+    stopping = asyncio.create_task(wakeup.unsubscribe(first))
+    await asyncio.wait_for(closing.wait(), WAIT_DEADLINE_SECONDS)
+    starting = asyncio.create_task(wakeup.subscribe(second, "models"))
+    try:
+        for _ in range(2):
+            if cancel_stop:
+                stopping.cancel()
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+        assert not starting.done()
+        assert wakeup.listen_task is listener
+        assert wakeup.subscriptions == []
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(stopping, starting, return_exceptions=True)
+    assert isinstance(outcomes[0], asyncio.CancelledError) if cancel_stop else outcomes[0] is None
+    assert outcomes[1] is None
+    assert closed == [True]
+    assert wakeup.listen_task is not listener
+    await wakeup.unsubscribe(second)
+    assert closed == [True, True]
+    assert wakeup.listen_task is None
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("through_stop", [False, True])
+async def test_repeated_cancellation_finishes_the_claimed_batch(monkeypatch, through_stop):
+    relay = OutboxRelay(DemoOutboxEvent, no_op_deliver, wakeup=InProcessWakeup())
+    batch = ClaimedBatch(uuid4(), (DemoOutboxEvent(id=uuid4(), topic="book.created", payload={}),))
+    entered, release = asyncio.Event(), asyncio.Event()
+    recorded = []
+
+    async def deliver_and_record(claimed):
+        entered.set()
+        await release.wait()
+        recorded.append(claimed.token)
+
+    monkeypatch.setattr(relay, "claim", AsyncMock(return_value=batch))
+    monkeypatch.setattr(relay, "deliver_and_record", deliver_and_record)
+    close = AsyncMock()
+    monkeypatch.setattr(relay.delivery, "close", close)
+    poll = asyncio.create_task(relay.poll_once())
+    await asyncio.wait_for(entered.wait(), WAIT_DEADLINE_SECONDS)
+    if through_stop:
+        relay.task = poll
+        waiter = asyncio.create_task(relay.stop())
+    else:
+        waiter = poll
+    try:
+        for _ in range(2):
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+            waiter.cancel()
+        checkpoint = asyncio.Event()
+        asyncio.get_running_loop().call_soon(checkpoint.set)
+        await checkpoint.wait()
+        assert not waiter.done()
+        assert recorded == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiter, WAIT_DEADLINE_SECONDS)
+        assert recorded == [batch.token]
+        if through_stop:
+            close.assert_awaited_once()
+            assert relay.task is None
+    finally:
+        release.set()
+        await asyncio.gather(waiter, poll, return_exceptions=True)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsubscribe_fails", [False, True])
+async def test_concurrent_stops_release_each_resource_once(monkeypatch, unsubscribe_fails):
+    wakeup = InProcessWakeup()
+    relay = OutboxRelay(DemoOutboxEvent, no_op_deliver, wakeup=wakeup)
+    entered, release = asyncio.Event(), asyncio.Event()
+    failure = RuntimeError("unsubscribe failed")
+
+    async def unsubscribe(_callback):
+        entered.set()
+        await release.wait()
+        if unsubscribe_fails:
+            raise failure
+
+    unsubscribe_call = AsyncMock(side_effect=unsubscribe)
+    close = AsyncMock()
+    monkeypatch.setattr(wakeup, "unsubscribe", unsubscribe_call)
+    monkeypatch.setattr(relay.delivery, "close", close)
+    relay.task = asyncio.create_task(asyncio.Event().wait())
+    first = asyncio.create_task(relay.stop())
+    second = asyncio.create_task(relay.stop())
+    try:
+        await asyncio.wait_for(entered.wait(), WAIT_DEADLINE_SECONDS)
+        assert not first.done() and not second.done()
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(first, second, return_exceptions=True)
+    assert outcomes == ([failure, failure] if unsubscribe_fails else [None, None])
+    unsubscribe_call.assert_awaited_once_with(relay.on_wakeup)
+    close.assert_awaited_once()
+    assert relay.task is None
+    await relay.stop()
+    close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -5,23 +5,22 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
-from hare.fields.data.json.json_field import JSONField
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.generated_field import GeneratedField
 from hare.query.enums import Lookup
+from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.filters.resolution.filter_kwargs import FilterKwargs
-from hare.query.lookup_info.lookup_paths import LookupPaths
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
+from hare.query.lookup_info.bound_ordering import BoundOrdering
 from hare.query.plans.plan_origins import PlanOrigins
+from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.statements.building.query_joins import QueryJoins
-from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import KEYSET_FIELD_ORDER_CACHE_SIZE
 from hare.sql import Order
-from hare.sql.functions.json.json_sort_key import JsonSortKey
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -37,7 +36,6 @@ class KeysetBounds:
     ordered_fields: ClassVar[Cache[bool]] = Cache(
         max_size=KEYSET_FIELD_ORDER_CACHE_SIZE,
         holds_sql=False,
-        keyed_by_model=False,
         depends_on_other_models=True,
     )
 
@@ -164,34 +162,29 @@ class KeysetBounds:
         Returns:
             The criterion, ``None`` only for an empty ordering.
         """
-        table = query._effective_basetable()
+        context = ExpressionContext(
+            model=query.model,
+            table=query._effective_basetable(),
+            annotations=query._annotations,
+            dialect=query.dialect,
+            connection=query._connection,
+            visibility=query._visibility,
+            select_related_extra_conditions=query._select_related_extra_conditions,
+        )
+        features = query._connection.features if query._connection is not None else query.dialect.features
         criterion: Criterion | None = None
         equalities: list[Criterion] = []
-        last_index = len(cursor_values) - 1
         for index, ((field_name, order), value) in enumerate(
             zip(orderings[: len(cursor_values)], cursor_values, strict=True)
         ):
-            term, joins, field = LookupPaths.get_nested_field(
-                query.model,
-                table,
-                field_name,
-                visibility=query._visibility,
-                select_related_extra_conditions=query._select_related_extra_conditions,
-                dialect=query.dialect,
-                connection=query._connection,
-            )
-            # An ordering across a relation compares a joined column - its JOINs are added to the
-            # query.
-            for join in joins:
+            bound_path = BoundLookupPath.bind(context, ConcreteFieldPaths.get_path(query.model, field_name))
+            for join in bound_path.joins:
                 QueryJoins.join_table(query, join)
-            # A None boundary is not converted: it may come from a LEFT JOIN miss, and the target
-            # field's validation would reject it.
-            db_value = (
-                query.dialect.types.get_read_column_value(field, value, query.model)
-                if field is not None and value is not None
-                else value
-            )
-            nulls_first = QueryOrdering.nulls_sort_first(query, order)
+            ordering = BoundOrdering.bind(context, bound_path.term, bound_path.field, order)
+            field = ordering.field
+            term = ordering.term
+            db_value = ordering.encode_value(value)
+            nulls_first = ordering.nulls_first
             if db_value is None:
                 # A None boundary holds no value - which boundaries are None is part of the plan
                 # key (StatementPlanDescriptions.get_cursor_plan_description()); a value converting to
@@ -208,7 +201,7 @@ class KeysetBounds:
                 equality: Criterion = term.isnull()
             elif (
                 field is not None
-                and not query.dialect.features.compares_nan_as_ordered
+                and not features.compares_nan_as_ordered
                 and isinstance(GeneratedField.get_effective_field(field), FloatField)
             ):
                 comparison, equality = KeysetBounds.get_float_bound(term, value, db_value, order, nulls_first)
@@ -221,48 +214,21 @@ class KeysetBounds:
                         (PlanOrigins.get_value_origin(query, cursor_attribute, index), None)
                     )
             else:
-                if field is not None and isinstance(GeneratedField.get_effective_field(field), JSONField):
-                    term = JsonSortKey(term)
-                    db_value = JsonSortKey(ValueWrapper(db_value))
-                if field is not None and query.dialect.types.has_ordering_key(field):
-                    # Compared as the rows are ordered - by the dialect's key of the value.
-                    ordered_term = query.dialect.types.get_ordering_key(field, term)
-                    ordered_value = query.dialect.types.get_ordering_key(field, ValueWrapper(db_value))
-                    ordinary = ordered_term > ordered_value if order.is_ascending else ordered_term < ordered_value
-                else:
-                    ordinary = term > db_value if order.is_ascending else term < db_value
-                comparison = ordinary if nulls_first else (ordinary | term.isnull())
-                value_equality = term == db_value
-                equality = value_equality
+                boundary_term, wrapper = ordering.get_boundary_term(db_value)
+                ordinary = term > boundary_term if order.is_ascending else term < boundary_term
+                comparison = ordinary if nulls_first else ordinary | term.isnull()
+                equality = term == boundary_term
                 if field is not None and field.sensitive:
-                    # The boundary is the field's value - no log, event or error shows it.
                     FilterKwargs.hide_sensitive_values(comparison)
                     FilterKwargs.hide_sensitive_values(equality)
                 if value_wrapper_references is not None:
-                    # The comparison and the equality hold two separate ValueWrappers of one value -
-                    # both are referenced. A raw ordering column has no field to convert a new value
-                    # by. The last field's equality is in no AND-chain.
-                    comparison_wrapper = ordinary.right
-                    equality_wrapper = value_equality.right if index != last_index else None
-                    if isinstance(comparison_wrapper, JsonSortKey):
-                        comparison_wrapper = comparison_wrapper.args[0]
-                    if isinstance(equality_wrapper, JsonSortKey):
-                        equality_wrapper = equality_wrapper.args[0]
-                    if (
-                        field is not None
-                        and isinstance(comparison_wrapper, ValueWrapper)
-                        and (equality_wrapper is None or isinstance(equality_wrapper, ValueWrapper))
-                    ):
-                        value_wrapper_references.append(
-                            (
-                                PlanOrigins.get_value_origin(query, cursor_attribute, index),
-                                CursorValueReference(comparison_wrapper, equality_wrapper, field),
-                            )
+                    # One explicit source covers every occurrence in comparison and tie branches.
+                    value_wrapper_references.append(
+                        (
+                            PlanOrigins.get_value_origin(query, cursor_attribute, index),
+                            CursorValueReference(wrapper, field) if field is not None else None,
                         )
-                    else:
-                        value_wrapper_references.append(
-                            (PlanOrigins.get_value_origin(query, cursor_attribute, index), None)
-                        )
+                    )
             step = comparison & Criterion.all(equalities) if equalities else comparison
             criterion = step if criterion is None else criterion | step
             equalities.append(equality)

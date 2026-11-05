@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.migrations.exceptions import IncompatibleStateError
-from hare.migrations.operations.hare_operation import HareOperation
+from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
 
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
-class PartitionOperation(HareOperation):
+class PartitionOperation(ModelBoundOperation):
     """Adds or removes one partition of a model's table - a partition of the model's
     ``Meta.table_options`` entry accepting it (``TableOptions.accepts_partition``). On a connection whose
     dialect takes another entry only the state changes.
@@ -24,13 +24,6 @@ class PartitionOperation(HareOperation):
     def __init__(self, model_name: str, partition: Any) -> None:
         self.model_name = model_name
         self.partition = partition
-
-    def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
-        """The partitioned model."""
-        return frozenset({self.get_model_label(self.model_name, app_label)})
-
-    def get_table_model_names(self) -> tuple[str, ...]:
-        return (self.model_name,)
 
     def _set_partition_in_state(self, app_label: str, state: State, *, present: bool) -> None:
         """Adds the partition to, or removes it from, the model's table options in the state.

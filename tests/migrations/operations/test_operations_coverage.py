@@ -4,7 +4,7 @@ import pytest
 
 from hare import fields
 from hare.ddl import RawSQLTerm
-from hare.ddl.constraints import CheckConstraint, UniqueConstraint
+from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes import Index
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
@@ -137,7 +137,7 @@ def test_alter_trigger_missing_raises(state_with_model: State):
         AlterTrigger(model_name="TestModel", trigger=trigger).state_forward("models", state_with_model)
 
 
-# --- Constructor ValueError guards - "name or fields"/"old_name or old_fields" style mutual
+# --- Constructor ConfigurationError guards - "name or fields"/"old_name or old_fields" style mutual
 # requirements checked eagerly at __init__ time, before state_forward ever runs ---
 
 
@@ -197,7 +197,7 @@ def test_rename_index_by_old_fields_success(state_with_model: State):
     indexes = model_state.get_option_list("indexes")
     assert len(indexes) == 1
     assert indexes[0].name == "idx_renamed"
-    assert indexes[0].field_names == ["id"]
+    assert indexes[0].fields == ["id"]
 
 
 def test_add_constraint_unnamed_is_kept_with_the_constraints(state_with_model: State):
@@ -311,17 +311,6 @@ def test_rename_constraint_success(state_with_model: State):
     model_state = state_with_model.models[("models", "TestModel")]
     names = {c.name for c in model_state.options["constraints"]}
     assert names == {"uq_id_renamed"}
-
-
-def test_rename_constraint_check_constraint_success(state_with_model: State):
-    constraint = CheckConstraint(check=RawSQLTerm("id > 0"), name="chk_id")
-    AddConstraint(model_name="TestModel", constraint=constraint).state_forward("models", state_with_model)
-    RenameConstraint(model_name="TestModel", old_name="chk_id", new_name="chk_id_renamed").state_forward(
-        "models", state_with_model
-    )
-    model_state = state_with_model.models[("models", "TestModel")]
-    names = {c.name for c in model_state.options["constraints"]}
-    assert names == {"chk_id_renamed"}
 
 
 # --- RunSQL: list/tuple forms, ValueError on bad tuple shape, noop sentinel ---

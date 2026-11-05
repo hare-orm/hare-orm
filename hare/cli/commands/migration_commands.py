@@ -122,7 +122,7 @@ class MigrationCommands:
                 name=name,
                 rename_questions=rename_questions,
             )
-        except (ConfigurationError, *MIGRATION_GRAPH_ERRORS) as error:
+        except MIGRATION_GRAPH_ERRORS as error:
             raise CLIError(str(error)) from None
         MigrationCommands.print_change_warnings(changes)
         if not changes.writers:
@@ -214,7 +214,7 @@ class MigrationCommands:
             )
         except UnknownMigrationError as error:
             raise CLIUsageError(str(error)) from None
-        except (ConfigurationError, *MIGRATION_GRAPH_ERRORS) as error:
+        except MIGRATION_GRAPH_ERRORS as error:
             raise CLIError(str(error)) from None
         writer = squashed.writer
         if writer is None:
@@ -254,11 +254,10 @@ class MigrationCommands:
         ``hare.migrations.api.checkmigrations()``. Exits with 1 when a risk isn't exempted."""
         hare_config = CommandContext.load_config(cli_context)
         MigrationCommands.raise_for_unknown_app_labels(hare_config, app_labels)
-        config_dict = hare_config.to_dict()
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict):
+        async with CommandContext.database_error_boundary():
             try:
-                risks = await checkmigrations_api(config=config_dict, app_labels=list(app_labels) or None)
-            except (ConfigurationError, *MIGRATION_GRAPH_ERRORS) as error:
+                risks = await checkmigrations_api(config=hare_config, app_labels=list(app_labels) or None)
+            except MIGRATION_GRAPH_ERRORS as error:
                 raise CLIError(str(error)) from None
         if not risks:
             print(f"{TerminalColors.DIM}No risky operations in the migrations to apply{TerminalColors.RESET}")
@@ -320,28 +319,19 @@ class MigrationCommands:
         return app_label, migration
 
     @staticmethod
-    async def _run_migrate(
+    async def migrate(
         cli_context: CLIContext,
         app_label: str | None,
         migration: str | None,
-        *,
         fake: bool,
         dry_run: bool,
         lock_timeout: float | None = None,
     ) -> None:
+        """Apply the requested migration target with the CLI's error and progress reporting."""
         hare_config = CommandContext.load_config(cli_context)
-        # get_apps_with_existing_modules() finds each app's "migrations" module below - without it an
-        # app would seem to have none.
-        apps_config = CommandContext.select_apps(hare_config, None)
-        apps_dict = MigrationCommands.get_apps_with_existing_modules(
-            {label: app.to_dict() for label, app in apps_config.items()}
-        )
-        config_dict = hare_config.to_dict()
-        config_dict["apps"] = apps_dict
-
         target: str | None = None
         app_label, migration = MigrationCommands._split_dotted_app_label(app_label, migration)
-        if app_label is not None and app_label not in apps_config:
+        if app_label is not None and app_label not in hare_config.apps:
             raise CLIUsageError(f"Unknown app label {app_label}")
         if app_label and not migration:
             target = f"{app_label}.{LATEST_MIGRATION}"
@@ -354,11 +344,11 @@ class MigrationCommands:
         except QueryError as error:
             raise CLIUsageError(str(error)) from None
 
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict):
+        async with CommandContext.database_error_boundary():
             try:
                 try:
                     await migrate_api(
-                        config=config_dict,
+                        config=hare_config,
                         app_labels=None,
                         target=target,
                         fake=fake,
@@ -389,19 +379,6 @@ class MigrationCommands:
                 raise CLIError(str(error)) from error
 
     @staticmethod
-    async def migrate(
-        cli_context: CLIContext,
-        app_label: str | None,
-        migration: str | None,
-        fake: bool,
-        dry_run: bool,
-        lock_timeout: float | None = None,
-    ) -> None:
-        await MigrationCommands._run_migrate(
-            cli_context, app_label, migration, fake=fake, dry_run=dry_run, lock_timeout=lock_timeout
-        )
-
-    @staticmethod
     async def history(cli_context: CLIContext, app_labels: tuple[str, ...]) -> None:
         """`hare history` - prints the migrations applied on each connection, by app.
 
@@ -416,9 +393,7 @@ class MigrationCommands:
 
         # Every configured app is initialized, not just the selected ones - a selected app's
         # relations can point at models of an unselected app.
-        config_dict = hare_config.to_dict()
-
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict):
+        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config):
             for connection_alias, subset in apps_by_connection.items():
                 recorder = MigrationRecorder(Connections.get(connection_alias))
                 applied = await recorder.applied_migrations()
@@ -449,7 +424,7 @@ class MigrationCommands:
         loader = MigrationLoader(full_apps_dict, NoopRecorder())
         # Hare is initialized without connecting - a migration file naming a swappable model reads its
         # setting as it is imported.
-        async with CommandContext.hare_cli_context(hare_config.to_dict(), connect=False):
+        async with CommandContext.hare_cli_context(hare_config, connect=False):
             try:
                 await loader.build_graph()
             except MIGRATION_GRAPH_ERRORS as error:
@@ -487,21 +462,12 @@ class MigrationCommands:
                 raise CLIUsageError(f"app_label is required. Available app labels: {available}")
             raise CLIUsageError(f"migration_name is required. Usage: sqlmigrate {app_label} <migration_name>")
 
-        # get_apps_with_existing_modules() finds the "migrations" module of every app that didn't set
-        # one - without it, sqlmigrate fails with "Cannot find migration" for a
-        # migration that genuinely exists on disk.
-        apps_config = CommandContext.select_apps(config, None)
-        if app_label not in apps_config:
+        if app_label not in config.apps:
             raise CLIUsageError(f"Unknown app label {app_label}")
-        apps_dict = MigrationCommands.get_apps_with_existing_modules(
-            {label: app.to_dict() for label, app in apps_config.items()}
-        )
-        config_dict = config.to_dict()
-        config_dict["apps"] = apps_dict
 
         try:
             statements = await sqlmigrate_api(
-                config=config_dict,
+                config=config,
                 app_label=app_label,
                 migration_name=migration_name,
                 backward=backward,
@@ -516,11 +482,8 @@ class MigrationCommands:
             print(f"{TerminalColors.DIM}-- (no SQL statements){TerminalColors.RESET}")
             return
 
-        # sqlmigrate already wraps an atomic migration in the dialect's own transaction statements.
-        transactions = Connections.get(apps_dict[app_label].get("default_connection", "default")).dialect.transactions
-        transaction_statements = (f"{transactions.get_begin_sql()};", f"{transactions.get_commit_sql()};")
         for statement in statements:
-            if statement.startswith("--") or statement in transaction_statements:
+            if statement.startswith("--"):
                 print(f"{TerminalColors.DIM}{statement}{TerminalColors.RESET}")
             else:
                 if not statement.rstrip().endswith(";"):

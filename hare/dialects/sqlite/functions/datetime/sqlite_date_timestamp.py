@@ -43,6 +43,6 @@ class SqliteDateTimestamp:
         get_start_text: Any = cls.get_start_text
         if native_functions is not None:
             get_start_text = native_functions.DateTimestamp(
-                Timezone.parse, Timezone.ZONES.get_owner_bucket(cls), cls.get_start_text
+                Timezone.parse, Timezone.ZONES.get_bucket(cls), cls.get_start_text
             ).get_start_text
         await connection.create_function(SQLITE_DATE_TIMESTAMP_FUNCTION_NAME, 2, get_start_text, deterministic=True)

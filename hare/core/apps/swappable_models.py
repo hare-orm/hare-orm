@@ -32,18 +32,10 @@ class SwappableModels:
         for setting, value in apps.swappable_settings.items():
             if isinstance(value, dict):
                 for label in value.values():
-                    SwappableModels.check_swappable_target(apps, setting, label)
+                    SwappableModels.get_swappable_target(apps, setting, label)
                 continue
             label = value
-            app_label, model_name = label.split(".", 1)
-            target_model = apps.apps.get(app_label, {}).get(model_name)
-            if target_model is None:
-                reason = (
-                    "it is an abstract model (Meta.abstract = True)"
-                    if SwappableModels.is_abstract_model_of_app(apps, app_label, model_name)
-                    else f'app "{app_label}" has no such model'
-                )
-                raise ConfigurationError(f"Swappable setting {setting!r} points at {label!r}, but {reason}")
+            target_model = SwappableModels.get_swappable_target(apps, setting, label)
             target_setting = target_model._meta.swappable
             if target_setting is not None and target_setting != setting:
                 target_label = apps.swappable_settings.get(target_setting, label)
@@ -54,25 +46,30 @@ class SwappableModels:
                     )
 
     @staticmethod
-    def check_swappable_target(apps: Apps, setting: str, label: str) -> None:
-        """Checks a target of a ``swappable`` setting naming the targets of a generic foreign key.
+    def get_swappable_target(apps: Apps, setting: str, label: str) -> type[Model]:
+        """Finds the registered concrete model of a scalar or generic ``swappable`` setting.
 
         Args:
             apps: The registry.
             setting: The setting name.
             label: The ``"app_label.ModelName"`` label of a target.
 
+        Returns:
+            The registered target model.
+
         Raises:
             ConfigurationError: The model isn't registered, or is abstract.
         """
         app_label, model_name = label.split(".", 1)
-        if apps.apps.get(app_label, {}).get(model_name) is None:
+        target_model = apps.apps.get(app_label, {}).get(model_name)
+        if target_model is None:
             reason = (
                 "it is an abstract model (Meta.abstract = True)"
                 if SwappableModels.is_abstract_model_of_app(apps, app_label, model_name)
                 else f'app "{app_label}" has no such model'
             )
             raise ConfigurationError(f"Swappable setting {setting!r} points at {label!r}, but {reason}")
+        return target_model
 
     @staticmethod
     def get_swappable_targets(apps: Apps) -> dict[str, dict[str, str]]:

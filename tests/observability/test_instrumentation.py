@@ -12,7 +12,6 @@ from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
 from hare.instrumentation.declarations import QueryExecuted
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
 from hare.instrumentation.observers.observers import Observers
 
 
@@ -21,12 +20,14 @@ def _clear_observers():
     """The process observers and the kept errors of background observers are process-wide state -
     a test that leaves an observer or an unread error behind would leak it into later tests."""
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
-    ObserverDispatch.dropped_error_count = 0
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
+        dispatcher.dropped_error_count = 0
     yield
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
-    ObserverDispatch.dropped_error_count = 0
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
+        dispatcher.dropped_error_count = 0
 
 
 def notify_query(sql: str, params: list | None = None) -> None:
@@ -336,7 +337,7 @@ async def test_queries_an_observer_runs_itself_report_no_events():
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_kept_observer_errors_are_bounded_and_counted(monkeypatch):
-    monkeypatch.setattr(ObserverDispatch, "pending_errors", deque(maxlen=3))
+    monkeypatch.setattr(Observers.get_dispatcher(), "pending_errors", deque(maxlen=3))
 
     async def bad_observer(event):
         raise RuntimeError(event.sql)
@@ -344,13 +345,13 @@ async def test_kept_observer_errors_are_bounded_and_counted(monkeypatch):
     Observers.observe(QueryExecuted, bad_observer)
     for index in range(5):
         notify_query(f"SELECT {index}")
-        await asyncio.wait(list(ObserverDispatch.pending_tasks))
+        await asyncio.wait(list(Observers.get_dispatcher().pending_tasks))
 
-    assert [str(error) for error in ObserverDispatch.pending_errors] == ["SELECT 2", "SELECT 3", "SELECT 4"]
+    assert [str(error) for error in Observers.get_dispatcher().pending_errors] == ["SELECT 2", "SELECT 3", "SELECT 4"]
     with pytest.raises(ExceptionGroup, match="2 older failures") as excinfo:
         await Observers.wait_for_pending()
     assert len(excinfo.value.exceptions) == 3
-    assert ObserverDispatch.dropped_error_count == 0
+    assert Observers.get_dispatcher().dropped_error_count == 0
     await Observers.wait_for_pending()
 
 
@@ -369,7 +370,7 @@ async def test_kept_observer_error_does_not_keep_the_observer_locals_alive():
 
     Observers.observe(QueryExecuted, bad_observer)
     notify_query("SELECT 1", ["large parameter"])
-    await asyncio.wait(list(ObserverDispatch.pending_tasks))
+    await asyncio.wait(list(Observers.get_dispatcher().pending_tasks))
     gc.collect()
 
     assert payload_references[0]() is None
@@ -380,7 +381,7 @@ async def test_kept_observer_error_does_not_keep_the_observer_locals_alive():
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_dispatches_past_the_backlog_limit_are_dropped_with_a_warning(monkeypatch, caplog):
-    monkeypatch.setattr("hare.instrumentation.observers.observer_dispatch.MAX_PENDING_OBSERVER_DISPATCHES", 3)
+    monkeypatch.setattr("hare.instrumentation.observers.observer_dispatcher.MAX_PENDING_OBSERVER_DISPATCHES", 3)
     release = asyncio.Event()
     calls = []
 
@@ -392,7 +393,7 @@ async def test_dispatches_past_the_backlog_limit_are_dropped_with_a_warning(monk
     with caplog.at_level("WARNING", logger="hare"):
         for index in range(5):
             notify_query(f"SELECT {index}")
-        assert len(ObserverDispatch.pending_tasks) == 3
+        assert len(Observers.get_dispatcher().pending_tasks) == 3
         release.set()
         await Observers.wait_for_pending()
         notify_query("SELECT after")
@@ -423,7 +424,7 @@ async def test_wait_for_pending_cancels_a_stuck_observer_after_the_timeout(caplo
         await asyncio.wait_for(Observers.wait_for_pending(timeout_seconds=0.1), 5)
 
     assert cancelled == ["SELECT 1"]
-    assert ObserverDispatch.pending_tasks == set()
+    assert Observers.get_dispatcher().pending_tasks == set()
     assert any("still running after" in message for message in caplog.messages)
 
 
@@ -441,9 +442,10 @@ async def test_close_connections_does_not_wait_forever_for_a_stuck_observer(monk
         )
         Observers.observe(QueryExecuted, stuck_observer)
         notify_query("SELECT 1")
+        dispatcher = Observers.get_dispatcher()
         await asyncio.wait_for(Hare.close_connections(), 5)
 
-    assert ObserverDispatch.pending_tasks == set()
+    assert dispatcher.pending_tasks == set()
 
 
 @pytest.mark.database_independent

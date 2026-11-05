@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class ComputedFieldSchemas:
-    """The fields a model's properties and methods named in PydanticMeta.computed get in the pydantic
+    """The fields a model's properties and methods named in Meta.pydantic.computed get in the pydantic
     model, typed by their return annotations."""
 
     @staticmethod

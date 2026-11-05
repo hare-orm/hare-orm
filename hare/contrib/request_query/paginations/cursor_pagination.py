@@ -26,8 +26,9 @@ from hare.contrib.request_query.paginations.pagination import Pagination
 @dataclasses.dataclass(frozen=True, slots=True)
 class CursorPagination(Pagination):
     """Pages by a cursor - the ordering values of the row a page starts after or ends before -
-    instead of an offset: a page costs the same wherever it is, and rows added or removed between
-    requests don't shift the pages. The page is a ``CursorPage``; there is no total count.
+    instead of skipping preceding rows with OFFSET. Cost depends on filters, ordering and indexes.
+    Insertions or deletions before the boundary do not shift it. The page is a ``CursorPage``;
+    there is no total count.
 
     The ordering must read only the model's own fields and forward relations: no annotation, no
     path inside a field's value (a JSON key), no relation to many rows; the model needs a primary key to

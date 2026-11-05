@@ -6,9 +6,9 @@ import contextvars
 import errno
 import os
 import sqlite3
-from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from typing import Any, ClassVar, TypeVar, cast
+from typing import Any, ClassVar, cast
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.declarations import ShellCommand
@@ -51,6 +51,7 @@ from hare.dialects.sqlite.constants import (
 from hare.dialects.sqlite.enums import SpatialiteMetadata
 from hare.dialects.sqlite.exceptions import SqliteTriggerRecursionLimitError
 from hare.dialects.sqlite.functions.sqlite_function_errors import SqliteFunctionErrors
+from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqliteParameterAdapters
 from hare.dialects.sqlite.query.declarations import SqliteQuery
 from hare.dialects.sqlite.spatial.sqlite_spatial_extension import SqliteSpatialExtension
 from hare.dialects.sqlite.vectors.sqlite_vector_extension import SqliteVectorExtension
@@ -67,17 +68,14 @@ from hare.exceptions import (
 )
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 
-T = TypeVar("T")
-
-
-CoroutineFunction = Callable[..., Coroutine[None, None, T]]
-
 
 class SqliteClient(DatabaseClient):
     """What every SQLite driver shares: the connection's settings and PRAGMAs, its one connection
     taken like a pool's, the database file, scripts split into statements and the translation of a
     driver's errors into hare's. A driver (``hare.dialects.sqlite.drivers``) opens the connection,
     runs the statements and names its exception classes (``driver_errors``)."""
+
+    parameter_adapters: SqliteParameterAdapters
 
     native_python_types = frozenset({bytes, str, int, float})
     query_class = SqliteQuery
@@ -112,7 +110,9 @@ class SqliteClient(DatabaseClient):
         """
         return dict(zip(row.keys(), row, strict=True))
 
-    async def execute_dicts(self, query: str, values: list[Any] | None = None) -> list[dict[str, Any]]:
+    async def execute_dicts(
+        self, query: str, values: list[Any] | None = None, *, retry_read: bool = False
+    ) -> list[dict[str, Any]]:
         """Reads dictionaries from positional rows, preserving case-distinct output names.
 
         The cursor supplies the names once for the batch. Reading plain tuples avoids building
@@ -121,25 +121,44 @@ class SqliteClient(DatabaseClient):
         Args:
             query: The SQL statement.
             values: Its bound parameters.
+            retry_read: Permit retry of an explicitly safe read, as in ``execute()``; False by default.
 
         Returns:
             The rows keyed by their exact output names.
         """
-        result = await self.execute(query, values, returns_rows=True, rows_by_position=True)
+        result = await self.execute(query, values, returns_rows=True, rows_by_position=True, retry_read=retry_read)
         columns = result.column_names
         return [dict(zip(columns, row, strict=True)) for row in result.rows]
+
+    @property
+    def parameter_binding_key(self) -> object:
+        """The adapter snapshot used by statement preparation and execution."""
+        return self.parameter_adapters
+
+    def register_parameter_adapter(self, value_type: type, adapter: Callable[[Any], Any]) -> None:
+        """Replace this client's conversion for an exact Python type.
+
+        Configure adapters before executing queries. Transactions retain the snapshot they
+        started with; replacing a parent client's snapshot affects subsequent executions and
+        prevents reuse of plans prepared with its previous conversions.
+        """
+        self.parameter_adapters = self.parameter_adapters.with_adapter(value_type, adapter)
 
     def enforces_foreign_keys(self) -> bool:
         return super().enforces_foreign_keys() and (
             self.connection_alias not in SqliteClient.foreign_keys_switched_off.get()
         )
 
-    def __init__(self, file_path: str | None = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        if not isinstance(file_path, str) or not file_path:
+    def __init__(
+        self, file_path: str | bytes | os.PathLike[str] | os.PathLike[bytes] | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(file_path=file_path, **kwargs)
+        file_path = None if file_path is None else os.fsdecode(file_path)
+        if not file_path:
             raise ConfigurationError(
                 f"SQLite connection needs a non-empty file_path (a file name or ':memory:'), got {file_path!r}"
             )
+        self.parameter_adapters = SqliteParameterAdapters()
         self.filename = file_path
         #: The message of the last error one of hare's functions raised on the connection.
         self.function_errors = SqliteFunctionErrors()
@@ -219,7 +238,7 @@ class SqliteClient(DatabaseClient):
         """The databases each connection attaches.
 
         Args:
-            raw_value: The setting - ``{name: file}``, or the text ``name:file,name:file`` of a database URL;
+            raw_value: A mapping of names to files, or the text ``name:file,name:file`` of a database URL;
                 None for none.
 
         Returns:
@@ -243,10 +262,6 @@ class SqliteClient(DatabaseClient):
                     f"{SQLITE_ATTACHED_DATABASES_OPTION_NAME}: a database name is given twice in {raw_value!r}"
                 )
             raw_value = {name: file for name, __, file in pairs}
-        if not isinstance(raw_value, dict):
-            raise ConfigurationError(
-                f"{SQLITE_ATTACHED_DATABASES_OPTION_NAME} takes a dict of database names to files, got {raw_value!r}"
-            )
         for name, file in raw_value.items():
             if not isinstance(name, str) or not name or "\x00" in name:
                 raise ConfigurationError(

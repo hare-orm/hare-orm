@@ -4,29 +4,18 @@ use std::fmt::Write as _;
 
 use tokio_postgres::types::{FromSql, Kind as TypeShape, Type};
 
+use crate::pg::decode_context::PgDecodeContext;
 use crate::pg::error::DriverError;
 use crate::pg::types::array::decode_array;
-use crate::pg::types::bit_string::PgBitText;
 use crate::pg::types::composite::decode_composite;
-use crate::pg::types::datetime::time_of_day;
-use crate::pg::types::interval::decode_interval;
-use crate::pg::types::mac_address::decode_macaddr;
-use crate::pg::types::money::decode_money;
-use crate::pg::types::network::decode_network;
-use crate::pg::types::numeric::decode_numeric;
 use crate::pg::types::range::{decode_multirange, decode_range};
-use crate::pg::types::text_search_query::PgTsQueryText;
-use crate::pg::types::text_search_vector::PgTsVectorText;
-use crate::pg::types::time_with_zone::PgTimeTzCell;
 use crate::pg::types::vector::PgVectorCell;
-use crate::pg::value::wire_scalar::WireScalar;
+use crate::pg::value::column_decoder::PgColumnDecoder;
+pub(crate) use crate::pg::value::server_text_forms::ServerTextForms;
 use crate::pg::value::{BoxError, Value};
 
 /// The anonymous `record` pseudo-type (`ROW(...)`).
 pub(crate) const RECORD_OID: u32 = 2249;
-/// How many values one server-side text-conversion query carries (see `ServerTextForms`).
-pub(crate) const SERVER_TEXT_FORMS_PER_QUERY: usize = 10_000;
-
 /// A column's raw wire bytes (`None` for SQL NULL) - `Row` exposes them only through `FromSql`.
 pub(crate) struct RawColumnBytes<'a>(Option<&'a [u8]>);
 
@@ -41,48 +30,6 @@ impl<'a> FromSql<'a> for RawColumnBytes<'a> {
 
     fn accepts(_ty: &Type) -> bool {
         true
-    }
-}
-
-/// Values of types this module has no binary decoder for, converted to their text form by the
-/// server itself. tokio-postgres always requests binary results, so the first decoding pass
-/// (`Collect`) records every such value's type and raw bytes; `fetch_server_text_forms` sends
-/// them back as parameters of that same type cast to text (the type's own output function, what
-/// a text-format result would have carried); the second pass (`Supply`) hands the texts out in
-/// the same order.
-pub(crate) enum ServerTextForms<'a> {
-    Collect(Vec<(Type, &'a [u8])>),
-    Supply(std::vec::IntoIter<String>),
-}
-
-impl<'a> ServerTextForms<'a> {
-    pub(crate) fn collecting() -> Self {
-        ServerTextForms::Collect(Vec::new())
-    }
-
-    pub(crate) fn supplying(texts: Vec<String>) -> Self {
-        ServerTextForms::Supply(texts.into_iter())
-    }
-
-    /// The values the collecting pass needs converted (empty for a supplying one).
-    pub(crate) fn take_requests(&mut self) -> Vec<(Type, &'a [u8])> {
-        match self {
-            ServerTextForms::Collect(requests) => std::mem::take(requests),
-            ServerTextForms::Supply(_) => Vec::new(),
-        }
-    }
-
-    pub(crate) fn text_form(&mut self, postgres_type: &Type, raw: &'a [u8]) -> Result<Value, BoxError> {
-        match self {
-            ServerTextForms::Collect(requests) => {
-                requests.push((postgres_type.clone(), raw));
-                Ok(Value::Null)
-            }
-            ServerTextForms::Supply(texts) => texts
-                .next()
-                .map(Value::Text)
-                .ok_or_else(|| format!("no server text form for a {} value", postgres_type.name()).into()),
-        }
     }
 }
 
@@ -101,83 +48,62 @@ pub(crate) fn get_raw_column(row: &tokio_postgres::Row, index: usize) -> Result<
 
 pub fn decode_pg_row_values<'a>(
     row: &'a tokio_postgres::Row,
+    decoders: &[PgColumnDecoder<'_>],
     forms: &mut ServerTextForms<'a>,
 ) -> Result<Vec<Value>, DriverError> {
-    let columns = row.columns();
-    let mut out = Vec::with_capacity(columns.len());
-    for (index, column) in columns.iter().enumerate() {
-        let postgres_type = column.type_();
-        out.push(match get_raw_column(row, index)? {
-            Some(raw) => decode_value(postgres_type, raw, forms)
-                .map_err(|error| get_decode_error(index, postgres_type, &error))?,
-            None => Value::Null,
-        });
-    }
-    Ok(out)
+    decoders
+        .iter()
+        .enumerate()
+        .map(|(index, decoder)| {
+            decoder
+                .decode(get_raw_column(row, index)?, forms)
+                .map_err(|error| get_decode_error(index, row.columns()[index].type_(), &error))
+        })
+        .collect()
 }
 
-/// Checks that every value of `row` decodes - with the error decoding it would give - without
-/// keeping a decoded value: a common type is read in place, any other decoded and dropped. Only
-/// for a row whose columns need no server text form.
-pub(crate) fn check_pg_row_values(row: &tokio_postgres::Row) -> Result<(), DriverError> {
-    for (index, column) in row.columns().iter().enumerate() {
-        let postgres_type = column.type_();
-        let Some(raw) = get_raw_column(row, index)? else {
-            continue;
-        };
-        let checked = match WireScalar::parse(postgres_type, raw) {
-            Some(scalar) => scalar.map(drop),
-            None => decode_value(postgres_type, raw, &mut ServerTextForms::collecting()).map(drop),
-        };
-        checked.map_err(|error| get_decode_error(index, postgres_type, &error))?;
-    }
-    Ok(())
-}
-
-/// True when a column of type `ty` may need its values converted to text by the server (see
-/// `ServerTextForms`) - an anonymous record may, whatever its fields turn out to be.
-pub(crate) fn type_may_need_server_text_form(postgres_type: &Type) -> bool {
-    if decode_native_scalar(postgres_type, &[]).is_some() {
-        return false;
-    }
-    if postgres_type.oid() == RECORD_OID {
-        return true;
-    }
-    match postgres_type.kind() {
-        TypeShape::Array(inner) | TypeShape::Domain(inner) | TypeShape::Range(inner) | TypeShape::Multirange(inner) => {
-            type_may_need_server_text_form(inner)
-        }
-        TypeShape::Enum(_) => false,
-        TypeShape::Composite(fields) => fields.iter().any(|field| type_may_need_server_text_form(field.type_())),
-        _ => !is_named_native_type(postgres_type),
-    }
-}
-
-/// Extension types (no fixed OID) this module decodes itself, matched by name.
-pub(crate) fn is_named_native_type(postgres_type: &Type) -> bool {
-    matches!(postgres_type.name(), "vector" | "citext" | "geometry" | "geography")
-}
-
+#[cfg(test)]
 pub(crate) fn decode_value<'a>(
     postgres_type: &Type,
     raw: &'a [u8],
     forms: &mut ServerTextForms<'a>,
 ) -> Result<Value, BoxError> {
-    if let Some(value) = decode_native_scalar(postgres_type, raw) {
-        return value;
-    }
+    let mut context = PgDecodeContext::new(raw.len());
+    decode_value_with_context(postgres_type, raw, forms, &mut context)
+}
+
+pub(crate) fn decode_value_with_context<'a>(
+    postgres_type: &Type,
+    raw: &'a [u8],
+    forms: &mut ServerTextForms<'a>,
+    context: &mut PgDecodeContext,
+) -> Result<Value, BoxError> {
+    PgColumnDecoder::new(postgres_type).decode_with_context(raw, forms, context)
+}
+
+pub(super) fn decode_structured_value<'a>(
+    postgres_type: &Type,
+    raw: &'a [u8],
+    forms: &mut ServerTextForms<'a>,
+    context: &mut PgDecodeContext,
+) -> Result<Value, BoxError> {
     if postgres_type.oid() == RECORD_OID {
-        return decode_composite(raw, None, forms);
+        return decode_composite(raw, None, forms, context);
     }
     match postgres_type.kind() {
-        TypeShape::Array(member_type) => decode_array(member_type, raw, forms),
-        TypeShape::Domain(base_type) => decode_value(base_type, raw, forms),
+        TypeShape::Array(member_type) => decode_array(member_type, raw, forms, context),
         TypeShape::Enum(_) => Ok(Value::Text(std::str::from_utf8(raw)?.to_string())),
-        TypeShape::Range(_) => Ok(Value::Range(decode_range(postgres_type, raw, forms)?)),
-        TypeShape::Multirange(subtype) => decode_multirange(subtype, raw, forms),
-        TypeShape::Composite(fields) => decode_composite(raw, Some(fields), forms),
+        TypeShape::Range(_) => Ok(Value::Range(decode_range(postgres_type, raw, forms, context)?)),
+        TypeShape::Multirange(subtype) => decode_multirange(subtype, raw, forms, context),
+        TypeShape::Composite(fields) => decode_composite(raw, Some(fields), forms, context),
         _ => match postgres_type.name() {
-            "vector" => Ok(PgVectorCell::from_sql(postgres_type, raw)?.into_value()),
+            "vector" => {
+                let value = PgVectorCell::from_sql(postgres_type, raw)?.into_value();
+                if let Value::Array(items) = &value {
+                    context.reserve_values(items.len())?;
+                }
+                Ok(value)
+            }
             "citext" => Ok(Value::Text(std::str::from_utf8(raw)?.to_string())),
             // PostGIS's binary form is EWKB; its text form is the same bytes in uppercase hex.
             "geometry" | "geography" => {
@@ -187,50 +113,76 @@ pub(crate) fn decode_value<'a>(
                 }
                 Ok(Value::Text(hex))
             }
-            _ => forms.text_form(postgres_type, raw),
+            _ => Ok(forms.text_form(postgres_type, raw)),
         },
     }
 }
 
-/// Decodes a value of a fixed-OID built-in type this module has its own decoder for; `None` for
-/// any other type. Every decoder answers (`Ok` or `Err`) for any payload, an empty one included -
-/// `type_may_need_server_text_form` relies on that to tell the two apart.
-pub(crate) fn decode_native_scalar(postgres_type: &Type, raw: &[u8]) -> Option<Result<Value, BoxError>> {
-    if let Some(scalar) = WireScalar::parse(postgres_type, raw) {
-        return Some(scalar.map(WireScalar::into_value));
+#[cfg(test)]
+mod nested_wire_tests {
+    use super::*;
+    use crate::pg::types::constants::MAX_DECODE_NESTING;
+
+    fn record(child_oid: u32, child: &[u8]) -> Vec<u8> {
+        let mut raw = 1_i32.to_be_bytes().to_vec();
+        raw.extend_from_slice(&child_oid.to_be_bytes());
+        raw.extend_from_slice(&i32::try_from(child.len()).unwrap().to_be_bytes());
+        raw.extend_from_slice(child);
+        raw
     }
-    let unsigned_32 = |raw: &[u8]| -> Result<Value, BoxError> {
-        let bytes: [u8; 4] =
-            raw.try_into().map_err(|_| format!("invalid {} payload length {}", postgres_type.name(), raw.len()))?;
-        Ok(Value::Int(i64::from(u32::from_be_bytes(bytes))))
-    };
-    Some(match postgres_type.oid() {
-        // bytea, "char" (a single raw byte, returned as bytes like asyncpg).
-        17 | 18 => Ok(Value::Bytes(raw.to_vec())),
-        1700 => decode_numeric(raw),
-        1083 => i64::from_sql(&Type::INT8, raw)
-            .map_err(|_| format!("invalid time payload length {}", raw.len()).into())
-            .and_then(time_of_day)
-            .map(Value::Time),
-        1266 => PgTimeTzCell::from_sql(postgres_type, raw).map(|cell| Value::TimeTz(cell.0, cell.1)),
-        790 => decode_money(raw),
-        1186 => decode_interval(raw).map(Value::Interval),
-        650 | 869 => decode_network(postgres_type, raw).map(Value::Network),
-        829 | 774 => decode_macaddr(raw),
-        1560 | 1562 => PgBitText::from_sql(postgres_type, raw).map(|value| Value::Text(value.0)),
-        3614 => PgTsVectorText::from_sql(postgres_type, raw).map(|value| Value::Text(value.0)),
-        3615 => PgTsQueryText::from_sql(postgres_type, raw).map(|value| Value::Text(value.0)),
-        // oid, xid, cid
-        26 | 28 | 29 => unsigned_32(raw),
-        // xid8
-        5069 => <[u8; 8]>::try_from(raw).map_err(|_| format!("invalid xid8 payload length {}", raw.len()).into()).map(
-            |bytes| {
-                let value = u64::from_be_bytes(bytes);
-                i64::try_from(value).map_or_else(|_| Value::BigInt(value.to_string()), Value::Int)
-            },
-        ),
-        // void
-        2278 => Ok(Value::Null),
-        _ => return None,
-    })
+
+    #[test]
+    fn nested_records_share_the_native_depth_boundary() {
+        let mut raw = 0_i32.to_be_bytes().to_vec();
+        for _ in 0..32 {
+            raw = record(RECORD_OID, &raw);
+        }
+        let value = decode_value(&Type::RECORD, &raw, &mut ServerTextForms::collecting()).unwrap();
+        let mut cursor = &value;
+        for _ in 0..32 {
+            let Value::Composite(children) = cursor else { panic!("expected a record") };
+            assert_eq!(children.len(), 1);
+            cursor = &children[0];
+        }
+        assert!(matches!(cursor, Value::Composite(children) if children.is_empty()));
+        for _ in 32..MAX_DECODE_NESTING {
+            raw = record(RECORD_OID, &raw);
+        }
+        let error = decode_value(&Type::RECORD, &raw, &mut ServerTextForms::collecting()).unwrap_err();
+        assert!(error.to_string().contains("nesting depth"));
+    }
+
+    #[test]
+    fn nested_payloads_must_finish_and_every_truncation_is_an_error() {
+        let inner = record(Type::INT4.oid(), &7_i32.to_be_bytes());
+        let raw = record(RECORD_OID, &inner);
+        for length in 0..raw.len() {
+            assert!(decode_value(&Type::RECORD, &raw[..length], &mut ServerTextForms::collecting()).is_err());
+        }
+        let mut trailing = inner;
+        trailing.push(0);
+        let raw = record(RECORD_OID, &trailing);
+        assert!(decode_value(&Type::RECORD, &raw, &mut ServerTextForms::collecting()).is_err());
+    }
+
+    #[test]
+    fn array_members_share_the_enclosing_record_context() {
+        let mut array = 1_i32.to_be_bytes().to_vec();
+        array.extend_from_slice(&0_i32.to_be_bytes());
+        array.extend_from_slice(&Type::INT4.oid().to_be_bytes());
+        array.extend_from_slice(&2_i32.to_be_bytes());
+        array.extend_from_slice(&1_i32.to_be_bytes());
+        for number in [7_i32, 11] {
+            array.extend_from_slice(&4_i32.to_be_bytes());
+            array.extend_from_slice(&number.to_be_bytes());
+        }
+        let raw = record(Type::INT4_ARRAY.oid(), &array);
+        let value = decode_value(&Type::RECORD, &raw, &mut ServerTextForms::collecting()).unwrap();
+        let Value::Composite(fields) = value else { panic!("expected a record") };
+        let Value::Array(items) = &fields[0] else { panic!("expected an array") };
+        assert!(matches!(items.as_slice(), [Value::Int(7), Value::Int(11)]));
+        array.push(0);
+        let raw = record(Type::INT4_ARRAY.oid(), &array);
+        assert!(decode_value(&Type::RECORD, &raw, &mut ServerTextForms::collecting()).is_err());
+    }
 }

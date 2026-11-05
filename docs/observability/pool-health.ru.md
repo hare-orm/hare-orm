@@ -16,12 +16,13 @@ from hare import Connections
 status = Connections.get("default").get_pool_status()
 status.size, status.idle, status.in_use, status.waiting   # 20, 0, 20, 3
 
-for status in Connections.get_pool_statuses():            # все открытые пулы текущего контекста
+for status in Connections.get_pool_statuses():            # открытые пулы и зарегистрированные ошибки открытия
     print(status.connection_alias, status.role, status.schema, status.in_use, status.waiting)
 ```
 
-`get_pool_status()` возвращает `PoolStatus` (`hare.instrumentation.declarations`) или None, пока пул
-клиента ещё не открыт:
+`get_pool_status()` возвращает `PoolStatus` (`hare.instrumentation.declarations`). None возвращается,
+если пул не открыт и ошибки открытия не зарегистрированы. После неудачного открытия возвращается
+нулевая занятость со счётчиками ошибок, чтобы мониторинг видел недоступное подключение:
 
 | Поле | Что это |
 |---|---|
@@ -49,8 +50,9 @@ for status in Connections.get_pool_statuses():            # все открыт�
 | `DIRECT` | Клиента самого сервера в обход пулера транзакций (`direct_host`, [Пулеры соединений](../connections/connection-poolers.ru.md)). |
 | `INDEPENDENT` | Отдельного клиента — `Transactions.autonomous()`, сессии миграции с тайм-аутом блокировки. |
 
-`Connections.get_pool_statuses(connection_alias=None)` перечисляет все открытые пулы текущего контекста —
-по подключению, роли и схеме. Клиента, чей драйвер не сообщает о пуле (`Features.supports_pool_status`
+`Connections.get_pool_statuses(connection_alias=None)` перечисляет открытые пулы и клиентов с ошибками
+открытия в текущем контексте — по подключению, роли и схеме. Клиента, чей драйвер не сообщает о пуле
+(`Features.supports_pool_status`
 выключен — ClickHouse по HTTP, библиотека которого держит свои соединения при себе, или сторонний
 диалект), в списке нет, а его `get_pool_status()` бросает `UnSupportedError`.
 
@@ -91,7 +93,8 @@ Observers.observe(PoolAcquireTimedOut, lambda event: alert(f"{event.connection_a
 
 ## <a id="opentelemetry-metrics"></a>Метрики OpenTelemetry
 
-`OpenTelemetryInstrumentor` ([OpenTelemetry](opentelemetry.ru.md)) сообщает о каждом открытом пуле
+`OpenTelemetryInstrumentor` ([OpenTelemetry](opentelemetry.ru.md)) сообщает об открытых пулах и
+зарегистрированных ошибках открытия
 процесса. Имена — по семантическим соглашениям OpenTelemetry для клиентов баз данных (их статус пока
 «development»):
 
@@ -115,9 +118,19 @@ Observers.observe(PoolAcquireTimedOut, lambda event: alert(f"{event.connection_a
 
 Пулы с одинаковыми атрибутами (одно подключение в нескольких `HareContext` процесса) суммируются.
 
-Значения читаются при сборе метрик, в потоке экспортёра. Гистограмму нельзя наблюдать, поэтому ожидания и
-подключения, замеренные после прошлого сбора, записываются во время сбора. Каждый пул хранит последние
-4096 длительностей каждого вида для своих читателей; отставший читатель теряет самые старые.
+Текущее заполнение пула читается в потоке экспортёра. Завершённые ожидания и подключения сразу
+попадают в гистограммы; таймауты и ошибки подключения увеличивают счётчики при возникновении.
+Эти инструменты независимы от callback заполнения, в том числе при экспорте только гистограмм.
+Закрытие пула убирает его текущее заполнение, но не вычитает накопленные события. Каждый инструмент
+подписан на время своей работы; stop/start не повторяет старые события и не дублирует подписку.
+
+Health-check отдельно использует ограниченную выборку последних 4096 длительностей.
+`PoolChange.waits` — `SampleWindow`: `start_cursor` и `end_cursor` ограничивают последовательность
+измерений, `values` содержит сохранившиеся длительности, `observations` — число всех измерений
+интервала, `missed` — число перезаписанных. Курсоры читателей независимы. `AcquireWaitTime` сообщает
+о превышении порога, если оно наблюдалось; при потере выборки сообщает, что порог нельзя проверить.
+Пустая полная выборка не свидетельствует о долгом ожидании. Переполнение этого буфера health-check
+не теряет события метрических гистограмм.
 
 ## <a id="health-check"></a>Проверка здоровья
 

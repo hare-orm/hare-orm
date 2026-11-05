@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -48,7 +49,7 @@ class ExplicitPartitioning(Partitioning):
                 raise ConfigurationError(
                     f"{type(self).__name__}: a partition must be a {self.partition_class.__name__}, got {partition!r}"
                 )
-        object.__setattr__(self, "partitions", tuple(sorted(partitions, key=lambda partition: partition.name)))
+        object.__setattr__(self, "partitions", tuple(sorted(partitions, key=attrgetter("name"))))
         if self.default_partition is not None:
             Partitioning.check_partition_name(type(self).__name__, self.default_partition)
 

@@ -11,6 +11,10 @@ Window functions are on [Aggregates, grouping and window functions](aggregation.
 ones on [PostgreSQL functions](../dialects/postgresql/functions.md). A function given more or fewer
 arguments than it takes (`Upper("title", "x")`, `Coalesce("title")`) raises `QueryError` when it is built.
 
+`ArrayAgg` and `ArrayItem` are also exported from `hare.query.functions` for databases with arrays.
+See [array aggregation and element access on PostgreSQL](../dialects/postgresql/functions.md) and
+[array aggregates on ClickHouse](../dialects/clickhouse/aggregates.md). SQLite has no array column type.
+
 ## <a id="aggregates"></a>Aggregates
 
 | Class | SQL | Notes |
@@ -35,7 +39,8 @@ and a column across a relation are counted as they are. A `_filter` reading an a
 
 The population statistic, or the sample one with `sample=True`; `distinct=`/`_filter=` as for the
 aggregates above. `NULL`s are skipped; with no value (with fewer than two for `sample=True`) the result
-is `None`. Typed like `Avg`: a `float` for integers and floats; for a `DecimalField` an unrounded
+is `None`. Typed like `Avg`: a `float` for floats; for integers an exact `Decimal` on PostgreSQL and a
+`float` on SQLite and ClickHouse; for a `DecimalField` an unrounded
 `Decimal` PostgreSQL computes by its own numeric rules, and a `float` on ClickHouse, which computes the
 statistics of decimals as floats (`Features.computes_decimal_statistics_exactly`). SQLite has no such
 functions — hare registers its own.
@@ -72,6 +77,12 @@ converts by the zone's name. `Trunc` keeps the value's type — a datetime in th
 `week_day` counts 1 (Sunday) to 7, `iso_week_day` 1 (Monday) to 7. A part or type the value has none of
 (the hour of a `DateField`, the month of a `TimeField`) raises `FieldError`, and so does an argument that
 isn't a date, time or datetime.
+
+At time-zone transitions that change the offset by part of an hour, `TruncHour` can differ between
+databases. PostgreSQL and ClickHouse subtract the local minutes and seconds from the original instant;
+SQLite truncates the local wall clock. For `2024-04-06 15:07 UTC` in `Australia/Lord_Howe`, the results
+are respectively `14:30 UTC` (local `01:30`) and `14:00 UTC` (local `01:00`). Do not assume identical
+hour buckets across databases at these transitions.
 
 ```python
 await Loan.objects.annotate(month=TruncMonth("lent_at")).group_by("month").annotate(total=Count("id")).values("month", "total")
@@ -139,10 +150,10 @@ await Branch.objects.annotate(distance=Sqrt(Power("x", 2) + Power("y", 2))).filt
 | Class | Result |
 |---|---|
 | `Left(text, length)`, `Right(text, length)` | the first/last characters; a negative length drops that many from the other end |
-| `Substr(text, position, length=None)` | from a 1-based position, the database's own `substr`: PostgreSQL counts positions before 1 as empty and raises on a negative length; SQLite counts a negative position from the end and takes the characters before the position for a negative length; ClickHouse (`substringUTF8`) refuses position 0, counts a negative position from the end and leaves characters off the end for a negative length |
+| `Substr(text, position)`, `Substr(text, position, length)` | from a 1-based position, the database's own `substr`: PostgreSQL counts positions before 1 as empty and raises on a negative length; SQLite counts a negative position from the end and takes the characters before the position for a negative length; ClickHouse (`substringUTF8`) refuses position 0, counts a negative position from the end and leaves characters off the end for a negative length |
 | `StrIndex(text, substring)` | the 1-based position of the first occurrence, `0` without one — an `int` |
 | `Replace(text, old, new="")`, `Repeat(text, count)`, `Reverse(text)` | text |
-| `LPad(text, length, fill=" ")`, `RPad(...)` | filled to `length`; a longer text is cut to it |
+| `LPad(text, length, fill=" ")`, `RPad(...)` | filled to `length`; a longer text is cut to it. Empty `fill` leaves short text unchanged on PostgreSQL/SQLite; ClickHouse pads with spaces. Negative lengths return empty text on PostgreSQL/SQLite and raise a database error on ClickHouse |
 | `LTrim(text)`, `RTrim(text)` | leading/trailing spaces removed |
 | `Chr(code)`, `Ord(text)` | the character of a code point; the first character's code point — each database's own `chr`/`ascii` (`Ord("")` is NULL on SQLite; ClickHouse's `Chr` refuses only a code point no character has, `Chr(0)` is `\x00`) |
 | `MD5`, `SHA1`, `SHA224`, `SHA256`, `SHA384`, `SHA512(text)` | the lowercase hex digest of the UTF-8 text |

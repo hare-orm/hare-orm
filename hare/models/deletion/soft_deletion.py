@@ -78,7 +78,7 @@ class SoftDeletion:
         optimistic_lock_field = obj._meta.optimistic_lock_field
         old_version = getattr(obj, optimistic_lock_field) if optimistic_lock_field else None
         try:
-            rows = await writer.execute_update(
+            outcome = await writer.execute_update(
                 obj,
                 update_fields=[soft_delete_field],
                 apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
@@ -88,7 +88,7 @@ class SoftDeletion:
         except BaseException:
             SoftDeletion.restore_soft_delete_field(obj, had_soft_delete_value, old_soft_delete_value)
             raise
-        if rows == 0:
+        if outcome.row_count == 0 or not outcome.performed:
             SoftDeletion.restore_soft_delete_field(obj, had_soft_delete_value, old_soft_delete_value)
             if only_live_row:
                 return False

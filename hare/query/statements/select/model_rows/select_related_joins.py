@@ -11,7 +11,6 @@ from hare.query.statements.building.query_joins import QueryJoins
 if TYPE_CHECKING:
     from hare.models import Model
     from hare.query.statements.select.model_rows_query import ModelRowsQuery
-    from hare.sql import Table
 
 
 class SelectRelatedJoins:
@@ -24,7 +23,7 @@ class SelectRelatedJoins:
         query: ModelRowsQuery[Any],
         lookup_expression: str,
         value_wrapper_references: RecordedValueReferences | None = None,
-    ) -> tuple[type[Model], Table]:
+    ) -> None:
         """Joins the relations of a ``select_related()`` path and selects their columns.
 
         Args:
@@ -32,8 +31,6 @@ class SelectRelatedJoins:
             lookup_expression: The path.
             value_wrapper_references: Receives the values' references while a plan is recorded.
 
-        Returns:
-            The model and the table the path ends at.
         """
         fields = LookupPaths.expand_expression(query.model, lookup_expression)
         extra_condition = query._select_related_extra_conditions.get(lookup_expression)
@@ -91,13 +88,11 @@ class SelectRelatedJoins:
                     for related_field in related_fields
                 ]
             )
-        return model, table
 
     @staticmethod
     def select_related_extra_conditions_in_join_order(query: ModelRowsQuery[Any]) -> list[tuple[str, Q]]:
-        """`(path, extra_condition)` pairs in the order `_build_query()`'s own
-        `sorted(self._select_related)` loop resolves them in - the order their values are
-        recorded in.
+        """`(path, extra_condition)` pairs in the sorted order `_join_loaded_relations()` uses,
+        matching the order their values are recorded in.
 
         Args:
             query: The model rows query.

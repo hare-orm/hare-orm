@@ -1,6 +1,4 @@
-"""The rows of a rust.native.pg result read straight from the values the driver read (a PgResult)
-against the same reader on the result's PgRow objects - every codec gives equal values of the same
-type both ways - and a PgResult read as a sequence of rows."""
+"""Native result rows expose the same typed values by name and position, with sequence access."""
 
 import datetime
 import uuid

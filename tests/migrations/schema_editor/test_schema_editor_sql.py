@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +22,33 @@ from hare.vectors import VectorField
 from tests.utils.fake_client import FakeClient
 
 pytestmark = pytest.mark.database_independent
+
+
+@pytest.mark.asyncio
+async def test_failed_schema_script_keeps_error_until_cache_refresh_finishes(monkeypatch):
+    client = FakeClient("sql")
+    editor = TestSchemaEditor(client)
+    ddl_error = ValueError("second DDL statement failed")
+    refreshing = asyncio.Event()
+    release = asyncio.Event()
+    completed = asyncio.Event()
+
+    async def invalidate():
+        refreshing.set()
+        await release.wait()
+        completed.set()
+
+    monkeypatch.setattr(client, "execute_script", AsyncMock(side_effect=ddl_error))
+    monkeypatch.setattr(client, "invalidate_schema_cache", invalidate)
+    operation = asyncio.create_task(editor.run_raw_sql("first DDL; second DDL"))
+    await refreshing.wait()
+    operation.cancel()
+    release.set()
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await operation
+    assert completed.is_set()
+    assert caught.value.exceptions[0] is ddl_error
+    assert isinstance(caught.value.exceptions[1], asyncio.CancelledError)
 
 
 class TestSchemaEditorTableComments(TableComments):
@@ -146,9 +175,9 @@ async def test_create_model_generates_generated_column_sql() -> None:
     sql = client.executed[0]
     assert 'CREATE TABLE "document"' in sql
     assert (
-        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS (SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"title\", '')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"body\", '')),'B')) STORED"
+        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',"
+        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
+        "COALESCE(\"body\",'')),'B'))) STORED"
     ) in sql
 
 
@@ -177,9 +206,9 @@ async def test_add_field_generates_generated_column_sql() -> None:
     sql = client.executed[0]
     assert 'ALTER TABLE "document" ADD COLUMN' in sql
     assert (
-        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS (SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"title\", '')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
-        "COALESCE(\"body\", '')),'B')) STORED"
+        "\"search_vector\" TSVECTOR GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',"
+        "COALESCE(\"title\",'')),'A') || SETWEIGHT(TO_TSVECTOR('english',"
+        "COALESCE(\"body\",'')),'B'))) STORED"
     ) in sql
 
 

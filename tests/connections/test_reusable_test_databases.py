@@ -13,16 +13,19 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib.test import ReusableTestDatabases
 from hare.contrib.test.constants import REUSE_DATABASES_ENVIRONMENT_VARIABLE
+from hare.contrib.test.databases.declarations import TestDatabaseIdentity as DatabaseIdentity
 from hare.contrib.test.databases.kept_test_schema import KeptTestSchema
+from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
+from hare.contrib.test.databases.postgresql.test_database import PostgresqlTestDatabase
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.postgresql.client import PostgresqlClient
-from hare.dialects.postgresql.client.reusable_test_schemas import ReusableTestSchemas
-from hare.dialects.postgresql.constants import REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 from tests.connections.reusable_schema_models import KeptCounter
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.postgresql_extensions import PostgresqlExtensions
 
 OWNED_NAME_PATTERN = re.compile(r"^test_([0-9a-f]{12})_[0-9a-f]{32}$")
 EXTENSIONS_TO_INSTALL = ("citext", "vector", "btree_gist", "postgis")
@@ -44,6 +47,12 @@ def _get_postgres_template(tag: str) -> str:
     base_url, _, database_and_query = raw_db_url.rpartition("/")
     _, question_mark, query = database_and_query.partition("?")
     return f"{base_url}/test_{tag}_{{}}{question_mark}{query}"
+
+
+def _get_database_identity(client: PostgresqlClient) -> DatabaseIdentity:
+    host = client.direct_host or client.host or os.environ.get("PGHOST", "")
+    port = client.direct_port or client.port
+    return DatabaseIdentity((host, int(port)), client.database)
 
 
 async def _get_public_tables(client: PostgresqlClient) -> list[str]:
@@ -132,42 +141,34 @@ class TestSlotNames:
         assert len(set(slot_ids)) == 5
         assert all(re.fullmatch(r"[0-9a-f]{32}", slot_id) for slot_id in slot_ids)
 
-    def test_expand_leases_a_slot_named_like_an_owned_test_database(self) -> None:
+    def test_test_config_returns_exact_leases_without_credential_tokens(self) -> None:
         tag = uuid.uuid4().hex[:12]
-        with ReusableTestDatabases.track_new_leases() as own_lease_number_by_database_name:
-            first = DbUrlConfigGenerator.expand(
-                f"postgresql://u:p@h/test_{tag}_{{}}", testing=True, reuse_databases=True
-            )
-            second = DbUrlConfigGenerator.expand(
-                f"postgresql://u:p@h/test_{tag}_{{}}", testing=True, reuse_databases=True
-            )
+        first = DatabaseConfig.from_url(f"postgresql://u:p@h/test_{tag}_{{}}", reuse=True)
+        second = DatabaseConfig.from_url(f"postgresql://u:p@h/test_{tag}_{{}}", reuse=True)
         try:
-            first_name = first["credentials"]["database"]
-            second_name = second["credentials"]["database"]
+            assert first.lease is not None and second.lease is not None
+            first_name = first.config["credentials"]["database"]
+            second_name = second.config["credentials"]["database"]
             assert OWNED_NAME_PATTERN.match(first_name)
             assert OWNED_NAME_PATTERN.match(second_name)
             assert first_name != second_name
             assert first_name == f"test_{tag}_{ReusableTestDatabases.get_slot_id(0)}"
-            assert set(own_lease_number_by_database_name) == {first_name, second_name}
-            assert (
-                first["credentials"][REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL]
-                == (own_lease_number_by_database_name[first_name])
-            )
+            assert first.lease.identity.database == first_name
+            assert set(first.config["credentials"]) == {"host", "port", "user", "password", "database"}
         finally:
-            ReusableTestDatabases.release_leases(own_lease_number_by_database_name)
-        assert not ReusableTestDatabases.is_leased(first_name, own_lease_number_by_database_name[first_name])
+            ReusableTestDatabases.release_leases([first.lease, second.lease])
+        assert not ReusableTestDatabases.is_leased(first.lease)
 
-    def test_expand_without_reuse_or_placeholder_leases_nothing(self) -> None:
-        with ReusableTestDatabases.track_new_leases() as own_lease_number_by_database_name:
-            random_name = DbUrlConfigGenerator.expand("postgresql://u:p@h/test_{}", testing=True)
-            fixed_name = DbUrlConfigGenerator.expand("postgresql://u:p@h/fixed", testing=True, reuse_databases=True)
-            sqlite_file = DbUrlConfigGenerator.expand(
-                "sqlite+aiosqlite:///db_{}.sqlite3", testing=True, reuse_databases=True
-            )
-        assert own_lease_number_by_database_name == {}
-        for config in (random_name, fixed_name, sqlite_file):
-            assert REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL not in config["credentials"]
-        assert fixed_name["credentials"]["database"] == "fixed"
+    def test_parser_and_nonreusable_configs_acquire_no_leases(self) -> None:
+        before = dict(ReusableTestDatabases.leases)
+        parsed = DbUrlConfigGenerator.expand("postgresql://u:p@h/test_{}")
+        random_name = DatabaseConfig.from_url("postgresql://u:p@h/test_{}")
+        fixed_name = DatabaseConfig.from_url("postgresql://u:p@h/fixed", reuse=True)
+        sqlite_file = DatabaseConfig.from_url("sqlite+aiosqlite:///db_{}.sqlite3", reuse=True)
+        assert parsed["credentials"]["database"] == "test_{}"
+        assert ReusableTestDatabases.leases == before
+        assert all(config.lease is None for config in (random_name, fixed_name, sqlite_file))
+        assert fixed_name.config["credentials"]["database"] == "fixed"
 
     def test_a_kept_schema_is_read_back_from_its_text(self) -> None:
         kept_schema = KeptTestSchema("schema key", 42, (("pg_class", 10), ("pg_type", 20)), "fingerprint")
@@ -178,21 +179,48 @@ class TestSlotNames:
         assert KeptTestSchema.from_text(text) is None
 
     def test_release_of_a_stale_lease_keeps_the_newer_one(self) -> None:
-        template = f"test_{uuid.uuid4().hex[:12]}_{{}}"
-        database_name, first_lease_number = ReusableTestDatabases.acquire(template)
-        ReusableTestDatabases.release(database_name, first_lease_number, is_clean=True)
-        same_database_name, second_lease_number = ReusableTestDatabases.acquire(template)
+        template = DatabaseIdentity(("server", 5432), f"test_{uuid.uuid4().hex[:12]}_{{}}")
+        first = ReusableTestDatabases.acquire(template)
+        ReusableTestDatabases.release(first, is_clean=True)
+        second = ReusableTestDatabases.acquire(template)
         try:
-            assert same_database_name == database_name
-            ReusableTestDatabases.release(database_name, first_lease_number, is_clean=True)
-            assert ReusableTestDatabases.is_leased(database_name, second_lease_number)
+            assert second.identity == first.identity
+            ReusableTestDatabases.release(first, is_clean=True)
+            assert ReusableTestDatabases.is_leased(second)
         finally:
-            ReusableTestDatabases.release(database_name, second_lease_number, is_clean=False)
-        assert not ReusableTestDatabases.is_clean(database_name)
+            ReusableTestDatabases.release(second, is_clean=False)
+        assert not ReusableTestDatabases.is_clean(second.identity)
 
 
 @requires_postgres
 class TestPostgresPool:
+    @pytest.mark.asyncio
+    async def test_shared_database_reset_clears_qualified_tables_and_sequences(
+        self, pool_template: tuple[str, str]
+    ) -> None:
+        template, _ = pool_template
+        async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
+            client = ctx.get_connection()
+            await PooledWidget.objects.create(name="before reset")
+            await client.execute_script(
+                'CREATE SCHEMA "extra schema";'
+                'CREATE TABLE "extra schema"."quoted ""table" '
+                "(id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, value text);"
+                'INSERT INTO "extra schema"."quoted ""table" (value) VALUES (\'before reset\');'
+                'CREATE SEQUENCE "extra schema"."independent sequence";'
+                'SELECT nextval(\'"extra schema"."independent sequence"\');'
+            )
+            await ReusableTestSchemas.reset_rows(client)
+            assert await PooledWidget.objects.count() == 0
+            assert await client.execute_dicts('SELECT * FROM "extra schema"."quoted ""table"') == []
+            assert await client.execute_dicts(
+                'INSERT INTO "extra schema"."quoted ""table" (value) VALUES (\'after reset\') RETURNING id'
+            ) == [{"id": 1}]
+            assert await client.execute_dicts(
+                'SELECT nextval(\'"extra schema"."independent sequence"\') AS value'
+            ) == [{"value": 1}]
+            assert (await PooledWidget.objects.create(name="after reset")).id == 1
+
     @pytest.mark.asyncio
     async def test_reset_brings_back_a_fresh_database(self, pool_template: tuple[str, str]) -> None:
         template, _ = pool_template
@@ -299,10 +327,8 @@ class TestPostgresPool:
         for _ in range(3):
             async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
                 client = ctx.get_connection()
-                try:
-                    await client.execute_script("CREATE EXTENSION IF NOT EXISTS postgis")
-                except Exception as error:
-                    pytest.skip(f"postgis extension not available: {error}")
+                await PostgresqlExtensions.require(client, "postgis")
+                await client.execute_script("CREATE EXTENSION IF NOT EXISTS postgis")
                 await client.execute_script(
                     "CREATE TABLE spot (id int, location geography(Point, 4326));"
                     "CREATE INDEX spot_location ON spot USING gist (location);"
@@ -320,12 +346,12 @@ class TestPostgresPool:
         with pytest.raises(RuntimeError, match="boom"):
             async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
                 failed_database_name = ctx.get_connection().database
-                failed_lease_number = ctx.get_connection().reusable_test_database_lease
+                failed_identity = _get_database_identity(ctx.get_connection())
+                failed_lease = ReusableTestDatabases.leases[failed_identity]
                 await PooledWidget.objects.create(name="before the failure")
                 raise RuntimeError("boom")
-        assert failed_lease_number is not None
-        assert not ReusableTestDatabases.is_leased(failed_database_name, failed_lease_number)
-        assert failed_database_name in ReusableTestDatabases.kept_schema_by_database_name
+        assert not ReusableTestDatabases.is_leased(failed_lease)
+        assert failed_identity in ReusableTestDatabases.kept_schemas
         async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == failed_database_name
             assert await PooledWidget.objects.all().count() == 0
@@ -336,19 +362,20 @@ class TestPostgresPool:
     ) -> None:
         template, _ = pool_template
 
-        async def failing_reset(client: PostgresqlClient) -> bool:
+        async def failing_reset(resource: PostgresqlTestDatabase) -> bool:
             raise RuntimeError("reset failed")
 
         with pytest.raises(RuntimeError, match="reset failed"):
             async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
                 dirty_database_name = ctx.get_connection().database
+                dirty_identity = _get_database_identity(ctx.get_connection())
                 await PooledWidget.objects.create(name="left behind")
                 # A changed schema needs the reset.
                 await ctx.get_connection().execute_script("CREATE TABLE public.leftover (id int)")
-                monkeypatch.setattr(PostgresqlClient, "_reset_database", failing_reset)
+                monkeypatch.setattr(PostgresqlTestDatabase, "_reset_database", failing_reset)
         monkeypatch.undo()
-        assert not ReusableTestDatabases.is_clean(dirty_database_name)
-        assert dirty_database_name not in ReusableTestDatabases.kept_schema_by_database_name
+        assert not ReusableTestDatabases.is_clean(dirty_identity)
+        assert dirty_identity not in ReusableTestDatabases.kept_schemas
         async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == dirty_database_name
             assert await PooledWidget.objects.all().count() == 0
@@ -366,11 +393,12 @@ class TestPostgresPool:
         with pytest.raises(RuntimeError, match="clearing failed"):
             async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
                 dirty_database_name = ctx.get_connection().database
+                dirty_identity = _get_database_identity(ctx.get_connection())
                 await PooledWidget.objects.create(name="left behind")
                 monkeypatch.setattr(ReusableTestSchemas, "clear_rows", failing_clear_rows)
         monkeypatch.undo()
-        assert not ReusableTestDatabases.is_clean(dirty_database_name)
-        assert dirty_database_name not in ReusableTestDatabases.kept_schema_by_database_name
+        assert not ReusableTestDatabases.is_clean(dirty_identity)
+        assert dirty_identity not in ReusableTestDatabases.kept_schemas
         async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == dirty_database_name
             assert await PooledWidget.objects.all().count() == 0
@@ -380,10 +408,11 @@ class TestPostgresPool:
         template, _ = pool_template
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             database_name = ctx.get_connection().database
+            database_identity = _get_database_identity(ctx.get_connection())
             table_oid = await _get_table_oid(ctx.get_connection(), "keptcounter")
             await KeptCounter.objects.create(name="first")
             await KeptCounter.objects.create(name="second")
-        assert database_name in ReusableTestDatabases.kept_schema_by_database_name
+        assert database_identity in ReusableTestDatabases.kept_schemas
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == database_name
             # The table is the one created before - not created again.
@@ -396,10 +425,10 @@ class TestPostgresPool:
         """TRUNCATE gives the table new storage - a write of its catalog row, no change of the schema."""
         template, _ = pool_template
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
-            database_name = ctx.get_connection().database
+            database_identity = _get_database_identity(ctx.get_connection())
             await KeptCounter.objects.create(name="first")
             await ctx.get_connection().execute_script("TRUNCATE keptcounter RESTART IDENTITY")
-        assert database_name in ReusableTestDatabases.kept_schema_by_database_name
+        assert database_identity in ReusableTestDatabases.kept_schemas
 
     @pytest.mark.asyncio
     async def test_a_kept_schema_is_read_back_from_the_database_comment(self, pool_template: tuple[str, str]) -> None:
@@ -419,8 +448,9 @@ class TestPostgresPool:
         template, _ = pool_template
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             database_name = ctx.get_connection().database
+            database_identity = _get_database_identity(ctx.get_connection())
             await ctx.get_connection().execute_script("ALTER TABLE keptcounter ADD COLUMN extra int")
-        assert database_name not in ReusableTestDatabases.kept_schema_by_database_name
+        assert database_identity not in ReusableTestDatabases.kept_schemas
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == database_name
             column_rows = await ctx.get_connection().execute_dicts(
@@ -438,10 +468,11 @@ class TestPostgresPool:
         )
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             database_name = ctx.get_connection().database
+            database_identity = _get_database_identity(ctx.get_connection())
             (primary_key_row,) = await ctx.get_connection().execute_dicts(primary_key_sql)
             primary_key_name = primary_key_row["conname"]
             await ctx.get_connection().execute_script(f'ALTER TABLE keptcounter DROP CONSTRAINT "{primary_key_name}"')
-        assert database_name not in ReusableTestDatabases.kept_schema_by_database_name
+        assert database_identity not in ReusableTestDatabases.kept_schemas
         async with hare_test_context([KEPT_SCHEMA_MODELS], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == database_name
             constraint_rows = await ctx.get_connection().execute_dicts(primary_key_sql)
@@ -473,10 +504,7 @@ class TestPostgresPool:
         with pytest.raises(ConfigurationError):
             async with hare_test_context([__name__], db_url=template, reuse_databases=True, timezone="Not/AZone"):
                 pass
-        assert not any(
-            database_name.startswith(f"test_{tag}_")
-            for database_name in ReusableTestDatabases.lease_number_by_database_name
-        )
+        assert not any(identity.database.startswith(f"test_{tag}_") for identity in ReusableTestDatabases.leases)
         async with hare_test_context([__name__], db_url=template, reuse_databases=True) as ctx:
             assert ctx.get_connection().database == f"test_{tag}_{ReusableTestDatabases.get_slot_id(0)}"
 

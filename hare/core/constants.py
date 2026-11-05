@@ -12,12 +12,6 @@ HARE_PACKAGE_DIRECTORY = str(pathlib.Path(__file__).resolve().parent.parent)
 #: Environment variable pointing at a Hare ORM config object (module.VARIABLE).
 ENV_HARE_ORM_CONFIG = "HARE_ORM"
 
-#: pytest-xdist sets this to the worker's id (e.g. "gw0") in each worker process, and leaves it
-#: unset in a plain (non-`-n`) pytest run. Read to give each worker a database of its own: the file of a
-#: A file database's `db_url` and the kept test databases are named per worker under `-n`.
-ENV_PYTEST_XDIST_WORKER = "PYTEST_XDIST_WORKER"
-
-
 #: A ``swappable`` config setting name - an upper-case identifier such as ``USER_MODEL``.
 SWAPPABLE_SETTING_NAME_PATTERN = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*")
 
@@ -45,3 +39,6 @@ CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE = (
     "connection only - a connection of this loop would open an empty database of its own. Use the database "
     "from one event loop, or a database that outlives its connections"
 )
+
+RESOURCE_COMPLETION_FAILED = "Resource release failed while its caller was cancelled"
+INITIALIZATION_RELEASE_FAILED = "Application initialization and resource release failed"

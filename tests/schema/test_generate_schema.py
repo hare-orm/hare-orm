@@ -12,12 +12,7 @@ from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.trigger import Trigger
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.models import Model
-from tests.utils.context_apps_reset import ContextAppsReset
 from tests.utils.database_under_test import DatabaseUnderTest
-
-# Save the original classproperty before any test can shadow it
-_original_apps_prop = Hare.__dict__["apps"]
-
 
 # Safe schema SQL expected for SQLite
 SAFE_SCHEMA_SQL = r"""CREATE TABLE IF NOT EXISTS "defaultpk" (
@@ -109,40 +104,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS "uidx_teamevents_event_i_664dbc51aed8" ON "tea
 CREATE INDEX IF NOT EXISTS "idx_teamevents_team_id_147f04d59b94" ON "teamevents" ("team_id");""".strip()
 
 
-async def _reset_hare():
-    """Helper to reset Hare state before each test.
-
-    Note: We MUST NOT set Hare.apps = None
-    because it is a classproperty and setting it shadows the property
-    with a class attribute, breaking future access.
-    """
-    # Restore the original classproperty if it was shadowed
-    if not isinstance(Hare.__dict__.get("apps"), type(_original_apps_prop)):
-        type.__setattr__(Hare, "apps", _original_apps_prop)
-
-    # Get the current context and properly reset it
-    ctx = HareContext.get_current()
-    if ctx is not None:
-        # Clear db_config first to prevent close_all from trying to import bad backends
-        if ctx._connections is not None:
-            # Clear storage without closing (to avoid importing bad backends)
-            ctx._connections._get_storage().clear()
-            ctx._connections._db_config = None
-            ctx._connections = None
-        ctx._apps = None
-        ctx._inited = False
-        ctx._default_connection = None
-    else:
-        # No context exists - create one for the test
-        ctx = HareContext()
-        ctx.__enter__()
-
-
-async def _teardown_hare():
-    """Helper to teardown Hare state after each test."""
-    ContextAppsReset.reset_apps()
-
-
 def _get_sql(sqls: list[str], text: str) -> str:
     """Get SQL statement containing the given text."""
     return re.sub(r"[ \t\n\r]+", " ", " ".join([sql for sql in sqls if text in sql]))
@@ -173,8 +134,7 @@ async def _init_for_sqlite(module: str, safe: bool = False) -> list[str]:
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_minrelation():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, '"minrelation"')
         assert re.search(
@@ -191,34 +151,26 @@ async def test_minrelation():
         assert re.search(
             r'"team_id" INT NOT NULL CONSTRAINT "fk_\w+" REFERENCES "team" \("id"\) ON DELETE CASCADE', sql
         )
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_safe_generation():
     """Assert that the IF NOT EXISTS clause is included when safely generating schema."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels", True)
         sql = _get_sql(sqls, "")
         assert "IF NOT EXISTS" in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_unsafe_generation():
     """Assert that the IF NOT EXISTS clause is not included when generating schema."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels", False)
         sql = _get_sql(sqls, "")
         assert "IF NOT EXISTS" not in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -279,25 +231,19 @@ async def test_unsafe_generation():
 )
 @pytest.mark.asyncio
 async def test_bad_model_declaration_fails_schema_generation(error_match, models_module):
-    await _reset_hare()
-    try:
+    async with HareContext():
         with pytest.raises(ConfigurationError, match=error_match):
             await _init_for_sqlite(models_module)
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_a_cycle_of_foreign_keys_is_created_in_the_order_of_its_tables_on_sqlite():
     # SQLite checks a reference only when a row is written - every table keeps its REFERENCES.
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_cyclic")
         for table, target in (("one", "two"), ("two", "three"), ("three", "one")):
             assert f'REFERENCES "{target}"' in _get_sql(sqls, f'CREATE TABLE "{table}"')
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.asyncio
@@ -332,14 +278,11 @@ async def test_cyclic_with_db_constraint_false_does_not_raise():
     """A model-level FK cycle where every relation in the cycle has db_constraint=False has no
     real FK constraint DDL at all, so it must not trip the topological-sort cyclic check that
     only exists to prevent an unsatisfiable CREATE TABLE ordering."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_cyclic_no_constraint")
         cycle_sql = " ".join(sql for sql in sqls if re.search(r'CREATE TABLE "(one|two|three)"', sql))
         assert "REFERENCES" not in cycle_sql
         assert '"tournament_id" INT NOT NULL' in _get_sql(sqls, '"one"')
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -349,8 +292,7 @@ async def test_cyclic_fk_with_no_db_constraint_is_not_a_real_cycle():
     its related table, so it must never count toward the cyclic-fk check - neither a symmetric
     cycle where BOTH sides are db_constraint=False, nor an asymmetric one where only one side is
     (which isn't even a real cycle in the dependency graph, just a single one-way dependency)."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_cyclic_no_constraint")
 
         def create_table_sql(table: str) -> str:
@@ -360,8 +302,6 @@ async def test_cyclic_fk_with_no_db_constraint_is_not_a_real_cycle():
         assert "REFERENCES" not in create_table_sql("symmetricb")
         assert 'REFERENCES "asymmetricd"' in create_table_sql("asymmetricc")
         assert "REFERENCES" not in create_table_sql("asymmetricd")
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -371,38 +311,29 @@ async def test_postgres_only_fields_raise_unsupported_error_on_sqlite():
     generation against a SQLite connection must raise a clear UnSupportedError naming the
     offending field instead of silently emitting Postgres-flavored DDL (TSVECTOR, TEXT[], ...)
     that SQLite would then fail on with a confusing raw driver error, or worse, partially accept."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         with pytest.raises(
             UnSupportedError, match="only exists on postgresql - the sqlite dialect has no column type for it"
         ):
             await _init_for_sqlite("tests.schema.models_postgres_fields")
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_create_index():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "CREATE INDEX")
         assert re.search(r"idx_tournament_created_\w+", sql) is not None
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_create_index_with_custom_name():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "f3")
         assert "model_with_indexes__f3" in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -410,14 +341,11 @@ async def test_create_index_with_custom_name():
 async def test_fk_set_default_with_only_default_and_no_constraint_succeeds():
     """Without a real FK constraint only hare's own Python-side cascade resets the column, and it
     reads default= - so default= alone is enough, and no DDL DEFAULT/REFERENCES is emitted."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_fk_7")
         sql = _get_sql(sqls, '"one"')
         assert "DEFAULT" not in sql
         assert "REFERENCES" not in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -426,8 +354,7 @@ async def test_m2m_protect_generates_deferrable_no_action_fk():
     """on_delete=PROTECT has no SQL keyword of its own (enforced in Python before the DELETE is
     issued, see ManyToManyFieldInstance.db_on_delete) - the through-table's real FK constraint
     falls back to a deferrable NO ACTION in DDL, on both sides, as a defense-in-depth backstop."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "m2mondeleteprotectparent_m2mondeleteprotectpeer")
         assert re.search(
@@ -441,8 +368,6 @@ async def test_m2m_protect_generates_deferrable_no_action_fk():
             r"ON DELETE NO ACTION DEFERRABLE INITIALLY IMMEDIATE",
             sql,
         )
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -452,8 +377,7 @@ async def test_m2m_set_null_generates_nullable_column():
     the database's ON DELETE SET NULL constraint action to be legal DDL at all - both sides get
     the nullable column, since on_delete is mirrored onto the auto-generated backward field too
     (see Apps.init_relations)."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "m2mondeletesetnullparent_m2mondeletesetnullpeer")
         assert re.search(
@@ -468,8 +392,6 @@ async def test_m2m_set_null_generates_nullable_column():
             sql,
         )
         assert 'm2mondeletesetnullpeer_id" INT NOT NULL' not in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
@@ -478,8 +400,7 @@ async def test_composite_pk_m2m_protect_generates_deferrable_no_action_constrain
     """Same as test_m2m_protect_generates_deferrable_no_action_fk, but for a composite-PK owner - the
     table-level composite FOREIGN KEY constraint (not an inline column REFERENCES clause) falls
     back to a deferrable NO ACTION the same way."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "compositepkm2mprotectowner_compositepkm2mprotectpeer")
         assert re.search(
@@ -487,36 +408,28 @@ async def test_composite_pk_m2m_protect_generates_deferrable_no_action_constrain
             r'REFERENCES "compositepkm2mprotectowner" \("a", "b"\) ON DELETE NO ACTION DEFERRABLE INITIALLY IMMEDIATE',
             sql,
         )
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_multi_m2m_fields_in_a_model():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_m2m_2")
         sql = _get_sql(sqls, "CASCADE")
         assert not re.search(r'REFERENCES [`"]three_one[`"]', sql)
         assert not re.search(r'REFERENCES [`"]three_two[`"]', sql)
         assert re.search(r'REFERENCES [`"](one|two|three)[`"]', sql)
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_table_and_row_comment_generation():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "comments")
         assert re.search(r".*\/\* Upvotes done on the comment.*\*\/", sql)
         assert re.search(r".*\\n.*", sql)
         assert "\\/" in sql
-    finally:
-        await _teardown_hare()
 
 
 # ============================================================================
@@ -581,22 +494,18 @@ async def _init_for_postgres(module: str, safe: bool = False) -> list[str]:
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_the_sql_of_a_table(init, models_module, table_text, fragments):
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await init(models_module)
         sql = _get_sql(sqls, table_text)
         for fragment in fragments:
             assert fragment in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.requires("native")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_postgresql_table_and_row_comment_generation():
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_postgres("tests.shared_models.testmodels")
         sql = _get_sql(sqls, "comments")
         assert "COMMENT ON TABLE \"comments\" IS 'Test Table comment'" in sql
@@ -610,8 +519,6 @@ async def test_postgresql_table_and_row_comment_generation():
         # _get_sql() collapses the real embedded newline (plus its surrounding spaces) down to a
         # single space before this comparison, hence "Some comment" here, not "Some \n comment".
         assert 'COMMENT ON COLUMN "comments"."multiline_comment" IS \'Some comment\'' in sql
-    finally:
-        await _teardown_hare()
 
 
 SQLITE_SCHEMA_NO_DB_CONSTRAINT_SQL = r"""CREATE TABLE "event" ( /* This table contains a list of all the events */
@@ -1051,7 +958,7 @@ CREATE INDEX "idx_index_gin_c59b6d432f5d" ON "index" USING GIN ("gin");
 CREATE INDEX "idx_index_gist_cc203a3ffdb7" ON "index" USING GIST ("gist");
 CREATE INDEX "idx_index_sp_gist_939be3501a54" ON "index" USING SPGIST ("sp_gist");
 CREATE INDEX "idx_index_hash_c08b870a8bf2" ON "index" USING HASH ("hash");
-CREATE INDEX "idx_index_partial_f3f681bff192" ON "index" ("partial") WHERE ("id"=1);
+CREATE INDEX "idx_index_partial_31679bd35f20" ON "index" ("partial") WHERE ("id"=1);
 CREATE INDEX "idx_index_expr_6b3aac52573a" ON "index" USING GIN ((TO_TSVECTOR('english',((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
 CREATE INDEX "idx_index_path_21f724a059db" ON "index" ("path" "varchar_pattern_ops");"""
 
@@ -1075,7 +982,7 @@ CREATE INDEX IF NOT EXISTS "idx_index_gin_c59b6d432f5d" ON "index" USING GIN ("g
 CREATE INDEX IF NOT EXISTS "idx_index_gist_cc203a3ffdb7" ON "index" USING GIST ("gist");
 CREATE INDEX IF NOT EXISTS "idx_index_sp_gist_939be3501a54" ON "index" USING SPGIST ("sp_gist");
 CREATE INDEX IF NOT EXISTS "idx_index_hash_c08b870a8bf2" ON "index" USING HASH ("hash");
-CREATE INDEX IF NOT EXISTS "idx_index_partial_f3f681bff192" ON "index" ("partial") WHERE ("id"=1);
+CREATE INDEX IF NOT EXISTS "idx_index_partial_31679bd35f20" ON "index" ("partial") WHERE ("id"=1);
 CREATE INDEX IF NOT EXISTS "idx_index_expr_6b3aac52573a" ON "index" USING GIN ((TO_TSVECTOR('english',((COALESCE("title",'') || ' ') || COALESCE("body",'')))));
 CREATE INDEX IF NOT EXISTS "idx_index_path_21f724a059db" ON "index" ("path" "varchar_pattern_ops");"""
 
@@ -1245,13 +1152,10 @@ COMMENT ON COLUMN "postgres_fields"."real_array" IS 'this is array of real numbe
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_the_schema_sql_of_a_models_module(init, models_module, safe, expected):
-    await _reset_hare()
-    try:
+    async with HareContext():
         await init(models_module)
         sql = Connections.get("default").get_schema_sql(safe=safe)
         assert sql.strip() == expected.strip()
-    finally:
-        await _teardown_hare()
 
 
 # ============================================================================
@@ -1263,16 +1167,13 @@ async def test_the_schema_sql_of_a_models_module(init, models_module, safe, expe
 @pytest.mark.asyncio
 async def test_sqlite_schema_qualified_names_its_attached_database():
     """SQLite reads Meta.schema as the name of an attached database - written as is, never created."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         sqls = await _init_for_sqlite("tests.schema.models_schema_qualified", safe=True)
         sql = " ".join(sqls)
         assert '"custom"."category"' in sql
         assert '"custom"."product"' in sql
         assert '"custom"."tag"' in sql
         assert "CREATE SCHEMA" not in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.sqlite_only
@@ -1349,8 +1250,7 @@ async def test_sqlite_keeps_the_comments_of_tables_and_through_tables():
 @pytest.mark.asyncio
 async def test_postgresql_schema_qualified_safe():
     """Postgres (asyncpg) should produce schema-qualified names with CREATE SCHEMA."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         await _init_for_postgres("tests.schema.models_schema_qualified")
         sql = Connections.get("default").get_schema_sql(safe=True)
         # Should have CREATE SCHEMA
@@ -1371,8 +1271,6 @@ async def test_postgresql_schema_qualified_safe():
         assert 'COMMENT ON TABLE "custom"."product" IS \'Products table\'' in sql
         # Unique index on M2M through table should use schema-qualified table
         assert 'ON "custom"."product_tags"' in sql
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.requires("native")
@@ -1380,14 +1278,11 @@ async def test_postgresql_schema_qualified_safe():
 @pytest.mark.asyncio
 async def test_schema_qualified_single_schema_creation():
     """Only one CREATE SCHEMA per unique schema value."""
-    await _reset_hare()
-    try:
+    async with HareContext():
         await _init_for_postgres("tests.schema.models_schema_qualified")
         sql = Connections.get("default").get_schema_sql(safe=True)
         # All 3 models share schema "custom" — should create only once
         assert sql.count('CREATE SCHEMA IF NOT EXISTS "custom"') == 1
-    finally:
-        await _teardown_hare()
 
 
 class GeneratedTriggerCounterSqlite(Model):

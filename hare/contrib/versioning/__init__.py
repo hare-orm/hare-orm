@@ -1,4 +1,4 @@
-"""Append-only versioned models: every change a new row of the same ``id`` and a higher ``version``."""
+"""Helpers for creating successive rows with the same ``id`` and a higher ``version``."""
 
 from __future__ import annotations
 

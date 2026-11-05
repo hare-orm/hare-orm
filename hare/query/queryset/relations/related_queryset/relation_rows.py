@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import weakref
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from hare.models import Model
     from hare.query.queryset.queryset import QuerySet
     from hare.query.queryset.relations.related_queryset.related_query_set import RelatedQuerySet
 
@@ -31,22 +30,11 @@ class RelationRows:
         #: None before any were made. The queryset refers to no instance.
         self.bound_settings: tuple[tuple[Any, ...], str | None, QuerySet[Any]] | None = None
 
-    @classmethod
-    def make_for_prefetch(cls, obj: Model) -> Self:
-        """The rows of an instance that prefetching fills - the rows and the fetched flag set by the
-        caller.
-
-        Args:
-            obj: The instance.
-
-        Returns:
-            The rows.
-        """
-        relation_rows = cls.__new__(cls)
-        relation_rows.held_relation = None
-        relation_rows.relation_reference = None
-        relation_rows.bound_settings = None
-        return relation_rows
+    def get_relation(self) -> RelatedQuerySet[Any] | None:
+        """Return the held relation or its still-live weak reference, if one was created."""
+        if self.held_relation is not None:
+            return self.held_relation
+        return self.relation_reference() if self.relation_reference is not None else None
 
     def set_fetched(self, related_objects: list[Any]) -> None:
         """Takes the fetched rows - a relation object made for the rows before they were fetched is held

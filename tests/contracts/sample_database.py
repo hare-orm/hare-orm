@@ -6,14 +6,11 @@ import pytest
 
 from hare.contrib.outbox import OutboxEvent
 from hare.core.hare_context import HareContext
-from hare.dialects.dialect_registry import DialectRegistry
-from hare.exceptions import ConfigurationError, UnSupportedError
-from hare.fields.field import Field
 from hare.migrations.migration import Migration
 from hare.migrations.state.state import State
 from hare.migrations.writer.migration_writer import MigrationWriter
 from hare.models import Model
-from tests.contracts.constants import CONTRACT_APP, SAMPLED_FIELD_NAME
+from tests.contracts.constants import CONTRACT_APP
 from tests.contracts.contract_models import ContractModels
 from tests.contracts.field_sample import FieldSample
 from tests.contracts.hare_registry import HareRegistry
@@ -25,25 +22,8 @@ class SampleDatabase:
 
     @staticmethod
     def has_column(sample: FieldSample, dialect_name: str) -> bool:
-        """Whether a sample's field has a column on a dialect.
-
-        Args:
-            sample: The sample.
-            dialect_name: The dialect.
-
-        Returns:
-            False when the dialect refuses the field.
-        """
-        field = sample.make_fields()[SAMPLED_FIELD_NAME]
-        if not isinstance(field, Field):
-            return True
-        dialect = DialectRegistry.get_dialect(dialect_name)
-        try:
-            field.check_dialect_supported(dialect)
-            field.get_column_type(dialect)
-        except UnSupportedError:
-            return False
-        return True
+        """The declaration's expected support, without asking the implementation under test."""
+        return dialect_name in sample.column_dialects
 
     @staticmethod
     def get_shipped_model_bases() -> set[type[Model]]:
@@ -68,50 +48,9 @@ class SampleDatabase:
         return shipped
 
     @staticmethod
-    def get_unsupported_field_names(models: list[type[Model]], dialect_name: str) -> list[str]:
-        """The fields of models that have no column on a dialect.
-
-        Args:
-            models: The models.
-            dialect_name: The dialect.
-
-        Returns:
-            Each as ``Model.field``.
-        """
-        dialect = DialectRegistry.get_dialect(dialect_name)
-        unsupported = []
-        for model in models:
-            for field_name, field in model._meta.fields_map.items():
-                if not isinstance(field, Field):
-                    continue
-                try:
-                    field.check_dialect_supported(dialect)
-                    field.get_column_type(dialect)
-                except UnSupportedError:
-                    unsupported.append(f"{model.__name__}.{field_name}")
-        return unsupported
-
-    @staticmethod
     def is_capturable(sample: FieldSample) -> bool:
-        """Whether a change of a sample's row can be captured - its models are registered while the application
-        runs, and a database keeping unique keys, the only one an outbox is bound on, has a column for it.
-
-        Args:
-            sample: The sample.
-
-        Returns:
-            True also for a sample that can't be built here: its ``requires`` mark deselects it, or the test
-            fails building it.
-        """
-        if not sample.registered_live:
-            return False
-        try:
-            return any(
-                dialect.features.supports_unique_constraints and SampleDatabase.has_column(sample, dialect.name)
-                for dialect in DialectRegistry.get_dialects()
-            )
-        except (ImportError, ConfigurationError):
-            return True
+        """Whether the sample can be registered live on a profile supporting the outbox."""
+        return sample.registered_live and bool({"sqlite", "postgresql"}.intersection(sample.column_dialects))
 
     @staticmethod
     def skip_unless_stored(sample: FieldSample) -> None:
@@ -138,8 +77,6 @@ class SampleDatabase:
         dialect_name = dialect.name
         if not SampleDatabase.has_column(sample, dialect_name):
             pytest.skip(f"the field has no column on {dialect_name}")
-        if sample.related and not dialect.features.supports_foreign_keys:
-            pytest.skip(f"{dialect_name} keeps no foreign key - a relation on it is refused when bound")
 
     @staticmethod
     async def create(
@@ -195,23 +132,6 @@ class SampleDatabase:
         writer = MigrationWriter("0001_initial", CONTRACT_APP, operations)
         migration = Migration.from_source(writer.as_string(), name="0001_initial", app_label=CONTRACT_APP)
         return migration, new_state
-
-    @staticmethod
-    async def get_create_sql(context: HareContext, models: list[type[Model]]) -> list[str]:
-        """The statements creating the tables of models, as their migration would run them.
-
-        Args:
-            context: The contract test's database.
-            models: The models.
-
-        Returns:
-            The statements, in order.
-        """
-        migration, _ = SampleDatabase.get_written_migration(models)
-        connection = context.get_connection()
-        editor = connection.dialect.schema_editor_class(connection, atomic=False, collect_sql=True)
-        await migration.apply(State(), schema_editor=editor)
-        return list(editor.collected_sql)
 
     @staticmethod
     async def apply_migration(context: HareContext, models: list[type[Model]]) -> None:

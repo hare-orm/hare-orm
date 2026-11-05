@@ -4,7 +4,7 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDateAccess, PyDateTime, PyDict, PyString, PyTimeAccess, PyTzInfo};
+use pyo3::types::{PyDateAccess, PyDateTime, PyString, PyTimeAccess, PyTzInfo};
 use pyo3::PyVisit;
 
 use crate::python::objects;
@@ -28,12 +28,12 @@ pub struct ZoneConversions {
     /// `(zone_name) -> tzinfo`.
     zone_parser: Py<PyAny>,
     /// Zone name -> its zone: an owner bucket of `Timezone.ZONES`, which empties it whenever the
-    /// zones are dropped - read here without a Python call per row.
-    zones_by_name: Py<PyDict>,
+    /// zones are dropped. Reads and writes go through the bucket to enforce its bound.
+    zones_by_name: Py<PyAny>,
 }
 
 impl ZoneConversions {
-    pub fn new(zone_parser: Py<PyAny>, zones_by_name: Py<PyDict>) -> Self {
+    pub fn new(zone_parser: Py<PyAny>, zones_by_name: Py<PyAny>) -> Self {
         ZoneConversions { zone_parser, zones_by_name }
     }
 
@@ -50,8 +50,9 @@ impl ZoneConversions {
     /// The zone of a name.
     pub fn get_zone<'py>(&self, py: Python<'py>, zone_name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTzInfo>> {
         let zones_by_name = self.zones_by_name.bind(py);
-        if let Some(zone) = zones_by_name.get_item(zone_name)? {
-            return Ok(zone.cast_into::<PyTzInfo>()?);
+        let cached = zones_by_name.call_method1(intern!(py, "get"), (zone_name,))?;
+        if !cached.is_none() {
+            return Ok(cached.cast_into::<PyTzInfo>()?);
         }
         let zone = self.zone_parser.bind(py).call1((zone_name,))?.cast_into::<PyTzInfo>()?;
         zones_by_name.set_item(zone_name, &zone)?;

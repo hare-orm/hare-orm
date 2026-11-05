@@ -5,6 +5,76 @@
 
 ## <a id="schema-editor"></a>8. Команды схемы: редактор схемы
 
+`TableDefinition` готовит колонки, ограничения, параметры хранения и комментарии для общего
+компилятора CREATE при создании и пересборке таблицы. `TableCreation.get_create_plan()` подготавливает
+всё создание, включая триггеры, до отправки первой команды. Его неизменяемый `SchemaChangePlan`
+содержит упорядоченные `SchemaStatement` либо шаги, выполняемые во время миграции, и целевое описание
+таблицы. Исполнение и предпросмотр используют одни шаги. `plan.effects` описывает работу вроде
+чтения каталога или заполнения строк без анализа текста SQL.
+
+`SchemaRequirements` из `hare.ddl` собирает требования к расширениям из полей, индексов,
+ограничений и явных объявлений. Создание живой схемы и состояние миграций используют общий
+сборщик; создание таблиц не импортирует автодетектор миграций. `SchemaReferences` читает
+структурные ссылки на поля из ключей индексов, включённых колонок и условий ограничений.
+Из raw SQL зависимости не выводятся: порядок операций с такими объектами задаётся явно.
+
+`BoundIndexKey` различает физические имена колонок и подготовленные SQL-выражения до вывода SQL.
+Колонка с именем `lower(title)` экранируется как один идентификатор. Генерируемые имена используют
+это же явное различие; пунктуация не служит признаком SQL-выражения.
+
+Файлы миграций и `inspectdb` используют общие `DeclarationValueSerializer` и `ImportManager` из
+`hare.declarations`. Импорты получают постоянные псевдонимы после резервирования имён моделей и
+полей. Сравнение деклараций использует структурные значения отдельно от генерации Python-кода;
+готовый SQL-term сохраняет непрозрачный текст, который сериализатор записывает как `RawSQLTerm`.
+
+Динамический default для заполнения колонки вычисляется один раз при исполнении. Сбор SQL не
+вызывает функцию default и не считывает часы: он оставляет комментарий о требуемом действии.
+Замена enum аналогично описывает работу, зависящую от каталога. Вывод с такими комментариями —
+предпросмотр, а не полный сценарий миграции, который можно самостоятельно выполнить.
+
+`TableRebuild.get_rebuild_plan()` подготавливает копирование, замену таблицы и восстановление
+объявленных зависимых объектов до первого DDL. Выражения колонок и постоянные defaults компилируются
+на этом этапе; значения от часов остаются явными шагами исполнения. Неподдержанный callable default
+для пересборки отклоняется до создания временной таблицы. План содержит оба описания таблицы.
+Диалект добавляет подготовку зависимых объектов и предварительные проверки в тот же план.
+
+`get_add_field_plan()` вместе подготавливает определения колонок, заполнение строк, установку
+NOT NULL, ограничения и индексы. Неподдержанное последующее объявление поэтому отклоняется до
+добавления колонки. Динамический default сохраняет снимок настроек поля. `get_remove_field_plan()`
+выбирает удаление на месте либо подготовленную пересборку диалекта; автоматические промежуточные
+таблицы связей используют отдельный план удаления. Эти компиляторы не обращаются к базе.
+
+`get_alter_field_plan()` включает изменения ключей связей, зависимые индексы, generated-колонки,
+defaults, комментарии и преобразования сохранённых значений. `ColumnConversionPrecondition` и
+`ColumnNullPrecondition` — явные шаги исполнения. Перенос строк в объявленную промежуточную модель
+связи использует отдельный шаг исполнения, если нужны defaults или генерируемые ключи. Преобразование,
+требующее первичный ключ, проверяет его наличие при подготовке, до изменения колонки.
+
+`get_table_rename_plan()` готовит переименование партиций и восстановление индексов в отдельных
+таблицах вместе с переименованием основной таблицы. `get_delete_model_plan()` подготавливает
+удаление зависимых объектов, автоматических through-таблиц, таблиц хранения и объектов, которые
+не удаляет DROP TABLE. План создания ClickHouse включает явную проверку топологии реплик, если
+нереплицируемый движок хранит строки распределённой таблицы; предпросмотр отмечает проверку,
+не подключаясь к кластеру.
+
+Переименование колонок использует `ColumnRenames.get_model_column_rename_plan()` и
+`get_table_column_rename_plan()`. `IndexStatements.get_indexes_before_column_rename_plan()` и
+`get_indexes_after_column_rename_plan()` готовят удаление и восстановление индексов в отдельных таблицах;
+`GeneratedIndexNames.get_generated_index_names_change_plan()` — производные имена индексов и ограничений.
+Операции переименования поля и таблицы объединяют все затронутые модели, промежуточные таблицы и зависимые
+объекты до исполнения первого шага. Пересборка отмечается `SchemaEffect.REPLACE_TABLE`, поэтому производные
+имена не переименовываются повторно. Проверки времени исполнения вложенных планов сохраняются в общем плане.
+
+`SchemaCleanup` дожидается завершения очистки даже при отмене и сохраняет обе ошибки, если операция
+и очистка завершились неудачно. Создание ресурса предшествует этой области: неудачный CREATE не
+должен привести к удалению существующего объекта. SQLite восстанавливает прежнее значение
+`legacy_alter_table`. ClickHouse использует уникальную временную Distributed-таблицу и удаляет её
+после копирования, в том числе при ошибке; неуспешный CREATE не входит в область этой очистки.
+Проверки размещения в кластере предшествуют удалению зависимых объектов. Пересборка PostgreSQL
+использует `SchemaTransaction`: блокирует исходную таблицу до копирования и выполняет замену с
+восстановлением зависимостей в одной транзакции или savepoint. Эти области не делают
+нетранзакционный DDL атомарным и не угадывают исход команды при потере соединения.
+
 `build_schema_editor_class()` возвращает подкласс `BaseSchemaEditor`. Редактор выполняет публичные
 операции (`create_model()`, `add_field()`, `alter_field()`, `add_index()`, ...) как порядок их шагов;
 команды каждого вида изменений пишут его **части** — подклассы `SchemaEditorPart` из
@@ -45,10 +115,10 @@ class ColstoreSchemaEditor(BaseSchemaEditor):
 `FIELD_TEMPLATE`, `INDEX_CREATE_TEMPLATE`, `FOREIGN_KEY_TEMPLATE`, `ADD_FIELD_TEMPLATE`,
 `ALTER_FIELD_TYPE_TEMPLATE`, `RENAME_INDEX_TEMPLATE`, ...); диалект переопределяет те, которые его база
 записывает иначе, и задаёт шаблону `None`, если такой команды нет, — тогда изменение пересоздаёт таблицу
-(`TableRebuild.remake_table(old_model, new_model, altered_fields=())`: новая таблица по модели, к которой
+(`TableRebuild.get_rebuild_plan(old_model, new_model, altered_fields=())`: новая таблица по модели, к которой
 ведёт изменение, строки копируются из старой таблицы поле за полем — из поля с тем же именем или из пары в
 `altered_fields` для переименованного, — старая таблица заменяется). База, у которой имена ключа и
-ограничений уникальности заняты во всей схеме, пока жива старая таблица, переопределяет `remake_table()`:
+ограничений уникальности заняты во всей схеме, пока жива старая таблица, переопределяет `get_rebuild_plan()`:
 PostgreSQL держит строки в копии, пока удаляет таблицу и создаёт её заново под теми же именами, — внешние
 ключи других таблиц, представления и прочие объекты её модели создаются снова, последовательности остаются
 со своими значениями. `TableComments.get_table_comment_sql()`
@@ -74,8 +144,9 @@ quoted_column)`). Диалект переопределяет условия, к
 ### <a id="names"></a>Имена и DDL только по состоянию миграций
 
 Каждый ключ, внешний ключ и ограничение уникальности создаётся под именем, которое вычисляет hare, а не
-придумывает база, — следующая миграция находит его по тому же имени, и ни одна команда не зависит от
-содержимого каталога: `sqlmigrate` показывает ровно тот SQL, который выполняет `migrate`.
+придумывает база, — следующая миграция находит его по тому же имени. Для статических шагов
+`SchemaStatement` `sqlmigrate` выводит тот же SQL. Шаги, которым нужен актуальный каталог или выполнение
+Python, обозначаются комментариями предпросмотра, а не полным исполняемым SQL.
 
 - Первичный ключ: `ColumnDefinitions.get_primary_key_clause(name)` — по умолчанию
   ` CONSTRAINT <имя> PRIMARY KEY`; составной — `PRIMARY_KEY_CONSTRAINT_CREATE_TEMPLATE`.
@@ -105,8 +176,8 @@ quoted_column)`). Диалект переопределяет условия, к
 
 | Возможность | Без неё |
 |---|---|
-| `supports_foreign_keys` | Нет ограничений `FOREIGN KEY`; hare сам выполняет каждое действие `on_delete` и проверку `PROTECT`, как для связи с `db_constraint=False`. |
-| `supports_unique_constraints` | Нет ограничений уникальности: уникальность отклоняется — у модели при привязке, у миграции до её первой команды; автоматическая промежуточная таблица не хранит уникальную пару; вставка-или-обновление ищет конфликт только по первичному ключу. |
+| `supports_foreign_keys` | Связи должны объявлять `db_constraint=False`; hare выполняет их действия `on_delete` и проверки `PROTECT` без внешнего ключа в базе. |
+| `supports_unique_constraints` | Уникальность отклоняется — у модели при привязке, у миграции до её первой команды; автоматическая промежуточная таблица не хранит уникальную пару. Если включён `supports_insert_conflicts`, вставка-или-обновление ищет конфликт только по первичному ключу. |
 | `creates_tables_with_forward_references` | Задайте её, если таблица создаётся с внешним ключом на ещё не созданную (ссылка проверяется при записи строки), — тогда `generate_schemas` создаёт цикл внешних ключей таблица за таблицей; без неё таблица цикла получает внешние ключи на последующие таблицы, когда те созданы. |
 | `supports_partial_indexes`, `supports_index_key_order`, `supports_index_nulls_order`, `supports_concurrent_indexes` | Эта часть индекса не записывается или отклоняется — `PartialIndex` без этого признака создаётся как индекс по всем строкам. |
 | `supports_deferrable_constraints`, `supports_not_valid_constraints` | Такой вид ограничения отклоняется. |
@@ -115,8 +186,9 @@ quoted_column)`). Диалект переопределяет условия, к
 | `alters_indexed_columns` | Сбросьте её, если СУБД не меняет колонку, покрытую индексом, — hare удалит покрывающие индексы на время изменения и создаст их заново. |
 
 Возможность только сообщает, что она у базы есть; базовый редактор её синтаксис не пишет. SQL пишут части
-диалекта, который её выставил; фразы ниже — методы класса части, и ядро вызывает их как
-`dialect.schema_editor_class.<part>_class.<method>()` там, где редактора у него нет:
+диалекта, который её выставил. Чистые методы класса и статические методы доступны через
+`dialect.schema_editor_class.<part>_class`; методы экземпляра и компиляторы планов используют часть,
+привязанную к редактору с его клиентом, настройками и режимом сбора SQL:
 
 | Возможность | Что реализуют части диалекта |
 |---|---|
@@ -125,7 +197,7 @@ quoted_column)`). Диалект переопределяет условия, к
 | `CHECK` полей-перечислений (`EnumMembersCondition`) | `ConstraintStatements.get_enum_members_check_sql(quoted_column, value_sqls)` — условие: колонка хранит одно из значений членов; по умолчанию ISO `IN (...)`. |
 | Ограничения исключения | `ConstraintStatements.get_exclusion_constraint_extension(constraint, fields_by_name)` — расширение, которое нужно ограничению; `ConstraintStatements.exclusion_constraint_sql(model, constraint)` — его определение. |
 | `supports_concurrent_indexes` | `add_index(model, index, concurrently)` и `remove_index(...)` редактора; базовый редактор создаёт и удаляет индекс обычным способом. `IndexStatements.get_index_create_sql()` и `IndexStatements.get_index_drop_sql()` дают обычные команды, от которых можно оттолкнуться. |
-| `supports_not_valid_constraints` | `ConstraintStatements.add_check_constraint_not_valid()` и `validate_constraint()`; базовый редактор добавляет ограничение как обычно и ничего не проверяет отдельно. |
+| `supports_not_valid_constraints` | `ConstraintStatements.get_unvalidated_check_add_plan()` и `get_constraint_validation_plan()`; базовый редактор добавляет ограничение как обычно и ничего не проверяет отдельно. |
 | `supports_extensions` | `Extensions.create_extension()`, `drop_extension()` и `get_extension_create_sql()`. |
 | `supports_enum_types` | `EnumTypes.get_enum_type_create_sql()`, `drop_enum_type()` и `alter_enum_type()` — типы `ENUM` колонок `NativeEnumField`. |
 | `supports_views` | `Views.get_view_create_sqls()`, `drop_view()` и `rename_view()`; базовый `alter_view()` удаляет представление, создаёт новое и снова выдаёт права на него. |
@@ -135,7 +207,7 @@ quoted_column)`). Диалект переопределяет условия, к
 | `supports_row_level_security` | `RowLevelSecurityPolicies.get_row_level_security_sqls()`, `get_policy_create_sqls()`, `drop_policy()`, `alter_policy()` и `rename_policy()` — см. [`supports_row_level_security`](#supports-row-level-security) |
 | `supports_grants` | `Grants.get_grant_sqls()` и `get_revoke_sqls()`. |
 | `supports_collations` | `Extensions.create_collation()` и `drop_collation()`. |
-| `supports_schemas` | `Schemas.move_table_to_schema()` — для модели, у которой меняется `Meta.schema`, и `move_to_schema(model, object, old_schema, new_schema)` у `Views`, `MaterializedViews`, `DatabaseFunctions` и `Sequences` — собственные объекты модели переносятся вместе с её таблицей (по умолчанию `UnSupportedError` до любого DDL). |
+| `supports_schemas` | `Schemas.get_table_schema_move_plan()` — для модели, у которой меняется `Meta.schema`, и `get_schema_move_plan(model, object, old_schema, new_schema)` у `Views`, `MaterializedViews`, `DatabaseFunctions` и `Sequences` — собственные объекты модели переносятся вместе с её таблицей (по умолчанию `UnSupportedError` до любого DDL). |
 | Отложенные ограничения | `TableClearing.defer_cascade_foreign_keys(model, connection)` — откладывает внешние ключи, в которые упирается каскад. |
 | Тестовые базы | `TableClearing.clear_tables(connection, quoted_tables)` — очищает таблицы между тестами (по умолчанию — один скрипт с `DELETE FROM` для каждой таблицы). |
 
@@ -147,9 +219,10 @@ quoted_column)`). Диалект переопределяет условия, к
 `TransactionStatements.get_tenant_setting_sql(tenant_texts)` (команда после `BEGIN`, записывающая
 арендаторов транзакции) и параметр подключения `tenant_row_level_security`.
 
-То же относится к операторам фильтра, которые есть только у одной базы: диалект регистрирует их в своём
-`install()` через [`Field.register_lookup()`](../custom-lookups.ru.md), нужное расширение — в
-`required_extension=`, а их функции-операторы [помечены как реализуемые только
+То же относится к операторам фильтра, которые есть только у одной базы: диалект возвращает
+объявления `LookupRegistration` в `ExtensionContribution.lookups` из `get_contribution()`,
+расширение указывается в `RegisteredLookup.required_extension`, а функции-операторы [помечены как реализуемые
+только
 диалектами](../custom-lookups.ru.md#one-database) и реализованы в заменах его `FilterOperators`; так
 PostgreSQL регистрирует свои триграммные операторы. Свои поля он регистрирует в своих типах
 (`TypeMapping.column_type`), а поля задают `COLUMN_TYPE_FROM_DIALECT = True`. Объявление, заданное
@@ -166,22 +239,34 @@ PostgreSQL регистрирует свои триграммные операт
 параметров диалекта, иначе его `default_table_options`:
 
 ```python
+import dataclasses
+
+from hare import fields
+from hare.ddl import RawSQLTerm
+from hare.ddl.table_options import TableOptions
+from hare.exceptions import ConfigurationError
+from hare.models import Model
+
+
 @dataclasses.dataclass(frozen=True)
 class ColstoreTableOptions(TableOptions):
     engine: str = "MergeTree()"
     order_by: tuple[str, ...] = ()
     partition_by: RawSQLTerm | None = None
 
-    def raise_if_unsupported(self, model):
+    def raise_if_unsupported(self, model, features):
         if not self.order_by:
             raise ConfigurationError(f"{model.__name__}: ColstoreTableOptions needs order_by")
 
-    def get_create_suffix_sql(self, model, quote):
+    def get_create_suffix_sql(self, model, editor):
+        quote = editor.quote
         sql = f" ENGINE = {self.engine} ORDER BY ({', '.join(quote(column) for column in self.order_by)})"
         return sql + (f" PARTITION BY {self.partition_by.sql}" if self.partition_by else "")
 
 
 class Event(Model):
+    created_at = fields.DatetimeField()
+
     class Meta:
         primary_key = None
         table_options = [ColstoreTableOptions(order_by=("created_at",))]
@@ -210,11 +295,12 @@ class Event(Model):
 | Хук | Что даёт |
 |---|---|
 | `get_storage_table_name(table_name)` | Таблицу, для которой пишется DDL колонок и хранения модели, — по умолчанию собственную таблицу модели. |
-| `get_companion_table_sqls(model, quote, client, replaces=...)` | Команды, создающие таблицу перед той, что хранит строки; по умолчанию никаких. |
+| `get_companion_table_sqls(model, editor, *, replaces=...)` | Команды, создающие таблицу перед той, что хранит строки; по умолчанию никаких. |
 | `keeps_row_versions()` | Хранит ли таблица несколько строк одного ключа, которые база сливает. |
 
-`copy_table_rows(model, new_table_name, old_table_name, column_mapping)` перестройки таблицы копирует
-строки в перестроенную таблицу — по умолчанию одним `INSERT ... SELECT`.
+`TableRebuild.get_copy_columns(old_model, new_model, altered_fields=())` готовит описания `ColumnCopy`.
+`get_copy_plan(model, new_table_name, source_sql, columns)` превращает их в план копирования строк:
+статический `INSERT ... SELECT`, где возможно, или явный шаг выполнения для отложенных значений.
 `get_journal_table_options(connection)` диалекта задаёт хранение журнала применённых миграций (на
 кластере ClickHouse он реплицируется), а `synchronize_table(connection, table_name)` ждёт строк, которые
 в него записали другие серверы, перед чтением журнала.
@@ -241,9 +327,20 @@ ClickHouse без `sample_by`; по умолчанию ничего не дел�
 
 ## <a id="introspector"></a>9. Чтение существующей схемы
 
+Описание физического типа принадлежит диалекту и отделено от Python-семантики поля.
+`ClickhousePhysicalType` предоставляет неизменяемое дерево контейнеров для чтения каталога и
+бинарных кодеков. `PostgresqlPhysicalType` объединяет имена, элементы массивов и модификаторы
+для интроспекции, подготовки COPY и оценки переписывания таблицы. Его native-декодер использует
+дерево типов tokio-postgres: оно не содержит точности или длины конкретной колонки.
+`SqlitePhysicalType` сохраняет объявление и применяет правила affinity для чтения схемы и
+STRICT-таблиц. Неизвестные объявления остаются непрозрачными, отсутствующие сведения — неизвестными.
+
 `build_introspector_class()` возвращает подкласс `SchemaIntrospector`, реализующий
-`fetch_default_schema()`, `fetch_table_names(connection, schema, include_partitions)` и
-`fetch_tables(connection, tables, schema) -> list[TableInfo]`; `fetch_schema_names(connection)`
+`fetch_default_schema(connection)`, `fetch_table_names(connection, schema, include_partitions)`,
+`fetch_catalog(connection, tables, schema) -> CatalogSnapshot` и чистое преобразование
+`get_table_infos(snapshot, dialect) -> list[TableInfo]`. Общий `fetch_tables()` объединяет чтение и
+преобразование. Переопределите `get_table_parts(snapshot, table_infos)`, если для drift нужны физические
+сведения каталога сверх восстановленных объявлений. `fetch_schema_names(connection)`
 перечисляет схемы для [схемы на арендатора](../../soft-delete-versions-tenants/schema-per-tenant.ru.md)
 (по умолчанию `UnSupportedError`). Остальное — `inspectdb`, поиск расхождений, обратное сопоставление
 типов и полей — работает с общими `TableInfo`/`ColumnInfo`/ `IndexInfo`/`ForeignKeyInfo`. Хранение
@@ -261,9 +358,12 @@ object_names)` — названные представления, материа
 (`hare.dialects.base.schema.shadow`), в котором строится тень, — асинхронный контекстный менеджер: вход
 создаёт тень и задаёт её `client`, выход удаляет её, что бы ни случилось; `get_shadow_schema_name(schema)`
 — схема тени для схемы моделей, `get_shadow_table_options(options)` — параметры таблицы, какими их берёт
-тень (ClickHouse переносит путь Keeper таблицы `Replicated*` под свой), `replace_shadow_names(text)` —
-текст, напечатанный тенью, с её именами, заменёнными на имена базы; `None` (по умолчанию) — поиск
-расхождений даёт `UnSupportedError`.
+тень (ClickHouse переносит путь Keeper таблицы `Replicated*` под свой), а
+`get_shadow_materialized_view(view)` размещает независимое хранилище представления в тени.
+`get_catalog_identities()` возвращает `CatalogIdentities`: drift применяет его `map_part()` к частям
+основного и теневого каталогов, чтобы сравнивать логические имена объектов. По умолчанию соответствия
+пусты. Возврат None из `build_shadow_database_class()` (по умолчанию) даёт `UnSupportedError` при поиске
+расхождений.
 
 То, как база возвращает выражение, тоже решает чтение схемы: `NOW_EXPRESSIONS` (написания текущего
 момента), `SEQUENCE_DEFAULT_PREFIXES` (значение по умолчанию из последовательности),
@@ -286,12 +386,14 @@ object_names)` — названные представления, материа
 числе готовый SQL, никогда не просматривается (функции SQLite, которые hare регистрирует на каждом
 подключении, — см. [SQLite: функции](../../dialects/sqlite/functions.ru.md#in-constraints-and-indexes)).
 
-`ForeignKeyRebuild.add_foreign_key_constraint_not_valid()` и
-`ConstraintStatements.add_unique_constraint_using_index()` стоят за `AddField(..., not_valid=True)` и
+`ForeignKeyRebuild.get_foreign_key_not_valid_plan()` и
+`ConstraintStatements.get_unique_constraint_using_index_plan()` стоят за `AddField(..., not_valid=True)` и
 `AddConstraint(..., using_index=...)`; базовый редактор добавляет ограничение с проверкой строк, а для
-`using_index` строит собственный индекс ограничения и удаляет прежний. Метод класса
-`ColumnTypeChanges.rewrites_table_on_alter()` говорит, какие изменения поля переписывают таблицу, — по
-умолчанию любая смена типа колонки.
+`using_index` строит собственный индекс ограничения и удаляет прежний. Подготовленные шаги отмечают
+перезапись строк через `SchemaEffect.REWRITE_ROWS`. Компилятор смены типа использует
+`ColumnTypeChanges.column_type_change_rewrites_table(old_type, new_type)` для своей команды;
+пересборка таблицы и преобразование хранимых значений объявляют эффекты непосредственно. Отчёты
+операций и правила рисков читают полученный план, включая работу с зависимыми и through-таблицами.
 
 [Проверка миграций](../../migrations/zero-downtime.ru.md#checking-migrations) берёт правила из
 `MigrationSafetyRules`: их перечисляет `get_rules()` — базовый класс даёт общие для всех баз, диалект
@@ -300,6 +402,9 @@ object_names)` — названные представления, материа
 миграции), возвращающим `MigrationRisk` из `context.get_risk(...)`. Получаемый ими
 `MigrationSafetyContext` содержит миграцию и операцию, состояния до и после неё, диалект и его
 `features`, `large_table_rows` и число строк каждой таблицы, которую меняет миграция (`table_row_counts`).
+`context.schema_plan` лениво подготавливает фактический план AddField или AlterField без исполнения;
+правила заполнения и перезаписи строк читают его `effects`. Возможности и размещение настроенного
+клиента учитываются и при `MigrationSafetyChecker.check(..., read_catalog=False)`, без подсчёта строк.
 `count_table_rows(client, table_name, schema, at_most)` считает строки таблицы до `at_most` (подойдёт и
 оценка), 0 — для таблицы, которой нет; базовый класс возвращает None — тогда любая таблица считается
 большой.

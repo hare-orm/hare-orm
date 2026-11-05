@@ -1214,16 +1214,18 @@ class TestTimezoneAndRouters:
 
     @pytest.mark.database_independent
     @pytest.mark.asyncio
-    async def test_init_routers_with_type(self):
-        """_init_routers accepts router type directly."""
+    @pytest.mark.parametrize("use_factory", [False, True])
+    async def test_init_routers_with_callable(self, use_factory):
+        """Router classes and factories use the same construction path."""
 
+        router = (lambda: TestTimezoneAndRouters.TestRouter()) if use_factory else TestTimezoneAndRouters.TestRouter
         async with HareContext() as ctx:
             await ctx.init(
                 HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}),
-                routers=[TestTimezoneAndRouters.TestRouter],
+                routers=[router],
             )
 
-            assert ctx.routers == [TestTimezoneAndRouters.TestRouter]
+            assert ctx.routers == [router]
 
     @pytest.mark.database_independent
     @pytest.mark.asyncio
@@ -1258,8 +1260,8 @@ class TestTimezoneAndRouters:
         ("router", "message"),
         [
             pytest.param("not_a_valid_router_path", "Can't import router", id="invalid_router_type"),
-            # Neither a string nor a type.
-            pytest.param(123, "Router must be either str or type", id="invalid_router_item"),
+            # Cannot construct a router.
+            pytest.param(123, "Can't instantiate router", id="invalid_router_item"),
         ],
     )
     @pytest.mark.database_independent
@@ -1443,3 +1445,46 @@ def test_an_import_failing_inside_a_models_module_is_named_with_its_cause(tmp_pa
         Hare.bind_models(
             HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["models_importing_a_missing_package"]})
         )
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_error_type", [None, RuntimeError, asyncio.CancelledError])
+async def test_failed_connection_initialization_retains_release_errors_and_discards_state(
+    monkeypatch, release_error_type
+):
+    initialization_error = ValueError("initialization failed")
+    release_error = release_error_type("release failed") if release_error_type is not None else None
+    closed = []
+
+    class OpenedClient:
+        discarded = False
+
+        async def close(self):
+            closed.append(self)
+            if release_error is not None:
+                raise release_error
+
+    def reject_connection(alias):
+        raise initialization_error
+
+    handler = ConnectionHandler()
+    client = OpenedClient()
+    handler.root_clients["opened"] = client
+    handler._db_config = {"broken": {}}
+    monkeypatch.setattr(handler, "get", reject_connection)
+    with pytest.raises(BaseExceptionGroup if release_error is not None else ValueError) as raised:
+        await handler._init_connections()
+    if release_error is None:
+        assert raised.value is initialization_error
+    else:
+        assert len(raised.value.exceptions) == 2
+        assert raised.value.exceptions[0] is initialization_error
+        if isinstance(release_error, asyncio.CancelledError):
+            assert isinstance(raised.value.exceptions[1], asyncio.CancelledError)
+        else:
+            assert raised.value.exceptions[1] is release_error
+    assert closed == [client]
+    assert client.discarded
+    assert not handler.root_clients
+    assert handler._db_config is None

@@ -17,10 +17,12 @@ class ClickhouseSqlContext(SqlContext):
         reads_distributed_table: The statement being rendered reads a ``Distributed`` table - it
             runs on every shard, so a table it joins and a subquery of its ``IN`` are read once,
             ``GLOBAL``, and sent to them.
+        cluster_name: The connection's cluster, used when compiling mutations of distributed tables.
     """
 
     rows_are_grouped: bool = False
     reads_distributed_table: bool = False
+    cluster_name: str | None = None
 
     def quote(self, name: Any) -> str:
         # A backslash escapes the next character of a quoted name - doubled, it is itself.
@@ -44,4 +46,6 @@ class ClickhouseSqlContext(SqlContext):
         Returns:
             The ClickHouse context.
         """
+        if isinstance(sql_context, cls):
+            return sql_context
         return cls(**{field.name: getattr(sql_context, field.name) for field in fields(SqlContext)})

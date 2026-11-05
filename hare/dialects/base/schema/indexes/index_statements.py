@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from copy import copy
 from typing import Any
 
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
+from hare.ddl.indexes.bound_index_key import BoundIndexKey
 from hare.ddl.indexes.index import Index
+from hare.ddl.schema_references import SchemaReferences
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
+from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models import Model
 
 
@@ -20,27 +24,23 @@ class IndexStatements(SchemaEditorPart):
 
     def format_index_fields(
         self,
-        field_names: Sequence[str],
+        keys: Sequence[BoundIndexKey],
         opclasses: Sequence[str] | None = None,
-        column_names: Collection[str] = (),
         orders: Sequence[str] | None = None,
     ) -> str:
         """Renders an index's column list - a column quoted, a rendered expression as it is.
 
         Args:
-            field_names: The indexed columns or rendered expressions, in order.
+            keys: The bound columns or expressions, in order.
             opclasses: The operator class of each, if any.
-            column_names: The table's real columns - one of them is always quoted, whatever
-                characters its name has.
             orders: ``"DESC"`` or ``""`` for each, if any.
 
         Returns:
             The comma-separated list.
         """
         formatted = []
-        for position, field in enumerate(field_names):
-            is_expression = field not in column_names and GeneratedNames.is_index_expression(field)
-            column = field if is_expression else self.editor.quote(field)
+        for position, bound_key in enumerate(keys):
+            column = bound_key.get_sql(self.editor)
             opclass = opclasses[position] if opclasses and position < len(opclasses) else ""
             # An opclass name is quoted like any identifier.
             order = orders[position] if orders and position < len(orders) else ""
@@ -51,7 +51,7 @@ class IndexStatements(SchemaEditorPart):
     def get_index_sql(
         self,
         model: type[Model],
-        field_names: Sequence[str],
+        field_names: Sequence[str | BoundIndexKey],
         safe: bool = False,
         index_name: str | None = None,
         index_type: str | None = None,
@@ -60,12 +60,13 @@ class IndexStatements(SchemaEditorPart):
         unique: bool = False,
         orders: Sequence[str] | None = None,
         indexed_table_sql: str | None = None,
+        template: str | None = None,
     ) -> str:
         """The ``CREATE INDEX`` of an index of a model's table.
 
         Args:
             model: The model.
-            field_names: The indexed columns, or the SQL of each expression key.
+            field_names: Physical column names or explicitly bound expression keys.
             safe: Whether to add ``IF NOT EXISTS``.
             index_name: The index's name - generated from the columns when None.
             index_type: The access method (``USING ...``), empty for the default one.
@@ -78,18 +79,23 @@ class IndexStatements(SchemaEditorPart):
         Returns:
             The statement.
         """
-        template = self.editor.UNIQUE_INDEX_CREATE_TEMPLATE if unique else self.editor.INDEX_CREATE_TEMPLATE
+        template = template or (
+            self.editor.UNIQUE_INDEX_CREATE_TEMPLATE if unique else self.editor.INDEX_CREATE_TEMPLATE
+        )
         prefix = GeneratedNamePrefix.UNIQUE_INDEX if unique else GeneratedNamePrefix.INDEX
+        keys = tuple(key if isinstance(key, BoundIndexKey) else BoundIndexKey(key) for key in field_names)
         return template.format(
             exists=self.editor.table_creation.get_exists_sql(safe),
             index_name=self.editor.get_index_name_sql(
-                index_name or GeneratedNames.get_index_name(prefix, model, field_names), model._meta.schema
+                index_name
+                or GeneratedNames.get_index_name(
+                    prefix, model, [key.value for key in keys], expression_keys=keys[0].is_expression
+                ),
+                model._meta.schema,
             ),
             table_name=indexed_table_sql
             or self.editor.get_indexed_table_sql(model._meta.db_table, model._meta.schema),
-            fields=self.format_index_fields(
-                field_names, opclasses, column_names=set(model._meta.fields_db_projection.values()), orders=orders
-            ),
+            fields=self.format_index_fields(keys, opclasses, orders=orders),
             index_type=self.format_index_type(index_type) if index_type else "",
             extra=f"{extra}" if extra else "",
         )
@@ -155,7 +161,7 @@ class IndexStatements(SchemaEditorPart):
             extra="",
         )
 
-    def column_names_for_index(self, model: type[Model], index: Index) -> list[str]:
+    def get_bound_keys(self, model: type[Model], index: Index) -> list[BoundIndexKey]:
         """Returns the index's keys as this connection's ``CREATE INDEX`` lists them - a field's
         own column (its ``source_field``), an expression rendered by the connection's dialect.
 
@@ -166,7 +172,10 @@ class IndexStatements(SchemaEditorPart):
         Returns:
             One key each.
         """
-        return index.get_key_sqls(model, self.editor.client.dialect)
+        return [
+            BoundIndexKey(value, is_expression=not bool(index.fields))
+            for value in index.get_key_sqls(model, self.editor.client.dialect)
+        ]
 
     @staticmethod
     def get_field_indexes(model: type[Model], field: Field[Any]) -> list[Index]:
@@ -203,11 +212,12 @@ class IndexStatements(SchemaEditorPart):
         Returns:
             The indexes.
         """
-        # Local import: the table rebuild part reads this module's statements.
-        from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
-
-        column = field.source_field or field.model_field_name
-        field_index = Index(fields=(column,))
+        columns = (
+            tuple(field.db_column_names)
+            if isinstance(field, ForeignKeyFieldInstance)
+            else (field.source_field or field.model_field_name,)
+        )
+        field_index = Index(fields=columns)
         indexes = [field_index] if field_is_indexed else []
         # The field's own index may be listed in Meta.indexes too - held once, and not at all while the
         # change only adds it.
@@ -216,7 +226,7 @@ class IndexStatements(SchemaEditorPart):
             index = entry if isinstance(entry, Index) else Index(fields=tuple(entry))
             # The field's own index may be listed there too.
             if (
-                TableRebuild.index_references_field(index, field)
+                SchemaReferences.references_field(SchemaReferences.get_index_field_names(index), field)
                 and (name := self.index_name_for_model(model, index)) not in names
             ):
                 names.add(name)
@@ -276,13 +286,8 @@ class IndexStatements(SchemaEditorPart):
         """
         if index.name:
             return index.name
-        index.get_expressions(model)
         # Named after the keys in plain SQL - the same name on every database.
-        column_names = (
-            self.editor.constraint_names.get_fields_to_columns(model, index.field_names)
-            if index.fields
-            else list(index.field_names)
-        )
+        column_names = index.get_key_names(model)
         if renamed_column is not None:
             old_column, new_column = renamed_column
             column_names = [old_column if column_name == new_column else column_name for column_name in column_names]
@@ -291,6 +296,7 @@ class IndexStatements(SchemaEditorPart):
             model,
             column_names,
             index.get_name_parts(),
+            expression_keys=not bool(index.fields),
         )
 
     def get_index_before_column_rename(
@@ -321,6 +327,8 @@ class IndexStatements(SchemaEditorPart):
         index_name: str | None = None,
         indexed_table_sql: str | None = None,
         safe: bool = False,
+        *,
+        template: str | None = None,
     ) -> str:
         """Returns the statement creating an index - with its table, or added to it later.
 
@@ -330,14 +338,14 @@ class IndexStatements(SchemaEditorPart):
             index_name: The index's name, its own by default.
             indexed_table_sql: The table the index is created on, the model's by default.
             safe: Whether the index is created only when it doesn't exist yet.
+            template: A dialect-selected statement template, chosen before rendering.
 
         Returns:
             The statement.
         """
-        index.get_expressions(model)
         return self.get_index_sql(
             model,
-            self.column_names_for_index(model, index),
+            self.get_bound_keys(model, index),
             safe,
             index_name=index_name or self.index_name_for_model(model, index),
             index_type=index.get_index_type_sql(),
@@ -346,6 +354,7 @@ class IndexStatements(SchemaEditorPart):
             unique=index.unique,
             orders=index.get_column_orders(model) or None,
             indexed_table_sql=indexed_table_sql,
+            template=template,
         )
 
     def get_index_drop_sql(self, model: type[Model], index: Index) -> str:
@@ -360,28 +369,38 @@ class IndexStatements(SchemaEditorPart):
         """
         index.raise_if_not_droppable(self.editor.client.features, self.editor.client.dialect)
         index_name = self.index_name_for_model(model, index)
+        options = model._meta.get_table_options(self.editor.client.dialect)
+        table_name = options.get_storage_table_name(model._meta.db_table) if options else model._meta.db_table
+        return self.get_table_index_drop_sql(table_name, index_name, model._meta.schema)
+
+    def get_table_index_drop_sql(self, table_name: str, index_name: str, schema: str | None = None) -> str:
+        """Drop an index of an explicitly selected physical table, including automatic through tables."""
         return self.editor.DROP_INDEX_TEMPLATE.format(
-            name=self.editor.qualify_table_name(index_name, model._meta.schema),
-            table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+            name=self.editor.qualify_table_name(index_name, schema),
+            table=self.editor.get_schema_table_sql(table_name, schema),
         )
 
-    async def drop_indexes_reading_columns_to_rename(self, old_model: type[Model], new_model: type[Model]) -> None:
-        """Drops the indexes that read their table's columns by name, before a column of the table
+    def get_indexes_before_column_rename_plan(
+        self, old_model: type[Model], new_model: type[Model]
+    ) -> SchemaChangePlan:
+        """Prepares dropping indexes that read their table's columns by name, before a column of the table
         is renamed - none by default: an index follows its column.
 
         Args:
             old_model: The model before the rename.
             new_model: The model after it - its column not renamed yet.
         """
+        return SchemaChangePlan(())
 
-    async def recreate_indexes_reading_renamed_columns(self, old_model: type[Model], new_model: type[Model]) -> None:
-        """Creates again the indexes ``drop_indexes_reading_columns_to_rename()`` dropped, after a
+    def get_indexes_after_column_rename_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Prepares recreating the indexes dropped before a
         column of the table was renamed - none by default.
 
         Args:
             old_model: The model before the rename.
             new_model: The model after it - its column already renamed.
         """
+        return SchemaChangePlan(())
 
     @classmethod
     def get_index_include_sql(cls, quoted_columns: Sequence[str]) -> str:

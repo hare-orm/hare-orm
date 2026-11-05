@@ -4,12 +4,17 @@ no change. On the database under test, where the field has a column, the migrati
 
 import pytest
 
+from hare.dialects.dialect_registry import DialectRegistry
+from hare.exceptions import UnSupportedError
+from hare.fields.field import Field
+from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.state.state import State
 from tests.contracts.constants import CONTRACT_APP, CONTRACT_DIALECTS, SAMPLED_FIELD_NAME
 from tests.contracts.contract_models import ContractModels
 from tests.contracts.field_samples import FIELD_SAMPLES
 from tests.contracts.sample_database import SampleDatabase
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.fake_client import FakeClient
 
 
 @pytest.mark.database_independent
@@ -23,8 +28,35 @@ async def test_a_written_migration_of_a_field_reads_back_as_the_model(sample):
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize("sample", [sample.get_parameter() for sample in FIELD_SAMPLES])
-def test_a_field_has_a_column_on_some_dialect(sample):
-    assert any(SampleDatabase.has_column(sample, dialect_name) for dialect_name in CONTRACT_DIALECTS)
+def test_a_field_has_a_column_on_each_declared_dialect(sample):
+    assert sample.column_dialects and set(sample.column_dialects) <= set(CONTRACT_DIALECTS)
+    field = sample.make_fields()[SAMPLED_FIELD_NAME]
+    if sample.related:
+        model = State.from_models(ContractModels.make_models(sample)).apps.get_model(f"{CONTRACT_APP}.ContractRow")
+        declared_field = model._meta.fields_map.get(SAMPLED_FIELD_NAME)
+        if isinstance(declared_field, ManyToManyFieldInstance):
+            assert declared_field.backward_keys and declared_field.forward_keys
+            for dialect_name in sample.column_dialects:
+                client = FakeClient(dialect_name)
+                editor = client.dialect.schema_editor_class(client)
+                data = editor.table_creation.get_model_sql_data(model)
+                assert data.many_to_many_tables_sql
+                through_sql = "\n".join(data.many_to_many_tables_sql)
+                for column in (*declared_field.backward_keys, *declared_field.forward_keys):
+                    assert editor.quote(column) in through_sql
+            return
+        field = model._meta.fields_map[sample.column_name]
+    assert isinstance(field, Field) and field.has_db_field
+    for dialect_name in CONTRACT_DIALECTS:
+        dialect = DialectRegistry.get_dialect(dialect_name)
+        if dialect_name in sample.column_dialects:
+            field.check_dialect_supported(dialect)
+            assert field.get_column_type(dialect), dialect_name
+        elif not sample.related:
+            # Column declarations are tested negatively too, including Decimal on SQLite.
+            # Relation restrictions belong to the model's FK/uniqueness capabilities.
+            with pytest.raises(UnSupportedError):
+                field.check_dialect_supported(dialect)
 
 
 @pytest.mark.asyncio

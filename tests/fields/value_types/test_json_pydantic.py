@@ -8,8 +8,6 @@ from hare.exceptions import ValidationError
 from hare.fields import JSONField
 from tests.shared_models import testmodels, testmodels_pydantic
 
-REQUIRES = ("pydantic",)
-
 
 class MyPydanticModel(BaseModel):
     name: str

@@ -1,4 +1,4 @@
-//! `FirstRow` - the one row `fetch_one()` and a stream's `__anext__()` return, made a `PgRow` on the
+//! `FirstRow` - the row a stream's `__anext__()` returns, made a `PgRow` on the
 //! event loop's thread.
 
 use std::sync::Arc;

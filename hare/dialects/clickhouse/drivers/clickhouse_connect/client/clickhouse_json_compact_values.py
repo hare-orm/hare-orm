@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from hare.dialects.clickhouse.drivers.clickhouse_connect.constants import CLICKHOUSE_DECIMAL_CONTEXT
-from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 
 
 class ClickhouseJsonCompactValues:
@@ -27,7 +27,8 @@ class ClickhouseJsonCompactValues:
         Returns:
             The Python value.
         """
-        name, arguments = ClickhouseTypeNames.get_type_parts(type_name)
+        physical_type = ClickhousePhysicalType.from_sql(type_name)
+        name, arguments = physical_type.name, physical_type.arguments
         if value is None:
             return None
         if name in {"Nullable", "LowCardinality"}:
@@ -44,7 +45,7 @@ class ClickhouseJsonCompactValues:
         if name in {"Date", "Date32"}:
             return datetime.date.fromisoformat(value)
         if name in {"DateTime", "DateTime64"}:
-            return cls.get_moment(name, arguments, value)
+            return cls.get_moment(physical_type, value)
         if name == "UUID":
             return uuid.UUID(value)
         if name in {"IPv4", "IPv6"}:
@@ -54,43 +55,26 @@ class ClickhouseJsonCompactValues:
         if name == "Tuple":
             items = list(value.values()) if isinstance(value, dict) else value
             return tuple(
-                cls.get_value(cls.get_element_type(argument), item)
-                for argument, item in zip(arguments, items, strict=True)
+                cls.get_value(element.sql, item) for element, item in zip(physical_type.elements, items, strict=True)
             )
         if name == "Map":
             return {cls.get_value(arguments[0], key): cls.get_value(arguments[1], item) for key, item in value.items()}
         return value
 
     @staticmethod
-    def get_element_type(argument: str) -> str:
-        """The type of a tuple's element - a named element's type after its name.
-
-        Args:
-            argument: The element's declaration.
-
-        Returns:
-            The type.
-        """
-        name, _arguments = ClickhouseTypeNames.get_type_parts(argument)
-        if " " in name.strip():
-            return argument.strip().split(" ", 1)[1]
-        return argument
-
-    @staticmethod
-    def get_moment(name: str, arguments: list[str], value: str) -> datetime.datetime:
+    def get_moment(physical_type: ClickhousePhysicalType, value: str) -> datetime.datetime:
         """A moment of a ``DateTime`` or a ``DateTime64`` column - in the column's time zone, where it
         names one.
 
         Args:
-            name: The type's name.
-            arguments: Its arguments - a precision of a ``DateTime64`` first, a zone last.
+            physical_type: The parsed column type, including its optional timezone.
             value: The moment's text.
 
         Returns:
             The moment.
         """
         moment = datetime.datetime.fromisoformat(value)
-        zone_arguments = arguments[1:] if name == "DateTime64" else arguments
-        if zone_arguments:
-            return moment.replace(tzinfo=zoneinfo.ZoneInfo(zone_arguments[0].strip().strip("'")))
+        timezone = physical_type.timezone
+        if timezone is not None:
+            return moment.replace(tzinfo=zoneinfo.ZoneInfo(timezone))
         return moment

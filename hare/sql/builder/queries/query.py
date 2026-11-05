@@ -83,7 +83,8 @@ class Query:
 
         Args:
             terms: A list of terms to select. These can be any type of int, float, str, bool, or
-                Term. They cannot be a Field unless ``Query.from_`` is called first.
+                Term. A bare column-name string requires ``Query.from_`` first; a ``Field``
+                already carries its table reference and can be selected directly.
             kwargs: Passed on to the ``QueryBuilder`` (``wrap_set_operation_queries``,
                 ``wrapper_class``, ``immutable``).
 

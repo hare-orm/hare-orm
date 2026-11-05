@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, ClassVar
+
+import pytest
 
 from hare import fields
 from hare.instrumentation.enums import RowOperation
+from hare.time import Timezone
 from tests.contracts.writes.enums import WriteOutcome, WriteRole
 from tests.contracts.writes.write_observer import WriteObserver
 from tests.contracts.writes.write_path import WritePath
@@ -15,7 +19,7 @@ STAMPED_ROLES = (WriteRole.SUBJECT, WriteRole.NOTE)
 
 class AutoNowObserver(WriteObserver):
     """The ``auto_now`` and ``auto_now_add`` fields: a path inserting a row stamps both, a path updating one
-    advances ``auto_now`` and keeps ``auto_now_add``, a row no path writes keeps its stamps."""
+    sets ``auto_now`` to the write's moment and keeps ``auto_now_add``; a row no path writes keeps its stamps."""
 
     name: ClassVar[str] = "auto_now"
     outcomes: ClassVar[dict[str, WriteOutcome]] = {
@@ -33,7 +37,11 @@ class AutoNowObserver(WriteObserver):
 
     async def check(self, scenario: WriteScenario, path: WritePath, outcome: WriteOutcome) -> None:
         before = await scenario.get_snapshot()
-        await path.run(scenario, 5)
+        moment = datetime(2040, 1, 1, tzinfo=UTC)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(Timezone, "now", lambda: moment)
+            patch.setattr(fields.DatetimeField, "get_stamp_value", lambda self, now=None: moment)
+            await path.run(scenario, 5)
         after = await scenario.get_snapshot()
 
         changed_rows = path.get_changed_rows(*STAMPED_ROLES)
@@ -44,11 +52,11 @@ class AutoNowObserver(WriteObserver):
                 continue
             row = after[role.value][pk]
             if operation is RowOperation.INSERT:
-                assert row["touched_at"] is not None
-                assert row["created_at"] is not None
+                assert row["touched_at"] == moment, (role, pk)
+                assert row["created_at"] == moment, (role, pk)
             elif operation is RowOperation.UPDATE:
                 old_row = before[role.value][pk]
-                assert row["touched_at"] > old_row["touched_at"], (role, pk)
+                assert row["touched_at"] == moment, (role, pk)
                 assert row["created_at"] == old_row["created_at"], (role, pk)
         for role in STAMPED_ROLES:
             for pk, row in before[role.value].items():

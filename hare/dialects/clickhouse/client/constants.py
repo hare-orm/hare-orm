@@ -19,10 +19,9 @@ CLICKHOUSE_FAILED_MUTATIONS_PATTERN = re.compile(r"execution of mutations? '([^'
 
 #: Stops failed mutations of a table - one left would fail every later mutation of the table, and
 #: could still change its rows once the write that made it has raised; only a mutation that has failed
-#: is stopped (``{0}``: ``ON CLUSTER``,
-#: ``{1}``: the table's name, ``{2}``: the mutations' ids, as literals).
+#: is stopped. IDs are local to a physical table, so this command never broadcasts.
 CLICKHOUSE_KILL_MUTATIONS_TEMPLATE = (
-    "KILL MUTATION{on_cluster} WHERE database = {database} AND table = {table} AND mutation_id IN ({ids}) "
+    "KILL MUTATION WHERE database = {database} AND table = {table} AND mutation_id IN ({ids}) "
     "AND latest_fail_reason != ''"
 )
 

@@ -7,6 +7,8 @@ from hare.sql.terms.term import Term
 class Index(Term):
     """An index by its name."""
 
+    structure_attributes = ("name",)
+
     def __init__(self, name: str, alias: str | None = None) -> None:
         super().__init__(alias)
         self.name = name

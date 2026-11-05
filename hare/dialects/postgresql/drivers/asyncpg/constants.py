@@ -44,8 +44,8 @@ POSTGRES_TIMESTAMP_SIZE = 8
 #: A naive datetime before this year may be one ``datetime.astimezone()`` can't convert (Windows).
 EPOCH_YEAR = 1970
 
-#: AsyncpgTransactionClient.stream()'s default `Connection.cursor(..., prefetch=...)`
-#: batch size when QuerySet.stream()'s own chunk_size argument is left unset (0) - matches
+#: AsyncpgTransactionClient.stream()'s default `Cursor.fetch(batch_size)` batch size
+#: when QuerySet.stream()'s chunk_size argument is left unset (0) - matches
 #: iterator()'s own default chunk_size, so the two methods behave similarly out of the box.
 DEFAULT_STREAM_PREFETCH = 1000
 
@@ -55,37 +55,19 @@ ASYNCPG_POOL_ONLY_PARAMETERS = frozenset(
     {"min_size", "max_size", "max_queries", "max_inactive_connection_lifetime", "setup", "init", "reset", "connect"}
 )
 
-#: Sanity ceilings for asyncpg's own numeric connection parameters.
-ASYNCPG_MAX_QUERIES_LIMIT = 1_000_000_000
-ASYNCPG_MAX_LIFETIME_SECONDS = 86400.0
-ASYNCPG_MAX_CONNECT_TIMEOUT_SECONDS = 86400.0
-ASYNCPG_MAX_CACHEABLE_STATEMENT_SIZE = 2**30
-
-
 #: The root certificate setting of a DB_URL - asyncpg reads it only from a DSN, as ``sslrootcert``.
 ASYNCPG_ROOT_CERTIFICATE_SETTING = "ssl_root_cert"
 #: The DSN carrying the root certificate - the host, port and the rest are passed apart, over it.
 ASYNCPG_ROOT_CERTIFICATE_DSN_PREFIX = "postgresql://?"
 ASYNCPG_ROOT_CERTIFICATE_DSN_PARAMETER = "sslrootcert"
 
-#: The settings asyncpg's pool takes that hare checks before passing them on.
+#: The settings asyncpg's pool takes whose URL text hare parses before passing them on.
 ASYNCPG_CONNECTION_OPTIONS = ConnectionOptions(
-    ConnectionOption("max_queries", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=ASYNCPG_MAX_QUERIES_LIMIT),
-    ConnectionOption(
-        "max_cacheable_statement_size",
-        ConnectionOptionType.WHOLE_NUMBER,
-        minimum=0,
-        maximum=ASYNCPG_MAX_CACHEABLE_STATEMENT_SIZE,
-    ),
-    ConnectionOption(
-        "max_inactive_connection_lifetime", ConnectionOptionType.SECONDS, maximum=ASYNCPG_MAX_LIFETIME_SECONDS
-    ),
-    ConnectionOption(
-        "max_cached_statement_lifetime", ConnectionOptionType.SECONDS, maximum=ASYNCPG_MAX_LIFETIME_SECONDS
-    ),
-    ConnectionOption(
-        "timeout", ConnectionOptionType.SECONDS, positive=True, maximum=ASYNCPG_MAX_CONNECT_TIMEOUT_SECONDS
-    ),
+    ConnectionOption("max_queries", ConnectionOptionType.WHOLE_NUMBER),
+    ConnectionOption("max_cacheable_statement_size", ConnectionOptionType.WHOLE_NUMBER),
+    ConnectionOption("max_inactive_connection_lifetime", ConnectionOptionType.SECONDS),
+    ConnectionOption("max_cached_statement_lifetime", ConnectionOptionType.SECONDS),
+    ConnectionOption("timeout", ConnectionOptionType.SECONDS),
     ConnectionOption(ASYNCPG_ROOT_CERTIFICATE_SETTING, ConnectionOptionType.TEXT),
 )
 
@@ -110,12 +92,10 @@ POSTGRES_INTERVAL_DAYS_PER_MONTH = 30
 ASYNCPG_EXTENSION_TYPE_NAMES = ("citext", "ltree", "hstore")
 #: The extension types of ASYNCPG_EXTENSION_TYPE_NAMES the database has, with their schemas.
 ASYNCPG_EXTENSION_TYPES_SQL = (
-    "SELECT pg_type.typname, pg_namespace.nspname FROM pg_type "
+    "SELECT pg_type.typname, pg_namespace.nspname, pg_type.oid FROM pg_type "
     "JOIN pg_namespace ON pg_namespace.oid = pg_type.typnamespace "
     "WHERE pg_type.typname = ANY($1::text[]) AND pg_type.typtype = 'b'"
 )
-#: The word of a statement creating or dropping an extension - its types are looked up again after it.
-EXTENSION_STATEMENT_WORD = "EXTENSION"
 #: The version byte leading PostgreSQL's binary ``ltree``.
 LTREE_BINARY_VERSION = 1
 #: The length of a NULL value in PostgreSQL's binary ``hstore``.

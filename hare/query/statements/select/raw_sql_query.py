@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
+from collections import Counter
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -37,7 +38,9 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
         self._sql = sql
         self._parameters = parameters
         self._apply_connection(connection)
-        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get(self._get_raw_sql_plan_key())
+        self._raw_sql_plan: RawSQLPlan | None = StatementPlans.raw_sql_plans.get_model_bucket(self.model).get(
+            self._get_raw_sql_plan_key()
+        )
         # A text and parameter types a plan was kept for were checked when it was made. Any other
         # is checked here, not once the query is awaited, so a %s-placeholder/parameters count
         # mismatch (see RawSQL.__init__) surfaces at the .raw(sql, parameters) call.
@@ -55,7 +58,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             connection.connection_alias,
             connection.query_class,
             self._sql,
-            tuple([type(parameter) for parameter in self._parameters]),
+            tuple(map(type, self._parameters)),
         )
 
     def _get_statements(self, parameters_inline: bool) -> list[tuple[str, list[Any]]]:
@@ -85,7 +88,7 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             indexes_by_parameter_id = {id(parameter): index for index, parameter in enumerate(raw_sql.parameters)}
             parameter_indexes = [indexes_by_parameter_id.get(id(source)) for source in parameterizer.sources]
             if None not in parameter_indexes:
-                StatementPlans.raw_sql_plans[self._get_raw_sql_plan_key()] = RawSQLPlan(
+                StatementPlans.raw_sql_plans.get_model_bucket(self.model)[self._get_raw_sql_plan_key()] = RawSQLPlan(
                     sql, cast("tuple[int, ...]", tuple(parameter_indexes))
                 )
         return [(sql, parameterizer.values)]
@@ -100,27 +103,31 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
             return []
         column_names = result.column_names
         annotation_names_key = (self.model, connection.connection_alias, connection.dialect, column_names)
-        annotation_names = StatementPlans.raw_sql_annotation_names.get(annotation_names_key)
+        annotation_names = StatementPlans.raw_sql_annotation_names.get_model_bucket(self.model).get(
+            annotation_names_key
+        )
         if annotation_names is None:
-            _model_column_names, annotation_names = self._get_row_column_names(list(column_names))
-            StatementPlans.raw_sql_annotation_names[annotation_names_key] = annotation_names
+            annotation_names = self._get_annotation_names(column_names)
+            StatementPlans.raw_sql_annotation_names.get_model_bucket(self.model)[annotation_names_key] = (
+                annotation_names
+            )
         return await ModelRows(self.model, connection, annotations=annotation_names).read_all(result)
 
-    def _get_row_column_names(self, column_names: list[str]) -> tuple[list[str], list[str]]:
-        """Splits the raw query's columns into model columns and annotations - a column that is
+    def _get_annotation_names(self, column_names: Sequence[str]) -> list[str]:
+        """Finds the raw query's annotations - a column that is
         neither a column nor a field of the model becomes an attribute of each instance.
 
         Args:
             column_names: The result's column names, in order.
 
         Returns:
-            The model column names and the annotation names.
+            The annotation names in result order.
 
         Raises:
             QueryError: A column name appears more than once.
             FieldError: The primary key column isn't selected.
         """
-        duplicate_names = sorted({name for name in column_names if column_names.count(name) > 1})
+        duplicate_names = sorted(name for name, count in Counter(column_names).items() if count > 1)
         if duplicate_names:
             raise QueryError(
                 f"raw() query returns the column(s) {duplicate_names} more than once - alias the "
@@ -138,14 +145,13 @@ class RawSQLQuery(AwaitableQuery[TModel], Generic[TModel]):
                 f"raw() query for {self.model.__name__} must select the primary key column(s) "
                 f"{missing_pk_columns} - instances can't be built without it."
             )
-        model_column_names = []
-        annotation_names = []
-        for column_name in column_names:
-            if column_name in layout.entry_by_column or column_name in layout.entry_by_field_name:
-                model_column_names.append(column_name)
-            elif column_name not in meta.fields_map:
-                annotation_names.append(column_name)
-        return model_column_names, annotation_names
+        return [
+            column_name
+            for column_name in column_names
+            if column_name not in layout.entry_by_column
+            and column_name not in layout.entry_by_field_name
+            and column_name not in meta.fields_map
+        ]
 
-    def __await__(self) -> Generator[Any, None, list[TModel]]:
-        return self._get_execution_query()._execute().__await__()
+    async def _execute_bound(self) -> list[TModel]:
+        return await self._get_execution_query()._execute()

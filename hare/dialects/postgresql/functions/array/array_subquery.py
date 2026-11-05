@@ -9,6 +9,7 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.sql import SqlContext
+from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -46,8 +47,7 @@ class ArraySubquery(Subquery):
         return ArrayField(base_field=element_field)
 
     def as_(self, alias: str) -> Self:  # type: ignore[override]
-        self.alias = alias
-        return self
+        return Term.as_(self, alias)
 
     def get_subquery_sql(self, sql_context: SqlContext) -> str:
         """The SQL of the wrapped query, without an alias."""

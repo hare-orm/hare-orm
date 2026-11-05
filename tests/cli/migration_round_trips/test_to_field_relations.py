@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from hare.migrations import operations as ops
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
@@ -74,7 +75,7 @@ async def test_renamed_to_field_target_keeps_the_relation_pointing_at_it(project
 
     project.write_models(template.format(code_name="slug", source_field=', source_field="code"'))
     await project.cli_ok("makemigrations")
-    assert "ops.RenameField(" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
 
@@ -104,8 +105,8 @@ async def test_to_field_target_replaced_without_rename_repoints_the_relation_bef
 
     project.write_models(template.format(code_name="ident"))
     await project.cli_ok("makemigrations")
-    latest_migration = project.read_latest_migration()
-    assert latest_migration.index("ops.AlterField(") < latest_migration.index("ops.RemoveField(")
+    operation_types = [type(operation) for operation in project.get_latest_migration().operations]
+    assert operation_types.index(ops.AlterField) < operation_types.index(ops.RemoveField)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     await project.query("INSERT INTO author (id, ident) VALUES (1, 'a')")
@@ -146,18 +147,14 @@ async def test_to_field_target_removed_with_the_referencing_model_is_removed_aft
 
     project.write_models(author)
     await project.cli_ok("makemigrations")
-    latest_migration = project.read_latest_migration()
-    assert latest_migration.index("ops.DeleteModel(") < latest_migration.index("ops.RemoveField(")
+    operation_types = [type(operation) for operation in project.get_latest_migration().operations]
+    assert operation_types.index(ops.DeleteModel) < operation_types.index(ops.RemoveField)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
 
     await project.cli_ok("migrate", "app", project.migration_files()[0])
     assert "code" in await project.column_types("author")
     assert "author_id" in await project.column_types("book")
-
-
-def get_migration_dependencies_line(migration_source: str) -> str:
-    return migration_source.split("dependencies = ", 1)[1].split("\n", 1)[0]
 
 
 @pytest.mark.asyncio
@@ -184,9 +181,9 @@ async def test_to_field_target_replaced_in_another_app_is_removed_in_a_follow_up
     a_migrations = project.migration_files("a")
     b_migrations = project.migration_files("b")
     assert len(a_migrations) == 3
-    follow_up_migration = project.read_latest_migration("a")
-    assert "ops.RemoveField(" in follow_up_migration
-    assert f'("b", "{b_migrations[-1]}")' in get_migration_dependencies_line(follow_up_migration)
+    follow_up_migration = project.get_latest_migration("a")
+    assert any(isinstance(operation, ops.RemoveField) for operation in follow_up_migration.operations)
+    assert ("b", b_migrations[-1]) in follow_up_migration.dependencies
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     await project.query("INSERT INTO author (id, ident) VALUES (1, 'a')")
@@ -231,8 +228,8 @@ async def test_to_field_target_removal_waits_for_the_other_app_repointing_the_re
 
     await project.cli_ok("makemigrations")
     b_migrations = project.migration_files("b")
-    removal_migration = project.read_latest_migration("a")
-    assert f'("b", "{b_migrations[-1]}")' in get_migration_dependencies_line(removal_migration)
+    removal_migration = project.get_latest_migration("a")
+    assert ("b", b_migrations[-1]) in removal_migration.dependencies
     await project.cli_ok("migrate")
     await project.assert_in_sync()
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -109,7 +108,7 @@ class ExistsQuery(RowsSummaryQuery):
         if self._offset and (self._distinct or self._distinct_on):
             self._group_by_primary_key_for_distinct()
         self.query._selects = []
-        self.query._select_other(ValueWrapper(1, allow_parametrize=False))  # type:ignore[arg-type]
+        self.query._select_other(ValueWrapper(1, allow_parametrize=False))
 
     def _group_by_primary_key_for_distinct(self) -> None:
         """Groups a sliced ``.distinct()`` query by its primary key, so the offset skips distinct
@@ -134,12 +133,12 @@ class ExistsQuery(RowsSummaryQuery):
             )
         )
 
-    def __await__(self) -> Generator[Any, None, bool]:
+    async def _execute_bound(self) -> bool:
         if self._is_none or self._limit == 0:
-            return self._execute_none().__await__()
+            return await self._execute_none()
         query = self._get_execution_query()
         query._make_query_to_run()
-        return query._execute_with_retry_context(query._execute()).__await__()
+        return await query._execute_reading(query._execute())
 
     async def _execute_none(self) -> bool:
         return False
@@ -147,5 +146,5 @@ class ExistsQuery(RowsSummaryQuery):
     async def _execute(
         self,
     ) -> bool:
-        result, _ = await self._connection.execute(*self._get_parameterized_sql(), returns_rows=True)
+        result, _ = await self._connection.execute(*self._get_parameterized_sql(), returns_rows=True, retry_read=True)
         return bool(result)

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.execution.write_statements import BoundWriteValue
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -20,7 +22,7 @@ class WriteValueReference:
     doesn't.
     """
 
-    wrapper: ValueWrapper
+    wrapper: ParameterSlot | ValueWrapper
     field: Field[Any]
 
     def get_parameter_values(self, value: Any, model: type[Model], dialect: Dialect) -> ParameterValues | None:
@@ -35,7 +37,11 @@ class WriteValueReference:
         Returns:
             The parameters, or None when the converted value isn't a plain value.
         """
-        db_value = dialect.types.get_db_value(self.field, value, None)
+        db_value = (
+            value.database_value
+            if isinstance(value, BoundWriteValue)
+            else dialect.types.get_db_value(self.field, value, None)
+        )
         if isinstance(db_value, Term):
             return None
-        return [(id(self.wrapper), db_value, False)]
+        return [(self.wrapper, db_value, False)]

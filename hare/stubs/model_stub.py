@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import dataclasses
 import inspect
 import typing
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from hare.exceptions import FieldError
+from hare.models.write.rules.enums import WriteType
 from hare.query.generic_foreign_keys.constants import GENERIC_FOREIGN_KEY_LOOKUPS, GENERIC_FOREIGN_KEY_TYPE_KEY
 from hare.query.generic_foreign_keys.generic_foreign_key_paths import GenericForeignKeyPaths
 from hare.query.managers.base_manager import BaseManager
@@ -22,6 +22,7 @@ from hare.stubs.stub_imports import StubImports
 from hare.stubs.value_type_text import ValueTypeText
 from hare.typing_info.declarations import ValueType
 from hare.typing_info.filter_value_types import FilterValueTypes
+from hare.typing_info.write_value_types import WriteValueTypes
 
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
@@ -48,12 +49,12 @@ class ModelStub:
         self.imports = imports
         self.relation_depth = relation_depth
         self.value_type_text = ValueTypeText(imports)
-        self.model_name = model.__name__
+        model_name = model.__name__
         #: The names of the model's declarations - free names of the stub's module.
-        self.filters_name = imports.declare(f"{self.model_name}{FILTERS_SUFFIX}")
-        self.writes_name = imports.declare(f"{self.model_name}{WRITES_SUFFIX}")
-        self.updates_name = imports.declare(f"{self.model_name}{UPDATES_SUFFIX}")
-        self.queryset_name = imports.declare(f"{self.model_name}{QUERYSET_SUFFIX}")
+        self.filters_name = imports.declare(f"{model_name}{FILTERS_SUFFIX}")
+        self.writes_name = imports.declare(f"{model_name}{WRITES_SUFFIX}")
+        self.updates_name = imports.declare(f"{model_name}{UPDATES_SUFFIX}")
+        self.queryset_name = imports.declare(f"{model_name}{QUERYSET_SUFFIX}")
 
     def get_paths(self, model: type[Model], prefix: str, depth: int) -> list[str]:
         """The field paths a filter key may start with - the model's fields, and the fields of the
@@ -116,43 +117,12 @@ class ModelStub:
         return lookups
 
     def get_write_types(self) -> dict[str, ValueType]:
-        """The type of the value of each field ``create()`` and ``update()`` take."""
-        write_types: dict[str, ValueType] = {}
-        meta = self.model._meta
-        for name in meta.fields_db_projection:
-            field = meta.fields_map[name]
-            write_types[name] = ValueType(
-                classes=(field.field_type, *field.get_accepted_value_types()),
-                declared_in=(self.model, name),
-                accepts_enum_values=True,
-                nullable=field.null,
-            )
-        for name in self.get_direct_relation_names():
-            relation = cast("RelationalField[Any]", meta.fields_map[name])
-            write_types[name] = ValueType(models=(relation.related_model,), nullable=relation.null)
-        for name, generic_field in meta.generic_foreign_key_fields.items():
-            # A branch's row is taken as a dict too - {"type": <branch>, <key fields>}.
-            write_types[name] = ValueType(
-                classes=(dict,), models=tuple(generic_field.branch_by_model), nullable=generic_field.null
-            )
-        if meta.primary_key_attribute:
-            key_type = meta.get_lookup_info(PRIMARY_KEY_ATTRIBUTE_NAME).value_type
-            write_types[PRIMARY_KEY_ATTRIBUTE_NAME] = ValueType(classes=(key_type,))
-        return write_types
+        """The type of each field value accepted by ``create()``."""
+        return WriteValueTypes.get_all(self.model)
 
     def get_update_types(self) -> dict[str, ValueType]:
-        """The type of the value of each field ``update()`` takes - a write's, or an expression."""
-        return {
-            name: dataclasses.replace(value_type, accepts_expressions=True)
-            for name, value_type in self.get_write_types().items()
-        }
-
-    def get_direct_relation_names(self) -> list[str]:
-        """The model's foreign key and one-to-one relations, in the order the model declares them -
-        a stub written twice is the same text."""
-        meta = self.model._meta
-        relation_names = meta.foreign_key_fields | meta.one_to_one_fields
-        return [name for name in meta.fields_map if name in relation_names]
+        """The shared write contracts with expressions accepted for updates."""
+        return WriteValueTypes.get_all(self.model, accepts_expressions=True, write_type=WriteType.UPDATE)
 
     def get_typed_dict(self, name: str, types_by_key: dict[str, ValueType]) -> list[str]:
         """The lines of a ``TypedDict`` whose keys are optional - the functional form takes any key."""
@@ -182,6 +152,10 @@ class ModelStub:
         exists = self.imports.add("hare.query.expressions", "Exists")
         single = self.imports.add("hare.query.queryset.single_rows.query_set_single", "QuerySetSingle")
         update_query = self.imports.add("hare.query.statements.write.update_query", "UpdateQuery")
+        dict_name = self.imports.add("builtins", "dict")
+        str_name = self.imports.add("builtins", "str")
+        tuple_name = self.imports.add("builtins", "tuple")
+        bool_name = self.imports.add("builtins", "bool")
         lines = [
             *self.get_typed_dict(filters, self.get_filter_types()),
             "",
@@ -200,10 +174,11 @@ class ModelStub:
             f"multiple_objects_returned_exception: {any_name} = ..., **kwargs: {unpack}[{filters}]) -> "
             f"{single}[{model}]: ...",
             f"    async def create(self, **kwargs: {unpack}[{writes}]) -> {model}: ...",
-            f"    async def get_or_create(self, defaults: dict[str, {any_name}] | None = None, "
-            f"**kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
-            f"    async def update_or_create(self, defaults: dict[str, {any_name}] | None = None, create_defaults: "
-            f"dict[str, {any_name}] | None = None, **kwargs: {unpack}[{filters}]) -> tuple[{model}, bool]: ...",
+            f"    async def get_or_create(self, defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"**kwargs: {unpack}[{filters}]) -> {tuple_name}[{model}, {bool_name}]: ...",
+            f"    async def update_or_create(self, defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"create_defaults: {dict_name}[{str_name}, {any_name}] | None = None, "
+            f"**kwargs: {unpack}[{filters}]) -> {tuple_name}[{model}, {bool_name}]: ...",
             f"    def update(self, **kwargs: {unpack}[{updates}]) -> {update_query}: ...",
             *self.get_extension_method_lines(),
         ]
@@ -219,7 +194,8 @@ class ModelStub:
         lines.extend(
             [
                 f"    @{overload}",
-                f"    def values_list(self, *fields_: str, flat: bool = False, named: bool = False, **kwargs: "
+                f"    def values_list(self, *fields_: {str_name}, flat: {bool_name} = False, "
+                f"named: {bool_name} = False, **kwargs: "
                 f"{any_name}) -> {queryset}[{model}, {any_name}, {any_name}]: ...",
             ]
         )
@@ -238,7 +214,7 @@ class ModelStub:
         any_name = self.imports.add("typing", "Any")
         self_name = self.imports.add("typing", "Self")
         lines = []
-        for name, implementations in sorted(QuerySetExtensions.registered.items()):
+        for name, implementations in sorted(QuerySetExtensions.get_registered().items()):
             implementation = implementations.get(type(self.dialect))
             if implementation is None:
                 continue
@@ -288,7 +264,10 @@ class ModelStub:
         return ", ".join(parts)
 
     def get_selected_types(self) -> dict[str, ValueType]:
-        """The type of each field ``values_list(name, flat=True)`` selects."""
+        """The read type of each direct stored field for ``values_list(name, flat=True)`` overloads.
+
+        Relation paths and expression outputs retain the queryset's general return type.
+        """
         selected_types: dict[str, ValueType] = {}
         for name in self.model._meta.fields_db_projection:
             try:
@@ -349,7 +328,7 @@ class ModelStub:
         key_text = self.value_type_text.get_text(key_type)
         name = PRIMARY_KEY_ATTRIBUTE_NAME
         return [
-            "    @property",
+            f"    @{self.imports.add('builtins', 'property')}",
             f"    def {name}(self) -> {key_text}: ...",
             f"    @{name}.setter",
             f"    def {name}(self, value: {self.value_type_text.get_union([key_text, 'None'])}) -> None: ...",

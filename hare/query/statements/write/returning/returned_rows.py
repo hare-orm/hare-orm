@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +9,8 @@ from hare.exceptions import FieldError
 from hare.models.write.rules.constants import RETURNING_METHOD_NAME
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.query.hare_column_names import HareColumnNames
+from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 from hare.query.statements.constants import RETURNING_OLD_VALUES_KEY
 from hare.sql.terms.values.old_row_value import OldRowValue
 
@@ -168,38 +170,50 @@ class ReturnedRows:
         Returns:
             A dict per row, by returned name.
         """
-        meta = self.model._meta
-        fields_map = meta.fields_map
-        projection = meta.fields_db_projection
-        old_value_names = HareColumnNames.get_old_value_names(self.model) if self.old_source_names_by_name else {}
+        projection = self.model._meta.fields_db_projection
+        layout = self._get_layout(self.source_names_by_name, types=types, column_names=projection)
+        old_layout = None
+        if self.old_source_names_by_name:
+            old_value_names = HareColumnNames.get_old_value_names(self.model)
+            old_layout = self._get_layout(
+                self.old_source_names_by_name,
+                types=types,
+                column_names={name: old_value_names[column] for name, column in projection.items()},
+            )
         rows: list[dict[str, Any]] = []
         for raw_row in raw_rows:
-            # A driver's row may have no .items()/.get() - read as a dict.
-            row = dict(raw_row)
-            returned_row = {
-                name: self.get_value(
-                    [
-                        types.get_python_value(fields_map[source_name], row[projection[source_name]])
-                        for source_name in source_names
-                    ]
+            returned_row = dict(zip(self.source_names_by_name, layout.read(raw_row), strict=True))
+            if old_layout is not None:
+                returned_row[RETURNING_OLD_VALUES_KEY] = dict(
+                    zip(self.old_source_names_by_name, old_layout.read(raw_row), strict=True)
                 )
-                for name, source_names in self.source_names_by_name.items()
-            }
-            if self.old_source_names_by_name:
-                returned_row[RETURNING_OLD_VALUES_KEY] = {
-                    name: self.get_value(
-                        [
-                            types.get_python_value(
-                                fields_map[source_name],
-                                row[old_value_names[projection[source_name]]],
-                            )
-                            for source_name in source_names
-                        ]
-                    )
-                    for name, source_names in self.old_source_names_by_name.items()
-                }
             rows.append(returned_row)
         return rows
+
+    def _get_layout(
+        self,
+        source_names_by_name: Mapping[str, tuple[str, ...]],
+        *,
+        types: TypeRegistry | None = None,
+        column_names: Mapping[str, str] | None = None,
+    ) -> RowLayout:
+        """Bind the columns and composite groups of the named returned values.
+
+        Raw RETURNING rows use database column names and field readers. Follow-up SELECT
+        rows already contain Python values under field names and omit both options.
+        """
+        fields = self.model._meta.fields_map
+        return RowLayout(
+            tuple(
+                RowColumn(
+                    column_names[name] if column_names is not None else name,
+                    types.get_python_reader(fields[name]) if types is not None else None,
+                )
+                for names in source_names_by_name.values()
+                for name in names
+            ),
+            tuple(len(names) for names in source_names_by_name.values()),
+        )
 
     def get_primary_keys(self, types: TypeRegistry, raw_rows: Sequence[Any]) -> list[Any]:
         """The primary keys of ``RETURNING`` rows.
@@ -217,18 +231,9 @@ class ReturnedRows:
         ]
         keys: list[Any] = []
         for raw_row in raw_rows:
-            row = dict(raw_row)
-            key_values = [types.get_python_value(field, row[column]) for field, column in key_fields]
+            key_values = [types.get_python_value(field, raw_row[column]) for field, column in key_fields]
             keys.append(key_values[0] if len(key_values) == 1 else tuple(key_values))
         return keys
-
-    @staticmethod
-    def get_value(values: list[Any]) -> Any:
-        """The value of a returned name - its one field's, or a tuple of a composite key's; None
-        when every part is None."""
-        if len(values) == 1:
-            return values[0]
-        return None if all(value is None for value in values) else tuple(values)
 
     async def read(self, connection: DatabaseClient, visibility: RowVisibility, keys: Sequence[Any]) -> list[Any]:
         """The rows of ``keys`` as they are now - instances, or dicts of the named fields - in the
@@ -262,12 +267,16 @@ class ReturnedRows:
                 ]
             )
         )
+        key_layout = RowLayout(
+            tuple(RowColumn(name) for name in meta.primary_key_attribute_names),
+            (len(meta.primary_key_attribute_names),),
+        )
+        output_layout = self._get_layout(self.source_names_by_name)
         rows_by_key: dict[Any, dict[str, Any]] = {}
         for values in await queryset.values_list(*source_names):
             values_by_source_name = dict(zip(source_names, values, strict=True))
-            key = self.get_value([values_by_source_name[name] for name in meta.primary_key_attribute_names])
-            rows_by_key[key] = {
-                name: self.get_value([values_by_source_name[source_name] for source_name in names])
-                for name, names in self.source_names_by_name.items()
-            }
+            key = key_layout.read(values_by_source_name)[0]
+            rows_by_key[key] = dict(
+                zip(self.source_names_by_name, output_layout.read(values_by_source_name), strict=True)
+            )
         return [rows_by_key[key] for key in keys if key in rows_by_key]

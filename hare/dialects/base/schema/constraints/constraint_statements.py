@@ -7,6 +7,8 @@ from hare.ddl.conditions.constraint_condition import ConstraintCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.fields.field import Field
@@ -42,21 +44,6 @@ class ConstraintStatements(SchemaEditorPart):
             raise UnSupportedError(f"DEFERRABLE unique constraints are not supported on {dialect}")
         constraint.raise_if_unsupported(self.editor.client.features, dialect)
 
-    def get_unique_constraint_name(self, model: type[Model], constraint: UniqueConstraint) -> str:
-        """The name of a unique constraint - its own, else made from the table and its columns.
-
-        Args:
-            model: The constrained model.
-            constraint: The unique constraint.
-
-        Returns:
-            The name.
-        """
-        return self.editor.constraint_names.constraint_name_for_model(
-            model,
-            UniqueConstraint(fields=tuple(model._meta.get_column_names(constraint.fields)), name=constraint.name),
-        )
-
     def get_unique_constraint_clause(self, model: type[Model], constraint: UniqueConstraint) -> str | None:
         """The clause of a unique constraint among a table's definitions - in ``CREATE TABLE`` and in
         ``ALTER TABLE ... ADD``.
@@ -73,7 +60,7 @@ class ConstraintStatements(SchemaEditorPart):
             return None
         dialect = self.editor.client.dialect
         clause = self.editor.UNIQUE_CONSTRAINT_CREATE_TEMPLATE.format(
-            index_name=self.editor.quote(self.get_unique_constraint_name(model, constraint)),
+            index_name=self.editor.quote(self.editor.constraint_names.constraint_name_for_model(model, constraint)),
             nulls=constraint.get_nulls_sql(dialect),
             fields=self.editor.column_definitions.get_key_columns_sql(
                 model._meta.get_column_names(constraint.fields), constraint.without_overlaps
@@ -106,7 +93,9 @@ class ConstraintStatements(SchemaEditorPart):
         return self.editor.UNIQUE_INDEX_CREATE_TEMPLATE.format(
             exists=self.editor.table_creation.get_exists_sql(safe),
             index_type="",
-            index_name=self.editor.get_index_name_sql(self.get_unique_constraint_name(model, constraint), meta.schema),
+            index_name=self.editor.get_index_name_sql(
+                self.editor.constraint_names.constraint_name_for_model(model, constraint), meta.schema
+            ),
             table_name=self.editor.get_indexed_table_sql(meta.db_table, meta.schema),
             fields=self.editor.column_definitions.get_key_columns_sql(
                 meta.get_column_names(constraint.fields), constraint.without_overlaps
@@ -133,9 +122,9 @@ class ConstraintStatements(SchemaEditorPart):
         """
         raise UnSupportedError(f"ExclusionConstraint is not supported on {self.editor.client.dialect}")
 
-    async def add_check_constraint_not_valid(self, model: type[Model], constraint: CheckConstraint) -> None:
-        """Adds a CHECK constraint that only new and updated rows must pass - the existing rows are
-        checked later, by ``validate_constraint()``. A dialect that can't leave the existing rows
+    def get_unvalidated_check_add_plan(self, model: type[Model], constraint: CheckConstraint) -> SchemaChangePlan:
+        """Prepares a CHECK constraint that only new and updated rows must pass - existing rows are
+        checked later by a validation plan. A dialect that can't leave the existing rows
         unchecked (``Features.supports_not_valid_constraints`` False) adds the constraint as usual -
         the database then checks the rows as its ``ADD CONSTRAINT`` does: every row where a table is
         rebuilt for it; only the rows written later where that statement leaves the existing ones
@@ -145,12 +134,12 @@ class ConstraintStatements(SchemaEditorPart):
             model: The constrained model.
             constraint: The check constraint.
         """
-        await self.editor.add_constraint(model, constraint)
+        return self.editor.get_add_constraint_plan(model, constraint)
 
-    async def add_unique_constraint_using_index(
+    def get_unique_constraint_using_index_plan(
         self, model: type[Model], constraint: UniqueConstraint, index_name: str
-    ) -> None:
-        """Adds a unique constraint over a unique index the table already has, which becomes the
+    ) -> SchemaChangePlan:
+        """Prepares a unique constraint over an index the table already has, which becomes the
         constraint's. A dialect that can't hand an index over builds the constraint's own and drops
         the index.
 
@@ -159,16 +148,18 @@ class ConstraintStatements(SchemaEditorPart):
             constraint: The named unique constraint, without a condition.
             index_name: The existing unique index's name.
         """
-        await self.editor.add_constraint(model, constraint)
-        await self.editor.run_sql(
+        addition = self.editor.get_add_constraint_plan(model, constraint)
+        removal = SchemaStatement(
             self.editor.DROP_INDEX_TEMPLATE.format(
                 name=self.editor.qualify_table_name(index_name, model._meta.schema),
                 table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
             )
         )
 
-    async def validate_constraint(self, model: type[Model], name: str) -> None:
-        """Checks the existing rows against a constraint added without checking them; nothing by
+        return SchemaChangePlan((*addition.steps, removal))
+
+    def get_constraint_validation_plan(self, model: type[Model], name: str) -> SchemaChangePlan:
+        """Prepares checking existing rows against a constraint added without checking them; nothing by
         default - a database adding no constraint unchecked checked the rows as it added it, or
         checks only the rows written later.
 
@@ -176,13 +167,14 @@ class ConstraintStatements(SchemaEditorPart):
             model: The constrained model.
             name: The constraint's name.
         """
+        return SchemaChangePlan(())
 
-    async def rename_partial_unique_index(
+    def get_partial_unique_rename_plan(
         self,
         model: type[Model],
         old_constraint: UniqueConstraint,
         new_constraint: UniqueConstraint | CheckConstraint | ExclusionConstraint,
-    ) -> None:
+    ) -> SchemaChangePlan:
         """Renames the unique index a unique constraint with a condition is - a partial unique
         constraint has no table constraint to rename (see ``add_constraint()``). A database
         renaming no index drops it and creates it again under the new name.
@@ -197,25 +189,32 @@ class ConstraintStatements(SchemaEditorPart):
         """
         if not isinstance(new_constraint, UniqueConstraint):
             raise TypeError(f"Cannot rename UniqueConstraint to {type(new_constraint).__name__}")
-        old_name = self.editor.constraint_names.get_partial_unique_index_name(model, old_constraint)
-        new_name = self.editor.constraint_names.get_partial_unique_index_name(model, new_constraint)
+        old_name = self.editor.constraint_names.constraint_name_for_model(model, old_constraint)
+        new_name = self.editor.constraint_names.constraint_name_for_model(model, new_constraint)
         if old_name == new_name:
-            return
+            return SchemaChangePlan(())
         if self.editor.RENAME_INDEX_TEMPLATE:
-            await self.editor.run_sql(
-                self.editor.RENAME_INDEX_TEMPLATE.format(
-                    old_name=self.editor.qualify_table_name(old_name, model._meta.schema),
-                    new_name=self.editor.quote(new_name),
+            return SchemaChangePlan(
+                (
+                    SchemaStatement(
+                        self.editor.RENAME_INDEX_TEMPLATE.format(
+                            old_name=self.editor.qualify_table_name(old_name, model._meta.schema),
+                            new_name=self.editor.quote(new_name),
+                        )
+                    ),
                 )
             )
-            return
-        await self.editor.run_sql(
-            self.editor.DROP_INDEX_TEMPLATE.format(
-                name=self.editor.qualify_table_name(old_name, model._meta.schema),
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.DROP_INDEX_TEMPLATE.format(
+                        name=self.editor.qualify_table_name(old_name, model._meta.schema),
+                        table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+                    )
+                ),
+                *self.editor.get_add_constraint_plan(model, new_constraint).steps,
             )
         )
-        await self.editor.add_constraint(model, new_constraint)
 
     @classmethod
     def get_enum_members_check_sql(cls, quoted_column: str, value_sqls: list[str]) -> str:

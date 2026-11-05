@@ -15,12 +15,13 @@ from hare import Connections
 status = Connections.get("default").get_pool_status()
 status.size, status.idle, status.in_use, status.waiting   # 20, 0, 20, 3
 
-for status in Connections.get_pool_statuses():            # every open pool of the current context
+for status in Connections.get_pool_statuses():            # open pools and recorded opening failures
     print(status.connection_alias, status.role, status.schema, status.in_use, status.waiting)
 ```
 
-`get_pool_status()` returns a `PoolStatus` (`hare.instrumentation.declarations`), or None while the
-client's pool isn't open yet:
+`get_pool_status()` returns a `PoolStatus` (`hare.instrumentation.declarations`). It returns None when
+no pool is open and no connection failure has been recorded. After a failed opening it returns zero
+occupancy with the failure counters, so monitoring can report the failed connection:
 
 | Field | What it is |
 |---|---|
@@ -48,8 +49,8 @@ A connection may have several pools, each with its `PoolRole` (`hare.instrumenta
 | `DIRECT` | The client of the server itself past a transaction pooler (`direct_host`, [Connection poolers](../connections/connection-poolers.md)). |
 | `INDEPENDENT` | A client of its own — `Transactions.autonomous()`, a migration's session with a lock timeout. |
 
-`Connections.get_pool_statuses(connection_alias=None)` lists every open pool of the current context, by
-connection, role and schema. A client whose driver reports no pool status
+`Connections.get_pool_statuses(connection_alias=None)` lists open pools and clients with recorded opening
+failures in the current context, by connection, role and schema. A client whose driver reports no pool status
 (`Features.supports_pool_status` false — ClickHouse over HTTP, whose library keeps its connections to
 itself, or a third-party dialect) is not in the list, and its `get_pool_status()` raises
 `UnSupportedError`.
@@ -92,7 +93,8 @@ Observers.observe(PoolAcquireTimedOut, lambda event: alert(f"{event.connection_a
 
 ## <a id="opentelemetry-metrics"></a>OpenTelemetry metrics
 
-`OpenTelemetryInstrumentor` ([OpenTelemetry](opentelemetry.md)) reports every open pool of the process,
+`OpenTelemetryInstrumentor` ([OpenTelemetry](opentelemetry.md)) reports open pools and recorded opening
+failures in the process,
 named by OpenTelemetry's semantic conventions for database clients (their status is still "development"):
 
 | Metric | Type | Value |
@@ -115,10 +117,19 @@ Every metric carries the attributes:
 
 Pools with equal attributes (one connection of several `HareContext` objects in a process) are summed.
 
-The values are read when the metrics are collected, on the exporter's thread. A histogram can't be
-observed, so the waits and connects measured since the previous collection are recorded during the
-collection. Each pool keeps its latest 4096 durations of each type for its readers; a reader further
-behind loses the oldest ones.
+Current occupancy is read on the exporter's thread. Completed waits and connects feed histograms
+directly; timeouts and connection failures increment counters when they happen. These instruments
+work independently of the occupancy callback, including exporters selecting only histograms.
+Closing a pool removes its occupancy but does not subtract its accumulated events. Each instrument
+subscribes for its active lifetime; stop/start does not replay old events or duplicate subscriptions.
+
+Health checks separately use a bounded window of the latest 4096 durations. `PoolChange.waits` is a
+`SampleWindow`: `start_cursor` and `end_cursor` delimit a measurement sequence, `values` contains its
+retained durations, `observations` counts every measurement in the interval and `missed` counts those
+overwritten. Readers have independent cursors. `AcquireWaitTime` reports an exceeded threshold when
+observed; if samples were lost, it reports that the threshold cannot be verified. An empty complete
+window contains no evidence of a long wait. The metric histograms do not lose events when this
+health-check buffer overflows.
 
 ## <a id="health-check"></a>Health check
 

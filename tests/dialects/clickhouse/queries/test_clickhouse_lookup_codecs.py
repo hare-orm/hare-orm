@@ -1,6 +1,5 @@
 """A filter's values of a field the ClickHouse dialect writes its own way (a UUID as the UUID itself,
-a native JSON document) are still converted as the field's to_lookup_value() converts them - by the
-native codec, where one is built."""
+a native JSON document) retain the field's lookup conversion."""
 
 import uuid
 
@@ -9,7 +8,6 @@ import pytest
 from hare import fields
 from hare.dialects.clickhouse.clickhouse_dialect import ClickhouseDialect
 from hare.query.filters.lookups.value_encoders import ValueEncoders
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from tests.shared_models.testmodels import UUIDFkRelatedModel
 
 pytestmark = pytest.mark.database_independent
@@ -20,7 +18,6 @@ SAMPLES = {
 }
 
 
-@pytest.mark.requires("native")
 @pytest.mark.parametrize("stores_json_natively", [True, False])
 @pytest.mark.parametrize("field_class", list(SAMPLES))
 def test_a_lookup_value_is_the_field_s_own(stores_json_natively, field_class):
@@ -28,11 +25,9 @@ def test_a_lookup_value_is_the_field_s_own(stores_json_natively, field_class):
     field = field_class(null=True)
     field.model = UUIDFkRelatedModel
     field.model_field_name = "value"
-    codec = HydrateAccelerator.get_lookup_codec(field, types)
-    assert codec is not None
     for value in SAMPLES[field_class]:
         expected = field.to_lookup_value(value, UUIDFkRelatedModel)
-        written = codec[0].write(value, UUIDFkRelatedModel)
+        written = types.get_lookup_value(field, value, UUIDFkRelatedModel)
         assert written == expected
         assert type(written) is type(expected)
 

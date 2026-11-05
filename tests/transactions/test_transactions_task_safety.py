@@ -187,7 +187,7 @@ async def test_statement_started_after_commit_began_is_refused(db_truncate):
             sibling = asyncio.ensure_future(connection.execute(_slow_query_sql(0.3)))
             await _wait_until(lambda: bool(connection._savepoint_lock._open_spans))
             commit = asyncio.ensure_future(connection.commit())
-            await _wait_until(lambda: connection._ending)
+            await _wait_until(lambda: connection.transaction_state.ending)
             with pytest.raises(TransactionManagementError, match="being committed or rolled back"):
                 await Tournament.objects.create(name="too late")
             await commit

@@ -33,7 +33,7 @@ class AsyncpgHstoreCodec:
             ValueError: The text isn't an hstore value.
         """
         if isinstance(value, str):
-            pairs: list[tuple[Any, Any]] = list(HStoreText.parse_pairs(value))
+            pairs: list[tuple[Any, Any]] = HStoreText.parse_pairs(value)
         elif isinstance(value, Mapping):
             pairs = list(value.items())
         else:

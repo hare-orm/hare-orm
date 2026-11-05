@@ -4,12 +4,15 @@ import asyncio
 import time
 import urllib.parse
 from collections.abc import Mapping
+from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.package_checks import PackageChecks
 from hare.contrib.request_query.api_getter.constants import API_RETRY_AFTER_HEADER
 from hare.contrib.request_query.api_getter.declarations import ApiRequestExecuted
+from hare.core.constants import RESOURCE_COMPLETION_FAILED
 from hare.core.log import logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.instrumentation.observers.observers import Observers
 
 if TYPE_CHECKING:
@@ -44,7 +47,22 @@ class ApiHttpRequests:
     async def __aenter__(self) -> ApiHttpRequests:
         return self
 
-    async def __aexit__(self, *exc_info: object) -> None:
+    async def __aexit__(
+        self,
+        exception_type: type[BaseException] | None = None,
+        exception: BaseException | None = None,
+        exception_traceback: TracebackType | None = None,
+    ) -> None:
+        """Drain cleanup before exit, preserving both the request failure and a cleanup failure."""
+        try:
+            await ResourceCompletion.wait(self.close())
+        except BaseException as release_error:
+            if exception is None or release_error is exception:
+                raise
+            raise BaseExceptionGroup(RESOURCE_COMPLETION_FAILED, [exception, release_error]) from None
+
+    async def close(self) -> None:
+        """Cancel and drain header tasks, then close the batch client."""
         # A run ended by an error or a cancellation leaves no call of a headers function behind.
         pending_tasks = [task for task in self.headers_by_source.values() if not task.done()]
         for task in pending_tasks:

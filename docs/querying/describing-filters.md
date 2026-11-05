@@ -81,7 +81,6 @@ A key or name that fails raises its `FieldError` again on every call — errors 
 | `value_type` | The type of the value — of each item of a list or range. A tuple of types for a composite key; `bool` for `isnull`/`not_isnull`; `int` for a date part or `len`; `str` for a text lookup or a JSON/hstore key; `object` for any JSON value. |
 | `crosses_to_many` | Whether a relation the key crosses holds many rows for one row (a reverse FK or a many-to-many relation) — the filter joins it, and the query can return a row more than once. |
 | `requires_extension` | The database extension the lookup needs (`"pg_trgm"` for the trigram lookups, `"unaccent"`), else `None`. |
-| `dialects` | The names of the dialects the field and the lookup exist on (`frozenset({"postgresql"})` for an array field), `None` for every dialect — or for a field whose column type each dialect gives (`GeometryField`, `VectorField`), which `is_supported()` checks against the dialect asked about. |
 | `is_supported(dialect)` | Whether a query on `dialect` runs the lookup — see below. |
 
 ### <a id="errors"></a>Errors
@@ -105,7 +104,7 @@ A key or name that fails raises its `FieldError` again on every call — errors 
 on that dialect runs the lookup. It is not supported when:
 
 - the field doesn't exist on the dialect (a field with `COLUMN_TYPE_FROM_DIALECT` the dialect gives no
-  column type, e.g. an array or range field off PostgreSQL);
+  column type, e.g. a range field off PostgreSQL);
 - the lookup's operator is one only dialects implement (`search`, the trigram lookups, the array, range
   and JSON container lookups, a [lookup of one database](../extending/custom-lookups.md#one-database))
   and this dialect doesn't implement it;
@@ -115,7 +114,7 @@ on that dialect runs the lookup. It is not supported when:
 from hare.dialects.dialect_registry import DialectRegistry
 
 sqlite = DialectRegistry.get_dialect("sqlite")
-info = Book._meta.get_lookup_info("title__search")
+info = Book._meta.get_lookup_info("title__trigram_similar")
 info.is_supported(sqlite)                                  # False
 info.is_supported(DialectRegistry.get_dialect("postgresql"))  # True
 ```
@@ -124,7 +123,7 @@ A query running a lookup its connection's dialect doesn't support raises `UnSupp
 SQL is built:
 
 ```text
-Book.objects.filter(title__search=...) can't run on sqlite: the sqlite dialect doesn't implement the __search lookup
+Book.objects.filter(title__trigram_similar=...) can't run on sqlite: the sqlite dialect doesn't implement the __trigram_similar lookup
 ```
 
 ## <a id="get_lookups"></a>`get_lookups()`
@@ -140,7 +139,7 @@ each lookup's suffix after `path` — `""` for plain equality, `"icontains"`, `"
 description, and holds only the lookups the dialect supports. A relation itself has the lookups of its
 key (`""`, `in`, `not`, `not_in`, `isnull`, `not_isnull`); a forward relation with a single key column
 has the lookups of that column (`author` those of `author_id`, the dialect's alike); `pk` of a composite
-primary key has `""` and `in`.
+primary key has `""`, `in`, `not` and `not_in`.
 
 A lookup can also need a feature of the connection the query runs on, beyond its dialect:
 `posix_regex`/`iposix_regex` need `features.supports_posix_regex` — on SQLite a connection whose database

@@ -1,26 +1,31 @@
 //! Composite values (`ROW(...)`), read as tuples.
 
-use bytes::Buf;
 use tokio_postgres::types::{Field, Kind as TypeShape, Type};
 
-use crate::pg::types::read_length_prefixed;
-use crate::pg::value::decode::{decode_value, ServerTextForms};
+use crate::pg::decode_context::PgDecodeContext;
+use crate::pg::value::decode::{decode_value_with_context, ServerTextForms};
 use crate::pg::value::{BoxError, Value};
+use crate::pg::wire_reader::PgWireReader;
 
 /// A composite value (`ROW(...)`) as a tuple of its fields: a field count, then per field its type
 /// OID and length-prefixed bytes. `fields` carries the declared field types of a named composite
 /// type; an anonymous record's fields are typed by the OIDs on the wire.
 pub(crate) fn decode_composite<'a>(
-    mut raw: &'a [u8],
+    raw: &'a [u8],
     fields: Option<&[Field]>,
     forms: &mut ServerTextForms<'a>,
+    context: &mut PgDecodeContext,
 ) -> Result<Value, BoxError> {
-    let count = raw.try_get_i32().map_err(|_| "empty composite payload")?;
-    let count = usize::try_from(count).map_err(|_| format!("negative composite field count {count}"))?;
-    let mut values = Vec::with_capacity(count.min(raw.len()));
+    let mut reader = PgWireReader::new(raw, "composite");
+    let count = reader.count(8)?;
+    if fields.is_some_and(|fields| fields.len() != count) {
+        return Err("composite field count differs from its declared type".into());
+    }
+    context.reserve_values(count)?;
+    let mut values = Vec::with_capacity(count);
     for index in 0..count {
-        let oid = raw.try_get_u32().map_err(|_| "truncated composite field type")?;
-        let Some(bytes) = read_length_prefixed(&mut raw, "composite field")? else {
+        let oid = reader.u32()?;
+        let Some(bytes) = reader.nullable_bytes()? else {
             values.push(Value::Null);
             continue;
         };
@@ -30,7 +35,8 @@ pub(crate) fn decode_composite<'a>(
                 Type::from_oid(oid).unwrap_or_else(|| Type::new(String::new(), oid, TypeShape::Simple, String::new()))
             }
         };
-        values.push(decode_value(&field_type, bytes, forms)?);
+        values.push(decode_value_with_context(&field_type, bytes, forms, context)?);
     }
+    reader.finish()?;
     Ok(Value::Composite(values))
 }

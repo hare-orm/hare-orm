@@ -78,11 +78,7 @@ class QueryModifier:
         if self.having_criterion or other.having_criterion:
             having_criterion = QueryModifier._or(self._and_criterion(), other._and_criterion())
         else:
-            where_criterion = (
-                (self.where_criterion | other.where_criterion)
-                if self.where_criterion and other.where_criterion
-                else (self.where_criterion or other.where_criterion)
-            )
+            where_criterion = QueryModifier._or(self.where_criterion, other.where_criterion)
         return self.__class__(
             where_criterion,
             self.joins + other.joins,

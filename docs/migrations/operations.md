@@ -16,7 +16,6 @@ class CreateModel:
         name: str,
         fields: list[tuple[str, FieldLike]],
         options: dict[str, Any] | None = None,
-        bases: list[str] | None = None,
         state_only: bool = False,
     ) -> None: ...
 
@@ -58,13 +57,13 @@ the new migrations of what it needs and on the existing migrations of an app who
 relation closing a cycle among models created together is added by an `AddField` after them (a
 many-to-many relation rather than a foreign key), and one closing a cycle among models deleted together
 — a model deleted with the through model of its many-to-many relation, two models pointing at each
-other — is removed by a `RemoveField` before them.
+other — is removed by a `RemoveField` before them. If several fields point along the cyclic edge
+being removed, each gets a `RemoveField`; removing just one would leave that dependency in place.
 
 Deleting a model referenced from another app makes the deleting migration depend on the other app's new
 migration that removes or repoints the reference. `makemigrations` for the deleting app alone is refused
-while the other app's migrations still reference the model. Migration files that can't be replayed in
-order (a relation left pointing at a deleted or never created model) are reported by every command as a
-plain error naming the relation.
+while the other app's migrations still reference the model. When migration state is reconstructed,
+relations pointing at a deleted or never created model are reported as an error naming the relation.
 
 A model deleted in the same run in which a new relation takes over one of its backward accessors (e.g.
 `Book` replaced by `Novel`, both with `related_name="books"` on `Author`) is deleted before the new model
@@ -77,7 +76,8 @@ the generated `CreateModel`/`DeleteModel` pair drops the old table's rows; answe
 
 `AlterModelOptions.options` is the model's whole set of options that have no operation of their own
 (everything except the table, schema, indexes, constraints, triggers, primary key, views, materialized
-views, functions, sequences, row level security, policies and grants) — an option left out of it is
+views, dictionaries, functions, sequences, row level security, policies and grants) — an option left out
+of it is
 removed from the model. An empty option, `managed=True` and the options the migration state doesn't
 keep — `ordering`, `get_latest_by`, `manager`, `returning`, `track_dirty_fields`, `change_capture`, which
 change no schema — are left out of the state, as `makemigrations` leaves them. A changed
@@ -202,7 +202,8 @@ regular `save()` writes it.
 
 A NOT NULL field with no default at all can't be added to a table holding rows: PostgreSQL and SQLite
 refuse the column, the migration rolled back. ClickHouse adds it and its stored rows read the type's
-empty value (`0`, `''`) — a `unique=True` field too, its rows then sharing that value.
+empty value (`0`, `''`). A `unique=True` field is unsupported on ClickHouse and raises `UnSupportedError`
+before SQL is executed.
 
 ### <a id="remove-field"></a>`RemoveField`
 
@@ -284,7 +285,7 @@ be created under that name. The through model's other columns of the copied rows
 field is kept as it was. The rename renames the field wherever a declaration names it as a field: the
 model's indexes — their fields, key expressions (`Lower("title")`, an ordering) and `Q` conditions — and
 constraints (their fields, `Q` conditions and checks, an exclusion constraint's field entries), a
-trigger's `Q` condition, a policy's `Q`, a materialized view's `unique_columns`, a sequence's `owned_by`,
+trigger's `Q` condition, a policy's `Q`, a sequence's `owned_by`,
 `Meta.tenant_field`/`soft_delete_field`/`optimistic_lock_field`, the table options naming fields (a
 ClickHouse `order_by`), and an unnamed index or unique constraint named after its keys takes the name the
 renamed model gives it. It renames the columns other tables name after a component of a composite key —
@@ -320,6 +321,7 @@ class RemoveIndex:
         name: str | None = None,
         fields: list[str] | None = None,
         *,
+        index: Index | None = None,
         concurrently: bool = False,
     ) -> None: ...
 
@@ -341,6 +343,10 @@ plain `AddIndex`/`RemoveIndex`; add `concurrently=True` by hand for a big, busy 
 it (`Features.supports_concurrent_indexes` — SQLite, ClickHouse) builds and drops the index the plain way.
 
 ```python
+from hare import migrations
+from hare.ddl import Index
+from hare.migrations import operations as ops
+
 class Migration(migrations.Migration):
     atomic = False
     operations = [
@@ -349,8 +355,11 @@ class Migration(migrations.Migration):
 ```
 
 `RemoveIndex(name=...)` also finds an unnamed expression-based index (e.g. `Index(Lower("name"))`) by the
-name it was created under (`idx_<table>_expr_<hash>`, `uidx_...` for a unique one) — `makemigrations`
-writes that name when such an index is removed or changed.
+name it was created under (`idx_<table>_expr_<hash>`, `uidx_...` for a unique one).
+Alternatively, `RemoveIndex("Book", index=Index(Lower("title")))` selects the declaration itself;
+`index` cannot be combined with `name` or `fields`. `makemigrations` uses this form for unnamed
+expression or specialized indexes. The database name is computed from the model at execution,
+including preceding table or field renames; comparison does not bind or mutate the declaration.
 
 ## <a id="constraint-operations"></a>Constraints
 
@@ -394,7 +403,8 @@ existing ones aren't checked, and `ValidateConstraint` checks nothing there.
 
 `AddConstraint(..., using_index="<index name>")` makes a named `UniqueConstraint` without a `condition`
 take over a unique index the model already has — one built before with
-`AddIndex(..., unique=True, concurrently=True)` — instead of building its own while the table's writes
+`AddIndex(..., Index(..., unique=True), concurrently=True)` — instead of building its own while the
+table's writes
 wait: PostgreSQL `ADD CONSTRAINT ... UNIQUE USING INDEX`, which renames the index to the constraint's
 name. In the migration state the index leaves the model's `Meta.indexes`, so the model declares only the
 constraint. Unapplied, the constraint is dropped and the index built again, for the `AddIndex` before it.
@@ -437,7 +447,7 @@ class RunPython(HareOperation):
     ) -> None: ...
 
 class RunSQL(HareOperation):
-    # a string, a list of strings, or a list of (sql, parameters) - each parameter at a %s placeholder on
+    # a string or a sequence of strings or (sql, parameters) pairs - each parameter at a %s placeholder on
     # every database, as raw() takes them (a literal % of such sql written %%)
     def __init__(
         self,
@@ -495,10 +505,11 @@ which creates no schema by DDL (an attached database stands for one), both are s
 `RemoveCollation` takes the same arguments, to create it again going back. SQLite and ClickHouse have no
 collation DDL (`Features.supports_collations`) — both are skipped there with a warning.
 
-The `apps` given to `code` and `reverse_code` hold the models as the migrations applied before this one left
-them. On a rollback they hold only migrations still applied: an app depending on this one that the same
-run has already unapplied is not in them, so deleting rows through `apps.get_model()` does not cascade
-into its dropped tables. `apps.get_model("app.Model")` takes the model's label, as `HareContext.get_model()`
+The `apps` given to `code` and `reverse_code` hold the historical models at that operation boundary,
+including changes made by preceding operations in the same migration. On a rollback they hold only
+migrations still applied: models introduced by migrations already unapplied in this run are absent,
+so deleting rows through `apps.get_model()` does not cascade into their dropped tables.
+`apps.get_model("app.Model")` takes the model's label, as `HareContext.get_model()`
 does.
 
 `RunPython.noop` is a ready-made no-op you can use as `reverse_code` for a one-way data migration.
@@ -536,6 +547,9 @@ operations = [
 ```
 
 ```python
+from hare import fields
+from hare.migrations import operations as ops
+
 operations = [
     # The column and the field arrive together, the index is built by hand.
     ops.SeparateDatabaseAndState(
@@ -589,16 +603,35 @@ class CreateReportSnapshot(Operation):
 
 Override `deconstruct()` only when the arguments aren't stored as given.
 
+Built-in operations use their public `hare.migrations.operations` path. Custom operation classes
+keep their import path, including when nested inside `SeparateDatabaseAndState`; sharing a name
+with a built-in operation does not change which class the generated file imports.
+
+Callbacks copied from numbered migration modules retain postponed annotations without evaluating
+type-only imports. This applies to callbacks wrapped in `functools.partial` too. Defaults and
+decorators remain executable expressions; only annotations retain their deferred evaluation.
+
 hare's own operations subclass `HareOperation` (`hare.migrations.operations`), an `Operation` that
 changes the state and the database separately; an operation of your own subclasses `Operation`.
 
-`migrate` takes migrations back on one state, operation by operation, with what each operation changed in
-it kept aside — a rollback of many migrations costs what applying them does. An operation of your own may
-change a field of a model state in place, so the state before it is kept whole; its `database_backward()`
-gets the state after the operation (`old_state`) and a copy of the state before it (`new_state`). Set
-`backward_reads_state_left = False` when `database_backward()` doesn't read `old_state`, or
-`backward_reads_state_reached = False` when it doesn't read `new_state` — the state is then not copied for
-it, and the side it doesn't read is the other state.
+Migration preparation creates independent before/after snapshots for every operation.
+`state_forward()` changes a private working state. Database methods receive the actual boundaries:
+`database_forward()` gets before/after; `database_backward()` gets after/before. Treat these database
+method inputs as read-only. Changing a nested field declaration in `state_forward()` does not change
+an earlier snapshot or the caller's input. `Migration.apply()` returns a new state;
+`Migration.unapply(state_before=...)` explicitly takes the state before application and preserves it.
+
+`Operation.snapshot()` creates the operation used for preparation and execution. Its default copies
+mutable declaration values from instance attributes and inherited slots without calling defaults or
+migration callbacks. Nested fields use their snapshot protocol, and callbacks retain their identity.
+An operation holding external resources can override it to copy only declaration data and retain
+its resource handles.
+Do not keep execution results on the migration file's shared operation objects.
+
+`SeparateDatabaseAndState` retains separate prepared state and database branches. Nested database
+operations use the same tenant routing, atomicity and constraint policy as top-level operations.
+SQL collection includes renderable siblings of a Python-only operation and marks the Python step
+with a comment; it never runs that callback.
 
 ## <a id="extensions"></a>Extensions
 
@@ -606,6 +639,8 @@ Declare which PostgreSQL extensions a model needs via `Meta.extensions`, instead
 `RunSQL("CREATE EXTENSION IF NOT EXISTS ...")`:
 
 ```python
+from hare.models import Model
+
 class Book(Model):
     ...
     class Meta:
@@ -614,7 +649,7 @@ class Book(Model):
 
 A field type, an index or a constraint that needs an extension names it itself — you don't repeat it
 in `Meta.extensions`: a field through its dialect's column type (`TypeMapping.extension` — `citext` for a
-`CitextField`, `postgis` for a `PostGISField` or a `GeometryField`, `vector` for a `VectorField`), an index
+`CitextField`, `postgis` for a `GeometryField`, `vector` for a `VectorField`), an index
 of an access method an extension provides through its class (`BloomIndex` needs `bloom`; a `GistIndex` or
 a `GinIndex` over a plain scalar column without an operator class needs `btree_gist`/`btree_gin`), and a
 constraint through the dialect's schema editor (a GiST `ExclusionConstraint` or a key compared
@@ -640,9 +675,9 @@ class DropEnumType:
     def __init__(self, name: str, labels: Sequence[str], schema: str | None = None) -> None: ...
 ```
 
-The `ENUM` types of [`NativeEnumField`](../dialects/postgresql/fields.md#nativeenumfield) columns. Like
-extensions they aren't kept in the state: the autodetector derives them from the fields
-(`field.requires_enum_type`) every time it diffs two states — `CreateEnumType` before the first column of
+The `ENUM` types of [`NativeEnumField`](../dialects/postgresql/fields.md#nativeenumfield) columns are
+retained in `State.enum_types`. The autodetector combines this history with the types required by
+fields (`field.requires_enum_type`) when comparing states — `CreateEnumType` before the first column of
 a type, `AlterEnumType` when its labels change, `DropEnumType` after its last column is gone. A type is
 named by its schema and name: `schema` is the field's `type_schema`, None for the connection's default
 schema, so same-named types of two schemas are two types. Two fields naming one
@@ -651,10 +686,14 @@ field itself (`Mood = Enum("Mood", {...})`), its members as they are when it is 
 importing the class — a member added to the class later is a change the next `makemigrations` sees.
 
 - `AlterEnumType` adds the new labels in place (`ALTER TYPE ... ADD VALUE ... BEFORE ...`) while the old
-  labels keep their order. A removed or reordered label replaces the type in one statement: the type is
-  renamed, the new one created, every column of it (and every array column) converted through text with
-  its default, and the old type dropped — a row still holding a removed label stops it with an error, so
-  update those rows in an earlier migration. Going back runs the opposite change.
+  labels keep their order. Removal or reordering replaces the type in one transaction. Dependent tables
+  are locked, labels checked, and default expressions read before the type is renamed. Scalar and array
+  columns, including tables outside the migration's models, are converted through text; defaults are
+  restored from their original expressions without rewriting SQL. The type's owner, comment and ordinary
+  grants are retained. A row still holding a removed label stops the change, so update it first.
+  Domains, functions, generated expressions or other unsupported dependencies, and delegated grant chains,
+  require explicit operations and are refused before DDL. SQL preview shows a catalog-dependent step;
+  it does not connect or invent the dependent columns. Going back runs the opposite change.
 - `DropEnumType` going back creates the type again with `labels`; `CreateEnumType` going back drops it.
 - On a database without `ENUM` types (`features.supports_enum_types` false) the three are skipped with a
   warning — a migration file runs on any database.
@@ -692,7 +731,7 @@ class RenameView:
     def __init__(self, model_name: str, old_name: str, new_name: str) -> None: ...
 
 class AddMaterializedView:
-    def __init__(self, model_name: str, view: MaterializedView) -> None: ...
+    def __init__(self, model_name: str, view: MaterializedView, *, replacing: bool = False) -> None: ...
 
 class AlterMaterializedView:
     def __init__(self, model_name: str, view: MaterializedView) -> None: ...
@@ -769,8 +808,12 @@ operation runs it as SQL of the connection the migration runs on. A migration fi
 
 `RefreshMaterializedView` fills a materialized view with the rows of its query again — after a data
 migration that changed the rows it reads, say. It changes no state, and going back does nothing.
-`concurrently=True` keeps the view readable meanwhile and needs its `unique_columns`
+On PostgreSQL, `concurrently=True` keeps the view readable meanwhile and needs its `unique_columns`
 (`ConfigurationError` before any SQL otherwise).
+
+ClickHouse uses its [materialized-view refresh rules](../dialects/clickhouse/schema-objects.md).
+`AddMaterializedView(..., replacing=True)` preserves the rows of a declared target table when replacing
+the view, without filling that table again.
 
 On a database without the type of object (`features.supports_views`, `supports_materialized_views`,
 `supports_database_functions`, `supports_sequences`, `supports_row_level_security`, `supports_grants`)
@@ -813,3 +856,5 @@ The dictionary operations work on what a model declares in `Meta.dictionaries` �
 dictionaries](../dialects/clickhouse/schema-objects.md#dictionaries). `SynchronizeKeySeries` moves the
 series of numbers a ClickHouse model's generated key is taken from past the greatest key of its table —
 see [ClickHouse keys](../dialects/clickhouse/models.md#keys).
+`sqlmigrate` shows a comment describing runtime synchronization, without reading the database or
+advancing a series.

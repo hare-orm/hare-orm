@@ -80,9 +80,9 @@ async def test_alter_m2m_on_delete_rebuilds_the_through_table_constraints(db_iso
 
     cascade_field = copy(protect_field)
     cascade_field.on_delete = CASCADE
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
         M2MOnDeleteProtectParent, protect_field, cascade_field
-    )
+    ).execute(editor)
     assert (await get_foreign_key_rule(connection, through_table, backward_key))[0] == "CASCADE"
     assert (await get_foreign_key_rule(connection, through_table, forward_key))[0] == "CASCADE"
 
@@ -95,14 +95,14 @@ async def test_alter_m2m_on_delete_rebuilds_the_through_table_constraints(db_iso
 
     set_null_field = copy(protect_field)
     set_null_field.on_delete = SET_NULL
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
         M2MOnDeleteProtectParent, cascade_field, set_null_field
-    )
+    ).execute(editor)
     assert (await get_foreign_key_rule(connection, through_table, backward_key))[0] == "SET NULL"
 
-    await editor.many_to_many_through_tables.alter_many_to_many_field(
+    await editor.many_to_many_through_tables.get_many_to_many_change_plan(
         M2MOnDeleteProtectParent, set_null_field, protect_field
-    )
+    ).execute(editor)
     assert await get_foreign_key_rule(connection, through_table, backward_key) == CURRENT_PROTECT_RULE
     assert await get_foreign_key_rule(connection, through_table, forward_key) == CURRENT_PROTECT_RULE
 

@@ -73,3 +73,23 @@ EMPTY_PENDING_DEFAULTS: MappingProxyType[str, Any] = MappingProxyType({})
 #: The start of the alias an expression of ``Meta.ordering`` is ordered by - never selected, followed
 #: by its place among the expressions.
 META_ORDERING_ALIAS_PREFIX = "hare meta ordering "
+
+#: Every attempted restoration is completed before setter errors are reported.
+INSTANCE_RESTORE_FAILURES_MESSAGE = "Instance restoration failures"
+
+#: Persistence bookkeeping is restored without invoking model field setters.
+INSTANCE_STATE_ATTRIBUTE_NAMES = frozenset(
+    (
+        "_saved_in_db",
+        "_custom_generated_pk",
+        "_connection_alias",
+        "_dirty_snapshot",
+        "_partial",
+        "_await_when_save",
+        "_allow_soft_delete_write",
+    )
+)
+
+WRITE_RESTORE_FAILURES_MESSAGE = "Write failed and instance restoration also failed"
+
+REFRESH_RESTORE_FAILURES_MESSAGE = "Refresh failed and instance restoration also failed"

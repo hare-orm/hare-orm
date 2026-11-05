@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
-from hare.migrations.writer.import_manager import ImportManager
-from hare.migrations.writer.migration_writer import MigrationWriter
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
@@ -29,22 +29,8 @@ class ModelSourceBuilder:
     def __init__(
         self, table: TableInfo, options: ModelGenerationOptions, imports: ImportManager | None = None
     ) -> None:
-        self.table = table
-        self.options = options
-        self.model_builder = self.get_model_builder(frozenset())
-        self.shares_imports = imports is not None
+        self.model_builder = InspectedModelBuilder(table, options)
         self.imports = imports if imports is not None else ImportManager()
-        #: Whether the last build rendered a class, not a skipped table's note.
-        self.has_class = False
-
-    def get_model_builder(self, extra_reserved_attribute_names: frozenset[str]) -> InspectedModelBuilder:
-        """The builder of the table's inspected model, reserving ``extra_reserved_attribute_names``."""
-        return InspectedModelBuilder(self.table, self.options, extra_reserved_attribute_names)
-
-    @property
-    def bound_names(self) -> set[str]:
-        """Module-level names the rendered source binds through its imports."""
-        return {"Model", *self.imports.bound_names()}
 
     def build(self) -> str:
         """The model's source with its imports.
@@ -52,31 +38,22 @@ class ModelSourceBuilder:
         Returns:
             The source, or the note a skipped table gets instead.
         """
-        body = self.build_body()
-        if not self.has_class:
-            return body
-        return "\n".join([*self.get_import_lines(self.imports), "", "", body])
-
-    def build_body(self) -> str:
-        """The model's class source without its imports - which ``self.imports`` holds then.
-
-        Returns:
-            The class source, or the note a skipped table gets instead.
-        """
-        inspected = self.model_builder.build()
-        self.has_class = inspected.state is not None
+        inspected = self.prepare()
         if inspected.state is None:
             return inspected.skipped_note or ""
-        source = self.render(inspected)
-        # A class-body attribute named like an import (a column "fields", "OnDelete", ...) would
-        # shadow that import for every later line of the class body - rebuilt with those names
-        # reserved. Renaming attributes never changes which imports are needed.
-        if not self.bound_names & set(inspected.state.fields):
-            return source
-        self.model_builder = self.get_model_builder(frozenset(self.bound_names))
-        if not self.shares_imports:
-            self.imports = ImportManager()
-        return self.render(self.model_builder.build())
+        body = self.render(inspected)
+        return "\n".join([*self.get_import_lines(self.imports), "", "", body])
+
+    def prepare(self) -> InspectedModel:
+        """Construct the declaration once, reserving its class and field names before rendering.
+
+        A module prepares every model first. Shared imports then choose aliases that
+        cannot shadow any model or be shadowed inside a model body.
+        """
+        inspected = self.model_builder.build()
+        if inspected.state is not None:
+            self.imports.reserved_names |= {inspected.class_name, *inspected.state.fields}
+        return inspected
 
     @staticmethod
     def get_import_lines(imports: ImportManager) -> list[str]:
@@ -88,7 +65,7 @@ class ModelSourceBuilder:
         Returns:
             The lines.
         """
-        lines = ["from hare.models import Model", *imports.render()]
+        lines = imports.render()
         # An enum class no module defines (the labels of a database ENUM type) is declared after
         # the imports.
         if imports.enum_declarations:
@@ -105,7 +82,7 @@ class ModelSourceBuilder:
                 del kwargs["db_index"]
             elif not field.index and not field.pk:
                 kwargs["db_index"] = False
-        return MigrationWriter.render_call(path, args, kwargs, self.imports)
+        return DeclarationValueSerializer.render_call(path, args, kwargs, self.imports)
 
     def render(self, inspected: InspectedModel) -> str:
         """The class source of an inspected model.
@@ -118,13 +95,14 @@ class ModelSourceBuilder:
         """
         # Only a model with a state reaches here - a skipped through table has none.
         state = cast("ModelState", inspected.state)
-        lines = [f"class {inspected.class_name}(Model):"]
+        base_name = self.imports.add_from("hare.models", "Model")
+        lines = [f"class {inspected.class_name}({base_name}):"]
         for attribute_name, field in state.fields.items():
             todo_reason = inspected.todo_reasons.get(attribute_name)
             todo = f"  # TODO: {todo_reason}" if todo_reason else ""
             lines.append(f"    {attribute_name} = {self.render_field(field)}{todo}")
         if isinstance(state.pk_field_name, tuple):
-            composite_pk = MigrationWriter.render_call(
+            composite_pk = DeclarationValueSerializer.render_call(
                 "hare.fields.CompositePrimaryKey",
                 list(state.pk_field_name),
                 {"without_overlaps": True} if state.options.get(ModelOption.PK_WITHOUT_OVERLAPS) else {},
@@ -141,7 +119,8 @@ class ModelSourceBuilder:
             for entry in inspected.meta_layout:
                 if isinstance(entry, ModelOption):
                     lines.append(
-                        f"        {entry} = {MigrationWriter.render_value(state.options[entry], self.imports)}"
+                        f"        {entry} = "
+                        f"{DeclarationValueSerializer.render_value(state.options[entry], self.imports)}"
                     )
                 else:
                     lines.append(f"        {entry}")

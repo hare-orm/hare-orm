@@ -1,5 +1,22 @@
 # Custom fields
 
+Field conversion and validation run in Python for individual writes, bulk writes,
+filters and result materialization. Native drivers decode database wire formats;
+they do not provide a second implementation of ORM field rules.
+
+Container subclasses implement `encode_value(value, instance, types, path)`,
+`decode_value(value, types)` and `normalize_value(value, path)`. These hooks apply
+to root columns and nested values. The explicit `types` argument supplies child
+conversions, and `path` identifies the nested value in an error. Dialect container
+conversion does not select behavior by comparing method identities.
+
+`JSONField.prepare_value()` validates a declared type and checks the document before
+encoding. The default encoder receives its JSON representation; a custom encoder
+receives the Python representation, with plain inputs preserved. Non-finite numbers,
+circular references and excessive nesting are rejected before encoding. The default
+codec preserves integers beyond 64 bits. Optional JSON acceleration runs only after
+this preparation and does not change field policy or the raw driver API.
+
 A field of your own subclasses `hare.fields.Field`.
 
 ## <a id="overrides"></a>What a field overrides
@@ -67,9 +84,8 @@ parsing a bare ISO string into a real `datetime`.
 **Don't** override it (keep the default) when `to_db_value`/`from_db_value` are asymmetric — an
 encoder/decoder pair that isn't its own inverse when applied to an already-decoded value, as with
 encryption or masking. Running `from_db_value` (the decode half) on a value that never went through
-`to_db_value` would silently corrupt it in memory, and a subsequent `save()` would then encode the
-*already-corrupted* value — for an encryption field, that means writing plaintext to the database instead
-of ciphertext.
+`to_db_value` can reject or corrupt it before it is saved; a later `save()` cannot recover the original
+value from an invalid decoding result.
 
 ```python
 class EncryptedField(Field[str]):
@@ -129,21 +145,51 @@ A `TypeMapping` leaves to the field whatever it doesn't set:
 
 | Attribute | What it sets |
 |---|---|
-| `column_type` | The column type, or a `(field) -> str` building it. |
+| `column_type` | The column type, or a `(field) -> str \| None` building it; returning `None` means that declaration has no supported column type. |
 | `generated_sql` | The DDL of a database-generated primary key column. |
 | `function_cast` | A `(field, term) -> term` wrapping the column wherever it is compared, ordered or copied. |
 | `to_db` | A `(field, value, instance) -> value` in place of the field's `to_db_value()`. |
-| `to_db_refuses_only` | `to_db` only refuses a value — one the field's `native_write_check` leaves to it — and writes any other as the field does: the write accelerator writes every other value itself (SQLite's `FloatField` refuses `NaN` this way). |
 | `to_lookup` | A `(field, value, instance) -> value` in place of the field's `to_lookup_value()`. |
-| `to_python` | A `(field, value) -> value` in place of the field's `from_db_value()`. |
+| `to_python` | A `(field, value) -> value` replacing `from_db_value()`. Built-in converters normalize the driver's format and invoke the field's reader; a custom converter must invoke it itself if the field's contract requires it. |
 | `json_term` | A `(field, term) -> term` giving the text the value is written into a JSON object as — for a value stored in a form JSON can't hold (a UUID in 16 bytes). |
-| `naive_datetime_is_utc` | The field's own `from_db_value()`, with a naive datetime from the driver read as a UTC instant. |
+| `ordering_key` | A `(field, term) -> term \| None` defining the SQL ordering expression; `None` uses the column itself. |
+| `holds_null` | Whether the column type supports NULL; `None` inherits the mapping of a base field class. |
 | `extension` | The database extension the column type needs — created wherever a field of the class is used (`postgis` for a `GeometryField`, `vector` for a `VectorField` on PostgreSQL). |
 | `inserted_by_select` | An INSERT writing the column writes its rows as a `SELECT` of them, not as `VALUES` — for a value written as an expression the dialect's `VALUES` doesn't read; or a `(field) -> bool` deciding it per field. |
 
 `field.get_column_type(dialect)`, `field.get_generated_sql(dialect)` and
 `field.get_function_cast(dialect)` read the result; a field computing them from its own configuration
 overrides these methods.
+
+
+## <a id="declaration-snapshots"></a>Declaration snapshots
+
+`field.snapshot()` creates an independent, unbound declaration for model publication and migration state. It
+does not
+call the field constructor, defaults or validators. Mutable literal defaults and nested fields
+are copied; callbacks retain their identity. The snapshot drops model/name/reference binding and
+derived conversion caches. Relation snapshots retain physical column overrides and declaration
+references, while removing the bound target model and key fields.
+
+`get_declaration_values()` returns the state to retain, including inherited and private slots.
+Runtime copies, deep copies and snapshots preserve slot values automatically. A custom field can
+override this method to exclude runtime attributes. Override `snapshot(memo=...)`
+when external handles need a specific copying policy; pass the memo when snapshotting nested fields.
+Historical model rendering binds fresh declarations, so neither rendering nor changing a later
+migration state changes an earlier field declaration.
+
+Model bodies, abstract bases and mixins use this protocol before binding. Reusing a field declaration
+under different names in different models does not bind or mutate the original object. Generated
+relation sides and shadow key columns are rebuilt for the new model rather than inherited as declarations.
+
+Publication retains an independent declaration snapshot. Calling `snapshot()` on a published field
+reads that declaration, including an implicit relation column name, rather than reconstructing it
+from runtime mutations. Model/name/column/reference identity, normalization state and cache buckets
+belong to its `BoundField` record. A runtime field copy receives fresh caches and captures a new
+declaration when published; changing that copy does not update the original publication.
+For relations, the record also holds a `BoundRelation` with target fields, source/target key names
+and through-table identity. A declaration snapshot clears this data; the model graph prepares it
+again when binding the relation.
 
 ## <a id="lookups-value-paths-and-generated-columns"></a>Lookups, value paths and generated columns
 
@@ -182,7 +228,8 @@ class CodeField(CharField):
         return None
 ```
 
-A dialect adds a path segment to field classes it doesn't define itself — PostgreSQL's `name__unaccent`
-on text fields — with `FieldClass.register_transform(segment, get_transform, required_extension=...)` —
-`get_transform(field)` returns the same pair as `get_path_transform()` — from its `Dialect.install()`,
-which runs once when the dialect is registered.
+A dialect adds path segments to other field classes by returning `TransformRegistration` declarations
+in `ExtensionContribution.transforms` from `Dialect.get_contribution()`. Each declaration contains the
+field class, segment and `RegisteredTransform(get_transform, required_extension)`.
+`get_transform(field)` returns the same pair as `get_path_transform()`. Outside factories,
+`FieldClass.register_transform(segment, get_transform, required_extension=...)` publishes one declaration.

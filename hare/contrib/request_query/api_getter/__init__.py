@@ -9,10 +9,11 @@ from hare.contrib.request_query.api_getter.api_getter_triggers import ApiGetterT
 from hare.contrib.request_query.api_getter.api_http_requests import ApiHttpRequests
 from hare.contrib.request_query.api_getter.api_source import ApiSource
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
-from hare.contrib.request_query.api_getter.declarations import ApiRequestExecuted
+from hare.contrib.request_query.api_getter.declarations import ApiAssignment, ApiRequestExecuted
 from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger, ApiRequestMode, ApiValueMappingMode
 
 __all__ = (
+    "ApiAssignment",
     "ApiGetter",
     "ApiGetterRetry",
     "ApiGetterTrigger",

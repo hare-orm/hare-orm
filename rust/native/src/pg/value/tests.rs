@@ -3,7 +3,7 @@
 use chrono::{NaiveDate, NaiveTime};
 use tokio_postgres::types::{Kind as TypeShape, Type};
 
-use crate::pg::value::decode::{decode_value, type_may_need_server_text_form, ServerTextForms};
+use crate::pg::value::decode::{decode_value, ServerTextForms};
 use crate::pg::value::test_support::*;
 use crate::pg::value::{RangeValue, Value};
 
@@ -71,17 +71,18 @@ fn catalog_and_pseudo_types_decode_natively() {
 #[test]
 fn types_without_a_decoder_are_collected_for_their_server_text_form() {
     let mut forms = ServerTextForms::collecting();
-    assert!(matches!(decode_value(&Type::POINT, &[1, 2], &mut forms).unwrap(), Value::Null));
-    assert!(matches!(decode_value(&Type::REGCLASS, &[0, 0, 4, 235], &mut forms).unwrap(), Value::Null));
+    let point = decode_value(&Type::POINT, &[1, 2], &mut forms).unwrap();
+    let regclass = decode_value(&Type::REGCLASS, &[0, 0, 4, 235], &mut forms).unwrap();
+    assert!(matches!(point, Value::DeferredText(0)));
+    assert!(matches!(regclass, Value::DeferredText(1)));
     let requests = forms.take_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].0, Type::POINT);
-    let mut forms = ServerTextForms::supplying(vec!["(1,2)".to_string()]);
-    assert!(matches!(decode_value(&Type::POINT, &[1, 2], &mut forms).unwrap(), Value::Text(text) if text == "(1,2)"));
-    assert!(type_may_need_server_text_form(&Type::POINT));
-    assert!(type_may_need_server_text_form(&Type::RECORD));
-    assert!(!type_may_need_server_text_form(&Type::INT4_ARRAY));
-    assert!(!type_may_need_server_text_form(&Type::INT4MULTI_RANGE));
+    let mut rows = vec![vec![point, regclass, Value::Null]];
+    ServerTextForms::supply(&mut rows, vec!["(1,2)".to_string(), "pg_class".to_string()]).unwrap();
+    assert!(matches!(&rows[0][0], Value::Text(text) if text == "(1,2)"));
+    assert!(matches!(&rows[0][1], Value::Text(text) if text == "pg_class"));
+    assert!(matches!(&rows[0][2], Value::Null));
 }
 
 #[test]

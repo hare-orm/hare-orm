@@ -87,18 +87,15 @@ class DeclarationBuilder:
         include_to_many = self.build_include(queryset, include) if include is not None else {}
         filters = tuple(
             declaration
-            for parameter, field_info in self.request_query_class.model_fields.items()
+            # A dialect registration can invalidate preparation. The candidate is
+            # private; preparation retries it before publishing the completed schema.
+            for parameter, field_info in tuple(self.request_query_class.model_fields.items())
             if parameter not in option_parameters
             and (declaration := self.build_filter(queryset, dialects, parameter, field_info)) is not None
         )
-        lookup_infos = {
-            declaration.filter_key: declaration.lookup_info
-            for declaration in filters
-            if declaration.filter_key is not None and declaration.lookup_info is not None
-        }
         if search is not None:
-            lookup_infos.update(self.build_search(queryset, dialects, search))
-        ordering_infos = self.build_ordering(queryset, ordering, pagination)
+            self.check_search(queryset, dialects, search)
+        self.check_ordering(queryset, ordering, pagination)
         self.described_models.add(queryset.model)
         key_ordering_paths = (
             self.describe_ordering(queryset, "pk").paths if queryset.model._meta.has_primary_key else ()
@@ -108,9 +105,7 @@ class DeclarationBuilder:
             filters=filters,
             bounds=self.build_bounds(filters),
             search=search,
-            lookup_infos=lookup_infos,
             ordering=ordering,
-            ordering_infos=ordering_infos,
             key_ordering_paths=key_ordering_paths,
             fields=fields,
             include=include,
@@ -119,7 +114,6 @@ class DeclarationBuilder:
             join_type=join_type,
             versions=versions,
             deleted=deleted,
-            dialects=dialects,
             api_sources=api_sources,
             api_mappings=api_mappings,
             api_target_fields=api_target_fields,
@@ -460,9 +454,7 @@ class DeclarationBuilder:
         self.described_models.update(RequestQueryDeclaration.get_models(ordering_info))
         return ordering_info
 
-    def build_search(
-        self, queryset: QuerySet[Any], dialects: tuple[Dialect, ...], search: SearchConfig
-    ) -> dict[str, LookupInfo]:
+    def check_search(self, queryset: QuerySet[Any], dialects: tuple[Dialect, ...], search: SearchConfig) -> None:
         """Reads the searched fields: each takes one text value with the search's lookup.
 
         Args:
@@ -470,14 +462,10 @@ class DeclarationBuilder:
             dialects: The dialects the search must run on.
             search: The search option.
 
-        Returns:
-            The ORM's description of each field's filter key, by key.
-
         Raises:
             ConfigurationError: A field doesn't exist, doesn't run the lookup on a dialect, or its
                 lookup doesn't take text.
         """
-        lookup_infos = {}
         for field_name in search.fields:
             filter_key = search.get_filter_key(field_name)
             lookup_info = self.get_lookup_info(queryset, dialects, f"{self.class_name}.Meta.search", filter_key)
@@ -488,24 +476,19 @@ class DeclarationBuilder:
                     f"{self.class_name}.Meta.search: {filter_key!r} takes "
                     f"{ValueAnnotation.describe(lookup_info.value_shape, lookup_info.value_type)}, not text"
                 )
-            lookup_infos[filter_key] = lookup_info
-        return lookup_infos
 
-    def build_ordering(
+    def check_ordering(
         self,
         queryset: QuerySet[Any],
         ordering: OrderingConfig | None,
         pagination: Pagination | None,
-    ) -> dict[str, OrderingInfo]:
+    ) -> None:
         """Reads the names a request may order by and the default ordering.
 
         Args:
             queryset: The class's queryset.
             ordering: The ordering option.
             pagination: The pagination option - it checks each name it pages by.
-
-        Returns:
-            The ORM's description of each name, by name without its direction.
 
         Raises:
             ConfigurationError: A name doesn't exist, is an encrypted field, crosses a relation to
@@ -514,14 +497,10 @@ class DeclarationBuilder:
         names = list(ordering.fields) if ordering else []
         if ordering:
             names.extend(name.removeprefix(DESCENDING_PREFIX) for name in ordering.default)
-        ordering_infos: dict[str, OrderingInfo] = {}
-        for name in names:
-            if name in ordering_infos:
-                continue
-            ordering_infos[name] = self.get_ordering_info(queryset, name)
+        for name in dict.fromkeys(names):
+            description = self.get_ordering_info(queryset, name)
             if pagination is not None:
-                pagination.check_ordering(self.class_name, name, ordering_infos[name])
-        return ordering_infos
+                pagination.check_ordering(self.class_name, name, description)
 
     def get_ordering_info(self, queryset: QuerySet[Any], name: str) -> OrderingInfo:
         """The ORM's description of one ordering name, checked.
@@ -534,7 +513,7 @@ class DeclarationBuilder:
             The description.
 
         Raises:
-            ConfigurationError: See ``build_ordering()``.
+            ConfigurationError: See ``check_ordering()``.
         """
         try:
             ordering_info = self.describe_ordering(queryset, name)

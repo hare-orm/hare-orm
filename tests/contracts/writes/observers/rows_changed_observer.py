@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from collections import Counter
+from typing import ClassVar
 
 from hare.instrumentation.declarations import RowsChanged
 from hare.instrumentation.observers.observers import Observers
@@ -23,23 +24,11 @@ class RowsChangedObserver(WriteObserver):
         with Observers.observing(RowsChanged, events.append):
             await path.run(scenario, 5)
         roles = {scenario.models.get_model(role): role for role in WriteRole}
-        reported = list(
+        reported = Counter(
             (roles[event.model].value, event.operation.value, tuple(event.pks) if event.pks is not None else None)
             for event in events
         )
-        expected = list(
+        expected = Counter(
             (change.role.value, change.operation.value, change.get_reported_pks()) for change in path.reported
         )
-        assert self.sort_key_list(reported) == self.sort_key_list(expected)
-
-    @staticmethod
-    def sort_key_list(items: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
-        """The items in an order that compares keys and the absence of keys.
-
-        Args:
-            items: The ``(role, operation, keys)`` items.
-
-        Returns:
-            The items, sorted.
-        """
-        return sorted(items, key=lambda item: (item[0], item[1], item[2] is None, item[2] or ()))
+        assert reported == expected

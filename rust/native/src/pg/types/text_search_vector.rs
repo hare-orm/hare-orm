@@ -1,8 +1,9 @@
 //! `TSVECTOR`, read as the text `tsvector_out` prints.
 
-use bytes::Buf;
+use crate::pg::wire_reader::PgWireReader;
 use tokio_postgres::types::{FromSql, Type};
 
+use crate::pg::decode_context::PgDecodeContext;
 use crate::pg::value::BoxError;
 
 /// `TSVECTOR`'s wire format (`tsvectorsend`): a 4-byte lexeme count, then per lexeme a
@@ -16,35 +17,20 @@ use crate::pg::value::BoxError;
 /// column alike.
 pub(crate) struct PgTsVectorText(pub(crate) String);
 
-impl<'a> FromSql<'a> for PgTsVectorText {
-    fn from_sql(_ty: &Type, mut raw: &'a [u8]) -> Result<Self, BoxError> {
-        if raw.len() < 4 {
-            return Err("invalid tsvector payload: too short".into());
-        }
-        let nitems = raw.get_i32();
-        let nitems =
-            usize::try_from(nitems).map_err(|_| format!("invalid tsvector payload: negative lexeme count {nitems}"))?;
+impl PgTsVectorText {
+    pub(crate) fn decode(raw: &[u8], context: &mut PgDecodeContext) -> Result<Self, BoxError> {
+        let mut reader = PgWireReader::new(raw, "tsvector");
+        let nitems = reader.count(3)?;
+        context.reserve_values(nitems)?;
         let mut rendered_entries = Vec::with_capacity(nitems);
         for _ in 0..nitems {
-            let null_pos =
-                raw.iter().position(|&byte| byte == 0).ok_or("invalid tsvector payload: unterminated lexeme")?;
-            let lexeme = std::str::from_utf8(&raw[..null_pos])
-                .map_err(|error| format!("invalid tsvector payload: lexeme is not valid UTF-8: {error}"))?
-                .replace('\\', "\\\\")
-                .replace('\'', "''");
-            raw.advance(null_pos + 1);
-            if raw.len() < 2 {
-                return Err("invalid tsvector payload: truncated position count".into());
-            }
-            let npos = raw.get_i16();
-            let npos = usize::try_from(npos)
-                .map_err(|_| format!("invalid tsvector payload: negative position count {npos}"))?;
-            if raw.len() < npos * 2 {
-                return Err("invalid tsvector payload: truncated position list".into());
-            }
+            let lexeme = reader.c_string()?.replace('\\', "\\\\").replace('\'', "''");
+            let position_count = reader.i16()?;
+            let npos = reader.checked_count(i32::from(position_count), 2)?;
+            context.reserve_values(npos)?;
             let mut positions = Vec::with_capacity(npos);
             for _ in 0..npos {
-                let raw_pos = raw.get_u16();
+                let raw_pos = reader.u16()?;
                 let position = raw_pos & 0x3FFF;
                 let weight_letter = match raw_pos >> 14 {
                     3 => "A",
@@ -60,7 +46,14 @@ impl<'a> FromSql<'a> for PgTsVectorText {
                 format!("'{lexeme}':{}", positions.join(","))
             });
         }
+        reader.finish()?;
         Ok(PgTsVectorText(rendered_entries.join(" ")))
+    }
+}
+
+impl<'a> FromSql<'a> for PgTsVectorText {
+    fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, BoxError> {
+        Self::decode(raw, &mut PgDecodeContext::new(raw.len()))
     }
 
     fn accepts(postgres_type: &Type) -> bool {

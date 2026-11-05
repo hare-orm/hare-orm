@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from hare.contrib.test import capture_queries, hare_test_context
 from hare.exceptions import NoValuesFetched, OperationalError, QueryError, UnSupportedError
-from hare.query.expressions import Exists, OuterReference, Q, Subquery
+from hare.query.expressions import Exists, F, OuterReference, Q, Subquery
 from hare.query.functions import Count, Max, Sum
 from tests.contracts.constants import CLICKHOUSE_VERSIONS_WITHOUT_CORRELATED_MEMBERSHIP
 from tests.contracts.query_shape_models import (
@@ -161,9 +161,20 @@ async def test_correlated_membership_compares_null_values(shape_rows):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["shelf", "shelf__pk"])
-async def test_composite_relation_aliases_keep_the_key_operations(shape_rows, path):
-    query = ShapeItem.objects.values("id", key=path)
+@pytest.mark.parametrize("declaration", ("values", "alias", "annotate"))
+async def test_composite_relation_aliases_keep_the_key_operations(shape_rows, path, declaration):
+    query = (
+        ShapeItem.objects.values("id", key=path)
+        if declaration == "values"
+        else getattr(ShapeItem.objects, declaration)(key=F(path))
+    )
     null_key = None if path == "shelf" else (None, None)
+    keys = [("A", 1), ("A", 2), ("A", 2), ("B", 1), None, ("B", 1)]
+    assert await query.order_by("id").values_list("key", flat=True) == keys
+    assert await query.order_by("id").values_list("id", "key") == list(enumerate(keys, 1))
+    assert [row.key for row in await query.order_by("id").values_list("key", named=True)] == keys
+    assert await query.order_by("id").values("key") == [{"key": key} for key in keys]
+    assert await query.values_list("key", flat=True).count() == 6
     assert await query.filter(key=("A", 2)).order_by("id").values_list("id", flat=True) == [2, 3]
     assert await query.filter(key__in=[("B", 1)]).order_by("id").values_list("id", flat=True) == [4, 6]
     assert await query.filter(key=null_key).values_list("id", flat=True) == [5]

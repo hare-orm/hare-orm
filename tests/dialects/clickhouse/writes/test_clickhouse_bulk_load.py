@@ -22,8 +22,6 @@ from hare.exceptions import (
 )
 from tests.dialects.clickhouse.models import Player, Team  # noqa: E402
 
-REQUIRES = ("clickhouse-connect",)
-
 PLAYER_FIELDS = ("name", "team_id", "score", "rating", "joined", "born", "active", "notes", "data")
 PLAYER_INSERT = (
     "INSERT INTO player (id, name, team_id, score, rating, joined, born, active, notes, data) FORMAT Native"
@@ -227,7 +225,7 @@ def test_a_driver_registered_first_takes_no_scheme_of_hares_own_driver():
         try:
             DialectRegistry.register_driver(TakingDriver())
         except ConfigurationError as error:
-            assert "already taken" in str(error), str(error)
+            assert "already registered or reserved" in str(error), str(error)
         else:
             raise AssertionError("the scheme of hare's own driver was taken")
         assert DialectRegistry.get_driver("postgresql+asyncpg").name == "postgresql+asyncpg"

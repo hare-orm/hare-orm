@@ -7,6 +7,8 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.driver_statement_log_filter import DriverStatementLogFilter
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_client import (
     ClickhouseDriverLibraryClient,
@@ -46,6 +48,8 @@ class ClickhouseDriverConnections:
         "busy_library_clients",
         "running_statements",
         "is_closed",
+        "accepting",
+        "closing",
         "lock",
     )
 
@@ -67,6 +71,8 @@ class ClickhouseDriverConnections:
         self.running_statements: set[concurrent.futures.Future[Any]] = set()
         #: Set once close() stopped waiting - a statement not started by then fails.
         self.is_closed = False
+        self.accepting = True
+        self.closing: asyncio.Task[None] | None = None
         #: Held where a worker thread changes what the others change too.
         self.lock = threading.Lock()
 
@@ -82,28 +88,45 @@ class ClickhouseDriverConnections:
         Returns:
             The awaitable of its result.
         """
-        self.statistics.acquire_count += 1
+        return asyncio.wrap_future(self.submit(function, *arguments))
+
+    def submit(self, function: Callable[..., ResultType], *arguments: Any) -> concurrent.futures.Future[ResultType]:
+        """Admit wire IO and expose its actual completion independently of asyncio waiters.
+
+        Future.cancel() prevents queued work from starting but cannot cancel running IO.
+        Completion callbacks and pool accounting track this Future, not its asyncio wrapper.
+        """
         submit_time = time.perf_counter() if PoolMetrics.enabled else 0.0
-        statement = self.executor.submit(self._run_on_thread, function, arguments, submit_time)
-        self.running_statements.add(statement)
-        statement.add_done_callback(self.running_statements.discard)
-        return asyncio.wrap_future(statement)
+        with self.lock:
+            if not self.accepting:
+                raise DBConnectionError(CLICKHOUSE_DRIVER_CLOSED_MESSAGE)
+            self.statistics.acquire_count += 1
+            statement = self.executor.submit(self._run_on_thread, function, arguments, submit_time)
+            self.running_statements.add(statement)
+        # add_done_callback can call synchronously for an already completed Future.
+        statement.add_done_callback(self._forget_statement)
+        return statement
+
+    def _forget_statement(self, statement: concurrent.futures.Future[Any]) -> None:
+        """Forget completed wire IO, independently of cancellation of its asyncio waiter."""
+        with self.lock:
+            self.running_statements.discard(statement)
 
     def _run_on_thread(
         self, function: Callable[..., ResultType], arguments: tuple[Any, ...], submit_time: float
     ) -> ResultType:
-        library_client: ClickhouseDriverLibraryClient | None = getattr(self.thread_connections, "library_client", None)
-        is_new = library_client is None
-        if library_client is None:
-            library_client = ClickhouseDriverLibraryClient(**self.connection_settings)
-            self.thread_connections.library_client = library_client
         with self.lock:
             if self.is_closed:
                 raise DBConnectionError(CLICKHOUSE_DRIVER_CLOSED_MESSAGE)
+            library_client: ClickhouseDriverLibraryClient | None = getattr(
+                self.thread_connections, "library_client", None
+            )
+            if library_client is None:
+                library_client = ClickhouseDriverLibraryClient(**self.connection_settings)
+                self.thread_connections.library_client = library_client
+                self.library_clients.append(library_client)
             if submit_time:
                 self.statistics.add_wait(time.perf_counter() - submit_time)
-            if is_new:
-                self.library_clients.append(library_client)
             # Taken before its connection opens: close() leaves a taken one to its thread.
             self.busy_library_clients.add(library_client)
         try:
@@ -119,6 +142,8 @@ class ClickhouseDriverConnections:
         with self.lock:
             self.busy_library_clients.discard(library_client)
             is_closed = self.is_closed
+            if is_closed:
+                self.library_clients.remove(library_client)
         if is_closed:
             self._disconnect(library_client)
 
@@ -139,12 +164,12 @@ class ClickhouseDriverConnections:
             connection.connect()
         except BaseException:
             # A handshake the server refused leaves the socket open.
-            connection.disconnect()
-            with self.lock:
-                self.statistics.add_connect_failure()
+            try:
+                connection.disconnect()
+            finally:
+                with self.lock:
+                    self.statistics.add_connect_failure()
             raise
-        # Just opened - its first statement needs no ping.
-        library_client.last_statement_time = time.monotonic()
         with self.lock:
             self.statistics.add_connect(time.perf_counter() - start_time)
 
@@ -154,10 +179,13 @@ class ClickhouseDriverConnections:
         Returns:
             The open, the idle and the waited-for connections, the least and the most of them.
         """
-        open_count = sum(map(self._is_connected, self.library_clients))
-        running_count = len(self.running_statements)
-        busy_count = min(running_count, self.max_size)
-        return open_count, max(0, open_count - busy_count), running_count - busy_count, 0, self.max_size
+        with self.lock:
+            open_count = sum(map(self._is_connected, self.library_clients))
+            busy_count = len(self.busy_library_clients)
+            waiting_count = sum(
+                not statement.running() and not statement.done() for statement in self.running_statements
+            )
+        return open_count, max(0, open_count - busy_count), waiting_count, 0, self.max_size
 
     async def close(self) -> None:
         """Ends the worker threads and closes their connections. The statements handed over
@@ -165,8 +193,24 @@ class ClickhouseDriverConnections:
         started fail, and a statement still running ends on its own - its thread closes its
         connection then.
         """
+        if self.closing is None:
+            with self.lock:
+                self.accepting = False
+            self.closing = asyncio.create_task(self._close())
+        await ResourceCompletion.wait(self.closing)
+
+    async def _close(self) -> None:
+        """Drain admitted work for the grace period, then close the pool to queued work.
+
+        concurrent Future state records submitted, running and completed IO. A cancelled
+        asyncio waiter cannot return a running connection to the pool. Busy connections
+        remain with their worker and disconnect on release after the grace period.
+        Queued work reaches the closed-pool check when its worker is available; cancelling
+        its Future here would turn the pool's connection error into caller cancellation.
+        """
         self.executor.shutdown(wait=False)
-        running_statements = list(self.running_statements)
+        with self.lock:
+            running_statements = tuple(self.running_statements)
         if running_statements:
             await asyncio.get_running_loop().run_in_executor(
                 None, concurrent.futures.wait, running_statements, CLICKHOUSE_DRIVER_CLOSE_TIMEOUT_SECONDS
@@ -178,9 +222,21 @@ class ClickhouseDriverConnections:
                 for library_client in self.library_clients
                 if library_client not in self.busy_library_clients
             ]
-            self.library_clients.clear()
+            self.library_clients = [
+                library_client
+                for library_client in self.library_clients
+                if library_client in self.busy_library_clients
+            ]
+        errors: list[BaseException] = []
         for library_client in idle_library_clients:
-            self._disconnect(library_client)
+            try:
+                self._disconnect(library_client)
+            except BaseException as error:
+                errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, errors)
 
     @staticmethod
     def _disconnect(library_client: ClickhouseDriverLibraryClient) -> None:

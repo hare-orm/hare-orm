@@ -102,7 +102,7 @@ def test_an_argument_a_declaration_does_not_write_is_refused_before_the_file_is(
     constraint = CommentedCheck(check=Q(high__gt=0), name="account_high", comment="kept")
     assert ClassPath.get(CommentedCheck).endswith("CommentedCheck")
     writer = MigrationWriter("0002_check", "app", [AddConstraint(model_name="Account", constraint=constraint)])
-    with pytest.raises(MigrationAutodetectorError, match=r"operation\[2\]\.constraint\[1\]\.comment"):
+    with pytest.raises(MigrationAutodetectorError, match=r"operation.*\.comment.*written 'kept', read ''"):
         MigrationChecks.raise_if_not_read_back(writer)
 
 

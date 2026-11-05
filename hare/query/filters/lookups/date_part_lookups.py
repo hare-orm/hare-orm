@@ -261,14 +261,12 @@ class DatePartLookups:
         Raises:
             UnSupportedError: ``value`` isn't an int.
         """
-        value = DatePartLookups.get_part_value(date_part, value)
-        use_timezone = Timezone.get_use_timezone()
-        zone_name = Timezone.name() if is_datetime_field and use_timezone else None
-        # A naive datetime term is read in the machine's local zone where the column holds an
-        # instant; a dialect storing the wall-clock digits ignores it.
-        use_local_zone_when_naive = is_datetime_field and not use_timezone
-        return Extract(date_part, term, zone_name=zone_name, use_local_zone_when_naive=use_local_zone_when_naive).eq(
-            value
+        return DatePartLookups.compare_part(
+            date_part,
+            operator.eq,
+            term,
+            DatePartLookups.get_part_value(date_part, value),
+            is_datetime_field=is_datetime_field,
         )
 
     # The date part lookups of a value with no zone of its own (a JSON scalar) - no zone conversion.

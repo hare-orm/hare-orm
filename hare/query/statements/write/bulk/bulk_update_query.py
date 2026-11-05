@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Generator, Iterable, Sequence
-from itertools import chain, compress, repeat
-from operator import attrgetter, not_
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from collections.abc import Awaitable, Callable, Iterable
+from copy import copy
+from itertools import chain, compress
+from operator import not_
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar, cast
 
+from hare.core.registries import Registries
 from hare.exceptions import QueryError, StaleObjectError, UnSupportedError, ValidationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.instrumentation.capture.captured_write import CapturedWrite
+from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.instances.dirty_fields import DirtyFields
@@ -22,18 +25,22 @@ from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.rules.written_target_checks import WrittenTargetChecks
+from hare.models.write.write_finalizer import WriteFinalizer
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.bound_query import BoundQuery
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.write_statements import WritePreview, WriteStatement
 from hare.query.expressions import Q
 from hare.query.hare_column_names import HareColumnNames
+from hare.query.key_columns import KeyColumns
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from hare.query.rows.values_rows.value_field import ValueField
 from hare.query.scopes.tenants.tenant_scope import TenantScope
 from hare.query.statements.building.query_conditions import QueryConditions
 from hare.query.statements.building.query_ctes import QueryCtes
 from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.constants import (
+    BULK_UPDATE_DEFERRED_PREVIEW_MESSAGE,
     BULK_UPDATE_MATCHES_FILTER_ALIAS,
     BULK_UPDATE_RETURNING_UNSUPPORTED_MESSAGE,
     BULK_UPDATE_VALUES_ALIAS,
@@ -41,26 +48,23 @@ from hare.query.statements.constants import (
 from hare.query.statements.write.bulk.bulk_objects import BulkObjects
 from hare.query.statements.write.bulk.bulk_update_checks import BulkUpdateChecks
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
-from hare.query.statements.write.bulk.declarations import BulkUpdateStatementLayout
+from hare.query.statements.write.bulk.declarations import BoundUpdateBatch, BulkUpdateStatementLayout
 from hare.query.statements.write.update_query import UpdateQuery
 from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 from hare.sql.builder.returned_value import ReturnedValue
+from hare.sql.builder.update_from_values import UpdateFromValues, ValuesColumn
 from hare.sql.functions.cast import Cast
+from hare.sql.identifiers import Identifiers
 from hare.sql.terms.case.case import Case
 from hare.sql.terms.parameters.parameterizer import Parameterizer
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 from hare.sql.terms.term import Term
-from hare.sql.terms.tuple import Tuple
 from hare.sql.terms.values.literal_value import LiteralValue
-from hare.sql.terms.values.row_value_list import RowValueList
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
-    from hare.fields.field import Field
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.models import Model
     from hare.query.queryset.queryset import QuerySet
-    from hare.sql.builder.tables.table import Table
     from hare.sql.sql_context import SqlContext
 
 TModel = TypeVar("TModel", bound="Model")
@@ -118,7 +122,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         )
         tenant_scoped = bool(model._meta.tenant_field) and not source._visibility.all_tenants
         if tenant_scoped:
-            BulkUpdateChecks.check_tenant_values_resolved(model, objects)
+            BulkUpdateChecks.check_tenant_defaults_ready(model, objects)
         BulkUpdateChecks.check_primary_keys(model, objects)
         if source._uses_default_scope:
             # The objects are matched by their keys, like save() matches one: under the default
@@ -146,27 +150,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         # left written.
         self._completed_objects: list[TModel] = []
 
-    @staticmethod
-    def _pk_and_version_db_values(
-        types: TypeRegistry,
-        obj: TModel,
-        pk_values: tuple[Any, ...],
-        pk_field_objs: list[Any],
-        optimistic_lock_field_obj: Any,
-        optimistic_lock_field: str | None,
-    ) -> list[Any]:
-        """The DB values of an object's primary key column(s), then the optimistic lock column's old
-        value when the model has one - the column order of a VALUES row.
-        """
-        db_values = [
-            types.get_db_value(pk_field_obj, pk_value, None)
-            for pk_value, pk_field_obj in zip(pk_values, pk_field_objs, strict=True)
-        ]
-        if optimistic_lock_field_obj is not None and optimistic_lock_field is not None:
-            db_values.append(types.get_db_value(optimistic_lock_field_obj, getattr(obj, optimistic_lock_field), obj))
-        return db_values
-
-    def _make_queries(self, parameters_inline: bool = False) -> list[tuple[str, list[Any], list[TModel]]]:
+    def _make_queries(self, parameters_inline: bool = False) -> list[BoundUpdateBatch[TModel]]:
         """One UPDATE over a VALUES table of the rows per batch of objects - a single pass, instead of
         a CASE per field. One multi-row UPDATE per batch is one round trip.
 
@@ -187,7 +171,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             table_options.raise_if_fixed_fields_written(self.model, self.fields)
         BulkUpdateChecks.raise_if_row_written_twice(self.model, self._objects, dialect.types)
         layout = self._get_statement_layout(parameters_inline=parameters_inline)
-        queries_with_parameters: list[tuple[str, list[Any], list[TModel]]] = []
+        queries_with_parameters: list[BoundUpdateBatch[TModel]] = []
         for batch in BulkWriteBatches.get_batches(self._objects, layout.batch_size):
             objects_item = list(batch)
             if not objects_item:
@@ -195,19 +179,14 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             if not parameters_inline:
                 queries_with_parameters.append(self._make_whole_rows_query(layout, objects_item))
             else:
-                queries_with_parameters.append(
-                    self._make_query_by_value(layout, objects_item, parameters_inline=parameters_inline)
-                )
+                queries_with_parameters.append(self._make_inline_query(layout, objects_item))
         return queries_with_parameters
 
-    def _get_filter_criterion(self, table: Table) -> Term | None:
+    def _get_filter_criterion(self) -> Term | None:
         """The queryset's own filter as a criterion over the base table alone - through a primary
         key subquery where it needs a JOIN, which the hand-built ``UPDATE ... FROM (VALUES ...)``
         can't carry. The query's CTEs are applied after it, so the WITH clause is rendered once,
         ahead of the UPDATE, rather than inside that subquery too.
-
-        Args:
-            table: The model's table.
 
         Returns:
             The criterion, None when the queryset carries no filter.
@@ -221,36 +200,13 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         # A filter on an aggregate annotation needs its GROUP BY to be applied per row.
         QueryGrouping.apply_auto_group_by(self)
         if self._filters_need_primary_key_subquery():
-            pk_fields_for_subquery = [
-                table[self.model._meta.fields_map[name].source_field or name]
-                for name in self.model._meta.primary_key_attribute_names
-            ]
             # The annotation terms QueryConditions.get_filters() selected would become extra subquery columns.
             self.query._selects = []
-            subquery = self.query.select(*pk_fields_for_subquery)
-            pk_reference = (
-                pk_fields_for_subquery[0] if len(pk_fields_for_subquery) == 1 else Tuple(*pk_fields_for_subquery)
-            )
-            filter_criterion: Term | None = pk_reference.isin(subquery)
+            filter_criterion: Term | None = self._get_matching_rows_criterion(self.query)
         else:
             filter_criterion = self.query._wheres
         QueryCtes.apply_with_ctes(self)
         return filter_criterion or None
-
-    def _get_stored_key(self, obj: TModel, pk_fields: Sequence[Field[Any]], pk_names: Sequence[str]) -> Any:
-        """An object's primary key as the database stores it - as ``_read_returned_keys()`` gives a row's: a
-        tuple for a composite key.
-
-        Args:
-            obj: The object.
-            pk_fields: The key's fields.
-            pk_names: Their attribute names.
-
-        Returns:
-            The key.
-        """
-        stored_key = ReturnedValues.get_stored_key(self.dialect.types, pk_fields, pk_names, obj)
-        return stored_key if len(stored_key) > 1 else stored_key[0]
 
     def _get_returning_columns(self, pk_columns: list[str]) -> list[str]:
         """The columns the UPDATE returns: the primary key - the rows come in no order - and, with
@@ -313,16 +269,12 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         """
         meta = self.model._meta
         table = meta.basetable
-        filter_criterion = self._filter_criterion = self._get_filter_criterion(table)
+        filter_criterion = self._filter_criterion = self._get_filter_criterion()
         # One PK column for a regular model, N (in primary_key_attribute order) for a composite one -
         # everything below is written to that general case, a single-column PK is just N=1 of it.
         primary_key_attribute_names = meta.primary_key_attribute_names
         pk_field_objects = [meta.fields_map[name] for name in primary_key_attribute_names]
-        pk_columns = [
-            field_object.source_field or name
-            for field_object, name in zip(pk_field_objects, primary_key_attribute_names, strict=True)
-        ]
-        pk_column_count = len(primary_key_attribute_names)
+        pk_columns = list(KeyColumns.get_source_columns(meta))
         fields = self._get_written_column_fields()
         field_objects = [meta.fields_map[field] for field in fields]
         dialect = self._connection.dialect
@@ -344,13 +296,10 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             key_cast_types.append(get_key_cast_type(optimistic_lock_field_object))
             key_fields.append(optimistic_lock_field)
 
-        base_context = self.query.query_class.SQL_CONTEXT
+        base_context = self._connection.sql_context
         quote: Callable[[str], str] = base_context.quote
         db_table = meta.db_table
-        values_alias = BULK_UPDATE_VALUES_ALIAS
-        while values_alias == db_table:
-            values_alias += "_"
-        values_alias_sql = quote(values_alias)
+        values_alias = Identifiers.get_free_name(BULK_UPDATE_VALUES_ALIAS, (db_table,))
         # c0..c{key column count - 1} = the key column(s) and the old version, the rest the written
         # fields.
         value_column_names = [f"c{column_position}" for column_position in range(len(key_fields) + len(fields))]
@@ -358,22 +307,18 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         # Table-qualified on the right-hand side and in WHERE, so a model column named like one of
         # the VALUES table's own c<N> columns can't be read from the wrong side.
         table_sql = quote(db_table)
-        assignments = [
-            (quote(field_object.source_field or field), f"{values_alias_sql}.{value_column_name}")
-            for field_object, field, value_column_name in zip(
-                field_objects, fields, value_column_names[len(key_fields) :], strict=True
+        assignments: list[tuple[str, ValuesColumn | Term]] = [
+            (field_object.source_field or field, ValuesColumn(index))
+            for index, (field_object, field) in enumerate(
+                zip(field_objects, fields, strict=True), start=len(key_fields)
             )
         ]
-        matches = [
-            (f"{table_sql}.{quote(column)}", f"{values_alias_sql}.{value_column_name}")
-            for column, value_column_name in zip(
-                [*pk_columns, *([version_column] if version_column is not None else [])],
-                value_column_names,
-                strict=False,
-            )
-        ]
+        matches = tuple(
+            (column, ValuesColumn(index))
+            for index, column in enumerate([*pk_columns, *([version_column] if version_column is not None else [])])
+        )
         if version_column is not None:
-            assignments.append((quote(version_column), f"{table_sql}.{quote(version_column)} + 1"))
+            assignments.append((version_column, table[version_column] + LiteralValue("1")))
         # A value's placeholder depends only on the dialect and the cast type - one template per
         # column, formatted with the parameter index, instead of a Parameter and Cast term per value.
         placeholder_template = dialect.parameters.placeholder_template
@@ -397,26 +342,20 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         if (max_rows := features.max_bulk_update_rows) is not None:
             batch_size = max_rows if batch_size is None else min(batch_size, max_rows)
         return BulkUpdateStatementLayout(
-            table=table,
+            write=UpdateFromValues(
+                table=table,
+                assignments=tuple(assignments),
+                matches=matches,
+                columns=tuple(value_column_names),
+                alias=values_alias,
+                condition=filter_criterion,
+                returned=tuple(
+                    ReturnedValue(sql=f"{table_sql}.{quote(column)}", alias_sql=quote(column))
+                    for column in self._get_returning_columns(pk_columns)
+                ),
+            ),
             base_context=base_context,
-            filter_criterion=filter_criterion,
-            assignments=assignments,
-            matches=matches,
-            returned=[
-                ReturnedValue(sql=f"{table_sql}.{quote(column)}", alias_sql=quote(column))
-                for column in self._get_returning_columns(pk_columns)
-            ],
-            values_columns_sql=clauses.get_values_table_columns_sql(value_column_names),
-            values_alias_sql=values_alias_sql,
-            fields=fields,
-            field_cast_types=field_cast_types,
-            field_placeholder_templates=field_placeholder_templates,
-            pk_column_count=pk_column_count,
-            pk_field_objects=pk_field_objects,
-            optimistic_lock_field=optimistic_lock_field if version_column is not None else None,
-            optimistic_lock_field_object=optimistic_lock_field_object if version_column is not None else None,
-            key_cast_types=key_cast_types,
-            key_placeholder_templates=key_placeholder_templates,
+            row_cast_types=[*key_cast_types, *field_cast_types],
             row_fields=[*key_fields, *fields],
             row_placeholder_templates=tuple(key_placeholder_templates + field_placeholder_templates),
             batch_size=batch_size,
@@ -436,22 +375,8 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         Returns:
             The statement.
         """
-        filter_criterion = layout.filter_criterion
         return self._connection.dialect.clauses.get_update_from_values_sql(
-            with_sql=with_sql,
-            table=layout.table,
-            table_sql=layout.table.get_sql(layout.base_context),
-            assignments=layout.assignments,
-            values_columns_sql=layout.values_columns_sql,
-            values_sql=values_sql,
-            values_alias_sql=layout.values_alias_sql,
-            matches=layout.matches,
-            condition_sql=(
-                filter_criterion.get_sql(values_context.copy(subquery=True, with_namespace=True))
-                if filter_criterion
-                else None
-            ),
-            returned=layout.returned,
+            write=layout.write, with_sql=with_sql, values_sql=values_sql, sql_context=values_context
         )
 
     def _get_hidden_values(
@@ -485,7 +410,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
 
     def _make_whole_rows_query(
         self, layout: BulkUpdateStatementLayout, objects_item: list[TModel]
-    ) -> tuple[str, list[Any], list[TModel]]:
+    ) -> BoundUpdateBatch[TModel]:
         """The UPDATE of one batch whose rows the field codecs serialize whole - the key, the old
         version and the fields of every row in one serialization; the VALUES text depends only on
         the placeholders and the row count.
@@ -495,7 +420,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             objects_item: The batch's objects.
 
         Returns:
-            The statement, its parameters and the objects.
+            A bound statement and the objects to which its result applies.
         """
         parameterizer = Parameterizer()
         values_context = layout.base_context.copy(parameterizer=parameterizer)
@@ -503,95 +428,61 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         with_sql = QuerySqlRendering.with_sql(self.query._with, values_context) if self.query._with else ""
         row_fields = layout.row_fields
         values_before_rows = len(parameterizer.values)
-        parameters = BulkWriteBatches.write_statement_parameters(
-            self.model, self._connection, objects_item, row_fields, list(parameterizer.values)
+        rows = BulkWriteBatches.serialize_instances(
+            self.model, self._connection.dialect.types, objects_item, row_fields
         )
-        rows = (
-            BulkWriteBatches.serialize_instances(self.model, self._connection.dialect.types, objects_item, row_fields)
-            if parameters is None
-            else None
-        )
-        row_count = len(objects_item) if rows is None else len(rows)
+        row_count = len(rows)
         values_sql = BulkWriteBatches.get_values_rows_sql(
             self.model, layout.row_placeholder_templates, values_before_rows + 1, row_count
         )
-        if rows is None:
-            # The rows' places in the numbering - their values come from the parameters.
-            parameterizer.values.extend(repeat(None, row_count * len(row_fields)))
-        else:
-            parameterizer.values.extend(chain.from_iterable(rows))
+        parameterizer.values.extend(chain.from_iterable(rows))
         update_sql = self._get_update_sql(layout, values_context, with_sql, values_sql)
-        if parameters is not None:
-            values_after_rows = parameterizer.values[values_before_rows + row_count * len(row_fields) :]
-            return (
-                update_sql,
-                parameters.extended(values_after_rows) if values_after_rows else parameters,
-                objects_item,
-            )
         statement_values = self._get_hidden_values(layout, parameterizer.values, values_before_rows, row_count)
-        return update_sql, statement_values, objects_item
+        return BoundUpdateBatch(
+            WriteStatement(
+                update_sql,
+                statement_values,
+                bool(layout.write.returned),
+                recovery=self._connection.get_write_recovery(self.model._meta.basetable),
+            ),
+            objects_item,
+        )
 
-    def _make_query_by_value(
-        self, layout: BulkUpdateStatementLayout, objects_item: list[TModel], *, parameters_inline: bool
-    ) -> tuple[str, list[Any], list[TModel]]:
-        """The UPDATE of one batch built value by value - parameterized, each value is appended to the
-        parameters with its placeholder text; inlined, it is rendered as a literal.
+    def _make_inline_query(
+        self, layout: BulkUpdateStatementLayout, objects_item: list[TModel]
+    ) -> BoundUpdateBatch[TModel]:
+        """The UPDATE of one batch with every value rendered as a literal.
 
         Args:
             layout: What every statement of this call shares.
             objects_item: The batch's objects.
-            parameters_inline: Whether every value is written into the SQL text.
 
         Returns:
-            The statement, its parameters and the objects.
+            A bound statement and the objects to which its result applies.
         """
-        parameterizer = None if parameters_inline else Parameterizer()
-        values_context = (
-            layout.base_context if parameterizer is None else layout.base_context.copy(parameterizer=parameterizer)
-        )
-        # The WITH clause is rendered first - its parameters come first.
+        values_context = layout.base_context
         with_sql = QuerySqlRendering.with_sql(self.query._with, values_context) if self.query._with else ""
-        field_rows = BulkWriteBatches.serialize_instances(
-            self.model, self._connection.dialect.types, objects_item, layout.fields
+        rows = BulkWriteBatches.serialize_instances(
+            self.model, self._connection.dialect.types, objects_item, layout.row_fields
         )
         rows_sql = []
-        parameter_offset = 0 if parameterizer is None else len(parameterizer.values)
-        # Each row's key, old version and fields follow the values bound before the rows.
-        first_row_value = parameter_offset
-        types = self.dialect.types
-        for obj, field_values in zip(objects_item, field_rows, strict=True):
-            pk_values = obj.pk if layout.pk_column_count > 1 else (obj.pk,)
-            key_values = self._pk_and_version_db_values(
-                types,
-                obj,
-                pk_values,
-                layout.pk_field_objects,
-                layout.optimistic_lock_field_object,
-                layout.optimistic_lock_field,
-            )
+        for values in rows:
             row_parts = []
-            if parameterizer is not None:
-                for value, template in chain(
-                    zip(key_values, layout.key_placeholder_templates, strict=True),
-                    zip(field_values, layout.field_placeholder_templates, strict=True),
-                ):
-                    parameter_offset += 1
-                    parameterizer.values.append(value)
-                    row_parts.append(template.format(parameter_offset))
-            else:
-                for value, cast_type in chain(
-                    zip(key_values, layout.key_cast_types, strict=True),
-                    zip(field_values, layout.field_cast_types, strict=True),
-                ):
-                    wrapped = self.query._wrapper_class(value)
-                    term = Cast(wrapped, cast_type) if cast_type is not None else wrapped
-                    row_parts.append(term.get_sql(values_context))
+            for value, cast_type in zip(values, layout.row_cast_types, strict=True):
+                wrapped = self.query._wrapper_class(value)
+                term = Cast(wrapped, cast_type) if cast_type is not None else wrapped
+                row_parts.append(term.get_sql(values_context))
             rows_sql.append("(" + ", ".join(row_parts) + ")")
         update_sql = self._get_update_sql(layout, values_context, with_sql, ", ".join(rows_sql))
-        if parameterizer is None:
-            return update_sql, [], objects_item
-        statement_values = self._get_hidden_values(layout, parameterizer.values, first_row_value, len(objects_item))
-        return update_sql, statement_values, objects_item
+        return BoundUpdateBatch(
+            WriteStatement(
+                update_sql,
+                [],
+                bool(layout.write.returned),
+                recovery=self._connection.get_write_recovery(self.model._meta.basetable),
+            ),
+            objects_item,
+        )
 
     def _get_fixed_parameter_count(self, base_context: Any, extra_where: Term | None) -> int:
         """Bind parameters every statement of this call carries besides its VALUES rows.
@@ -611,44 +502,6 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             extra_where.get_sql(fixed_context.copy(subquery=True, with_namespace=True))
         return len(parameterizer.values)
 
-    def _read_returned_keys(
-        self, rows: Sequence[Any], pk_fields: list[Field[Any]], columns: list[str], *, rows_by_name: bool
-    ) -> list[Any]:
-        """The primary key of each ``RETURNING`` row, as the objects hold it.
-
-        Args:
-            rows: The rows, the key's columns first.
-            pk_fields: The primary key's fields.
-            columns: The primary key's columns.
-            rows_by_name: Whether the rows are mappings of column names - read without the accelerator.
-
-        Returns:
-            One key per row - a tuple for a composite key.
-        """
-        types = self.dialect.types
-        is_composite = len(pk_fields) > 1
-
-        def read_in_python() -> list[Any]:
-            # A driver's row may have no .get() - read as a dict.
-            keys = [
-                tuple(
-                    types.get_python_value(field, row.get(column))
-                    for field, column in zip(pk_fields, columns, strict=True)
-                )
-                for row in map(dict, rows)
-            ]
-            return keys if is_composite else [key for (key,) in keys]
-
-        if HydrateAccelerator.module is None or not rows or rows_by_name:
-            return read_in_python()
-        reader = HydrateAccelerator.get_values_reader(
-            self.model,
-            tuple(ValueField(self.model, field.model_field_name, field, False) for field in pk_fields),
-            self._connection,
-        )
-        read = reader.read_tuples if is_composite else reader.read_flat
-        return cast("list[Any]", HydrateAccelerator.run_or_fall_back(lambda: read(list(rows)), read_in_python))
-
     async def _count_stale_objects(self, not_updated_objects: list[TModel]) -> int:
         """Counts the objects whose row the UPDATE skipped for a stale ``Meta.optimistic_lock_field``,
         rather than for the queryset's own filter.
@@ -663,10 +516,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             return len(not_updated_objects)
         primary_key_attribute_names = self.model._meta.primary_key_attribute_names
         pk_field_objs = [self.model._meta.fields_map[name] for name in primary_key_attribute_names]
-        pk_columns = [
-            field_obj.source_field or name
-            for field_obj, name in zip(pk_field_objs, primary_key_attribute_names, strict=True)
-        ]
+        pk_columns = KeyColumns.get_source_columns(self.model._meta)
         table = self.model._meta.basetable
         pk_terms = [table[column] for column in pk_columns]
         pk_values = [obj.pk if len(primary_key_attribute_names) > 1 else (obj.pk,) for obj in not_updated_objects]
@@ -677,10 +527,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             ]
             for pk_value in pk_values
         ]
-        if len(pk_terms) == 1:
-            pk_condition = pk_terms[0].isin([db_pk_value[0] for db_pk_value in db_pk_values])
-        else:
-            pk_condition = Tuple(*pk_terms).isin(RowValueList(*[Tuple(*db_pk_value) for db_pk_value in db_pk_values]))
+        pk_condition = KeyColumns.row_is_in(pk_terms, db_pk_values)
         matches_filter_column = HareColumnNames.get_free_name(BULK_UPDATE_MATCHES_FILTER_ALIAS, (self.model,))
         matches_filter = (
             Case(alias=matches_filter_column).when(self._filter_criterion, LiteralValue("1")).else_(LiteralValue("0"))
@@ -693,13 +540,13 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
 
     async def _execute_many(
         self,
-        queries_with_parameters: list[tuple[str, Any, list[TModel]]],
+        queries_with_parameters: list[BoundUpdateBatch[TModel]],
         stamped_values: InstanceValues | None = None,
     ) -> int | None:
         """Runs every statement, then raises for the stale objects found across all of them.
 
         Args:
-            queries_with_parameters: One ``(sql, values, objects)`` entry per statement.
+            queries_with_parameters: The bound statements and their input objects.
             stamped_values: The auto_now values serialization stamped on the objects.
 
         Returns:
@@ -735,14 +582,14 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
 
     async def _execute_statements(
         self,
-        queries_with_parameters: list[tuple[str, Any, list[TModel]]],
+        queries_with_parameters: list[BoundUpdateBatch[TModel]],
         stamped_values: InstanceValues | None = None,
     ) -> tuple[int | None, int]:
         """Runs every statement of this call, syncing each updated object's in-memory state - every
         object counts as written where the database returns no row.
 
         Args:
-            queries_with_parameters: One ``(sql, values, objects)`` entry per statement.
+            queries_with_parameters: The bound statements and their input objects.
             stamped_values: The auto_now values serialization stamped on the objects.
 
         Returns:
@@ -752,60 +599,36 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         optimistic_lock_field = self.model._meta.optimistic_lock_field
         track_dirty = self.model._meta.track_dirty_fields
         primary_key_attribute_names = self.model._meta.primary_key_attribute_names
-        pk_field_objs = [self.model._meta.fields_map[name] for name in primary_key_attribute_names]
-        source_primary_key_attributes = [
-            obj.source_field or name for obj, name in zip(pk_field_objs, primary_key_attribute_names, strict=True)
-        ]
+        source_primary_key_attributes = KeyColumns.get_source_columns(self.model._meta)
         populate_generated_fields = bool(self._returning and self.model._meta.generated_db_fields)
         supports_returning = self.dialect.features.supports_returning
-        # Told to the connection - a statement of many rows is long to search for its RETURNING.
-        returns_rows = (populate_generated_fields or self._reads_written_keys()) and supports_returning
         stamped_values = stamped_values or InstanceValues()
-        # An object's primary key as _read_returned_keys() gives a row's: a tuple for a composite key.
-        get_key = attrgetter(*primary_key_attribute_names)
         count: int | None = 0
         # Counted over every chunk - raised once all were attempted.
         total_stale_object_count = 0
-        # The driver's own parameters (write_parameters()) hide no sensitive value - the run does.
-        hides_written_values = bool(self.model._meta.sensitive_fields)
-        for sql, values, objects_item in queries_with_parameters:
-            statement = self._connection.execute(sql, values, returns_rows=returns_rows)
-            if hides_written_values and not isinstance(values, list):
-                rows_affected, returned_rows = await BulkWriteBatches.run_hiding_sensitive_values(
-                    statement, self.model, objects_item, list(self.fields)
-                )
-            else:
-                rows_affected, returned_rows = await statement
+        for batch in queries_with_parameters:
+            objects_item = batch.objects
+            stamped_values.keep(self._connection, objects_item)
+            rows_affected, returned_rows = await BoundWrite.execute_command(self._connection, batch.command)
             self._completed_objects.extend(objects_item)
             stale_object_count = 0
+            written_objects = objects_item
             if optimistic_lock_field or track_dirty or stamped_values.old_values:
                 # RETURNING names the rows the UPDATE wrote. Only those objects get their version
                 # and dirty baseline updated; any other gets its stamped auto_now values put back.
                 # Without RETURNING every object counts as written.
-                updated_pk_values = (
-                    set(
-                        self._read_returned_keys(
-                            returned_rows, pk_field_objs, source_primary_key_attributes, rows_by_name=False
+                if supports_returning:
+                    written_ids = {
+                        id(obj)
+                        for obj, _row in ReturnedValues.match_rows(
+                            self.model, self.dialect.types, objects_item, returned_rows, primary_key_attribute_names
                         )
-                    )
-                    if supports_returning
-                    else None
-                )
-                # Only the written fields become clean - other unsaved changes of the object stay
-                # dirty.
+                    }
+                    is_written = [id(obj) in written_ids for obj in objects_item]
+                else:
+                    is_written = [True] * len(objects_item)
+                # Only the written fields become clean; other unsaved changes remain dirty.
                 fields_to_sync = self._rules.get_updated_names()
-                is_written = (
-                    [True] * len(objects_item)
-                    if updated_pk_values is None
-                    else list(map(updated_pk_values.__contains__, map(get_key, objects_item)))
-                )
-                if updated_pk_values is not None and not all(is_written):
-                    # A key a field writes otherwise (an email's domain in lower case) is in the rows as stored.
-                    is_written = [
-                        written
-                        or self._get_stored_key(obj, pk_field_objs, primary_key_attribute_names) in updated_pk_values
-                        for obj, written in zip(objects_item, is_written, strict=True)
-                    ]
                 written_objects = list(compress(objects_item, is_written))
                 unwritten_objects = list(compress(objects_item, map(not_, is_written)))
                 self._unwritten_objects.extend(unwritten_objects)
@@ -813,7 +636,7 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
                     for obj in written_objects:
                         # The version bump is registered to be put back if the transaction rolls back.
                         if optimistic_lock_field:
-                            stamped_values.bump_optimistic_lock(obj, optimistic_lock_field)
+                            stamped_values.bump_optimistic_lock(obj, optimistic_lock_field, self._connection)
                         if track_dirty:
                             DirtyFields.sync_dirty_snapshot_fields(obj, fields_to_sync, self._connection)
                 if stamped_values.old_values:
@@ -822,9 +645,9 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
                         stamped_values.restore(unwritten_objects)
                 if optimistic_lock_field and rows_affected is not None and rows_affected < len(objects_item):
                     stale_object_count = await self._count_stale_objects(unwritten_objects)
-            if populate_generated_fields and not supports_returning:
+            if self.model._meta.recomputed_db_fields and not (populate_generated_fields and supports_returning):
                 ReturnedValues.leave_unloaded(
-                    self.model, objects_item, self.model._meta.generated_db_fields, connection=self._connection
+                    self.model, written_objects, self.model._meta.recomputed_db_fields, connection=self._connection
                 )
             elif populate_generated_fields:
                 # UPDATE ... FROM (VALUES ...) returns its rows in no particular order - matched by
@@ -847,9 +670,9 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             count = None if count is None or rows_affected is None else count + rows_affected
         return count, total_stale_object_count
 
-    def __await__(self) -> Generator[Any, Any, int | None]:
+    async def _execute_bound(self) -> int | None:
         if self._is_none:
-            return self._execute_none().__await__()
+            return await self._execute_none()
         query = self._get_execution_query(True)
         if (
             query._returning
@@ -859,8 +682,8 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
             raise UnSupportedError(BULK_UPDATE_RETURNING_UNSUPPORTED_MESSAGE.format(dialect=query._connection.dialect))
         capture_needs = query.model._meta.change_capture_needs
         if capture_needs is not None and capture_needs.captures(RowOperation.UPDATE):
-            return WriteSteps.run_whole(query._connection, query._run_captured_bulk_update(capture_needs)).__await__()
-        return WriteSteps.get_whole_run(query._connection, query._report_bulk_update(query._run())).__await__()
+            return await WriteSteps.run_whole(query._connection, query._run_captured_bulk_update(capture_needs))
+        return await WriteSteps.get_whole_run(query._connection, query._report_bulk_update(query._run()))
 
     async def _run_captured_bulk_update(self, capture_needs: CaptureNeeds) -> int | None:
         """Runs the update of a model with ``Meta.change_capture`` and captures its rows - in one
@@ -897,7 +720,8 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
                     if snapshot_values is None:
                         unread_pks.append(obj.pk)
                     else:
-                        before_by_pk[obj.pk] = snapshot_values
+                        key = ChangeCapturing.get_stored_pk(obj, connection.dialect.types, obj.pk)
+                        before_by_pk[key] = snapshot_values
                 if unread_pks:
                     before_by_pk.update(await captured.read_before(unread_pks))
             stale_error: StaleObjectError | None = None
@@ -1027,40 +851,87 @@ class BulkUpdateQuery(UpdateQuery, Generic[TModel]):
         Returns:
             How many rows it updated.
         """
+        if not self._objects:
+            return 0
         # The stamps and blind indexes the update gives the objects - an object whose row isn't written
         # gets them put back.
         stamped_values = InstanceValues()
-        self._rules.stamp(self._objects, stamped_values)
         try:
+            self._rules.stamp(self._objects, stamped_values)
             queries = self._make_queries()
-            if len(queries) == 1 or self._batch_size is not None:
-                # One statement is atomic on its own; batches the caller asked for explicitly run as
-                # independent statements, as documented.
-                return await self._execute_many(queries, stamped_values)
-            # Batches split off only to stay under the bind-parameter ceiling run in one transaction,
-            # so a failure in any of them leaves no row updated - a stale version is not a failure
-            # and doesn't roll back the other rows, exactly as with a single statement.
-            original_connection = self._connection
-            try:
-                async with original_connection._in_transaction() as transaction_connection:
-                    self._connection = transaction_connection
-                    try:
-                        count, stale_object_count = await self._execute_statements(queries, stamped_values)
-                    finally:
-                        self._connection = original_connection
-            except BaseException:
-                stamped_values.restore()
-                raise
-            self._raise_for_stale_objects(stale_object_count)
-            return count
-        except (ValidationError, TypeError) as error:
-            stamped_values.restore()
-            # A value that failed to bind - an expression, or a field never given a value - is named.
-            self._rules.raise_if_unbound_values(self._objects, self._rules.field_names, error)
+        except BaseException as error:
+            WriteFinalizer.restore_failed_values(stamped_values, error)
+            if isinstance(error, (ValidationError, TypeError)):
+                self._rules.raise_if_unbound_values(self._objects, self._rules.field_names, error)
             raise
+        if len(queries) == 1 or self._batch_size is not None:
+            # Explicit batches are independent writes. A later failure cannot undo
+            # values already published for completed earlier statements.
+            try:
+                return await self._execute_many(queries, stamped_values)
+            except BaseException as error:
+                completed_ids = {id(obj) for obj in self._completed_objects}
+                WriteFinalizer.restore_failed_values(
+                    stamped_values, error, (obj for obj in self._objects if id(obj) not in completed_ids)
+                )
+                raise
+        # Batches split only to respect the parameter ceiling form one transaction.
+        original_connection = self._connection
+        try:
+            async with original_connection._in_transaction() as transaction_connection:
+                self._connection = transaction_connection
+                try:
+                    count, stale_object_count = await self._execute_statements(queries, stamped_values)
+                finally:
+                    self._connection = original_connection
+        except BaseException as error:
+            WriteFinalizer.restore_failed_values(stamped_values, error)
+            raise
+        # Stale rows do not undo the other rows successfully written by the call.
+        self._raise_for_stale_objects(stale_object_count)
+        return count
+
+    def _get_execution_query(self, for_write: bool = False) -> Self:
+        """Bind the connection; bulk values are prepared from objects, not update kwargs.
+
+        UpdateQuery's direct-assignment preparation would compute an unused timestamp
+        and conversions before the bulk preparation or even a deferred preview.
+        """
+        return BoundQuery._get_execution_query(self, for_write)
+
+    def _prepare_preview_objects(self) -> tuple[str, ...]:
+        """Inspect copies without computing defaults, timestamps or blind indexes."""
+        self._objects = [] if self._is_none else [copy(obj) for obj in self._objects]
+        self._scope_to_active_tenant()
+        deferred = set(self._rules.saved_attribute_names) if self._objects else set()
+        for obj in self._objects:
+            deferred.update(obj._await_when_save)
+        return tuple(sorted(deferred))
+
+    def preview(self) -> WritePreview:
+        """Show bound batches or explicitly defer values that require execution.
+
+        Explicit batches run independently; implicit splitting at the parameter
+        ceiling requires a transaction. Preview evaluates neither stamps nor defaults
+        and does not reserve the displayed values for a later execution.
+        """
+        with Registries.bind():
+            query = self._get_execution_query(True)
+            deferred = query._prepare_preview_objects()
+            if deferred:
+                return WritePreview(None, None, deferred)
+            batches = query._make_queries() if query._objects else []
+            return WritePreview(
+                tuple(batch.command for batch in batches), len(batches) > 1 and query._batch_size is None
+            )
 
     def _get_statements(self, parameters_inline: bool) -> list[tuple[str, list[Any]]]:
-        # Copies holding the stamps - showing the statements changes no object.
-        self._objects = self._rules.get_stamped_copies(list(self._objects))
-        self._scope_to_active_tenant()
-        return [(sql, values) for sql, values, _objects in self._make_queries(parameters_inline=parameters_inline)]
+        deferred = self._prepare_preview_objects()
+        if deferred:
+            raise QueryError(BULK_UPDATE_DEFERRED_PREVIEW_MESSAGE.format(fields=", ".join(deferred)))
+        if not self._objects:
+            return []
+        return [
+            (batch.command.sql, batch.command.parameters)
+            for batch in self._make_queries(parameters_inline=parameters_inline)
+        ]

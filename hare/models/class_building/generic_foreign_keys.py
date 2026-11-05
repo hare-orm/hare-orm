@@ -79,7 +79,7 @@ class GenericForeignKeys:
         )
         for name, value in declarations.items():
             if name not in attributes:
-                attributes[name] = deepcopy(value)
+                attributes[name] = value.snapshot()
 
     @staticmethod
     def bind(
@@ -101,7 +101,6 @@ class GenericForeignKeys:
             generic_field.model = model
         if is_abstract:
             return
-        GenericForeignKeyFieldInstance.declared_names.update(generic_fields)
         branched_fields = {name: field for name, field in generic_fields.items() if field.branch_names}
         GenericForeignKeys.expand_schema_entries(meta, branched_fields)
 

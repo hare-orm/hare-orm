@@ -23,6 +23,8 @@ class Routing:
 
     @staticmethod
     def forget_writes() -> None:
-        """Lets the current task read from the replicas again, its writes forgotten - for a task
-        that serves several requests one after another."""
-        WrittenConnections.current.set(None)
+        """Forget the active application's writes in this task, allowing replica reads again.
+
+        Other applications and already-started child tasks retain their snapshots.
+        """
+        WrittenConnections.forget()

@@ -30,11 +30,6 @@ class SqliteTextFunctions:
         return value if isinstance(value, str) else str(value)
 
     @staticmethod
-    def get_integer(value: Any) -> int:
-        """A length or a count as an integer."""
-        return int(value)
-
-    @staticmethod
     def raise_if_too_long(byte_count: int) -> None:
         """Refuses a text of more bytes than SQLite holds in one value - before it is built.
 
@@ -49,14 +44,14 @@ class SqliteTextFunctions:
         """``LEFT`` - a negative length keeps all but the last characters."""
         if value is None or length is None:
             return None
-        return cls.get_text(value)[: cls.get_integer(length)]
+        return cls.get_text(value)[: int(length)]
 
     @classmethod
     def right(cls, value: Any, length: Any) -> str | None:
         """``RIGHT`` - a negative length keeps all but the first characters."""
         if value is None or length is None:
             return None
-        text, count = cls.get_text(value), cls.get_integer(length)
+        text, count = cls.get_text(value), int(length)
         if count >= 0:
             return text[max(len(text) - count, 0) :] if count else ""
         return text[-count:]
@@ -66,7 +61,7 @@ class SqliteTextFunctions:
         """``LPAD``/``RPAD`` - a longer text is cut to ``length`` from its end."""
         if value is None or length is None or fill is None:
             return None
-        text, size, fill_text = cls.get_text(value), cls.get_integer(length), cls.get_text(fill)
+        text, size, fill_text = cls.get_text(value), int(length), cls.get_text(fill)
         if size <= 0:
             return ""
         cls.raise_if_too_long(size * UTF8_LONGEST_CHARACTER_BYTES)
@@ -80,7 +75,7 @@ class SqliteTextFunctions:
         """``REPEAT`` - a count below 1 gives an empty text."""
         if value is None or count is None:
             return None
-        text, times = cls.get_text(value), max(cls.get_integer(count), 0)
+        text, times = cls.get_text(value), max(int(count), 0)
         cls.raise_if_too_long(len(text.encode()) * times)
         return text * times
 

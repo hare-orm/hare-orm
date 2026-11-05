@@ -21,7 +21,7 @@ class Hare:
         _create_db: bool = False,
         use_timezone: bool = True,
         timezone: str = "UTC",
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         table_name_generator: Callable[[type[Model]], str] | None = None,
         slow_query_threshold_ms: float = 500.0,
         _enable_global_fallback: bool = False,
@@ -43,8 +43,8 @@ await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models
 URL and `{app_label: [module paths]}`. A source that can't be read — a missing file, a module or variable
 that doesn't exist — raises `ConfigurationError`.
 
-The process-wide settings (`slow_query_threshold_ms`, the class-level `table_name_generator`) change only
-once `init()` succeeds — a failed `init()` leaves them as they were.
+`table_name_generator` belongs to the context and its model registry. The context publishes it,
+and updates the process-wide `slow_query_threshold_ms`, only after `init()` succeeds.
 
 | Argument | Meaning |
 |---|---|
@@ -52,7 +52,7 @@ once `init()` succeeds — a failed `init()` leaves them as they were.
 | `connect` | `False` sets the models and connections up without connecting to any database — the connection names are still checked against the configuration. For tools that need the models and their SQL but no database: generating migrations, rendering DDL. |
 | `_create_db` | Create the database itself first (handy in tests). |
 | `use_timezone` / `timezone` | Timezone handling for `DatetimeField`. |
-| `routers` | A list of router classes or dotted paths — see [Routers](multiple-databases.md#routers). |
+| `routers` | Router classes or zero-argument factories, directly or by dotted path — see [Routers](multiple-databases.md#routers). |
 | `table_name_generator` | `Callable[[type[Model]], str]` to override the default table-naming scheme — see [`table_name_generator`](#table-name-generator) |
 | `slow_query_threshold_ms` | Queries at or above this duration get a DEBUG-level "Slow query" log line. Defaults to 500ms — see [Slow-query logging](../observability/observers.md#slow-query-logging). |
 | `_enable_global_fallback` | Lets code running outside the task that called `init()` (e.g. a background task started by an ASGI lifespan) still find the current context. The Litestar, FastAPI and Robyn integrations turn it on themselves. |
@@ -106,7 +106,7 @@ class HareConfig:
         self,
         connections: dict[str, ConnectionConfig | DBUrlConfig],
         apps: dict[str, AppConfig],
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         read_your_writes_seconds: float | None = None,
         use_timezone: bool | None = None,
         timezone: str | None = None,
@@ -156,16 +156,15 @@ class MigrationSafetyConfig:
 The configuration can be built in code from these classes of `hare.core.config` instead of a dict.
 `read_your_writes_seconds` — see [Reading your own writes](multiple-databases.md#read-your-writes); `cli`
 holds extra `hare` subcommands. A connection may also be given as `{"db_url": "..."}` (what
-`ConnectionConfig(db_url=...)` serializes to). `models` is a list or a tuple of module paths or
-modules.
+`ConnectionConfig(db_url=...)` serializes to). `models` accepts an iterable of module paths or module
+objects, for example a list or tuple; the iterable is consumed once.
 
 ### <a id="migrations-settings"></a>The `migrations` section
 
 `migrations` takes `lock_timeout`: seconds a migration's statement may wait for a lock another session
 holds before `migrate` fails — see [Lock timeout](../migrations/migrations.md#lock-timeout); and
 `safety`, the migration safety check's settings: `{"large_table_rows": 100000}` — the rows from which
-`checkmigrations` counts a table as large, a whole number from 0 to 10<sup>12</sup> — see [Checking
-migrations](../migrations/zero-downtime.md#checking-migrations).
+`checkmigrations` counts a table as large — see [Checking migrations](../migrations/zero-downtime.md#checking-migrations).
 
 ### <a id="swappable-settings"></a>The `swappable` section
 
@@ -188,9 +187,9 @@ The keys of a config mapping are the fields of these classes: the top level take
 `HareConfig`, a connection written as a mapping those of `ConnectionConfig`, an app those of `AppConfig`,
 the `cli` section those of `CliConfig`. Any other key raises `ConfigurationError` naming the closest
 known key — a misspelt `default_conection` would otherwise leave the app's models on the default
-connection without a word. The config itself, its `connections` and `apps` sections and every app
-are mappings, every connection a mapping or a URL: anything else (an empty YAML file, a list) raises
-`ConfigurationError` too.
+connection without a word. The config, its `connections` and `apps` sections and each app use mapping
+operations; each connection is a mapping or URL. Compatible mapping objects are accepted without a
+class check. Invalid Python structures may raise their natural `TypeError` or `AttributeError`.
 
 An unknown `engine` raises `ConfigurationError`, as does a connection parameter the database doesn't
 know: a misspelled credential (`comand_timeout`) is rejected by both PostgreSQL drivers — `rust_pg`
@@ -265,6 +264,12 @@ field, a wrong lookup) therefore raises `ConfigurationError` from `Hare.init()` 
 
 ## <a id="bind-models"></a>Binding the models without a database
 
+Model module entries can be imported module objects, including runtime modules absent from
+`sys.modules`; configuration retains these objects instead of replacing them with import paths.
+Failed binding restores model metadata and leaves deferred queries pending. Correct the declaration
+or query before retrying initialization. Reinitialization also retains the previous connections and
+router when preparation fails; it does not replay the old binding to reconstruct its state.
+
 ```python
 Hare.bind_models(config, table_name_generator=None)   # synchronous
 ```
@@ -290,8 +295,9 @@ context it does nothing. How long it waits for the queries still running depends
 A task still holding one of the dropped connection objects gets `DBConnectionError` on its next query instead
 of opening a new pool; a query through a model looks its connection up again — inside a transaction too — and
 gets `ConfigurationError`, as before `Hare.init()`. The context forgets its connections even when a close
-fails, and the first failure is raised afterwards; observers still flushing a metric or a trace get up to 10
-seconds to finish. `close_all()` of a `ConnectionHandler` is the same close for one context — see
+fails. A single failure is raised afterwards; multiple failures are retained in a `BaseExceptionGroup`.
+Observers still flushing a metric or a trace get up to 10 seconds to finish.
+`close_all()` of a `ConnectionHandler` is the same close for one context — see
 [Connections](connections.md#connections).
 
 ```python
@@ -328,8 +334,8 @@ and [`lookup_info`](../querying/describing-filters.md); a field's constructor ar
 
 ## <a id="run-async"></a>Scripts: `Hare.run_async()`
 
-For a one-off script (not a long-running app or a test), `Hare.run_async()` wraps `asyncio.run` and
-closes connections on exit for you:
+For a one-off script, `Hare.run_async()` runs the coroutine through an AnyIO blocking portal on a
+separate thread and event loop, and closes its context's connections on exit:
 
 ```python
 from hare import Hare, HareConfig

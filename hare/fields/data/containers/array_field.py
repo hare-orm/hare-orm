@@ -143,31 +143,4 @@ class ArrayField(ContainerField):
     def get_python_type(self) -> Any:
         # The element type, not the bare `list` of field_type - what a pydantic model generated from
         # the field accepts.
-        return list[self.get_child_python_type(self.base_field)]  # type: ignore[misc]
-
-    def get_read_codec_specification(
-        self, types: TypeRegistry, zone_name: str | None
-    ) -> tuple[str, dict[str, Any]] | None:
-        # Each element is read as the element field reads a value of an expression - the codec
-        # repeats decode_value() below, unless a subclass reads otherwise. An element held in a
-        # container of another shape is read by decode_value() itself.
-        field_class = type(self)
-        if (
-            not self.reads_values_by_types()
-            or field_class.decode_value is not ArrayField.decode_value
-            or field_class.normalize_value is not ArrayField.normalize_value
-            or (isinstance(self.base_field, ContainerField) and not isinstance(self.base_field, ArrayField))
-        ):
-            return None
-        # Imported here: the rows package imports the fields package.
-        from hare.query.rows.enums import ReadCodecType
-        from hare.query.rows.native.field_codecs import FieldCodecs
-
-        element_type, element_options = FieldCodecs.get_expression_read_specification(
-            self.base_field.model_field_name or self.model_field_name, self.base_field, types, zone_name
-        )
-        return ReadCodecType.ARRAY, {
-            "element_type": element_type,
-            "element_options": element_options,
-            "fallback": partial(self.get_python_value, types=types),
-        }
+        return list[self.base_field.get_annotation()]  # type: ignore[misc]

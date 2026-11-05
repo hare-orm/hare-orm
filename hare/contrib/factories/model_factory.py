@@ -262,23 +262,26 @@ class ModelFactory(Generic[TModel]):
     async def create_batch(cls, size: int, **given: Any) -> list[TModel]:
         """``size`` objects of the model, saved - in one ``bulk_create()`` when none of them makes a
         related object or acts once created, and the database gives back the keys it generates;
-        else one by one.
+        else one by one. The model's generated-key declaration decides whether keys must be returned,
+        even when ``given`` supplies their values.
 
         Args:
             size: How many.
             given: As ``create()`` takes.
 
         Returns:
-            The objects, each with its primary key.
+            The objects, with their primary keys when the model declares one.
         """
         declarations, _post_values, _parameter_names = cls.get_declarations(given)
+        if any(isinstance(declaration, SubFactory | PostDeclaration) for declaration in declarations.values()):
+            return [await cls.create(**given) for _ in range(size)]
         model = cls.get_model()
         reads_back_keys = model._meta.generated_pk_field_name is not None
-        features = model._meta.connection.features
-        if any(isinstance(declaration, SubFactory | PostDeclaration) for declaration in declarations.values()) or (
-            reads_back_keys and not (features.supports_returning and features.guarantees_returning_order)
-        ):
+        queryset = model.objects
+        connection = queryset.get_connection(for_write=True)
+        features = connection.features
+        if reads_back_keys and not (features.supports_returning and features.guarantees_returning_order):
             return [await cls.create(**given) for _ in range(size)]
         objs = cls.build_batch(size, **given)
-        await model.objects.bulk_create(objs, returning=True if reads_back_keys else None)
+        await queryset.using(connection).bulk_create(objs, returning=True if reads_back_keys else None)
         return objs

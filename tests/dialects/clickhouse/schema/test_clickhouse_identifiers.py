@@ -9,7 +9,7 @@ from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 from hare.query.expressions import F
 from hare.query.functions import Count
-from tests.dialects.clickhouse.models import BackslashName, KeywordName, Player, Team
+from tests.dialects.clickhouse.models import BackslashName, KeywordName, Player, Skill, Team
 
 
 @pytest.mark.asyncio
@@ -42,8 +42,9 @@ async def test_drift_on_a_connection_not_yet_open_reads_the_types_of_its_server(
     opens, before drift compares the first column."""
     state = State()
     state.models[("models", "Player")] = ModelState.make_from_model("models", Player)
-    # The model a relation of Player points at - drift builds the models in a shadow.
+    # Include both relation targets so drift can build the foreign key and the through table.
     state.models[("models", "Team")] = ModelState.make_from_model("models", Team)
+    state.models[("models", "Skill")] = ModelState.make_from_model("models", Skill)
     client = Connections.current().create_independent("models", {})
     try:
         drift = await detect_drift(client, state, ["models"])

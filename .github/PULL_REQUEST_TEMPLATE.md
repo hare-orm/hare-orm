@@ -12,10 +12,13 @@ they cover? If you only ran things manually, say what you ran.
 
 ## Checklist / Чек-лист
 
-- [ ] `make check` passes (style + mypy + bandit) / `make check` проходит
+- [ ] `make check` passes (Python/Rust checks, workflow lint and strict docs build) /
+      `make check` проходит (проверки Python/Rust, workflows и строгая сборка документации)
 - [ ] `make test_sqlite` passes; `make test_postgres_asyncpg` too if this
-      touches PostgreSQL / `make test_sqlite` проходит, а если затронут
-      PostgreSQL - и `make test_postgres_asyncpg`
+      touches PostgreSQL, along with `make test_postgres_rust` using a fresh native build;
+      `make test_clickhouse` if ClickHouse is affected / `make test_sqlite` проходит;
+      если затронут PostgreSQL — также `make test_postgres_asyncpg` и `make test_postgres_rust`
+      со свежей сборкой native; если затронут ClickHouse — `make test_clickhouse`
 - [ ] `make docs` passes if this touches `docs/` / `make docs` проходит, если затронута `docs/`
 - [ ] Docs updated under `docs/` (both the `.md` and its `.ru.md` sibling) if this changes public
       behavior / Документация в `docs/` обновлена (и `.md`, и `.ru.md`), если меняется публичное

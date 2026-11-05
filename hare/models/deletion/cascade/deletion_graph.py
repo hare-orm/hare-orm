@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.core.caching.model_cache import ModelCache
 from hare.fields.enums import OnDelete
@@ -9,6 +8,7 @@ from hare.fields.relations.fields.backward_foreign_key_relation import BackwardF
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.models.deletion.cascade.deletion_scope import DeletionScope
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -19,12 +19,6 @@ class DeletionGraph:
     """What the model graph says about deleting a model's rows - the relations pointing at it,
     which of them protect it or cascade onto other models, which the database doesn't enforce.
     Each is a fact of the model graph, computed once."""
-
-    #: The tables of the tenant schema a delete visits (``TenantSchemaVisits``) - a schema made
-    #: before a model's migration has no table of it, and no row of it to reach.
-    visited_schema_tables: ClassVar[ContextVar[frozenset[str] | None]] = ContextVar(
-        "hare_deletion_visited_schema_tables", default=None
-    )
 
     @staticmethod
     @ModelCache.fact()
@@ -201,19 +195,19 @@ class DeletionGraph:
         it. Whether a database enforces a relation is read from the connection the model writes to
         now, never kept with the model: the same model may be bound to another database later.
         """
-        declares_unconstrained_relations, constraint_owners = DeletionGraph.get_cascade_constraint_owners(model)
-        return declares_unconstrained_relations or not DeletionGraph.enforce_foreign_keys(constraint_owners)
+        declares_unconstrained_relations, constraint_models = DeletionGraph.get_cascade_constraint_models(model)
+        return declares_unconstrained_relations or not DeletionGraph.enforce_foreign_keys(constraint_models)
 
     @staticmethod
     @ModelCache.fact(depends_on_other_models=True)
-    def get_cascade_constraint_owners(model: type[Model]) -> tuple[bool, tuple[type[Model], ...]]:
+    def get_cascade_constraint_models(model: type[Model]) -> tuple[bool, tuple[type[Model], ...]]:
         """What the relations of ``model`` and of the models its ``on_delete=CASCADE`` relations reach
         declare about their constraints: whether one of them is declared ``db_constraint=False``,
         and the models holding the keys of the others - their databases enforce those only when they
         support foreign keys.
         """
         declares_unconstrained_relations = False
-        constraint_owners: list[type[Model]] = []
+        constraint_models: list[type[Model]] = []
         for cascade_model in DeletionGraph.get_cascade_models(model):
             relation_fields: list[ForeignKeyFieldInstance[Any] | ManyToManyFieldInstance[Any]] = [
                 foreign_key_field for __, foreign_key_field in DeletionGraph.get_backward_relations(cascade_model)
@@ -230,9 +224,9 @@ class DeletionGraph:
                     declares_unconstrained_relations = True
                     continue
                 referencing_model = relation_field.get_referencing_model()
-                if referencing_model not in constraint_owners:
-                    constraint_owners.append(referencing_model)
-        return declares_unconstrained_relations, tuple(constraint_owners)
+                if referencing_model not in constraint_models:
+                    constraint_models.append(referencing_model)
+        return declares_unconstrained_relations, tuple(constraint_models)
 
     @staticmethod
     def enforce_foreign_keys(models: tuple[type[Model], ...]) -> bool:
@@ -356,12 +350,14 @@ class DeletionGraph:
         if not model._meta.tenant_schema:
             return True
         # Local import: the tenant schemas import the models.
+        from hare.models.deletion.cascade.related_rows import RelatedRows
         from hare.models.tenancy.tenant_schemas import TenantSchemas
 
-        visited_tables = DeletionGraph.visited_schema_tables.get()
+        scope = DeletionScope.current.get()
+        client = RelatedRows.get_connection_for(model, connection) or model.get_routed_connection(for_write=True)
+        visited_tables = scope.tables if scope is not None and scope.includes(client) else None
         if visited_tables is not None:
             return model._meta.db_table in visited_tables
-        client = connection if connection is not None else model.get_routed_connection(for_write=True)
         return (
             client.tenant_schema_template is None
             or client.tenant_schema is not None
@@ -381,7 +377,13 @@ class DeletionGraph:
         Returns:
             False for a relation kept in each tenant's schema while no tenant schema is active.
         """
-        visited_tables = DeletionGraph.visited_schema_tables.get()
+        scope = DeletionScope.current.get()
+        through_model = many_to_many_field.related_model if many_to_many_field._generated else many_to_many_field.model
+        visited_tables = (
+            scope.tables
+            if scope is not None and scope.includes(through_model.get_routed_connection(for_write=True))
+            else None
+        )
         if visited_tables is not None and DeletionGraph.is_tenant_schema_relation(many_to_many_field):
             return many_to_many_field.through in visited_tables
         return DeletionGraph.reaches_table(many_to_many_field.model, connection) and DeletionGraph.reaches_table(

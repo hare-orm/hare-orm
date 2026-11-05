@@ -49,6 +49,6 @@ class SqliteLocalNow:
         get_local_now_text: Any = cls.get_local_now_text
         if native_functions is not None:
             get_local_now_text = native_functions.LocalNow(
-                Timezone.parse, Timezone.ZONES.get_owner_bucket(cls), cls.get_local_now_text
+                Timezone.parse, Timezone.ZONES.get_bucket(cls), cls.get_local_now_text
             ).get_local_now_text
         await connection.create_function(SQLITE_LOCAL_NOW_FUNCTION_NAME, 2, get_local_now_text)

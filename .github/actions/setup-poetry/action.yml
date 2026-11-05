@@ -22,7 +22,7 @@ runs:
         python-version: ${{ inputs.python-version }}
     - name: Install poetry
       shell: bash
-      run: pipx install poetry==2.1.4
+      run: pipx install "poetry==$(python -m tests.matrix.matrix_catalog tools.poetry)"
     - name: Install make
       if: runner.os == 'Windows'
       shell: bash

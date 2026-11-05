@@ -20,6 +20,7 @@ PING_SQL = "SELECT 1"
 
 #: The error of a statement or an ending on a transaction that ended already.
 TRANSACTION_FINALISED_MESSAGE = "Transaction already finalised"
+CAPTURED_ON_COMMIT_FAILURES_MESSAGE = "Captured on_commit() callback failures"
 #: The error of a statement or a commit of a transaction whose BEGIN outlived the wait after a cancellation.
 TRANSACTION_BEGIN_ABANDONED_MESSAGE = "The transaction's BEGIN exceeded the cancellation wait"
 
@@ -43,3 +44,5 @@ TRANSACTION_ON_ANOTHER_EVENT_LOOP_MESSAGE = (
     "the loop they were opened on - run its statements on that loop. An application under test running in an "
     "event loop of its own takes the pytest plugin's hare_app_transactional_db"
 )
+READ_RETRY_MESSAGE = "Read query attempt %d/%d failed (%s), retrying in %.2fs"
+SCHEMA_CACHE_INVALIDATION_FAILED = "Schema change and cache invalidation both failed"

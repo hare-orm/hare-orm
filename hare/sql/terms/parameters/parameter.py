@@ -13,6 +13,8 @@ class Parameter(Term):
     will be determined based on the dialect if not provided.
     """
 
+    structure_attributes = ("_index", "_placeholder")
+
     is_aggregate = None
 
     def __init__(self, placeholder: str | None = None, index: int | None = None) -> None:

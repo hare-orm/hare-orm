@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from hare.lazy_loading.lazy_pattern import LazyPattern
 
+#: FTS5 must be available to read a managed full-text index.
+FULL_TEXT_INDEX_REQUIRED_FEATURE = "supports_full_text_index"
+
 #: The SQLite UDF turning search text into an FTS5 query: ``(text, search type, column filter)``.
 SQLITE_FULL_TEXT_QUERY_FUNCTION_NAME = "hare_full_text_query"
 

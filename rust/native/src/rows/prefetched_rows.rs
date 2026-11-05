@@ -1,24 +1,9 @@
-//! Laying prefetched rows out on the instances they belong to - `Prefetcher`'s per-row loops in
-//! one call each.
+//! Group prefetched rows by their relation keys without publishing them on parent instances.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList, PyString};
+use pyo3::types::{PyDict, PyList, PyString};
 
-use crate::python::ffi::{generic_delete_attribute, generic_set_attribute};
-
-/// The entries grouped by the value of `attribute` on each, in their order: `{value: [entry, ...]}`.
-#[pyfunction]
-pub fn group_by_attribute<'py>(
-    entries: &Bound<'py, PyAny>,
-    attribute: &Bound<'py, PyString>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let groups = PyDict::new(entries.py());
-    for entry in entries.try_iter()? {
-        let entry = entry?;
-        append_to_group(&groups, entry.getattr(attribute)?, entry)?;
-    }
-    Ok(groups)
-}
+use crate::python::ffi::generic_delete_attribute;
 
 /// Appends `value` to the list `groups` holds under `key`, starting the list when there is none.
 fn append_to_group<'py>(groups: &Bound<'py, PyDict>, key: Bound<'py, PyAny>, value: Bound<'py, PyAny>) -> PyResult<()> {
@@ -95,41 +80,4 @@ pub fn group_rows_by_owner<'py>(
         generic_delete_attribute(&shared_entry, owner_attribute)?;
     }
     Ok(groups)
-}
-
-/// Gives each instance's to-many relation the rows of `rows_by_key` under the instance's
-/// `key_attribute` value - none when there are none: the relation kept in `relation_attribute`,
-/// made by `make_relation(instance)` and kept there when the instance has none yet, is marked
-/// fetched with those rows.
-#[pyfunction]
-pub fn set_prefetched_rows(
-    instances: &Bound<'_, PyAny>,
-    key_attribute: &Bound<'_, PyString>,
-    rows_by_key: &Bound<'_, PyDict>,
-    relation_attribute: &Bound<'_, PyString>,
-    make_relation: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    let py = instances.py();
-    let fetched_name = pyo3::intern!(py, "_fetched");
-    let rows_name = pyo3::intern!(py, "related_objects");
-    let fetched = PyBool::new(py, true).to_owned().into_any();
-    for instance in instances.try_iter()? {
-        let instance = instance?;
-        let key = instance.getattr(key_attribute)?;
-        let rows = match rows_by_key.get_item(&key)? {
-            Some(rows) => rows,
-            None => PyList::empty(py).into_any(),
-        };
-        let relation = match instance.getattr_opt(relation_attribute)? {
-            Some(relation) if !relation.is_none() => relation,
-            _ => {
-                let relation = make_relation.call1((&instance,))?;
-                generic_set_attribute(&instance, relation_attribute, &relation)?;
-                relation
-            }
-        };
-        generic_set_attribute(&relation, fetched_name, &fetched)?;
-        generic_set_attribute(&relation, rows_name, &rows)?;
-    }
-    Ok(())
 }

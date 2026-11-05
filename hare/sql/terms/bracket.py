@@ -8,5 +8,7 @@ from hare.sql.terms.tuple import Tuple
 class Bracket(Tuple):
     """A term in parentheses."""
 
+    structure_attributes = ()
+
     def __init__(self, term: Any) -> None:
         super().__init__(term)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 
 if TYPE_CHECKING:
@@ -17,14 +18,14 @@ class CallableDelivery(OutboxDelivery):
         function: Sends an event; raising fails it.
     """
 
-    def __init__(self, function: Callable[[Any], Awaitable[None]]) -> None:
+    def __init__(self, function: Callable[[Any], Awaitable[DeliveryResult | None]]) -> None:
         self.function = function
 
-    async def deliver(self, event: OutboxEvent) -> None:
-        await self.function(event)
+    async def deliver(self, event: OutboxEvent) -> DeliveryResult | None:
+        return await self.function(event)
 
     @staticmethod
-    def of(delivery: OutboxDelivery | Callable[[Any], Awaitable[None]]) -> OutboxDelivery:
+    def of(delivery: OutboxDelivery | Callable[[Any], Awaitable[DeliveryResult | None]]) -> OutboxDelivery:
         """A delivery, or a function made one.
 
         Args:

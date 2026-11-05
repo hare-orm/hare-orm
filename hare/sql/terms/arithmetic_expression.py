@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.enums import Arithmetic
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 
 
 class ArithmeticExpression(Term):
@@ -20,6 +14,8 @@ class ArithmeticExpression(Term):
 
     Order of operations is preserved.
     """
+
+    structure_attributes = ("left", "operator", "right")
 
     add_order = [Arithmetic.ADD, Arithmetic.SUB]
 
@@ -36,32 +32,14 @@ class ArithmeticExpression(Term):
         self.left = left
         self.right = right
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.left.nodes_()
-        yield from self.right.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.left
+        yield self.right
 
     @property
     def is_aggregate(self) -> bool | None:  # type:ignore[override]
         # True if both left and right terms are True or None. None if both terms are None. Otherwise, False
         return Term.get_combined_is_aggregate([self.left.is_aggregate, self.right.is_aggregate])
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Useful when reusing fields across queries.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the term with the tables replaced.
-        """
-        self.left = self.left.replace_table(current_table, new_table)
-        self.right = self.right.replace_table(current_table, new_table)
-        return self
 
     def left_needs_parens(self, current_operator: Arithmetic, left_operator: Arithmetic | None) -> bool:
         """Returns true if the expression on the left of the current operator needs to be enclosed in parentheses.

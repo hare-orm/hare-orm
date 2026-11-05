@@ -52,6 +52,7 @@ test suite. For anything you'll deploy, use real migrations instead — see
 ## <a id="3-create-and-query-rows"></a>3. Create and query rows
 
 ```python
+# library/queries.py
 from library.models import Author, Book
 
 async def run() -> None:
@@ -78,6 +79,31 @@ rest — is in [QuerySet methods](../querying/queryset-methods.md).
 The rest of the documentation shows such statements without the `async def` around them: every snippet
 runs inside `async` code, with hare initialized as in step 2, and models import `from hare import fields`
 and `from hare.models import Model`.
+
+## <a id="4-run-the-program"></a>4. Run the program
+
+Save `run()` in `library/queries.py`, then run `python main.py` from the directory containing `library`.
+The `finally` block closes connections if initialization or a query fails.
+
+```python
+# main.py
+import asyncio
+
+from hare import Hare
+from library.db import init_db
+from library.queries import run
+
+
+async def main() -> None:
+    try:
+        await init_db()
+        await run()
+    finally:
+        await Hare.close_connections()
+
+
+asyncio.run(main())
+```
 
 ## <a id="next"></a>Next
 

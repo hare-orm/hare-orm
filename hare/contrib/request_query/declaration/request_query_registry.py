@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from threading import RLock
+from typing import TYPE_CHECKING, Any, ClassVar
 from weakref import ReferenceType, WeakSet
 
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
@@ -18,6 +19,9 @@ class RequestQueryRegistry:
     """The models a request query class reads, tracked so its declaration and parameters are forgotten
     when one of them changes or leaves the registry - and the refusal of a model already
     unregistered."""
+
+    lock: ClassVar[RLock] = RLock()
+    revision: ClassVar[int] = 0
 
     @staticmethod
     def check_model_registered(query_class: type[RequestQuery[Any]], model: type[Model]) -> None:
@@ -70,8 +74,10 @@ class RequestQueryRegistry:
 
     @staticmethod
     def forget_parameters(query_class: type[RequestQuery[Any]]) -> None:
-        """Forgets the class's declaration and the parameters ``prepare_parameters()`` added or
-        described, so both are built again - the types of the parameters too - on the next use.
+        """Forget future construction's generation without mutating returned schemas.
+
+        Parameters, their types and the checked declaration are built together on
+        the next use. Existing instances keep their completed generation.
 
         Args:
             query_class: The request query class.
@@ -79,12 +85,6 @@ class RequestQueryRegistry:
         # Local import: the request query module imports this module.
         from hare.contrib.request_query.request_query import RequestQuery
 
-        RequestQuery.declarations.forget_owner(query_class)
-        if query_class not in RequestQuery.prepared_classes:
-            return
-        RequestQuery.prepared_classes.discard(query_class)
-        unprepared_fields = RequestQuery.unprepared_fields.pop(query_class, None)
-        if unprepared_fields is not None:
-            query_class.__pydantic_fields__.clear()
-            query_class.__pydantic_fields__.update(unprepared_fields)
-            query_class.model_rebuild(force=True)
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            RequestQuery.declarations.forget_holder(query_class)

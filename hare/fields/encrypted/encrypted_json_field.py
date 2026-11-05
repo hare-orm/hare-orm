@@ -12,7 +12,6 @@ from hare.fields.encrypted.constants import (
 )
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.encrypted.field_encryption import FieldEncryption
-from hare.lazy_loading.pydantic_classes import PydanticClasses
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -70,17 +69,6 @@ class EncryptedJSONField(EncryptedFieldBase, JSONField[Any]):
             ValidationError: ``value`` doesn't match ``field_type``, can't be stored or isn't JSON
                 serializable.
         """
-        type_adapter = self.get_value_type_adapter()
-        if type_adapter is not None:
-            typed_value = self.validate_declared_type(value)
-            self.check_storable_value(type_adapter.dump_python(typed_value))
-            plain_value = type_adapter.dump_python(typed_value, mode="json")
-            self.check_storable_value(plain_value)
-            return plain_value
-        if PydanticClasses.is_model_instance(value):
-            plain_value = value.model_dump(mode="json")
-            self.check_storable_value(plain_value)
-            return plain_value
         return self.decoder(self.encode_value(value))
 
     def encrypt_document(self, value: Any) -> Any:
@@ -139,12 +127,14 @@ class EncryptedJSONField(EncryptedFieldBase, JSONField[Any]):
                 f"{field_label}: stored value can't be decrypted - a token holds no JSON value."
             ) from error
 
+    @FieldEncryption.bind()
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> str | None:
         self.validate(value)
         if value is None:
             return None
         return JsonCodec.dumps(self.encrypt_document(self.get_plain_value(value)))
 
+    @FieldEncryption.bind()
     def from_db_value(self, value: Any) -> Any:
         if value is None:
             return None
@@ -188,6 +178,7 @@ class EncryptedJSONField(EncryptedFieldBase, JSONField[Any]):
             return None
         return self.encrypt_stored_keys if self.encrypt_keys else self.decrypt_stored_keys
 
+    @FieldEncryption.bind()
     def encrypt_stored_keys(self, stored_value: Any) -> str:
         """A document stored with plaintext keys, its keys encrypted.
 
@@ -201,6 +192,7 @@ class EncryptedJSONField(EncryptedFieldBase, JSONField[Any]):
             self.get_document_with_keys(self.decode_stored_document(stored_value), FieldEncryption.encrypt)
         )
 
+    @FieldEncryption.bind()
     def decrypt_stored_keys(self, stored_value: Any) -> str:
         """A document stored with encrypted keys, its keys decrypted.
 

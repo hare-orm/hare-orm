@@ -7,7 +7,7 @@ from datetime import timedelta
 
 import pytest
 
-from hare.contrib.outbox import OutboxRelay
+from hare.contrib.outbox import DeliveryResult, OutboxRelay
 from hare.time import Timezone
 from tests.contrib.outbox.models import DemoOutboxEvent, SoftDeleteOutboxEvent, TenantScopedOutboxEvent
 from tests.utils.waiting import wait_until
@@ -246,7 +246,7 @@ async def test_an_outcome_recorded_after_another_relay_published_the_event_leave
     published_at = Timezone.now() - timedelta(seconds=5)
     # The lease ran out; another relay leased the event and delivered it.
     await DemoOutboxEvent.objects.all().update(leased_by=None, lease_until=None, published_at=published_at)
-    await late.record_outcomes(events, [late_outcome])
+    await late.record_outcomes(events, [DeliveryResult(events.events[0].id, late_outcome)])
     event = await DemoOutboxEvent.objects.get()
     assert event.published_at == published_at
     assert (event.attempts, event.last_error, event.dead_lettered_at) == (0, None, None)
@@ -257,8 +257,10 @@ async def test_a_failure_recorded_after_another_relay_leased_the_event_leaves_it
     await DemoOutboxEvent.enqueue("widget.updated", {})
     late = OutboxRelay(DemoOutboxEvent, lambda event: None, name="late")
     events = await late.claim()
-    await DemoOutboxEvent.objects.all().update(leased_by="taking_over")
-    await late.record_outcomes(events, [RuntimeError("failed late")])
+    await DemoOutboxEvent.objects.all().update(lease_until=None)
+    taking_over = OutboxRelay(DemoOutboxEvent, lambda event: None, name="taking_over")
+    await taking_over.claim()
+    await late.record_outcomes(events, [DeliveryResult(events.events[0].id, RuntimeError("failed late"))])
     event = await DemoOutboxEvent.objects.get()
     assert (event.leased_by, event.attempts, event.last_error) == ("taking_over", 0, None)
 

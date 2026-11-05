@@ -4,13 +4,18 @@ import secrets
 from types import TracebackType
 from typing import TYPE_CHECKING, Self, cast
 
+from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.base.schema.constants import SCHEMA_CLEANUP_FAILED
 from hare.dialects.base.schema.shadow.shadow_database import ShadowDatabase
+from hare.dialects.postgresql.client.constants import POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL
+from hare.dialects.postgresql.connection.search_path import SearchPath
 from hare.dialects.postgresql.constants import (
     POSTGRESQL_SEARCH_PATH_SQL,
     POSTGRESQL_SHADOW_SCHEMA_CREATE_TEMPLATE,
     POSTGRESQL_SHADOW_SCHEMA_PREFIX,
-    POSTGRESQL_SHADOW_SEARCH_PATH_TEMPLATE,
 )
+from hare.dialects.postgresql.introspection.constants import POSTGRESQL_CATALOG_REFERENCE_CASTS
+from hare.inspectdb.introspection.catalog_identities import CatalogIdentities
 from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
@@ -42,9 +47,8 @@ class PostgresqlShadowDatabase(ShadowDatabase):
                     self.real_schema_by_shadow_schema[cast("str", self.get_shadow_schema_name(schema))] = schema
             quoted_prefix = self.connection.dialect.literals.quote_identifier(self.prefix)
             await self.client.execute_script(POSTGRESQL_SHADOW_SCHEMA_CREATE_TEMPLATE.format(schema=quoted_prefix))
-            await self.client.execute_script(
-                POSTGRESQL_SHADOW_SEARCH_PATH_TEMPLATE.format(schema=quoted_prefix, search_path=rows[0]["search_path"])
-            )
+            search_path = SearchPath.parse(rows[0]["search_path"]).prepended(self.prefix)
+            await self.client.execute_dicts(POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL, [search_path.to_setting()])
         except BaseException as error:
             # No __aexit__() follows a failed __aenter__() - the transaction and the connection end here.
             await self.__aexit__(type(error), error, error.__traceback__)
@@ -57,22 +61,40 @@ class PostgresqlShadowDatabase(ShadowDatabase):
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        try:
-            if self.client is not None and self.transaction is not None:
-                # Rolled back - the transaction then ends with nothing to commit.
+        errors: list[BaseException] = []
+        if self.client is not None and self.transaction is not None:
+            cause = exception
+            try:
                 await cast("TransactionClient", self.client).rollback()
-                await self.transaction.__aexit__(None, None, None)
-        finally:
-            if self.independent_client is not None:
-                await self.independent_client.close()
+            except BaseException as error:
+                errors.append(error)
+                cause = error
+            try:
+                # The context token belongs to this task. A failed rollback must still
+                # exit the context, and must never turn that exit into a commit attempt.
+                await self.transaction.__aexit__(
+                    type(cause) if cause is not None else None,
+                    cause,
+                    cause.__traceback__ if cause is not None else None,
+                )
+            except BaseException as error:
+                errors.append(error)
+        if self.independent_client is not None:
+            try:
+                await ResourceCompletion.wait(self.independent_client.close())
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            if exception is not None:
+                errors.insert(0, exception)
+            if len(errors) == 1:
+                raise errors[0]
+            raise BaseExceptionGroup(SCHEMA_CLEANUP_FAILED, errors)
 
     def get_shadow_schema_name(self, schema: str | None) -> str | None:
         if schema is None or schema == self.default_schema:
             return self.prefix
         return Identifiers.get_within_limit(f"{self.prefix}_{schema}")
 
-    def replace_shadow_names(self, text: str) -> str:
-        # The longest first - the shadow of the default schema begins each of the others.
-        for shadow_schema, schema in sorted(self.real_schema_by_shadow_schema.items(), key=lambda item: -len(item[0])):
-            text = text.replace(shadow_schema, schema)
-        return text
+    def get_catalog_identities(self) -> CatalogIdentities:
+        return CatalogIdentities(self.real_schema_by_shadow_schema, POSTGRESQL_CATALOG_REFERENCE_CASTS)

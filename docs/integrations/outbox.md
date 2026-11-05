@@ -8,7 +8,9 @@ delivers the events to where they go: Kafka, RabbitMQ, Redis streams, an HTTP en
 function of your own.
 
 Delivery is **at least once**: an event can arrive twice (a relay stopped between delivering and
-recording it), so a receiver deduplicates on the event's `id`, which every delivery sends.
+recording it). Kafka, RabbitMQ, Redis streams and HTTP deliveries carry the event's `id` for receiver
+deduplication. Custom deliveries choose their wire format. Taskiq delivery sends task arguments and
+labels; include a stable business key there and make the task idempotent.
 
 There are two ways to write events:
 
@@ -42,7 +44,7 @@ class MyOutboxEvent(YourBaseModel, OutboxEvent):
 | `created_at` | When the event was written |
 | `attempts`, `last_error` | Failed deliveries and the error of the last one |
 | `next_attempt_at` | When a failed event is tried again; `NULL` for at once |
-| `lease_until`, `leased_by` | The relay delivering the event and until when |
+| `lease_until`, `leased_by`, `lease_token` | The relay delivering the event and until when |
 | `published_at` | When it was delivered |
 | `dead_lettered_at` | When it ran out of attempts — it is no longer delivered |
 
@@ -51,12 +53,11 @@ events still to deliver (by `sequence`, and by `ordering_key, sequence`), of the
 dead-lettered events, and `(topic, sequence)`.
 
 > [!WARNING]
-> **Keep `OutboxEvent.Meta` minimal**
+> **Configure your concrete outbox model**
 >
-> `ModelMeta` merges every abstract ancestor's `Meta` attributes into a concrete subclass through a
-> reversed-MRO walk, and on a key **collision** between two ancestors' `Meta` (`YourBaseModel.Meta` and
-> `OutboxEvent.Meta` both setting an attribute) whichever comes later wins — no error. Put project
-> options on `YourBaseModel.Meta`, never a `table` name or `indexes` on `OutboxEvent.Meta`.
+> Put project-specific options in the concrete model's `Meta`, leaving `OutboxEvent.Meta` unchanged.
+> Declaring `Meta.indexes` on that model replaces the inherited index list: preserve the relay indexes
+> when adding your own. See [Model options](../models/meta-options.md) for `Meta` settings.
 
 The events' `sequence` is taken when they are written. The events of one row are written while the write
 holds that row's lock, so their order is the order of their commits whatever the clocks of the hosts —
@@ -112,9 +113,9 @@ async with Transactions.atomic():
     )
 ```
 
-Inside `Transactions.atomic()` every ORM call resolves to the transaction's connection, so the event and
-the write it reports share one `COMMIT`; a rollback drops both. Outside a transaction the event commits
-at once, like any `create()`. Once the transaction commits (at once outside one) the wakeup signals the
+When the write and `enqueue()` use the same connection with an active `Transactions.atomic()` transaction,
+they share one `COMMIT`; a rollback drops both. Outside a transaction the event commits at once, like any
+`create()`. Once the transaction commits (at once outside one) the wakeup signals the
 relays — the model's `Meta.outbox_wakeup`, or `wakeup=`.
 
 > [!WARNING]
@@ -127,13 +128,13 @@ relays — the model's `Meta.outbox_wakeup`, or `wakeup=`.
 The arguments are checked before anything is written (`ValidationError`): `headers` a mapping of
 non-empty text names, `extra_field_values` setting none of `enqueue()`'s own fields nor those the ORM and
 the relay keep (`sequence`, `created_at`, `next_attempt_at`, `published_at`, `dead_lettered_at`,
-`attempts`, `last_error`, `lease_until`, `leased_by`).
+`attempts`, `last_error`, `lease_until`, `leased_by`, `lease_token`).
 
 ### <a id="idempotency-key"></a>`idempotency_key=`
 
-At most one event ever exists per key. When one already exists, `enqueue()` returns **it** unchanged (its
-own topic and payload) — no error, no duplicate, no wakeup signal. Retrying a handler or re-running a job
-is safe.
+At most one stored event exists per key. While it is retained, `enqueue()` returns **it** unchanged
+(its own topic and payload) — no error, no duplicate, no wakeup signal. After cleanup physically removes
+the event, the same key can create a new one. Choose retention to cover the expected retry window.
 
 - It is `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING` and a `SELECT` of the event under the key,
   on one connection. A conflict never raises, so it never aborts an enclosing PostgreSQL transaction. A
@@ -232,6 +233,9 @@ them, whatever `batch_size`; on a database without transactions the batches writ
 except for a stale object: the other rows and their events are written, and `StaleObjectError` is raised
 after them.
 
+Repeated cancellation does not detach a nontransactional write that is being completed this way.
+If that write also fails, a `BaseExceptionGroup` retains both cancellation and the write error.
+
 `Meta.change_capture` takes any `ChangeSink` (`hare.instrumentation.capture`); `ChangeCapture` is the one
 writing an outbox. A sink of your own implements `get_written_models()` — the models it writes, each on
 the captured model's connection —, `get_field_names(model)` — the fields a change holds — and
@@ -240,10 +244,13 @@ the captured model's connection —, `get_field_names(model)` — the fields a c
 ### <a id="change-capture-declaration"></a>Declaration
 
 ```python
+from hare.fields.relations.swappable_model_reference import SwappableModelReference
+
+
 class ChangeCapture:
     def __init__(
         self,
-        outbox: type[OutboxEvent],
+        outbox: type[OutboxEvent] | str | SwappableModelReference,
         *,
         operations: Iterable[RowOperation | str] = (RowOperation.INSERT, RowOperation.UPDATE, RowOperation.DELETE),
         payload: ChangePayload | str = ChangePayload.AFTER,
@@ -263,7 +270,7 @@ class ChangeCapture:
 
 | Argument | Meaning |
 |---|---|
-| `outbox` | The concrete `OutboxEvent` model — its class or its `"app.Model"` label, found as the models are bound; on the captured model's connection, checked by `Hare.init()` |
+| `outbox` | The concrete `OutboxEvent` model — its class, its `"app.Model"` label or a `swappable(...)` reference, found as the models are bound; on the captured model's connection, checked by `Hare.init()` |
 | `operations` | The `RowOperation`s captured |
 | `payload` | What an event holds of its row — below |
 | `fields` | The fields an event holds; a relation is held by its key (`reader_id`). By default every field written in the table but the `sensitive` and encrypted ones — those only when named here |
@@ -431,7 +438,20 @@ a tenant field too, it is the row's tenant unless `extra_field_values` sets it. 
 (one row key of two tenants is one ordering key): declare its outbox with `Meta.tenant_schema = True`
 too, so each tenant's events stay in the tenant's schema.
 
+Batches captured by one write share `occurred_at`.
+
 ## <a id="outboxrelay"></a>`OutboxRelay`
+
+`using=` selects a database client or connection alias once for the relay's lifetime; when omitted,
+the model's write router selects it. The relay binds an `OutboxStore(model, client)` to the root client,
+outside the caller's transactions. Claims, lease renewal, outcomes, backlog and cleanup all use it.
+
+`claim()` returns `ClaimedBatch(token, events)`. Every claim has a fresh `lease_token`, even for the same
+relay name. `record_outcomes(batch, results)` matches results by event ID. A late success may acknowledge
+an unpublished event; a late failure or attempt metadata cannot replace the current claim's state.
+Already published events retain their publication time and metadata. A malformed batch response fails
+that transport's batch; successful results from other `TopicRouter` routes remain successful.
+
 
 ```python
 relay = OutboxRelay(
@@ -455,12 +475,16 @@ async with relay:
 ```
 
 The model may be given by its `"app.Model"` label (`OutboxRelay("shop.MyOutboxEvent", ...)`) — looked up
-in the current context when the relay first needs it. `batch_size`, the `LIMIT` of a claim, is an int in
-`1..10000` (`ConfigurationError` otherwise).
+in the current context when the relay first needs it. `batch_size`, the `LIMIT` of a claim, is a
+positive int (`ConfigurationError` otherwise); hare imposes no additional upper bound on a batch.
 Keep `delivery_timeout_seconds` below `lease_seconds` — a lease running out mid-delivery lets another
 relay deliver the event too.
 
 `start()`/`stop()` are idempotent; `stop()` waits for the relay and closes the delivery's connections.
+Concurrent calls share one shutdown. Cancelling a waiter, even repeatedly, waits for the current
+batch and resource releases before propagating cancellation. A failed wakeup unsubscribe does not
+skip closing the delivery. Database persistence may outlast the delivery timeout, and a failed
+acknowledgement still allows redelivery.
 `Hare.close_connections()` doesn't stop a relay — stop it yourself, or use `async with` for the
 application's lifetime.
 
@@ -468,7 +492,8 @@ application's lifetime.
 
 1. **Claim.** One short statement leases the next batch to the relay — the events still to deliver, due
    (`next_attempt_at` passed or `NULL`), not leased by a live relay, in `sequence` order:
-   `UPDATE ... SET lease_until, leased_by WHERE sequence IN (...) RETURNING`. Where the database locks
+   `UPDATE ... SET lease_until, leased_by, lease_token WHERE sequence IN (...) RETURNING`. Where the database
+   locks
    rows (PostgreSQL) the candidates are read `FOR UPDATE SKIP LOCKED`, so several relays split the queue;
    on SQLite one writer at a time does it.
 2. **Order.** An event of an ordering key isn't claimed while an earlier event of the key is undelivered
@@ -479,8 +504,9 @@ application's lifetime.
    another up to `concurrency` events at a time, each within `delivery_timeout_seconds`. While it is
    delivered, the relay renews the batch's lease three times per `lease_seconds`, so a batch taking
    longer than one lease isn't claimed and delivered again by another relay.
-4. **Record** — one `UPDATE` marks the delivered events published; a failed event gets `attempts + 1`,
-   `last_error` and
+4. **Record** — each success carrying metadata gets a separate `UPDATE`, storing its metadata and
+   publication together while the claim is current. One shared `UPDATE` publishes the remaining
+   successes, without metadata from expired claims. A failed event gets `attempts + 1`, `last_error` and
    `next_attempt_at = now + min(retry_base_seconds * 2 ** (attempts - 1), retry_max_seconds)`, spread by
    up to 10% either way. Out of attempts, it is dead-lettered (`dead_lettered_at`). The record is written
    even when the relay is stopped meanwhile. An event another relay published meanwhile — the lease ran
@@ -562,24 +588,41 @@ row, given up with an ERROR — the relay keeps polling.
 
 When relays share a wakeup across running event loops, removing the last subscription stops the
 listener and closes its transport on the loop that opened them, even if that relay uses another loop.
+New subscriptions wait for this release before starting a listener on the same wakeup. Cancelling
+an unsubscribe waiter does not detach the release or allow a new listener to reuse a closing transport.
 
 On a connection without `LISTEN`/`NOTIFY` (`Features.supports_listen_notify` off) a write signalling a
 `ListenNotifyWakeup` raises `ConfigurationError` before any event is written, and a relay listening
 `UnSupportedError` — leave the outbox without it there, its relays poll.
 
 A wakeup of your own subclasses `OutboxWakeup`: `signal(topics)` sends a signal,
-`listen(connection_alias)` listens until cancelled and gives each signal to `dispatch(topics)`, `close()`
-releases what they opened; `raise_if_unsupported(connection)` refuses a connection it can't signal on,
+`listen(connection)` listens until cancelled and gives each signal to `dispatch(topics)`. The relay
+passes its selected `DatabaseClient`; standalone `subscribe(callback, connection)` also accepts an
+alias. `ListenNotifyWakeup` retains that client for reconnects and cleanup. `close()` releases resources;
+`raise_if_unsupported(connection)` refuses a connection it can't signal on,
 before the events are written.
 
 ## <a id="deliveries"></a>Deliveries
 
-A delivery only sends: the relay retries, counts attempts and dead-letters. Every delivery sends the
-payload's JSON as the body, and the event's `headers`, its `id` (`hare-outbox-event-id`) and topic
-(`hare-outbox-topic`) as headers. An `async def deliver(event)` works as a delivery too (it is wrapped in
-`CallableDelivery`). A delivery of your own subclasses `OutboxDelivery`: `deliver(event)` sends one
+A delivery only sends: the relay retries, counts attempts and dead-letters. Kafka, RabbitMQ and HTTP
+send the payload's JSON as the body, and the event's `headers`, its `id` (`hare-outbox-event-id`) and
+topic (`hare-outbox-topic`) as headers. Redis streams store those values in entry fields. Taskiq sends
+the task arguments and labels without adding the outbox event ID. An `async def deliver(event)` also
+works as a delivery: `CallableDelivery` passes it the event, and the function chooses what to send.
+A delivery of your own subclasses `OutboxDelivery`: `deliver(event)` sends one
 event; `deliver_batch(events, *, concurrency, timeout_seconds)` sends a batch (each through `deliver()`
-by default) and returns per event `None` or what failed it; `close()` releases its connections.
+by default) and returns one `DeliveryResult(event_id, error=None, metadata={})` per event, in any order.
+A single `deliver()` may return `None` for success, raise on failure, or return a `DeliveryResult`.
+`error=None` acknowledges delivery. `metadata` maps application fields to attempt values; the store
+writes them only for the current claim. Transports perform no database writes.
+`close()` releases transport connections.
+
+Kafka producers and RabbitMQ exchanges open on first use. Failed setup closes the newly allocated
+client before another attempt; if setup and release both fail, an exception group retains both errors.
+A Kafka producer supplied by the application is already started and remains open after `close()`.
+
+The default batch delivery requires positive `concurrency`, so an invalid limit cannot block it
+indefinitely. `TopicRouter.close()` attempts to close every distinct transport even if one fails.
 `get_body()`, `get_headers()` and `get_key()` give an event's body, headers and message key as the
 built-in deliveries send them.
 
@@ -701,5 +744,6 @@ delivered in order per row.
 
 `hare.contrib.outbox.DeliveryError` — an event wasn't delivered: a delivery's own refusal (a webhook
 answering an error, no route taking a topic), or the failure the relay logs, the delivery's exception
-chained as `__cause__`. It is never raised to a caller of the relay; a failed event never stops the rest
-of the batch.
+chained as `__cause__`. During ordinary polling, transport failures become delivery outcomes; a failed
+event does not stop the rest of the batch. An explicit `record_outcomes()` call raises `DeliveryError`
+before writing if the result count or event IDs do not match the claimed batch.

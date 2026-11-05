@@ -6,6 +6,8 @@ from functools import partial
 
 import pytest
 
+from hare.core.extensions.declarations import ExtensionContribution
+from hare.core.registries import Registries
 from hare.ddl.constraints import ExclusionConstraint
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.dialects.base.sql_dialect import SqlDialect
@@ -45,8 +47,9 @@ class CountingDialect(SqlDialect):
     name = "lookup_hook_counting"
     install_count = 0
 
-    def install(self) -> None:
+    def get_contribution(self) -> ExtensionContribution:
         CountingDialect.install_count += 1
+        return ExtensionContribution()
 
 
 def test_a_field_brings_its_own_lookups():
@@ -71,8 +74,7 @@ def test_a_field_reads_inside_its_own_value():
 
 
 def test_a_dialect_registers_a_path_segment_on_core_fields():
-    had_own_transforms = "registered_transforms" in TextField.__dict__
-    previous_transforms = dict(TextField.__dict__.get("registered_transforms", {}))
+    previous_snapshot = Registries.snapshot
     TextField.register_transform(
         "reversed_text", lambda field: (partial(Function, "REVERSE"), field), required_extension="reverse_extension"
     )
@@ -84,10 +86,8 @@ def test_a_dialect_registers_a_path_segment_on_core_fields():
         assert FieldTransforms.get_transform(IntField(), "reversed_text") is None
         assert FieldTransforms.get_required_extension(text_field, "reversed_text") == "reverse_extension"
     finally:
-        if had_own_transforms:
-            TextField.registered_transforms = previous_transforms
-        else:
-            del TextField.registered_transforms
+        Registries.snapshot = previous_snapshot
+        Registries.changed()
 
 
 def test_postgresql_installs_unaccent_on_text_fields():
@@ -98,7 +98,7 @@ def test_postgresql_installs_unaccent_on_text_fields():
 
 
 def test_a_dialect_is_installed_once_when_registered(monkeypatch):
-    monkeypatch.setattr(DialectRegistry, "dialects_by_name", dict(DialectRegistry.dialects_by_name))
+    monkeypatch.setattr(Registries, "snapshot", Registries.snapshot)
     monkeypatch.setattr(CountingDialect, "install_count", 0)
     dialect = CountingDialect()
     DialectRegistry.register_dialect(dialect)

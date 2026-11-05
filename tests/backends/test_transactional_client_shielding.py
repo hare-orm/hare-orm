@@ -175,6 +175,7 @@ async def test_pooled_transaction_context_exit_terminates_an_abandoned_connectio
     fake_pool = SimpleNamespace(release=fake_release)
     fake_client = SimpleNamespace(
         _shielded_operation_abandoned=True,
+        _schema_touched=False,
         _prepared_without_release=False,
         _connection=fake_connection,
         _held_pool=fake_pool,
@@ -204,6 +205,7 @@ async def test_pooled_transaction_context_exit_releases_normally_when_not_abando
     fake_pool = SimpleNamespace(release=fake_release)
     fake_client = SimpleNamespace(
         _shielded_operation_abandoned=False,
+        _schema_touched=False,
         _prepared_without_release=False,
         _connection=fake_connection,
         _held_pool=fake_pool,

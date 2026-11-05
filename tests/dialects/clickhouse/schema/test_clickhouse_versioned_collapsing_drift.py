@@ -26,6 +26,8 @@ async def test_a_versioned_collapsing_table_is_in_sync_after_its_migration(
         textwrap.dedent(
             f"""
             from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+            from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
+            from hare.query.expressions import F
             from hare.dialects.clickhouse.fields import Int8Field
 
             class Balance(Model):
@@ -35,7 +37,9 @@ async def test_a_versioned_collapsing_table_is_in_sync_after_its_migration(
 
                 class Meta:
                     table_options = [
-                        ClickhouseTableOptions({order_by}engine="VersionedCollapsingMergeTree(sign, version)")
+                        ClickhouseTableOptions(
+                            {order_by}engine=ClickhouseEngine("VersionedCollapsingMergeTree", F("sign"), F("version"))
+                        )
                     ]
             """
         )

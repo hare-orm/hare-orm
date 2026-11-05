@@ -13,7 +13,6 @@ import pytest
 from tests.stubs.stub_configs import REPOSITORY_PATH
 
 # The pyright command line - its environment installs it and node.
-REQUIRES = ("pyright-cli",)
 
 pytestmark = pytest.mark.database_independent
 

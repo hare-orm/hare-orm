@@ -6,7 +6,6 @@ from typing import Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.query.constants import AMBIENT_TENANT_NOT_OVERRIDDEN
-from hare.query.scopes.constants import RESOLVED_DEFAULT_ATTRIBUTE
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +39,8 @@ class RowVisibility:
     #: ``DEFAULT`` resolved with no tenant active.
     DEFAULT_WITHOUT_TENANT: ClassVar[RowVisibility]
     #: ``DEFAULT`` resolved for the last tenant it was resolved for - ``(tenant, visibility)``, kept on
-    #: the class (``RESOLVED_DEFAULT_ATTRIBUTE``): every query of a request resolves it for one tenant.
-    resolved_defaults: ClassVar[Cache[tuple[Any, RowVisibility]]] = Cache(
-        holds_sql=False, keyed_by_model=False, owner_attribute=RESOLVED_DEFAULT_ATTRIBUTE
-    )
+    #: the class in a lifetime bucket: every query of a request resolves it for one tenant.
+    default_visibilities: ClassVar[Cache[tuple[Any, RowVisibility]]] = Cache(holds_sql=False)
 
     def get_for_active_tenant(self) -> RowVisibility:
         """This visibility with the tenant it scopes to resolved - the active one, unless a
@@ -60,11 +57,13 @@ class RowVisibility:
         if self is RowVisibility.DEFAULT:
             if tenant is None:
                 return RowVisibility.DEFAULT_WITHOUT_TENANT
-            resolved_default: tuple[Any, RowVisibility] | None = getattr(RowVisibility, RESOLVED_DEFAULT_ATTRIBUTE)
-            if resolved_default is not None and resolved_default[0] is tenant:
-                return resolved_default[1]
+            default_visibility: tuple[Any, RowVisibility] | None = RowVisibility.default_visibilities.get_value(
+                RowVisibility
+            )
+            if default_visibility is not None and default_visibility[0] is tenant:
+                return default_visibility[1]
             visibility = RowVisibility(tenant=tenant)
-            RowVisibility.resolved_defaults.set_owner_value(RowVisibility, (tenant, visibility))
+            RowVisibility.default_visibilities.set_value(RowVisibility, (tenant, visibility))
             return visibility
         return RowVisibility(self.all_tenants, self.include_deleted, self.only_deleted, tenant)
 
@@ -85,5 +84,3 @@ class RowVisibility:
 RowVisibility.DEFAULT = RowVisibility()
 
 RowVisibility.DEFAULT_WITHOUT_TENANT = RowVisibility(tenant=None)
-
-setattr(RowVisibility, RESOLVED_DEFAULT_ATTRIBUTE, None)

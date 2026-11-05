@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.exceptions import ConfigurationError
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.fields.field import Field
+from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
+from hare.fields.relations.fields.generic_foreign_key_field_instance import GenericForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.fields.one_to_one_field_instance import OneToOneFieldInstance
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
@@ -23,6 +24,24 @@ class ModelFieldCollection:
     reserved_field_names: ClassVar[Cache[frozenset[str]]] = Cache(Cache.max_size_from_env())
 
     @staticmethod
+    def snapshot_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+        """Separate class declarations from fields shared with other model bodies."""
+        return {
+            name: value.snapshot() if isinstance(value, (Field, GenericForeignKeyFieldInstance)) else value
+            for name, value in attributes.items()
+        }
+
+    @staticmethod
+    def is_declared_field(field: Field[Any]) -> bool:
+        """Exclude generated relation sides and key columns when inheriting declarations."""
+        return (
+            not isinstance(field, BackwardForeignKeyRelation)
+            and field.reference is None
+            and getattr(field, "generic_relation", None) is None
+            and not (isinstance(field, ManyToManyFieldInstance) and field._generated)
+        )
+
+    @staticmethod
     def search_for_field_attributes(base: type, attributes: dict[str, Any], name: str) -> None:
         """Collects the field attributes of ``base`` and its ancestors into ``attributes`` - a name already
         there is kept, so a derived class wins; several bases are read left to right.
@@ -34,11 +53,10 @@ class ModelFieldCollection:
         ``name`` is the class being built, for an error message.
         """
         if meta := getattr(base, "_meta", None):
-            # Deep-copied: concrete subclasses of one abstract base must not share Field instances -
-            # each is bound to its model.
+            # Inherit declarations; relation binding creates key columns and reverse sides again.
             for key, value in meta.fields_map.items():
-                if key not in attributes:
-                    attributes[key] = deepcopy(value)
+                if key not in attributes and ModelFieldCollection.is_declared_field(value):
+                    attributes[key] = value.snapshot()
             # A composite primary key's marker is consumed when the abstract base is built - made
             # anew for each concrete subclass.
             if meta.has_composite_primary_key and meta.primary_key_attribute:
@@ -68,12 +86,10 @@ class ModelFieldCollection:
             for parent in base.__mro__[1:]:
                 # Searching for Field attributes in the class hierarchy
                 ModelFieldCollection.search_for_field_attributes(parent, attributes, name)
-            # For mixin classes. deepcopy for the same reason as the abstract-base branch above -
-            # two concrete models sharing the same mixin would otherwise share the literal same
-            # Field instances too.
+            # A mixin declaration is independent in each concrete model too.
             for key, value in base.__dict__.items():
                 if isinstance(value, Field) and key not in attributes:
-                    attributes[key] = deepcopy(value)
+                    attributes[key] = value.snapshot()
             GenericForeignKeys.copy_inherited(base, attributes)
             # A manager declared on a plain mixin is bound to each concrete model the same way a
             # manager inherited from an abstract Model base is - otherwise it stays unbound
@@ -105,11 +121,11 @@ class ModelFieldCollection:
                         winning_value_by_key.setdefault(key, value)
         for key, value in winning_value_by_key.items():
             if key in attributes:
-                attributes[key] = deepcopy(value)
+                attributes[key] = value.snapshot()
 
     @staticmethod
     def dispatch_fields(
-        attributes: dict[str, Any], fields_db_projection: dict[str, str], is_abstract: bool
+        attributes: dict[str, Any], fields_db_projection: dict[str, str]
     ) -> tuple[
         dict[str, Field[Any]],
         set[str],
@@ -121,7 +137,6 @@ class ModelFieldCollection:
         Args:
             attributes: The class's attributes.
             fields_db_projection: The columns of the fields by name, filled in.
-            is_abstract: Whether the class is abstract.
 
         Returns:
             The fields by name, and the names of the foreign key, many-to-many and one-to-one fields.
@@ -132,9 +147,6 @@ class ModelFieldCollection:
         one_to_one_fields: set[str] = set()
         for key, value in attributes.items():
             if isinstance(value, Field):
-                if is_abstract:
-                    value = deepcopy(value)
-
                 fields_map[key] = value
                 value.model_field_name = key
 

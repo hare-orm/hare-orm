@@ -4,11 +4,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from hare.ddl.indexes.index import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
-from hare.exceptions import ConfigurationError
-from hare.fields.composite_primary_key import CompositePrimaryKey
+from hare.ddl.schema_references import SchemaReferences
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.migrations.constants import MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS
-from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
@@ -19,19 +17,18 @@ from hare.migrations.operations.fields.alter_field import AlterField
 from hare.migrations.operations.fields.field_like import FieldLike
 from hare.migrations.operations.fields.remove_field import RemoveField
 from hare.migrations.operations.fields.rename_field import RenameField
-from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.operations.models.alter_model_options import AlterModelOptions
 from hare.migrations.operations.models.alter_model_table import AlterModelTable
 from hare.migrations.operations.models.delete_model import DeleteModel
 from hare.migrations.operations.models.model_table_operation import ModelTableOperation
 from hare.migrations.operations.models.rename_model import RenameModel
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.operations.schema_objects.object_types.constraint_object_type import ConstraintObjectType
 from hare.migrations.operations.schema_objects.object_types.index_object_type import IndexObjectType
 from hare.migrations.operations.schema_objects.object_types.trigger_object_type import TriggerObjectType
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.models.enums import ModelOption
 
@@ -39,18 +36,14 @@ if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
-class CreateModel(ModelTableOperation, HareOperation):
+class CreateModel(ModelTableOperation):
     """Creates a model and its table."""
-
-    reads_old_state = False
-    backward_reads_state_reached = False
 
     def __init__(
         self,
         name: str,
         fields: list[tuple[str, FieldLike]],
         options: dict[str, Any] | None = None,
-        bases: list[str] | None = None,
         state_only: bool = False,
     ) -> None:
         """
@@ -58,7 +51,6 @@ class CreateModel(ModelTableOperation, HareOperation):
             name: The model's class name.
             fields: (name, field) pairs of the model's fields.
             options: The model's Meta options.
-            bases: The model's base class names.
             state_only: Only records the model in the migration state - its table already exists,
                 e.g. for a model moved here from another app.
         """
@@ -66,43 +58,22 @@ class CreateModel(ModelTableOperation, HareOperation):
         self.options = options
         self.fields = fields
         self.name = name
-        self.bases = bases
         self.state_only = state_only
         self._model: type[Model] | None = None
 
+    def snapshot(self) -> CreateModel:
+        """Keep the copied declaration independent of a previously rendered model."""
+        result = cast("CreateModel", super().snapshot())
+        result._model = None
+        return result
+
     def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
-        """The model, its bases and the models its fields relate to."""
-        return self.get_models_labels(app_label, [self.name, *(self.bases or [])], [field for _, field in self.fields])
+        """The model and the models its fields relate to."""
+        return self.get_models_labels(app_label, [self.name], [field for _, field in self.fields])
 
     def declares_raw_sql(self) -> bool:
         """Whether a field or an option of the model holds raw SQL."""
         return RawSQLTerm.is_in([field for _, field in self.fields]) or RawSQLTerm.is_in(self.options or {})
-
-    def gives_the_state_of(self, folded: CreateModel, operation: Operation, app_label: str) -> bool:
-        """Whether a creation folded with a later operation leaves the state this creation and the
-        operation leave - an option naming a removed or renamed field otherwise keeps the operation
-        apart (an index on the removed field, a constraint on the renamed one).
-
-        Args:
-            folded: The folded creation.
-            operation: The later operation.
-            app_label: The migrations' app.
-
-        Returns:
-            True when both states are the same, and neither refuses the operations.
-        """
-        # Deferred: the operation generator imports the operations.
-        from hare.migrations.autodetection.operation_generator import OperationGenerator
-
-        expected_state = State()
-        folded_state = State()
-        try:
-            self.state_forward(app_label, expected_state)
-            operation.state_forward(app_label, expected_state)
-            folded.state_forward(app_label, folded_state)
-        except (ConfigurationError, IncompatibleStateError):
-            return False
-        return not OperationGenerator(expected_state, folded_state).generate()
 
     def with_changes(
         self,
@@ -121,25 +92,28 @@ class CreateModel(ModelTableOperation, HareOperation):
         Returns:
             The operation.
         """
-        return CreateModel(
+        changed = CreateModel(
             name if name is not None else self.name,
             fields if fields is not None else list(self.fields),
             options if options is not None else (dict(self.options) if self.options is not None else None),
-            self.bases,
             self.state_only,
         )
+        changed.generation_dependencies = self.generation_dependencies
+        return changed
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """A later deletion, rename, options, table or field change of the model folds into its
         creation - a deletion cancels it."""
         if isinstance(other, DeleteModel) and self.is_same_model_name(self.name, other.name):
             if other.state_only == self.state_only:
-                return []
-            return super().reduce(other, app_label)
+                return OperationRewrite(())
+            return super().get_rewrite(other, app_label)
         if self.state_only:
-            return super().reduce(other, app_label)
+            return super().get_rewrite(other, app_label)
         if isinstance(other, RenameModel) and self.is_same_model_name(self.name, other.old_name):
-            return [self._get_renamed(other, app_label)]
+            if self.get_referenced_model_labels(app_label) is None:
+                return None
+            return OperationRewrite((self._get_renamed(other, app_label),))
         if isinstance(other, AlterModelOptions) and self.is_same_model_name(self.name, other.name):
             options = {
                 key: value
@@ -147,7 +121,7 @@ class CreateModel(ModelTableOperation, HareOperation):
                 if key in MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS or key in other.options
             }
             options.update(other.options)
-            return [self.with_changes(options=options)]
+            return OperationRewrite((self.with_changes(options=options),))
         if isinstance(other, AlterModelTable) and self.is_same_model_name(self.name, other.name):
             options = dict(self.options or {})
             for option in (ModelOption.TABLE, ModelOption.TABLE_IS_EXPLICIT):
@@ -159,30 +133,28 @@ class CreateModel(ModelTableOperation, HareOperation):
             if table_is_explicit:
                 options[str(ModelOption.TABLE)] = other.table
             options[str(ModelOption.TABLE_IS_EXPLICIT)] = table_is_explicit
-            return [self.with_changes(options=options)]
+            return OperationRewrite((self.with_changes(options=options),))
         if isinstance(other, (AddField, AlterField, RemoveField, RenameField)) and self.is_same_model_name(
             self.name, other.model_name
         ):
             field_names = [field_name for field_name, _field in self.fields]
             if isinstance(other, AddField) and other.name not in field_names:
-                return [self.with_changes(fields=[*self.fields, (other.name, other.field)])]
+                return OperationRewrite((self.with_changes(fields=[*self.fields, (other.name, other.field)]),))
             if isinstance(other, AlterField) and other.name in field_names:
-                return [self._get_created_with_altered_field(other)]
+                return OperationRewrite((self._get_created_with_altered_field(other),))
             if self.declares_raw_sql():
                 # Its raw SQL may name the removed or renamed column - the folded creation would make
                 # the table without it.
-                return super().reduce(other, app_label)
+                return super().get_rewrite(other, app_label)
             if isinstance(other, RemoveField) and other.name in field_names:
                 folded = self.with_changes(fields=[pair for pair in self.fields if pair[0] != other.name])
-                if self.gives_the_state_of(folded, other, app_label):
-                    return [folded]
+                return OperationRewrite((folded,))
             if isinstance(other, RenameField) and other.old_name in field_names and other.new_name not in field_names:
                 renamed_fields = other.get_renamed_model_fields(self.fields, app_label)
                 if renamed_fields is not None:
                     folded = self.with_changes(fields=renamed_fields)
-                    if self.gives_the_state_of(folded, other, app_label):
-                        return [folded]
-        return super().reduce(other, app_label)
+                    return OperationRewrite((folded,))
+        return super().get_rewrite(other, app_label)
 
     def _get_created_with_altered_field(self, alteration: AlterField) -> CreateModel:
         """The creation of the model with a field as a later operation alters it.
@@ -222,24 +194,27 @@ class CreateModel(ModelTableOperation, HareOperation):
             options=options,
         )
 
-    def pop_field(self, field_name: str) -> tuple[FieldLike, list[Index]]:
-        """Removes a field and the Meta.indexes entries over it, to be added back by a later
-        AddField and AddIndex operations.
+    def split_field(self, field_name: str) -> tuple[CreateModel, FieldLike, list[Index]]:
+        """Return a creation without a relation and its indexes, leaving this declaration unchanged.
+
+        The sorter adds the returned field and indexes in separate operations after
+        the tables they require exist. Structured expression dependencies participate;
+        raw SQL does not provide inferred field references.
 
         Args:
             field_name: The field's name.
 
         Returns:
-            The removed field and the removed indexes.
+            The replacement creation, extracted field and indexes.
         """
         field = next(field for name, field in self.fields if name == field_name)
-        self.fields = [pair for pair in self.fields if pair[0] != field_name]
+        fields = [pair for pair in self.fields if pair[0] != field_name]
         options = dict(self.options or {})
         kept_indexes: list[Any] = []
         removed_indexes: list[Index] = []
         for entry in options.get(ModelOption.INDEXES, ()):
             index = entry if isinstance(entry, Index) else Index(fields=tuple(entry))
-            if field_name in (index.fields or ()) or field_name in index.include:
+            if field_name in SchemaReferences.get_index_field_names(index):
                 removed_indexes.append(index)
             else:
                 kept_indexes.append(entry)
@@ -248,11 +223,7 @@ class CreateModel(ModelTableOperation, HareOperation):
                 options[ModelOption.INDEXES] = tuple(kept_indexes)
             else:
                 options.pop(ModelOption.INDEXES, None)
-            self.options = options
-        return field, removed_indexes
-
-    def get_table_model_names(self) -> tuple[str, ...]:
-        return (self.name,)
+        return self.with_changes(fields=fields, options=options), field, removed_indexes
 
     def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
         return [
@@ -270,7 +241,7 @@ class CreateModel(ModelTableOperation, HareOperation):
         dependencies = [
             dependency
             for _field_name, field in self.fields
-            for dependency in RelationDependencies.get_required_for_relation(app_label, self.name, field)
+            for dependency in RelationDependencies.get_required_for_relation(app_label, self.name, field, state)
         ]
         schema = options.get(ModelOption.SCHEMA)
         if schema:
@@ -311,31 +282,13 @@ class CreateModel(ModelTableOperation, HareOperation):
             kwargs["options"] = AlterModelOptions.get_written_options(self.options)
         else:
             kwargs.pop("options", None)
-        if not self.bases:
-            kwargs.pop("bases", None)
         return path, args, kwargs
 
     @property
     def model(self) -> type[Model]:
         """The model class of the operation's fields and options, built on first use."""
         if not self._model:
-            meta_class = type("Meta", (), self.options or {})
-
-            attributes: dict[str, Any] = dict(self.fields)
-            attributes["Meta"] = meta_class
-            attributes["_no_comments"] = True
-            attributes["__migration_state__"] = True
-
-            # A composite primary key's fields don't carry primary_key=True - its marker is put
-            # back, or the metaclass would add an "id".
-            primary_key_attribute = (self.options or {}).get("primary_key_attribute")
-            if isinstance(primary_key_attribute, tuple):
-                attributes["__migration_composite_pk__"] = CompositePrimaryKey(
-                    *primary_key_attribute,
-                    without_overlaps=(self.options or {}).get(ModelOption.PK_WITHOUT_OVERLAPS, False),
-                )
-
-            self._model = cast("type[Model]", type(self.name, (Model,), attributes))
+            self._model = ModelState.build_model(self.name, (Model,), dict(self.fields), self.options or {})
 
         return self._model
 
@@ -354,7 +307,7 @@ class CreateModel(ModelTableOperation, HareOperation):
             if not isinstance(field, DIRECT_RELATION_FIELDS):
                 continue
 
-            related_key = StateApps.split_reference(field.model_name)
+            related_key = state.get_model_key(field.model_name)
             if related_key in state.models:
                 changed_model_keys.add(related_key)
 
@@ -369,7 +322,7 @@ class CreateModel(ModelTableOperation, HareOperation):
                 # A label, a model class or a swappable reference alike.
                 if (
                     isinstance(field, DIRECT_RELATION_FIELDS)
-                    and StateApps.split_reference(field.model_name) == new_model_key
+                    and state.get_model_key(field.model_name) == new_model_key
                 ):
                     changed_model_keys.add(key)
                     break

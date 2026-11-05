@@ -1,9 +1,8 @@
 //! `Value` -> Python object: reading a result row.
 
 use chrono::Timelike;
-use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDelta, PyInt, PyList, PyString, PyTime, PyTuple};
+use pyo3::types::{PyBytes, PyDelta, PyInt, PyList, PyString, PyTime, PyTuple};
 
 use crate::pg::error::{to_pyerr, DriverError};
 use crate::pg::types::interval::{DAYS_PER_INTERVAL_MONTH, DAYS_PER_INTERVAL_YEAR};
@@ -12,7 +11,7 @@ use crate::pg::value::python_classes::{
     IPV6_NETWORK_TYPE,
 };
 use crate::pg::value::{IntervalValue, NetworkValue, RangeValue, Value};
-use crate::python::objects::{decimal_type, new_instance_with_attributes, new_uuid};
+use crate::python::objects::{decimal_type, new_uuid};
 
 impl<'py> IntoPyObject<'py> for Value {
     type Target = PyAny;
@@ -33,6 +32,11 @@ impl<'py> IntoPyObject<'py> for &Value {
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let obj = match self {
+            Value::DeferredText(_) => {
+                return Err(to_pyerr(DriverError::Conversion(
+                    "server text value was not supplied before publication".to_string(),
+                )))
+            }
             Value::Null => py.None().into_bound(py),
             Value::Bool(value) => value.into_pyobject(py)?.to_owned().into_any(),
             Value::Int(value) => value.into_pyobject(py)?.into_any(),
@@ -80,7 +84,7 @@ impl<'py> IntoPyObject<'py> for &Value {
 }
 
 /// Builds a `hare.dialects.postgresql.fields.ranges.Range(lower, upper, lower_inc, upper_inc, is_empty)`
-/// - without the dataclass's `__init__`, which only stores the fields.
+/// through its public constructor.
 fn range_to_py<'py>(py: Python<'py>, range: &RangeValue) -> PyResult<Bound<'py, PyAny>> {
     let none = py.None().into_bound(py);
     let (lower, upper, lower_inc, upper_inc) = if range.empty {
@@ -92,16 +96,7 @@ fn range_to_py<'py>(py: Python<'py>, range: &RangeValue) -> PyResult<Bound<'py, 
         };
         (read_bound(&range.lower)?, read_bound(&range.upper)?, range.lower_inc, range.upper_inc)
     };
-    new_instance_with_attributes(
-        range_type(py)?,
-        &[
-            (intern!(py, "lower"), &lower),
-            (intern!(py, "upper"), &upper),
-            (intern!(py, "lower_inc"), PyBool::new(py, lower_inc).as_any()),
-            (intern!(py, "upper_inc"), PyBool::new(py, upper_inc).as_any()),
-            (intern!(py, "is_empty"), PyBool::new(py, range.empty).as_any()),
-        ],
-    )
+    range_type(py)?.call1((lower, upper, lower_inc, upper_inc, range.empty))
 }
 
 /// The error of a date or a moment Python's `datetime` holds none of - a year before 1 or after 9999.

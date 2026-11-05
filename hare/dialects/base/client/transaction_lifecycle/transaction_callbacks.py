@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from hare.core.connections.connections import Connections
+from hare.dialects.base.client.constants import CAPTURED_ON_COMMIT_FAILURES_MESSAGE
 from hare.dialects.base.transactions.savepoints.savepoint_span import SavepointSpan, current_savepoint_span
 from hare.dialects.base.transactions.transaction_callback import TransactionCallback
 
@@ -60,25 +62,63 @@ class TransactionCallbacks:
 
         Args:
             callbacks: The callbacks, in registration order.
-            label: The callback type for the ExceptionGroup message
+            label: The callback type for the grouped failure message
                 (``"on_commit()"``/``"on_rollback()"``).
 
         Raises:
-            Exception: The one callback failure.
-            ExceptionGroup: Every failure, when two or more callbacks failed.
+            BaseException: The one callback failure.
+            BaseExceptionGroup: Every failure, when two or more callbacks failed; an
+                ExceptionGroup when all failures derive from Exception.
         """
-        errors: list[Exception] = []
+        errors: list[BaseException] = []
         for callback in callbacks:
             try:
                 result = callback()
                 if inspect.isawaitable(result):
                     await result
-            except Exception as error:
+            except BaseException as error:
                 errors.append(error)
         if len(errors) == 1:
             raise errors[0]
         if errors:
-            raise ExceptionGroup(f"{label} callback failures", errors)
+            raise BaseExceptionGroup(f"{label} callback failures", errors)
+
+    @staticmethod
+    @asynccontextmanager
+    async def capture_on_commit(
+        clients: Iterable[TransactionClient], *, execute: bool = False
+    ) -> AsyncGenerator[list[Callable[[], Any]]]:
+        """Capture surviving callbacks registered during a test scope on selected transactions.
+
+        The boundary records entry identities, so rolling back a savepoint cannot shift an
+        index past newly registered callbacks. Captured entries are removed from the queue;
+        only user callbacks are exposed. With ``execute``, bookkeeping and user callbacks run
+        in per-transaction registration order, including callbacks registered by callbacks.
+        If the scope itself raises, its queues are left to normal transaction cleanup.
+        """
+        roots = tuple(dict.fromkeys(client._get_top_level_transaction() for client in clients))
+        boundaries = [(client, frozenset(client._on_commit_callbacks)) for client in roots]
+        callbacks: list[Callable[[], Any]] = []
+        yield callbacks
+        errors: list[BaseException] = []
+        while True:
+            entries: list[TransactionCallback] = []
+            for client, previous in boundaries:
+                entries.extend(entry for entry in client._on_commit_callbacks if entry not in previous)
+                client._on_commit_callbacks[:] = [entry for entry in client._on_commit_callbacks if entry in previous]
+            if not entries:
+                break
+            callbacks.extend(entry.callback for entry in entries if entry.is_user_callback)
+            if not execute:
+                break
+            try:
+                await TransactionCallbacks.run_callbacks([entry.callback for entry in entries], "on_commit()")
+            except BaseException as error:
+                errors.append(error)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup(CAPTURED_ON_COMMIT_FAILURES_MESSAGE, errors)
 
     @staticmethod
     async def run_callbacks_as_outer_level(
@@ -93,12 +133,12 @@ class TransactionCallbacks:
             callbacks: the callbacks to run.
             label: names the callback type in an ExceptionGroup message.
         """
-        handler = Connections.current()
+        handler = client.connection_handler if client.connection_handler is not None else Connections.current()
         token = handler.set(client.connection_alias, client._parent)
         try:
             await TransactionCallbacks.run_callbacks(callbacks, label)
         finally:
-            handler.reset(token)
+            token.reset()
 
     @staticmethod
     async def discard_rolled_back_savepoint_callbacks(client: TransactionClient) -> None:
@@ -110,7 +150,9 @@ class TransactionCallbacks:
             client: The transaction's client.
 
         Raises:
-            Exception: The one failing callback's exception, or an ExceptionGroup of several.
+            BaseException: The one callback failure.
+            BaseExceptionGroup: Multiple callback failures; an ExceptionGroup when all
+                failures derive from Exception.
         """
         savepoint_span = client._savepoint_span
         if savepoint_span is None:

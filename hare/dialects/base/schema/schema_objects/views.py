@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hare.ddl.enums import GrantTarget
 from hare.ddl.schema_objects.view import View
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.models import Model
 
@@ -36,13 +37,9 @@ class Views(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Views")
 
-    async def drop_model_views(self, model: type[Model]) -> None:
-        """Drops the views a model declares, before its table is dropped - nothing by default: a
-        dialect without views has none, and one dropping them otherwise does it its own way.
-
-        Args:
-            model: The model.
-        """
+    def get_view_drop_sql(self, model: type[Model], view: View, *, if_exists: bool = False) -> str:
+        """Compile one removal for direct calls and dependency-ordered schema plans."""
+        raise self.get_unsupported_error("Views")
 
     async def alter_view(self, model: type[Model], old_view: View, new_view: View) -> None:
         """Replaces a view of a model by its new version of the same name, with the grants on it.
@@ -52,9 +49,10 @@ class Views(SchemaEditorPart):
             old_view: The view as it is.
             new_view: The view as it becomes.
         """
+        statements = self.get_view_create_sqls(model, new_view)
+        statements += self.editor.grants.get_grant_again_sqls(model, GrantTarget.VIEW, new_view.name)
         await self.drop_view(model, old_view)
-        await self.create_view(model, new_view)
-        await self.editor.grants.grant_again(model, GrantTarget.VIEW, new_view.name)
+        await self.editor.run_sqls(statements)
 
     async def rename_view(self, model: type[Model], old_view: View, new_view: View) -> None:
         """Renames a view of a model.
@@ -64,10 +62,10 @@ class Views(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Views")
 
-    async def move_to_schema(
+    def get_schema_move_plan(
         self, model: type[Model], view: View, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        """Moves an object a model declares to the schema the model's table moved to.
+    ) -> SchemaChangePlan:
+        """Prepares moving a declared object with its model to another schema.
 
         Args:
             model: The model, rendered in its old schema.

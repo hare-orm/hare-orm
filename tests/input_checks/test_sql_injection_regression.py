@@ -77,7 +77,7 @@ def test_json_get_sql_escapes_nested_string_values(value):
     rendered = JSON({"key": value}).get_sql(DEFAULT_SQL_CONTEXT)
     assert rendered.count("'") % 2 == 0
     inner = _unescape(rendered, "'")
-    assert value in inner
+    assert json.loads(inner) == {"key": value}
 
 
 @pytest.mark.parametrize(

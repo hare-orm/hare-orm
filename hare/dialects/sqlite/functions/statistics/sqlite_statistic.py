@@ -4,6 +4,8 @@ import math
 import statistics
 from typing import Any, ClassVar
 
+from hare.dialects.sqlite.functions.sqlite_math_functions import SqliteMathFunctions
+
 
 class SqliteStatistic:
     """A variance or standard deviation aggregate - also a window function - for SQLite, which has
@@ -18,22 +20,15 @@ class SqliteStatistic:
     def __init__(self) -> None:
         self.values: list[Any] = []
 
-    @staticmethod
-    def get_number(value: Any) -> int | float:
-        """A column value as a number - a text as a float, as SQLite reads it."""
-        if isinstance(value, (int, float)):
-            return value
-        return float(value.decode() if isinstance(value, bytes) else value)
-
     def step(self, value: Any) -> None:
         """Adds a row's value."""
         if value is not None:
-            self.values.append(self.get_number(value))
+            self.values.append(SqliteMathFunctions.get_number(value))
 
     def inverse(self, value: Any) -> None:
         """Removes a row's value leaving the window frame."""
         if value is not None:
-            self.values.remove(self.get_number(value))
+            self.values.remove(SqliteMathFunctions.get_number(value))
 
     def value(self) -> float | None:
         """The statistic of the values so far.

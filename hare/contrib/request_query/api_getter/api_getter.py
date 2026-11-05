@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from typing import Any, cast
 from urllib.parse import quote
 
+from hare.contrib.request_query.api_getter.api_enrichment_batch import ApiEnrichmentBatch
 from hare.contrib.request_query.api_getter.api_http_requests import ApiHttpRequests
 from hare.contrib.request_query.api_getter.api_source import ApiSource
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
@@ -19,7 +19,7 @@ from hare.contrib.request_query.api_getter.constants import (
     API_TARGET_VALUE_MISSING_MESSAGE,
     API_VALUE_CONVERSION_FAILED_MESSAGE,
 )
-from hare.contrib.request_query.api_getter.declarations import ApiTargetValue
+from hare.contrib.request_query.api_getter.declarations import ApiAssignment, ApiTargetValue
 from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger, ApiRequestMode, ApiValueMappingMode
 from hare.contrib.request_query.exceptions import (
     ApiDataNotFoundError,
@@ -62,91 +62,68 @@ class ApiGetter:
                 empty.
             ApiValueConversionError: A mapping's ``field`` or ``convert`` refuses a value.
         """
-        if not objs:
-            return
-        target_values: dict[tuple[int, str], ApiTargetValue] = {}
-        for mapping in mappings:
-            for root in objs:
-                value = cls.get_converted(None, mapping, ApiValuePaths.get_value_at_path(root, mapping.key))
-                for container in ApiValuePaths.get_containers(root, mapping.set_key):
-                    cls.apply_mapping_value(target_values, container, mapping, value)
-        running_sources = [
-            source
-            for source in sources
-            if source.triggers.runs_on(trigger)
-            and (requested_names is None or source.get_target_names() & requested_names)
-        ]
-        if running_sources:
-            async with ApiHttpRequests() as http_requests:
-                answers = await cls.run_together([cls.ask(http_requests, source, objs) for source in running_sources])
-            # In the sources' order - a target several sources set keeps its value by their order.
-            for source, (containers_by_value, items_by_value) in zip(running_sources, answers, strict=True):
-                cls.apply_source_values(target_values, source, containers_by_value, items_by_value)
-        cls.apply_target_values(target_values)
+        assignments = await cls.prepare(objs, sources, mappings, trigger=trigger, requested_names=requested_names)
+        cls.apply(assignments)
+
+    @classmethod
+    async def prepare(
+        cls,
+        objs: list[Any],
+        sources: Iterable[ApiSource] = (),
+        mappings: Iterable[ApiValueMapping] = (),
+        *,
+        trigger: ApiGetterTrigger = ApiGetterTrigger.READ,
+        requested_names: frozenset[str] | None = None,
+    ) -> tuple[ApiAssignment, ...]:
+        """Load, convert and validate assignments without changing the objects.
+
+        A serializer can read these values directly. Use apply() to perform the assignments
+        later; arbitrary user setters may have side effects and are not rolled back.
+        """
+        return await ApiEnrichmentBatch(cls, objs, sources, mappings, trigger, requested_names).prepare()
 
     @staticmethod
-    async def run_together[Result](awaitables: list[Awaitable[Result]]) -> list[Result]:
-        """Runs awaitables at the same time - the others cancelled once one raises.
-
-        Args:
-            awaitables: The awaitables.
-
-        Returns:
-            Their results, in their order.
-        """
-        tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
-        try:
-            return await asyncio.gather(*tasks)
-        except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+    def apply(assignments: Iterable[ApiAssignment]) -> None:
+        """Apply already prepared assignments in declaration order, changing targets in place."""
+        for assignment in assignments:
+            ApiValuePaths.set_child(assignment.container, assignment.set_name, assignment.value)
 
     @classmethod
     async def ask(
-        cls, http_requests: ApiHttpRequests, source: ApiSource, objs: list[Any]
-    ) -> tuple[dict[Any, list[Any]], dict[Any, Any]]:
+        cls, http_requests: ApiHttpRequests, source: ApiSource, containers_by_value: dict[Any, list[Any]]
+    ) -> dict[Any, Any]:
         """Asks a source for every value of its key the objects hold.
 
         Args:
             http_requests: The requests of the run.
             source: The source.
-            objs: The objects.
+            containers_by_value: The original keys and their target containers.
 
         Returns:
-            The containers holding each value - under None those holding no value, whose targets stay
-            empty - and the answer item of each value, None for a value without one.
+            The answer item for each requested value, None for a value without one.
         """
-        containers_by_value: dict[Any, list[Any]] = {}
-        key_name = source.get_key_name()
-        for root in objs:
-            for container in ApiValuePaths.get_containers(root, source.key):
-                values = [
-                    value
-                    for value in ApiValuePaths.to_list(ApiValuePaths.get_child(container, key_name))
-                    if cls.can_be_asked(value)
-                ]
-                for value in values or [None]:
-                    containers_by_value.setdefault(value, []).append(container)
         values = [value for value in containers_by_value if value is not None]
         if not values:
             if source.required:
                 raise ApiValueMissingError(
                     API_NO_KEY_VALUES_MESSAGE.format(source=source.get_name(), key=source.key), source.get_name()
                 )
-            return containers_by_value, {}
+            return {}
         if source.request_mode is ApiRequestMode.QUERY_MANY:
-            batches = [values[start : start + source.batch_size] for start in range(0, len(values), source.batch_size)]
+            batches = (values[start : start + source.batch_size] for start in range(0, len(values), source.batch_size))
             items_by_value: dict[Any, Any] = {}
-            for batch_items in await cls.run_together(
-                [cls.fetch_batch(http_requests, source, batch) for batch in batches]
+            for batch_items in await ApiEnrichmentBatch.run_workers(
+                batches,
+                lambda batch: cls.fetch_batch(http_requests, source, batch),
+                min(source.concurrency, (len(values) + source.batch_size - 1) // source.batch_size),
             ):
                 items_by_value.update(batch_items)
         else:
-            items = await cls.run_together([cls.fetch_one(http_requests, source, value) for value in values])
+            items = await ApiEnrichmentBatch.run_workers(
+                values, lambda value: cls.fetch_one(http_requests, source, value), min(source.concurrency, len(values))
+            )
             items_by_value = dict(zip(values, items, strict=True))
-        return containers_by_value, items_by_value
+        return items_by_value
 
     @staticmethod
     def can_be_asked(value: Any) -> bool:
@@ -365,7 +342,6 @@ class ApiGetter:
                 set_name=set_name,
                 set_key=mapping.set_key,
                 value=existing_value,
-                has_value=existing_value is not None,
             )
             target_values[target_key] = target_value
         if mapping.required:
@@ -373,23 +349,17 @@ class ApiGetter:
         if mapping.default is not None:
             target_value.default = mapping.default
         if mapping.mode is ApiValueMappingMode.LAST:
-            target_value.value, target_value.has_value = value, value is not None
-        elif not target_value.has_value and value is not None:
-            target_value.value, target_value.has_value = value, True
+            target_value.value = value
+        elif target_value.value is None and value is not None:
+            target_value.value = value
 
     @staticmethod
-    def apply_target_values(target_values: dict[tuple[int, str], ApiTargetValue]) -> None:
-        """Sets the settled value of every target - its default when empty.
-
-        Args:
-            target_values: The values of the targets.
-
-        Raises:
-            ApiValueMissingError: A required target stays empty.
-        """
+    def prepare_target_values(target_values: dict[tuple[int, str], ApiTargetValue]) -> tuple[ApiAssignment, ...]:
+        """Compute defaults and validate every required target before any assignment."""
+        assignments = []
         for target_value in target_values.values():
-            if target_value.value is None and target_value.default is not None:
-                target_value.value = target_value.default
-            if target_value.value is None and target_value.required:
+            value = target_value.value if target_value.value is not None else target_value.default
+            if value is None and target_value.required:
                 raise ApiValueMissingError(API_TARGET_VALUE_MISSING_MESSAGE.format(target=target_value.set_key))
-            ApiValuePaths.set_child(target_value.container, target_value.set_name, target_value.value)
+            assignments.append(ApiAssignment(target_value.container, target_value.set_name, value))
+        return tuple(assignments)

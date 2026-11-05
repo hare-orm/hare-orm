@@ -39,7 +39,8 @@ class HareRobyn(Robyn):
         file_object: str,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         openapi: OpenAPI | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -51,8 +52,9 @@ class HareRobyn(Robyn):
 
 - **`HareContext`.** Модели привязываются при создании приложения; контекст открывается при запуске
   рабочего процесса — до собственного `startup_handler` приложения — и закрывается при его остановке,
-  после собственного `shutdown_handler`. Контекст — глобальный запасной, поэтому его видит каждый запрос.
-  При остановке `Hare.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё работают.
+  после собственного `shutdown_handler`. Обработчики запросов, middleware, авторизация и WebSocket
+  явно активируют контекст приложения.
+  При остановке `HareContext.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё работают.
 - **Запросы из параметров проверяются при запуске.** `RequestQuery.check_declarations()` выполняется, как
   только модели настроены: ошибочный [запрос из параметров](request-queries.ru.md) не даёт процессу
   запуститься.
@@ -173,3 +175,8 @@ app = HareRobyn(__file__, hare_config=HARE_CONFIG, health_routes=HealthRoutes(He
 `hare_app_transactional_db`: приложение берёт контекст теста, его записи фиксируются, а все таблицы
 очищаются в конце теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests). Нужна
 серверная база или файл SQLite.
+
+Явно переданный `hare_context` остаётся под управлением вызывающего кода: интеграция не инициализирует
+и не закрывает его. Без этого аргумента приложение создаёт и закрывает отдельный контекст.
+Запуск приложения не задаёт глобальный запасной контекст. В тестах передавайте фикстуру явно:
+`hare_context=hare_app_db` или `hare_context=hare_app_transactional_db`.

@@ -547,8 +547,7 @@ async def test_request_query_filters_by_target_and_type(db_generic_fk):
             pagination = None
 
     await make_comments()
-    CommentRequestQuery.prepare_parameters()
-    fields_by_name = CommentRequestQuery.model_fields
+    fields_by_name = CommentRequestQuery.prepare_parameters().model_fields
     assert get_args(fields_by_name["target__type"].annotation)[0] == Literal["post", "photo", "article_version"]
 
     async def ids_of(**parameters: Any) -> list[int]:

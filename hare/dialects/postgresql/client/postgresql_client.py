@@ -3,14 +3,13 @@ from __future__ import annotations
 import abc
 import asyncio
 import ssl
-import time
 import uuid
 from asyncio.events import AbstractEventLoop
-from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Self, SupportsInt, TypeVar, cast
 
-from hare.core.caching.cache import Cache
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
 from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -20,18 +19,7 @@ from hare.dialects.base.client.pool.pool_connection_wrapper import PoolConnectio
 from hare.dialects.base.literals.constants import SQL_LONG_INT_MESSAGE, SQL_NULL_BYTE
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.constants import (
-    CTE_DEFINITION_RE,
-    CTE_INTRODUCER_RE,
-    LEADING_WORD_RE,
-    PARENTHESIZED_GROUP_RE,
     POSTGRES_AUTHORIZATION_SQLSTATE_CLASS,
-    POSTGRES_CREATE_LEGACY_PUBLIC_SCHEMA_STATEMENTS,
-    POSTGRES_CREATE_PUBLIC_SCHEMA_STATEMENTS,
-    POSTGRES_DATABASE_EXISTS_SQL,
-    POSTGRES_DATABASE_OWNER_PUBLIC_SCHEMA_VERSION_NUMBER,
-    POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL,
-    POSTGRES_DATABASE_ROLE_SETTINGS_SQL,
-    POSTGRES_DROP_SCHEMA_CASCADE_SQL,
     POSTGRES_FAILING_ROW_RE,
     POSTGRES_FORCED_DROP_DATABASE_SQL,
     POSTGRES_HIDDEN_FAILING_ROW_TEXT,
@@ -41,9 +29,6 @@ from hare.dialects.postgresql.client.constants import (
     POSTGRES_NULL_CHARACTER_SQLSTATES,
     POSTGRES_PASSWORD_ENVIRONMENT_VARIABLE,
     POSTGRES_POOL_CLOSED_WHILE_OPENING_MESSAGE,
-    POSTGRES_RESET_DATABASE_ROLE_SETTINGS_SQL,
-    POSTGRES_RESET_DATABASE_SETTINGS_SQL,
-    POSTGRES_ROLLBACK_PREPARED_SQL,
     POSTGRES_SERVER_VERSION_NUMBER_MAJOR_FACTOR,
     POSTGRES_SESSION_TIME_ZONE,
     POSTGRES_SESSION_TIME_ZONE_SETTING,
@@ -51,55 +36,45 @@ from hare.dialects.postgresql.client.constants import (
     POSTGRES_SHELL_OPTIONS_VARIABLE,
     POSTGRES_SHELL_PROGRAM,
     POSTGRES_STATEMENT_NULL_BYTE_MESSAGE,
-    POSTGRES_TERMINATE_OTHER_DATABASE_SESSIONS_SQL,
     POSTGRES_UNUSABLE_CHANNEL_MESSAGE,
     POSTGRES_UNUSABLE_ROOT_CERTIFICATE_MESSAGE,
-    POSTGRES_USER_SCHEMAS_SQL,
     POSTGRES_UTC_TIME_ZONE_NAMES,
     POSTGRES_VALUE_NULL_BYTE_MESSAGE,
     POSTGRESQL_CURRENT_SEARCH_PATH_SQL,
     POSTGRESQL_MISSING_TENANT_SCHEMA_MESSAGE,
     POSTGRESQL_POOLER_LOGIN_REFUSAL_SQLSTATE,
     POSTGRESQL_POOLER_LOGIN_REFUSAL_TEXT,
-    POSTGRESQL_SCHEMA_EXISTS_SQL,
     POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL,
     POSTGRESQL_SINGLE_CONNECTION_POOL_SETTINGS,
     PYTHON_LONG_INT_ERROR_START,
-    RETURNING_CLAUSE_RE,
-    SQL_BLOCK_COMMENT_DELIMITER_RE,
-    SQL_COMMENT_OR_QUOTED_TEXT_RE,
-    SQL_QUOTED_TEXT_PLACEHOLDER,
-    WRITE_STATEMENT_KEYWORDS,
-    WRITE_STATEMENT_TYPE_CACHED_TEXT_MAX_LENGTH,
 )
-from hare.dialects.postgresql.client.reusable_test_schemas import ReusableTestSchemas
 from hare.dialects.postgresql.client.transaction_pooler import TransactionPooler
+from hare.dialects.postgresql.connection.messages import CONFLICTING_SEARCH_PATH
+from hare.dialects.postgresql.connection.search_path import SearchPath
 from hare.dialects.postgresql.constants import (
     POSTGRES_CONNECTION_OPTION_DEFAULTS,
     POSTGRES_CONNECTION_OPTIONS,
     POSTGRES_DEFAULT_PORT,
     POSTGRES_PORT_OPTION,
-    POSTGRES_SERVER_VERSION_NUMBER_SQL,
     POSTGRESQL_DEFAULT_SCHEMA,
     POSTGRESQL_DIALECT,
-    REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL,
+    POSTGRESQL_SCHEMA_EXISTS_SQL,
 )
 from hare.dialects.postgresql.query.declarations import PostgresqlQuery
 from hare.exceptions import (
     ConfigurationError,
     DatabaseError,
     DBConnectionError,
-    OperationalError,
     ValidationError,
 )
-from hare.instrumentation.observers.observers import Observers
 from hare.instrumentation.pools.pool_registry import PoolRegistry
 from hare.sql.builder.queries.query import Query
 
 if TYPE_CHECKING:
     from asyncpg.connection import Connection
 
-    from hare.contrib.test.databases.kept_test_schema import KeptTestSchema
+    from hare.dialects.base.client.statement_recovery import StatementRecovery
+
 
 T = TypeVar("T")
 
@@ -150,10 +125,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         return translated
 
     query_class: type[Query] = PostgresqlQuery
-    #: Statement text -> whether it is a write reporting a row count (_is_write_without_returning()).
-    write_statement_types: ClassVar[Cache[bool]] = Cache(
-        Cache.max_size_from_env(), holds_sql=False, keyed_by_model=False
-    )
     native_python_types = DatabaseClient.native_python_types | {bool, uuid.UUID}
 
     @staticmethod
@@ -179,21 +150,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
                 raise
         await client.renew_password()
         return await method(client, *args, **kwargs)
-
-    @staticmethod
-    def get_statement_error(error: Exception) -> Exception:
-        """The error of a statement the server refused - a bound text holding a null byte refused as
-        every statement refuses it, any other refusal an ``OperationalError``.
-
-        Args:
-            error: The driver's error.
-
-        Returns:
-            The error to raise.
-        """
-        if getattr(error, "sqlstate", None) in POSTGRES_NULL_CHARACTER_SQLSTATES:
-            return ValidationError(POSTGRES_VALUE_NULL_BYTE_MESSAGE)
-        return OperationalError(error)
 
     @staticmethod
     def hide_failing_row(error: DatabaseError) -> None:
@@ -279,7 +235,7 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         port: SupportsInt = POSTGRES_DEFAULT_PORT,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(user=user, password=password, database=database, host=host, port=port, **kwargs)
 
         self.user = user
         self.password = password
@@ -289,17 +245,21 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         self.extra = kwargs.copy()
         self.server_settings = self._get_server_settings_with_utc_session(self.extra.pop("server_settings", None))
         self.extra.pop("connection_alias", None)
-        self.reusable_test_database_lease: int | None = self.extra.pop(REUSABLE_TEST_DATABASE_LEASE_CREDENTIAL, None)
-        #: The schema a leased test database kept from its previous lease - generate_schema() keeps it
-        #: when the context asks for the same one, and resets the database otherwise.
-        self.kept_test_schema: KeptTestSchema | None = None
-        #: The schema a leased test database holds as its context created it - kept, rows cleared, when
-        #: the lease ends with the schema unchanged.
-        self.leased_test_schema: KeptTestSchema | None = None
         self.loop = self.extra.pop("loop", None)
         self.connection_class = self.extra.pop("connection_class", self.connection_class)
         settings = POSTGRES_CONNECTION_OPTIONS.read(self.extra, POSTGRES_CONNECTION_OPTION_DEFAULTS)
         self.schema = settings["schema"]
+        configured_path = settings["search_path"]
+        server_path = self.server_settings.get("search_path")
+        if configured_path is not None and server_path is not None:
+            raise ConfigurationError(CONFLICTING_SEARCH_PATH)
+        self.search_path = configured_path
+        if self.search_path is None and server_path is not None:
+            self.search_path = SearchPath.parse(server_path)
+        if self.search_path is None and self.schema is not None:
+            self.search_path = SearchPath(self.schema)
+        if self.search_path is not None:
+            self.server_settings["search_path"] = self.search_path.to_setting()
         self.application_name = settings["application_name"]
         self.password_provider = PasswordProvider.from_settings(settings, self.password)
         if settings["tenant_schema_template"] is not None:
@@ -325,10 +285,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             raise ConfigurationError("direct_port needs direct_host - the server behind the pooler")
         self.pool_minsize: int = settings["min_size"]
         self.pool_maxsize: int = settings["max_size"]
-        if self.pool_minsize > self.pool_maxsize:
-            raise ConfigurationError(
-                f"min_size ({self.pool_minsize}) must not be greater than max_size ({self.pool_maxsize})"
-            )
         self.connect_max_retries: int = settings["connect_max_retries"]
         self.connect_retry_backoff_base_seconds: float = settings["connect_retry_backoff_base_seconds"]
         self.read_retry_max_retries: int = settings["read_retry_max_retries"]
@@ -349,24 +305,20 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         self._direct_client: Self | None = None
 
     @staticmethod
-    def _get_server_settings_with_utc_session(server_settings: dict[str, Any] | None) -> dict[str, Any]:
+    def _get_server_settings_with_utc_session(
+        server_settings: Mapping[str, Any] | Iterable[tuple[str, Any]] | None,
+    ) -> dict[str, Any]:
         """A copy of the configured ``server_settings`` with the session ``TimeZone`` set to UTC.
 
         Args:
-            server_settings: The configured settings, or None.
+            server_settings: A mapping or iterable of setting/value pairs, or None.
 
         Returns:
             The settings every connection is opened with.
 
         Raises:
-            ConfigurationError: The settings are no mapping (a DB_URL's ``?server_settings=`` text), or name a
-                ``TimeZone`` other than UTC.
+            ConfigurationError: The settings name a ``TimeZone`` other than UTC.
         """
-        if server_settings is not None and not isinstance(server_settings, Mapping):
-            raise ConfigurationError(
-                f"server_settings must be a mapping of PostgreSQL settings to values, got {server_settings!r} - "
-                "a DB_URL can't give one: set it in the connection's credentials"
-            )
         settings = dict(server_settings or {})
         for key in [key for key in settings if str(key).lower() == POSTGRES_SESSION_TIME_ZONE_SETTING.lower()]:
             configured_zone = settings.pop(key)
@@ -452,46 +404,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
                 await asyncio.sleep(delay)
                 attempt += 1
 
-    async def _execute_read_query_with_retry(
-        self,
-        function: CoroutineFunction[Any],
-        *args: Any,
-        sql: str | None = None,
-        parameters: list[Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        """Runs a read-only query, retrying on ``DBConnectionError`` with exponential backoff - each
-        retry takes a fresh pool connection. Never retried: a write, and an ``OperationalError`` (a
-        cancelled query leaves the connection usable). Off by default
-        (``read_retry_max_retries=0``). Each attempt is reported to the observers separately,
-        without the backoff sleep.
-        """
-        attempt = 0
-        while True:
-            attempt_start = time.perf_counter()
-            try:
-                result = await self._translate_exceptions(function, *args, **kwargs)
-            except DBConnectionError as error:
-                Observers.record_query(sql, parameters, attempt_start, error, self.connection_alias)
-                if attempt >= self.read_retry_max_retries:
-                    raise
-                delay = self.read_retry_backoff_base_seconds * (2**attempt)
-                self.log.debug(
-                    "Read query attempt %d/%d failed (%s), retrying in %.2fs",
-                    attempt + 1,
-                    self.read_retry_max_retries,
-                    error,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                attempt += 1
-            except Exception as error:
-                Observers.record_query(sql, parameters, attempt_start, error, self.connection_alias)
-                raise
-            else:
-                Observers.record_query(sql, parameters, attempt_start, None, self.connection_alias)
-                return result
-
     async def _pool_acquire(self) -> Any:
         """Takes one raw connection from the pool - each driver overrides it with its own timeout and
         exception translation.
@@ -563,8 +475,8 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             environment[POSTGRES_PASSWORD_ENVIRONMENT_VARIABLE] = password
         if self.application_name:
             environment[POSTGRES_SHELL_APPLICATION_NAME_VARIABLE] = self.application_name
-        if self.schema:
-            environment[POSTGRES_SHELL_OPTIONS_VARIABLE] = f"-c search_path={self.schema}"
+        if self.search_path is not None:
+            environment[POSTGRES_SHELL_OPTIONS_VARIABLE] = self.search_path.to_shell_option()
         return ShellCommand(tuple(arguments), environment)
 
     def get_shell_ssl_environment(self) -> dict[str, str]:
@@ -617,25 +529,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         """
         raise NotImplementedError("get_driver_error is not implemented")
 
-    async def _translate_exceptions(self, function: CoroutineFunction[Any], *args: Any, **kwargs: Any) -> Any:
-        """Runs ``func(self, ...)``, raising the driver's exceptions as hare's.
-
-        Args:
-            function: The method.
-            args: Its positional arguments.
-            kwargs: Its keyword arguments.
-
-        Returns:
-            What it returned.
-        """
-        try:
-            return await function(self, *args, **kwargs)
-        except Exception as driver_error:
-            error = self.get_driver_error(driver_error, args)
-            if error is None:
-                raise
-            raise error from driver_error
-
     async def close(self) -> None:
         self.closes_started += 1
         # Taken before anything is awaited: a pool opening after the close started (a query after
@@ -643,14 +536,16 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         template = self._template
         PoolRegistry.remove(self)
         direct_client = self._direct_client
+        self._direct_client = None
+        operations = [self.close_tenant_clients(), self._close()]
         if direct_client is not None:
-            self._direct_client = None
-            await direct_client.close()
-        await self.close_tenant_clients()
-        await self._close()
-        # Unless a pool opened meanwhile (a query after Connections.reconnect()) took its own.
-        if self._template is template:
-            self._template.clear()
+            operations.append(direct_client.close())
+        try:
+            await ResourceCompletion.wait_all(*operations)
+        finally:
+            # Unless a pool opened meanwhile (a query after Connections.reconnect()) took its own.
+            if self._template is template:
+                self._template.clear()
 
     async def enter_tenant_schema(self, schema_name: str) -> str:
         """Runs the rest of the transaction in another tenant's schema: its search path starts with
@@ -664,13 +559,10 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         """
         (row,) = await self.execute_dicts(POSTGRESQL_CURRENT_SEARCH_PATH_SQL)
         search_path = row["search_path"]
-        schemas = TransactionPooler.get_search_path_schemas(search_path)
-        if self.tenant_schema is not None and schemas[:1] == (self.tenant_schema,):
-            schemas = schemas[1:]
-        quote_identifier = self.dialect.literals.quote_identifier
+        path = SearchPath.parse(search_path).prepended(schema_name, replacing=self.tenant_schema)
         await self.execute_dicts(
             POSTGRESQL_SET_TRANSACTION_SEARCH_PATH_SQL,
-            [",".join(quote_identifier(schema) for schema in (schema_name, *schemas))],
+            [path.to_setting()],
         )
         return search_path
 
@@ -687,13 +579,17 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         schema on its search path, and an unqualified name created it there."""
         if self.tenant_schema is None:
             return table
-        shared_schema = (self.schema or "").removeprefix(f"{self.tenant_schema},") or POSTGRESQL_DEFAULT_SCHEMA
+        shared_schema = self.schema or POSTGRESQL_DEFAULT_SCHEMA
         return f"{self.dialect.literals.quote_identifier(shared_schema)}.{table}"
 
     def get_tenant_client_settings(self, schema_name: str) -> dict[str, Any]:
         """A search path of the tenant's schema, then the connection's own schema (``public``)."""
         return {
-            "schema": f"{schema_name},{self.schema or POSTGRESQL_DEFAULT_SCHEMA}",
+            "schema": self.schema,
+            "search_path": (self.search_path or SearchPath(self.schema or POSTGRESQL_DEFAULT_SCHEMA)).prepended(
+                schema_name, replacing=self.tenant_schema
+            ),
+            "server_settings": {key: value for key, value in self.server_settings.items() if key != "search_path"},
             "tenant_schema_template": None,
         }
 
@@ -800,9 +696,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
     async def db_create(self) -> None:
         if not self.database:
             raise ConfigurationError("Can't create a database without a configured database name")
-        if self.reusable_test_database_lease is not None:
-            await self._prepare_reusable_test_database()
-            return
         await self._create_database()
 
     async def _create_database(self) -> None:
@@ -822,9 +715,6 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
     async def db_delete(self) -> None:
         if not self.database:
             raise ConfigurationError("Can't drop a database without a configured database name")
-        if self.reusable_test_database_lease is not None:
-            await self._release_reusable_test_database()
-            return
         await self._reconnect(with_db=False)
         # A test database is dropped with whatever sessions are still on it - a pooler's, or one an
         # event loop closed in the middle of a query left running.
@@ -837,314 +727,8 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         finally:
             await self.close()
 
-    async def _prepare_reusable_test_database(self) -> None:
-        """Makes a leased test database exist and be empty: reuses it as is when this process
-        already reset it, takes the schema it kept for a context creating its models' schema
-        (``generate_schema()`` decides on it), resets it when it exists from before, creates it
-        otherwise."""
-        from hare.contrib.test.databases.reusable_test_databases import ReusableTestDatabases
-
-        assert self.database is not None and self.reusable_test_database_lease is not None  # nosec B101
-        self.leased_test_schema = None
-        self.kept_test_schema = ReusableTestDatabases.take_kept_schema(
-            self.database, self.reusable_test_database_lease
-        )
-        if self.kept_test_schema is None and not ReusableTestDatabases.is_clean(self.database):
-            if await self._database_exists():
-                await self._reset_database()
-            else:
-                await self._create_database()
-        ReusableTestDatabases.mark_used(self.database)
-
-    async def _release_reusable_test_database(self) -> None:
-        """Returns a leased test database to the pool: keeps the schema its context created, the rows
-        cleared, when the schema is unchanged, and resets the database otherwise - also when that
-        fails, leaving it marked as needing a reset before its next use."""
-        from hare.contrib.test.databases.reusable_test_databases import ReusableTestDatabases
-
-        assert self.database is not None and self.reusable_test_database_lease is not None  # nosec B101
-        if not ReusableTestDatabases.is_leased(self.database, self.reusable_test_database_lease):
-            return  # already released - the slot may belong to another context by now
-        leased_test_schema, self.leased_test_schema = self.leased_test_schema, None
-        self.kept_test_schema = None
-        is_clean = False
-        kept_schema = None
-        try:
-            if leased_test_schema is not None:
-                kept_schema = await self._run_on_server_session(
-                    lambda: self._clear_rows_on_its_session(leased_test_schema)
-                )
-            if kept_schema is None:
-                is_clean = await self._reset_database()
-        finally:
-            ReusableTestDatabases.release(
-                self.database, self.reusable_test_database_lease, is_clean=is_clean, kept_schema=kept_schema
-            )
-
-    async def generate_schema(self, safe: bool) -> None:
-        """Creates every model of this connection in the database - on a leased test database holding
-        the same schema from its previous lease, nothing: the schema stands, its rows cleared.
-
-        Args:
-            safe: Whether each object is created only when it doesn't exist yet.
-        """
-        from hare.contrib.test.databases.reusable_test_databases import ReusableTestDatabases
-
-        if self.reusable_test_database_lease is None:
-            await super().generate_schema(safe)
-            return
-        # Connected first, so the DDL is written for the features of the server's own version.
-        async with self.acquire_connection():
-            pass
-        schema = self.get_schema_sql(safe)
-        schema_key = ReusableTestSchemas.get_schema_key(schema)
-        kept_test_schema, self.kept_test_schema = self.kept_test_schema, None
-        if kept_test_schema is not None:
-            if kept_test_schema.schema_key == schema_key:
-                self.leased_test_schema = kept_test_schema
-                return
-            await self._reset_database()
-        self.log.debug("Creating schema: %s", schema)
-        if schema:
-            await self.execute_script(schema)
-        # Only the schema a context creates first thing is kept - a later call may follow DDL of the test.
-        if self.leased_test_schema is None and ReusableTestDatabases.may_keep_schema(
-            self.reusable_test_database_lease
-        ):
-            self.leased_test_schema = await ReusableTestSchemas.get_kept_schema(self, schema_key)
-
-    async def _database_exists(self) -> bool:
-        """Whether the configured database exists on the server.
-
-        Returns:
-            True if pg_database has it.
-        """
-        await self._reconnect(with_db=False)
-        try:
-            rows = await self.execute_dicts(POSTGRES_DATABASE_EXISTS_SQL, [self.database])
-        finally:
-            await self.close()
-        return bool(rows)
-
-    async def _reset_database(self) -> bool:
-        """Brings the configured database back to the state of a freshly created one without
-        dropping it: ends its other sessions, rolls back its prepared transactions, drops every
-        non-system schema (with the extensions installed in them), recreates the public schema
-        and clears database-level settings.
-
-        Returns:
-            False when the database does not exist, True once it was reset.
-        """
-        return await self._run_on_server_session(self._reset_database_on_its_session)
-
-    async def _run_on_server_session(self, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
-        """Runs a reset of the database on a session of the server's own past a transaction pooler: a
-        pooled session it ran on would stay in the pooler, the dropped extensions' objects cached -
-        PostGIS keeps their ids per session, and a query of a later test failed on the extension
-        created again.
-
-        Args:
-            operation: The reset, connecting and closing the client itself.
-
-        Returns:
-            What the operation returns.
-        """
-        pooled_address = self.host, self.port
-        if self.transaction_pooling and self.direct_host is not None:
-            self.host, self.port = self.direct_host, self.direct_port or self.port
-        try:
-            return await operation()
-        finally:
-            self.host, self.port = pooled_address
-
-    async def _end_other_sessions(self) -> None:
-        """Ends the database's other sessions and rolls back its prepared transactions."""
-        await self.execute(POSTGRES_TERMINATE_OTHER_DATABASE_SESSIONS_SQL)
-        for prepared_transaction_row in await self.execute_dicts(POSTGRES_DATABASE_PREPARED_TRANSACTIONS_SQL):
-            gid_literal = self.dialect.literals.get_string_literal_sql(prepared_transaction_row["gid"])
-            await self.execute_script(POSTGRES_ROLLBACK_PREPARED_SQL.format(gid_literal=gid_literal))
-
-    async def _get_settings_reset_statements(self) -> list[str]:
-        """The statements clearing the database's settings and its roles' settings in it.
-
-        Returns:
-            The statements.
-        """
-        role_setting_rows = await self.execute_dicts(POSTGRES_DATABASE_ROLE_SETTINGS_SQL)
-        quoted_database = self.dialect.literals.quote_identifier(self.database or "")
-        statements = [POSTGRES_RESET_DATABASE_SETTINGS_SQL.format(database=quoted_database)]
-        statements.extend(
-            POSTGRES_RESET_DATABASE_ROLE_SETTINGS_SQL.format(
-                role=role_setting_row["role_name"], database=quoted_database
-            )
-            for role_setting_row in role_setting_rows
-        )
-        return statements
-
-    async def _clear_rows_on_its_session(self, leased_test_schema: KeptTestSchema) -> KeptTestSchema | None:
-        """Empties a leased test database whose schema is unchanged, keeping the schema - on the
-        session the client's address opens.
-
-        Args:
-            leased_test_schema: The schema the lease's context created.
-
-        Returns:
-            The schema kept, or None when the database has to be reset instead.
-        """
-        try:
-            await self._reconnect(with_db=True)
-        except ConfigurationError:
-            await self.close()
-            return None
-        try:
-            await self._end_other_sessions()
-            kept_schema = await ReusableTestSchemas.clear_rows(self, leased_test_schema)
-            if kept_schema is not None:
-                await self.execute_script(";\n".join(await self._get_settings_reset_statements()))
-            return kept_schema
-        finally:
-            await self.close()
-
-    async def _reset_database_on_its_session(self) -> bool:
-        """``_reset_database()`` on the session the client's address opens.
-
-        Returns:
-            False when the database does not exist, True once it was reset.
-        """
-        try:
-            await self._reconnect(with_db=True)
-        except ConfigurationError:
-            await self.close()
-            if not await self._database_exists():
-                return False
-            raise
-
-        try:
-            await self._end_other_sessions()
-            schema_rows = await self.execute_dicts(POSTGRES_USER_SCHEMAS_SQL)
-            version_rows = await self.execute_dicts(POSTGRES_SERVER_VERSION_NUMBER_SQL)
-            statements = [
-                POSTGRES_DROP_SCHEMA_CASCADE_SQL.format(
-                    schema=self.dialect.literals.quote_identifier(schema_row["nspname"])
-                )
-                for schema_row in schema_rows
-            ]
-            if version_rows[0]["server_version_number"] >= POSTGRES_DATABASE_OWNER_PUBLIC_SCHEMA_VERSION_NUMBER:
-                statements.extend(POSTGRES_CREATE_PUBLIC_SCHEMA_STATEMENTS)
-            else:
-                statements.extend(POSTGRES_CREATE_LEGACY_PUBLIC_SCHEMA_STATEMENTS)
-            statements.extend(await self._get_settings_reset_statements())
-            await self.execute_script(";\n".join(statements))
-        finally:
-            await self.close()
-        return True
-
     def acquire_connection(self) -> ConnectionWrapper[Any] | PoolConnectionWrapper[Any]:
         return PoolConnectionWrapper(self)
-
-    @staticmethod
-    def _strip_comments_and_quoted_text(query: str) -> str:
-        """Blanks out comments (nested block comments included) and replaces every string
-        literal, quoted identifier and dollar-quoted string with a placeholder word.
-
-        Args:
-            query: The SQL text to inspect.
-
-        Returns:
-            The query text with only unquoted SQL left readable.
-        """
-        parts: list[str] = []
-        position = 0
-        while (token_match := SQL_COMMENT_OR_QUOTED_TEXT_RE.search(query, position)) is not None:
-            parts.append(query[position : token_match.start()])
-            token = token_match.group()
-            if token == "/*":  # nosec B105 - a comment marker, not a password
-                depth = 1
-                position = len(query)
-                for delimiter_match in SQL_BLOCK_COMMENT_DELIMITER_RE.finditer(query, token_match.end()):
-                    depth += 1 if delimiter_match.group() == "/*" else -1
-                    if depth == 0:
-                        position = delimiter_match.end()
-                        break
-                parts.append(" ")
-            elif token.startswith("--"):
-                parts.append(" ")
-                position = token_match.end()
-            else:
-                parts.append(SQL_QUOTED_TEXT_PLACEHOLDER)
-                position = token_match.end()
-        parts.append(query[position:])
-        return "".join(parts)
-
-    @staticmethod
-    def _get_main_statement_text(query: str) -> str:
-        """The query's main statement with comments and quoted text blanked out, every
-        parenthesized group removed and any leading ``WITH`` CTE list skipped.
-
-        Args:
-            query: The SQL text to inspect.
-
-        Returns:
-            The main statement's remaining top-level text.
-        """
-        remaining = PostgresqlClient._strip_comments_and_quoted_text(query)
-        while True:
-            reduced = PARENTHESIZED_GROUP_RE.sub(" ", remaining)
-            if reduced == remaining:
-                break
-            remaining = reduced
-        cte_introducer_match = CTE_INTRODUCER_RE.match(remaining)
-        if cte_introducer_match is None:
-            return remaining
-        remaining = remaining[cte_introducer_match.end() :]
-        while (cte_definition_match := CTE_DEFINITION_RE.match(remaining)) is not None:
-            remaining = remaining[cte_definition_match.end() :]
-        return remaining
-
-    @staticmethod
-    def _is_write_without_returning(query: str) -> bool:
-        """Whether `query` is an UPDATE/DELETE/INSERT/MERGE with no top-level RETURNING clause -
-        one that reports an affected-row count instead of result rows. Comments, quoted text,
-        CTEs (``[NOT] MATERIALIZED`` included) and a RETURNING inside a CTE are all accounted for.
-        Worked out once per statement text - a write of one row sends the same text every time.
-
-        Args:
-            query: The SQL text to inspect.
-
-        Returns:
-            True if the caller should read an affected-row count rather than fetch result rows.
-        """
-        if len(query) > WRITE_STATEMENT_TYPE_CACHED_TEXT_MAX_LENGTH:
-            return PostgresqlClient._reads_write_without_returning(query)
-        key = (query,)
-        is_write_without_returning = PostgresqlClient.write_statement_types.get(key)
-        if is_write_without_returning is None:
-            is_write_without_returning = PostgresqlClient._reads_write_without_returning(query)
-            PostgresqlClient.write_statement_types[key] = is_write_without_returning
-        return is_write_without_returning
-
-    @staticmethod
-    def _reads_write_without_returning(query: str) -> bool:
-        """``_is_write_without_returning()`` read off the statement text itself.
-
-        Args:
-            query: The SQL text to inspect.
-
-        Returns:
-            True if the caller should read an affected-row count rather than fetch result rows.
-        """
-        leading_word_match = LEADING_WORD_RE.match(query)
-        leading_word = leading_word_match.group(1).upper() if leading_word_match else ""
-        if leading_word in WRITE_STATEMENT_KEYWORDS:
-            if RETURNING_CLAUSE_RE.search(query) is None:
-                return True
-        elif leading_word_match is not None and leading_word != "WITH":
-            return False
-        main_statement = PostgresqlClient._get_main_statement_text(query)
-        main_keyword_match = LEADING_WORD_RE.match(main_statement)
-        if main_keyword_match is None or main_keyword_match.group(1).upper() not in WRITE_STATEMENT_KEYWORDS:
-            return False
-        return RETURNING_CLAUSE_RE.search(main_statement) is None
 
     async def _ensure_connection(self) -> None:
         """Creates the pool on first use - once, whichever task gets there first.
@@ -1215,7 +799,7 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
             return pool, connection
 
     @abc.abstractmethod
-    async def execute_many(self, query: str, values: list[Any]) -> None:
+    async def execute_many(self, query: str, values: list[Any], *, recovery: StatementRecovery | None = None) -> None:
         raise NotImplementedError("execute_many is not implemented")
 
     @abc.abstractmethod
@@ -1226,6 +810,8 @@ class PostgresqlClient(DatabaseClient, abc.ABC):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
+        recovery: StatementRecovery | None = None,
     ) -> StatementResult:
         raise NotImplementedError("execute is not implemented")
 

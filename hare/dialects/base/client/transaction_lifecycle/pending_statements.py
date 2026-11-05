@@ -25,14 +25,7 @@ class PendingStatements:
         """
         top_level_transaction = client._outer_transaction or client
         if top_level_transaction._begin_pending:
-            if top_level_transaction._shielded_begin_abandoned_task is not None:
-                raise TransactionManagementError(TRANSACTION_BEGIN_ABANDONED_MESSAGE)
-            # Shielded for the reason PendingStatements.send_pending_begin() gives.
-            await TransactionEnding.run_shielded_from_cancellation(
-                top_level_transaction._driver_send_begin(),
-                on_landed=top_level_transaction._mark_begin_sent,
-                on_timeout=top_level_transaction._mark_begin_operation_abandoned,
-            )
+            await PendingStatements.send_pending_begin(top_level_transaction)
         if top_level_transaction._pending_savepoints:
             await PendingStatements.send_pending_savepoints(client)
 

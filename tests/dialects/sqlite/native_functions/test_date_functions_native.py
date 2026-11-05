@@ -11,8 +11,6 @@ from hare.dialects.sqlite.functions.datetime.sqlite_date_part_extraction import 
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.sql.enums import TruncType
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]

@@ -6,6 +6,10 @@ import ipaddress
 import re
 import uuid
 
+CLICKHOUSE_PHYSICAL_TYPE_CACHE_SIZE = 1024
+CLICKHOUSE_TYPE_CONTAINERS = frozenset({"Array", "Map", "Tuple", "Nested", "Nullable", "LowCardinality", "Variant"})
+CLICKHOUSE_DECIMAL_TYPE_PRECISIONS = {"Decimal32": 9, "Decimal64": 18, "Decimal128": 38, "Decimal256": 76}
+
 #: The start of a dictionary-encoded column type - ``LowCardinality(T)``.
 CLICKHOUSE_LOW_CARDINALITY_PREFIX = "LowCardinality("
 #: The numbers an ``Enum8`` and an ``Enum16`` hold.
@@ -65,11 +69,9 @@ CLICKHOUSE_DYNAMIC_INTEGER_TYPES = (
 )
 #: The most digits a ``Decimal(P, S)`` holds.
 CLICKHOUSE_DECIMAL_MAX_PRECISION = 76
-#: The start of a ClickHouse type name -> the Python types the drivers read its values as (None: those
-#: of the type inside); a longer start is matched first.
-CLICKHOUSE_READ_PYTHON_TYPES: tuple[tuple[str, tuple[type, ...] | None], ...] = (
-    ("LowCardinality(", None),
-    ("Nullable(", None),
+#: The start of a parsed ClickHouse type name -> the Python types the drivers read its values as.
+#: Nullable/LowCardinality wrappers are removed before lookup; a longer start is matched first.
+CLICKHOUSE_READ_PYTHON_TYPES: tuple[tuple[str, tuple[type, ...]], ...] = (
     ("DateTime", (datetime.datetime,)),
     ("Date", (datetime.date,)),
     ("Decimal", (decimal.Decimal,)),
@@ -84,9 +86,9 @@ CLICKHOUSE_READ_PYTHON_TYPES: tuple[tuple[str, tuple[type, ...] | None], ...] = 
     ("UUID", (uuid.UUID,)),
     ("IPv4", (ipaddress.IPv4Address,)),
     ("IPv6", (ipaddress.IPv6Address,)),
-    ("Array(", (list,)),
-    ("Tuple(", (tuple,)),
-    ("Map(", (dict,)),
+    ("Array", (list,)),
+    ("Tuple", (tuple,)),
+    ("Map", (dict,)),
 )
 #: The least integer a literal is read as a ``UInt64`` from - which no signed integer of an array or a map
 #: shares a type with, so such a value of a signed field is written with its type.

@@ -4,6 +4,8 @@ from typing import Any, ClassVar
 
 from hare.exceptions import QueryError
 from hare.query.expressions import Function
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -14,6 +16,10 @@ from hare.sql.terms.term import Term
 
 class Collate(Function):
     """A text value compared and sorted by a collation of the database: ``Collate("name", "C")``."""
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),), keywords=(("expression", ArgumentRole.FIELD),)
+    )
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (

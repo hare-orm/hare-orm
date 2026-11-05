@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.exceptions import QueryError, ValidationError
 from hare.fields.enums import RelationType
@@ -12,8 +12,6 @@ from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.relation_key_values import RelationKeyValues
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.sql.builder.tables.table import Table
-
-TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
@@ -136,7 +134,7 @@ class ThroughDefaults:
             return []
         relation_columns = set(relation.field.forward_keys) | set(relation.field.backward_keys)
         provided = ThroughDefaults.given_field_names(through_model, through_defaults)
-        default_fields: list[tuple[str, Field[Any]]] = []
+        default_names: list[str] = []
         for field_name, field_object in through_model._meta.fields_map.items():
             column_name = field_object.source_field or field_name
             if (
@@ -152,8 +150,13 @@ class ThroughDefaults:
                 or getattr(field_object, "auto_now", False)
                 or getattr(field_object, "auto_now_add", False)
             ):
-                default_fields.append((column_name, field_object))
-        return default_fields
+                default_names.append(field_name)
+        if not default_names:
+            return []
+        names = RowWriteRules.get(through_model, WriteType.INSERT, default_names, ADD_METHOD_NAME).field_names
+        return [
+            (field.source_field or name, field) for name in names for field in (through_model._meta.fields_map[name],)
+        ]
 
     @staticmethod
     async def through_model_default_values(
@@ -170,11 +173,13 @@ class ThroughDefaults:
         """
         if not default_fields:
             return []
+        # Local import: saving imports the query and relation classes during model initialization.
+        from hare.models.instances.instance_saving import InstanceSaving
+
         through_model = relation.field.through_model_class
         assert through_model is not None  # nosec B101
         row_instance = through_model()
-        for field_name, awaitable_default in row_instance._await_when_save.items():
-            setattr(row_instance, field_name, await awaitable_default())
+        await InstanceSaving.set_async_default_field(row_instance)
         RowWriteRules.get(through_model, WriteType.INSERT, None, ADD_METHOD_NAME).stamp(
             (row_instance,), InstanceValues()
         )

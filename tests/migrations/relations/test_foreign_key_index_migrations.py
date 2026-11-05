@@ -285,7 +285,7 @@ async def test_unique_together_leading_with_the_foreign_key_replaces_its_index(
 
 
 @pytest.mark.asyncio
-async def test_unnamed_partial_index_on_the_foreign_key_column_takes_the_place_of_its_index(
+async def test_unnamed_partial_index_coexists_with_the_foreign_key_index(
     round_trip: ReversibleRoundTrip,
 ) -> None:
     def build_version() -> tuple[type[Model], ...]:
@@ -301,7 +301,7 @@ async def test_unnamed_partial_index_on_the_foreign_key_column_takes_the_place_o
     models = build_models(build_version)
     await round_trip.migrate_to(*models)
 
-    assert len(await round_trip.get_plain_index_names("fkm_partial_child")) == 1
+    assert len(await round_trip.get_plain_index_names("fkm_partial_child")) == 2
     assert round_trip.get_pending_operations(*models) == []
 
 

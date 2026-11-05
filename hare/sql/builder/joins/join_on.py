@@ -11,9 +11,9 @@ from hare.sql.sql_context import SqlContext
 if TYPE_CHECKING:
     from typing import Self
 
-    from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.selectable import Selectable
     from hare.sql.builder.tables.table import Table
+    from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.builder.joins.join import Join
 
 
@@ -24,7 +24,7 @@ class JoinOn(Join):
         self,
         item: Selectable,
         how: JoinType,
-        criteria: QueryBuilder,
+        criteria: Criterion,
         collate: str | None = None,
     ) -> None:
         super().__init__(item, how)
@@ -42,10 +42,10 @@ class JoinOn(Join):
             collate=f" COLLATE {self.collate}" if self.collate else "",
         )
 
-    def validate(self, _from: Sequence[Table], _joins: Sequence[Table]) -> None:
-        criterion_tables = set([field.table for field in self.criterion.fields_()])
+    def validate(self, _from: Sequence[Selectable], _joins: Sequence[Join]) -> None:
+        criterion_tables: set[Selectable | None] = {field.table for field in self.criterion.fields_()}
         available_tables = set(_from) | {join.item for join in _joins} | {self.item}
-        missing_tables = criterion_tables - available_tables  # type:ignore[operator]
+        missing_tables = criterion_tables - available_tables
         if missing_tables:
             raise JoinException(
                 "Invalid join criterion. One field is required from the joined item and "

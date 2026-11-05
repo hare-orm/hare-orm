@@ -100,6 +100,7 @@ class EncryptedTextField(EncryptedFieldBase, TextField):
             raise FieldError("A blind index compares the field's own column, not an expression over it")
         return operator(ColumnTerm(column, table=term.table), value)
 
+    @FieldEncryption.bind()
     def to_lookup_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         if not self.blind_index:
             return super().to_lookup_value(value, instance)
@@ -108,12 +109,14 @@ class EncryptedTextField(EncryptedFieldBase, TextField):
         TextValues.raise_if_not_text(self, value)
         return FieldEncryption.get_blind_index(value)
 
+    @FieldEncryption.bind()
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> str | None:
         value = super().to_db_value(value, instance)
         if value is None:
             return None
         return FieldEncryption.encrypt(value)
 
+    @FieldEncryption.bind()
     def from_db_value(self, value: Any) -> str | None:
         if value is None:
             return None

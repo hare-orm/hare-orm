@@ -2,49 +2,32 @@ from pathlib import Path
 
 import pytest
 
-from hare import Hare
-from hare.core.config import AppConfig, ConnectionConfig, HareConfig
+from hare.core.config import HareConfig
 from hare.migrations.api.migration_request_parser import MigrationRequestParser
 from hare.migrations.api.plan import plan
 from hare.migrations.exceptions import UnknownMigrationError
-from hare.migrations.execution.executor import MigrationTarget, PlanStep
-from hare.migrations.migration import Migration
+from hare.migrations.execution.executor import MigrationTarget
 
 pytestmark = pytest.mark.sqlite_only
-
-
-def _sqlite_config(**app_kwargs) -> HareConfig:
-    return HareConfig(
-        connections={
-            "default": ConnectionConfig(
-                engine="sqlite+aiosqlite",
-                credentials={"file_path": ":memory:"},
-            )
-        },
-        apps={
-            "models": AppConfig(models=["tests.shared_models.testmodels"], default_connection="default", **app_kwargs)
-        },
-    )
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_plan_unknown_app_label():
     with pytest.raises(UnknownMigrationError, match="Unknown app label"):
-        await plan(config=_sqlite_config(), app_labels=["ghost"])
+        await plan(
+            config=HareConfig.from_db_url(
+                "sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]}
+            ),
+            app_labels=["ghost"],
+        )
 
 
 @pytest.mark.asyncio
 async def test_plan_no_migrations_configured_returns_header_only():
-    config = HareConfig(
-        connections=_sqlite_config().connections,
-        apps={"models": AppConfig(models=["tests.unmigrated.models"], default_connection="default")},
-    )
-    try:
-        output = await plan(config=config)
-    finally:
-        await Hare.close_connections()
-    assert output == ["# Connection: default"]
+    config = HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.unmigrated.models"]})
+    output = await plan(config=config)
+    assert [(group.connection_alias, group.steps) for group in output] == [("default", ())]
 
 
 @pytest.mark.database_independent
@@ -128,21 +111,8 @@ async def test_plan_with_scoped_target_does_not_report_other_connections(
             },
         },
     }
-    try:
-        output = await plan(config=config, target="planscopedapp")
-    finally:
-        await Hare.close_connections()
+    output = await plan(config=config, target="planscopedapp")
 
-    assert output == ["# Connection: conn_a", "+ planscopedapp.0001_initial"]
-
-
-@pytest.mark.database_independent
-def test_format_steps_forward_and_backward():
-    forward = PlanStep(migration=Migration("0001_initial", "app_a"), backward=False)
-    backward = PlanStep(migration=Migration("0002_second", "app_a"), backward=True)
-    lines = PlanStep.format_steps([forward, backward], "default")
-    assert lines == [
-        "# Connection: default",
-        "+ app_a.0001_initial",
-        "- app_a.0002_second",
-    ]
+    assert [
+        (group.connection_alias, [(str(step.migration), step.backward) for step in group.steps]) for group in output
+    ] == [("conn_a", [("planscopedapp.0001_initial", False)])]

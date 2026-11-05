@@ -24,11 +24,11 @@ class PydanticListModel(RootModel[Any]):
         """Returns a serializable pydantic model instance that contains a list of models, from
         the provided queryset.
 
-        This will prefetch all the relations automatically.
+        Delegates relation loading and item validation to the configured submodel's
+        ``from_queryset()``, then validates the list wrapper.
 
         Args:
             queryset: a queryset on the model this PydanticListModel is based on.
         """
         submodel = cls.model_config["submodel"]  # type: ignore[typeddict-item]
-        fetch_fields = submodel._get_fetch_fields()
-        return cls.model_validate(submodel._validate_prefetched(list(await queryset.prefetch_related(*fetch_fields))))
+        return cls.model_validate(await submodel.from_queryset(queryset))

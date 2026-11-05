@@ -14,8 +14,10 @@ from hare.contrib.mypy.constants import (
     UNKNOWN_NAME_MESSAGE,
 )
 from hare.contrib.mypy.mypy_types import MypyTypes
+from hare.contrib.mypy.values_selection_types import ValuesSelectionTypes
 from hare.exceptions import HareError
-from hare.query.enums import Lookup
+from hare.query.enums import Lookup, RowShape
+from hare.query.queryset.selection.values_selection import ValuesSelection
 
 if TYPE_CHECKING:
     from mypy.nodes import Expression
@@ -54,53 +56,76 @@ class ValuesRowTypes:
         return_type = get_proper_type(method_context.default_return_type)
         if queryset_arguments is None or not isinstance(call, CallExpr) or not isinstance(return_type, Instance):
             return method_context.default_return_type
+        return_type = ValuesSelectionTypes.store(return_type, None, mypy_types)
         model, queryset_type = queryset_arguments
         annotations = AnnotationTypes.get_annotations(method_context.type, queryset_type)
         if annotations is None or not isinstance(call.callee, MemberExpr):
-            return method_context.default_return_type
+            return return_type
         method_name = call.callee.name
         is_values_list = method_name == "values_list"
         #: What each name selects - a string literal naming a path, an expression, or None for the
         #: path the name itself is.
-        selected: dict[str, Expression | None] = {}
+        selected: list[tuple[str, Expression | None]] = []
         flags: dict[str, bool] = {}
         for name, argument_style, expression in zip(call.arg_names, call.arg_kinds, call.args, strict=True):
             if argument_style == ARG_POS and isinstance(expression, StrExpr):
-                selected[expression.value] = None
+                selected.append((expression.value, None))
             elif argument_style == ARG_NAMED and is_values_list and name in {"flat", "named"}:
                 if not isinstance(expression, NameExpr) or expression.fullname not in {TRUE_FULLNAME, FALSE_FULLNAME}:
-                    return method_context.default_return_type
+                    return return_type
                 flags[name] = expression.fullname == TRUE_FULLNAME
             elif argument_style == ARG_NAMED and name is not None:
-                selected[name] = expression
+                selected.append((name, expression))
             else:
-                return method_context.default_return_type
+                return return_type
         if flags.get("named"):
-            return method_context.default_return_type
-        if not selected:
+            return return_type
+        implicit_all = not selected
+        if implicit_all:
             names = [name for name in model._meta.fields_map if name in model._meta.fields_db_projection]
             names += [name for name in annotations.items if name in annotations.required_keys]
-            selected = dict.fromkeys(names)
-        types_by_name = {
-            name: self.get_selected_type(mypy_types, model, annotations.items, method_name, name, expression, call)
-            for name, expression in selected.items()
-        }
+            selected = [(name, None) for name in names]
+        selected_types = [
+            (name, self.get_selected_type(mypy_types, model, annotations.items, method_name, name, expression, call))
+            for name, expression in selected
+        ]
         if not is_values_list:
+            types_by_name = dict(selected_types)
             row_type: Type = TypedDictType(
                 types_by_name,
                 set(types_by_name),
                 set(),
                 method_context.api.named_generic_type(TYPED_DICT_FALLBACK_FULLNAME, []),
             )
-        elif flags.get("flat") and len(types_by_name) == 1:
-            row_type = next(iter(types_by_name.values()))
+        elif flags.get("flat") and len(selected_types) == 1:
+            row_type = selected_types[0][1]
         else:
             row_type = TupleType(
-                list(types_by_name.values()), method_context.api.named_generic_type(TUPLE_FULLNAME, [mypy_types.any()])
+                [value_type for _, value_type in selected_types],
+                method_context.api.named_generic_type(TUPLE_FULLNAME, [mypy_types.any()]),
             )
         # The result is a QuerySet, which keeps the annotations in its own parameter - a queryset class
         # of the project's own kept them out of sight.
-        return return_type.copy_modified(args=[return_type.args[0], row_type, annotations])
+        selection = (
+            ValuesSelection(
+                RowShape.FLAT if flags.get("flat") else RowShape.TUPLE,
+                field_names=tuple(name for name, _ in selected),
+            )
+            if is_values_list
+            else ValuesSelection(
+                RowShape.DICT,
+                renamed_fields=tuple(
+                    (name, expression.value if isinstance(expression, StrExpr) else name)
+                    for name, expression in selected
+                ),
+            )
+        )
+        return ValuesSelectionTypes.store(
+            return_type.copy_modified(args=[return_type.args[0], row_type, annotations]),
+            selection,
+            mypy_types,
+            implicit_all=implicit_all,
+        )
 
     @staticmethod
     def get_selected_type(

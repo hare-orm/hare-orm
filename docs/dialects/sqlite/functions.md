@@ -30,7 +30,7 @@ operators call.
 | Numbers | `hare_stddev_pop`, `hare_stddev_samp`, `hare_var_pop`, `hare_var_samp` | `StdDev()` and `Variance()` as aggregates and window functions. |
 | Text | `hare_text_<name>`: `left`, `right`, `lpad`, `rpad`, `repeat`, `reverse`, `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` | The text and hash functions SQLite lacks — see [Text functions](#text-functions). |
 | JSON | `hare_json_path`, `hare_json_datetime` | A path with a digit segment and a date compared with a JSON value — see [JSON](#json). |
-| Full-text search | `hare_full_text_query` | The search text as an FTS5 query whose words are never read as FTS5 syntax — see [Full-text search](../search-and-geodata/full-text-search.md). |
+| Full-text search | `hare_full_text_query` | `PLAIN`, `PHRASE` and `WEBSEARCH` quote search terms; `RAW` passes FTS5 query syntax through — see [Full-text search](../search-and-geodata/full-text-search.md). |
 | Regular expressions | `regexp`, `match` | `__posix_regex` and `__iposix_regex`, only on a connection with `install_regexp_functions=true` — see [Regular expressions](#regular-expressions). |
 | Vectors | sqlite-vec, `hare_vector_negative_inner_product` | The `VectorField` distances, only on a connection with `load_sqlite_vec=true` — see [Vector search](../search-and-geodata/vector-search.md). |
 
@@ -85,7 +85,8 @@ before any SQL is sent. hare adds the meaning of its own paths:
 - a path with a digit segment is an object's key or an array's index, whichever the value at that point
   is (`hare_json_path`);
 - a date compared with a JSON value is read as `timestamp` or `timestamptz`, fractional seconds cut at
-  microseconds (`hare_json_datetime`).
+  microseconds (`hare_json_datetime`). The entire value must be an ISO date or datetime, without
+  surrounding whitespace; invalid text produces SQL `NULL`.
 
 The rest is SQLite's own:
 
@@ -98,8 +99,9 @@ The rest is SQLite's own:
 - `has_key`, `has_keys` and `has_any_keys` find a key of an object only (`json_type()`);
 - a value read as text is SQLite's stored text, without spaces after `,` and `:`, and so is a `Cast()` to
   text and a `Concat()` of it; a text lookup of a path matches the text `json_extract()` gives;
-- `JSONObject()` and `JSONArray()` are written by `json_object()`: a boolean as 1 or 0, a float with 15
-  significant digits (17 from SQLite 3.53), a moment or a time as its stored text, bytes as uppercase hex, a
+- `JSONObject()` uses `json_object()` and `JSONArray()` uses `json_array()`: a boolean as 1 or 0,
+  a float with 15 significant digits (17 from SQLite 3.53), a moment or a time as its stored text,
+  bytes as uppercase hex, a
   JSON value nested;
 - a null byte inside a JSON value is stored as it is.
 
@@ -111,7 +113,8 @@ With `install_regexp_functions=true` in the connection URL, hare registers `rege
 which SQLite's `REGEXP` and `MATCH` operators call, and `Features.supports_posix_regex` is on. A pattern
 is a Python `re` pattern, with its syntax and semantics: `__iposix_regex` is `re.IGNORECASE`, and
 PostgreSQL's `[[:digit:]]`, `\y` or `(?n)` aren't translated. An invalid pattern raises with Python's
-message. Python's `re` doesn't guard against catastrophic backtracking: a pattern as short
+message. Patterns longer than 1,000 characters are refused (`MAX_REGEX_PATTERN_LENGTH`). This length
+limit does not prevent catastrophic backtracking in Python's `re`: a pattern as short
 as `(a+)+$` can hold the connection, so never pass a pattern from user input unchecked.
 
 ## <a id="function-errors"></a>Errors
@@ -146,5 +149,8 @@ class Book(Model):
         indexes = (Index(Trunc("published", "month"), name="book_published_month"),)
 ```
 
-The same goes for `Extract()`, `Cast()`, the `JSONField` path lookups and the regular expression lookups.
+This restriction applies to variants that require a registered function: `Extract()`, temporal casts,
+`JSONField` paths with numeric segments and regular expression lookups. Native numeric or text casts
+and JSON paths containing only string keys do not require such a function; this restriction does not
+rule them out. An expression using them can still require a function elsewhere in its SQL.
 Date and time arithmetic there raises `ConfigurationError`: SQLite has no SQL for it.

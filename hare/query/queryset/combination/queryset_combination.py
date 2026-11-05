@@ -7,6 +7,7 @@ from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.fields.generated_field import GeneratedField
+from hare.query.execution.messages import DEPENDENT_SET_OPERATION
 from hare.query.queryset.combination.combination import Combination
 from hare.sql.enums import SetOperation
 
@@ -56,6 +57,8 @@ class QuerySetCombination:
         if selects_values and set_operation is not SetOperation.UNION_ALL:
             for branch in (queryset, *other_querysets):
                 QuerySetCombination.raise_if_encrypted_values_compared(branch, set_operation)
+        if any(branch._execution_dependencies for branch in (queryset, *other_querysets)):
+            raise QueryError(DEPENDENT_SET_OPERATION)
         combination = queryset._combination
         combined_rows_are_one_branch = combination is not None and bool(
             queryset._orderings or queryset._limit is not None or queryset._offset or queryset._is_none

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.schema.runtime_statements.table_clearing import TableClearing
+from hare.dialects.sqlite.client.sqlite_pragma_scope import SqlitePragmaScope
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -23,11 +24,8 @@ class SqliteTableClearing(TableClearing):
     async def clear_tables(cls, connection: DatabaseClient, quoted_tables: Sequence[str]) -> None:
         # Foreign keys are switched off meanwhile - a self-referencing or circular relation has no
         # delete order that satisfies them.
-        await connection.execute_script("PRAGMA foreign_keys = OFF")
-        try:
+        async with SqlitePragmaScope.run(connection, "foreign_keys", "OFF"):
             await super().clear_tables(connection, quoted_tables)
-        finally:
-            await connection.execute_script("PRAGMA foreign_keys = ON")
 
     @classmethod
     def defer_cascade_foreign_keys(

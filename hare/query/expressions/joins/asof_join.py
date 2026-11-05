@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -10,10 +11,11 @@ from hare.query.expressions.conditions.query_modifier import QueryModifier
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.joins.named_join import NamedJoin
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.subqueries.outer_reference import OuterReference
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 from hare.query.expressions.subqueries.subquery import Subquery
-from hare.query.lookup_info.lookup_paths import LookupPaths
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.query.plans.recording.plan_recording import PlanRecording
@@ -56,6 +58,8 @@ class AsofJoin(NamedJoin):
             model's fields with ``OuterReference()``; ``source`` is neither a model nor a queryset of model
             rows.
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     plannable = True
 
@@ -189,15 +193,20 @@ class AsofJoin(NamedJoin):
                 "have (Features.supports_asof_join)"
             )
         joins = self.get_joins(expression_context)
-        term, path_joins, output_field = LookupPaths.get_nested_field(
-            self.model,
-            joins[-1][0],
+        bound_path = BoundLookupPath.bind(
+            replace(
+                expression_context,
+                model=self.model,
+                table=joins[-1][0],
+                annotations={},
+                select_related_extra_conditions=None,
+                select_related_path_prefix="",
+            ),
             field_path,
-            visibility=expression_context.visibility,
-            dialect=expression_context.dialect,
-            connection=expression_context.connection,
         )
-        return ExpressionResult(term=term, joins=joins + path_joins, output_field=output_field)
+        return ExpressionResult(
+            term=bound_path.term, joins=joins + list(bound_path.joins), output_field=bound_path.field
+        )
 
     def get_joins(self, expression_context: ExpressionContext) -> list[TableCriterionTuple]:
         """The JOINs: those its condition's ``OuterReference()`` through a relation needs, then its own.

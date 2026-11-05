@@ -17,7 +17,6 @@ from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.fields.citext_field import CitextField
 from hare.dialects.postgresql.indexes import BloomIndex, GinIndex, GistIndex
 from hare.migrations.autodetection.operation_generator import OperationGenerator
-from hare.migrations.autodetection.required_extensions import RequiredExtensions
 from hare.migrations.operations import CreateExtension, CreateModel
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
@@ -52,8 +51,8 @@ def get_model_state(**options: object) -> ModelState:
 )
 def test_an_index_names_the_extension_it_needs(index, extension) -> None:
     model_state = get_model_state(indexes=[index])
-    assert RequiredExtensions.get_for_model_state(model_state, DialectRegistry.get_dialects()) == {extension}
-    assert RequiredExtensions.get_for_model_state(model_state, [DialectRegistry.get_dialect("sqlite")]) == set()
+    assert model_state.get_required_extensions(DialectRegistry.get_dialects()) == {extension}
+    assert model_state.get_required_extensions([DialectRegistry.get_dialect("sqlite")]) == set()
 
 
 @pytest.mark.database_independent
@@ -69,7 +68,7 @@ def test_an_index_names_the_extension_it_needs(index, extension) -> None:
 )
 def test_an_index_needing_no_extension_names_none(index) -> None:
     model_state = get_model_state(indexes=[index])
-    assert RequiredExtensions.get_for_model_state(model_state, DialectRegistry.get_dialects()) == set()
+    assert model_state.get_required_extensions(DialectRegistry.get_dialects()) == set()
 
 
 @pytest.mark.database_independent

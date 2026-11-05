@@ -14,13 +14,15 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import Self
 
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class ExistsTerm(Criterion):
     """EXISTS (<child SELECT>) - the child query's params share one SqlContext/parameterizer with
     the outer one, as a ``Subquery``'s do, so bind-parameter numbers
     don't diverge between the outer and the correlated child query."""
+
+    structure_attributes = ("inner_query",)
 
     is_subquery = True
     rewrites_inner_correlation = True
@@ -29,9 +31,8 @@ class ExistsTerm(Criterion):
         super().__init__()
         self.inner_query = inner_query
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.inner_query.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.inner_query
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
@@ -96,7 +97,7 @@ class ExistsTerm(Criterion):
         )
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        features = sql_context.dialect.features
+        features = sql_context.effective_features
         if features.supports_correlated_subqueries and not features.rewrites_correlated_exists:
             sql = f"EXISTS {self.inner_query.get_sql(sql_context)}"
         elif (union_parts := self.get_union_parts()) is not None:

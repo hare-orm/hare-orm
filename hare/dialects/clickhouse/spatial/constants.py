@@ -15,7 +15,7 @@ CLICKHOUSE_AREA_GEOMETRY_TYPES = frozenset({GeometryType.POLYGON, GeometryType.M
 #: The radius of the sphere a geography's spherical measures are taken on, in meters - ClickHouse
 #: measures on a sphere of radius one (WGS 84's mean radius).
 CLICKHOUSE_EARTH_RADIUS_METERS = 6_371_008.8
-#: The relations of a point and an area ClickHouse tests - a point on the area's border counts as in it.
+#: The relations of a point and an area ClickHouse tests; border points have no guaranteed classification.
 CLICKHOUSE_POINT_IN_AREA_RELATIONS = frozenset(
     {
         SpatialRelation.INTERSECTS,
@@ -53,7 +53,7 @@ CLICKHOUSE_AREA_FUNCTIONS = {
 CLICKHOUSE_AREA_DISTANCE_FUNCTIONS = ("polygonsDistanceCartesian", "polygonsDistanceSpherical")
 #: The distance of two points - planar, and on the WGS 84 ellipsoid in meters (longitude, latitude).
 CLICKHOUSE_POINT_DISTANCE_FUNCTIONS = ("L2Distance", "geoDistance")
-#: Whether a point is in an area (its border included).
+#: Whether a point is in an area; border points have no guaranteed classification.
 CLICKHOUSE_POINT_IN_POLYGON_FUNCTION = "pointInPolygon"
 #: The function writing a geometry as well-known text.
 CLICKHOUSE_AS_TEXT_FUNCTION = "wkt"

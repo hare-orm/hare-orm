@@ -2,122 +2,77 @@ import pytest
 
 from hare import Connections
 from hare.contrib.test import requires_features
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
-from hare.dialects.postgresql.functions.spatial import STDistance, STDWithin
 from hare.exceptions import ValidationError
+from hare.gis import Point, PointField
+from hare.gis.functions import Distance, DWithin
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.query.expressions import F
 from tests.dialects.postgresql.models_postgis import Place, PlaceWithValidatedLocation
 
 
 @pytest.mark.database_independent
-def test_to_db_value_wraps_wrong_shape():
-    """PostGISField.to_db_value does `latitude, longitude = value` with no check that `value`
-    actually unpacks to exactly 2 elements first - a wrong-shape value (e.g. a 3-tuple, or a
-    non-iterable) raised a bare ValueError/TypeError instead of the framework's own catchable
-    ValidationError, same unwrapped-exception bug class as every other field's own conversion
-    step fixed this session."""
-    field = PostGISField()
+@pytest.mark.parametrize("value", [(1.0, 2.0, 3.0), 123])
+def test_a_geography_value_requires_a_geometry(value):
     with pytest.raises(ValidationError):
-        field.to_db_value((1.0, 2.0, 3.0), Place)
-    with pytest.raises(ValidationError):
-        field.to_db_value(123, Place)
+        PointField(geography=True).to_db_value(value, Place)
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_postgis_round_trip(db_postgis):
-    place = await Place.objects.create(name="Moscow center", location=(55.7558, 37.6173))
+async def test_geography_round_trip_preserves_asymmetric_coordinates(db_postgis):
+    point = Point(37.6173, 55.7558, srid=4326)
+    place = await Place.objects.create(name="City centre", location=point)
     reread = await Place.objects.get(id=place.id)
-    assert reread.location == (55.7558, 37.6173)
+    assert reread.location == point
+    assert reread.location.x == 37.6173
+    assert reread.location.y == 55.7558
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_postgis_stdwithin_uses_gist_index(db_postgis):
-    near = await Place.objects.create(name="Near", location=(55.75, 37.62))
-    await Place.objects.create(name="Far", location=(50.0, 30.0))
-
-    results = (
-        await Place.objects.all().annotate(within=STDWithin("location", (55.7558, 37.6173), 5000)).filter(within=True)
-    )
-    assert [p.id for p in results] == [near.id]
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_postgis_within_km_lookup_matches_stdwithin(db_postgis):
-    near = await Place.objects.create(name="Near", location=(55.75, 37.62))
-    await Place.objects.create(name="Far", location=(50.0, 30.0))
-
-    via_lookup = await Place.objects.filter(location__within_km=(55.7558, 37.6173, 5.0))
-    via_stdwithin = (
-        await Place.objects.all().annotate(within=STDWithin("location", (55.7558, 37.6173), 5000)).filter(within=True)
-    )
-    assert [p.id for p in via_lookup] == [near.id]
-    assert [p.id for p in via_lookup] == [p.id for p in via_stdwithin]
+async def test_dwithin_lookup_and_expression_use_the_same_distance_units(db_postgis):
+    near = await Place.objects.create(name="Near", location=Point(37.62, 55.75))
+    await Place.objects.create(name="Far", location=Point(30.0, 50.0))
+    point = Point(37.6173, 55.7558)
+    via_lookup = await Place.objects.filter(location__dwithin=(point, 5000))
+    via_expression = await Place.objects.annotate(within=DWithin("location", point, 5000)).filter(within=True)
+    assert [obj.id for obj in via_lookup] == [near.id]
+    assert [obj.id for obj in via_expression] == [near.id]
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_postgis_stdistance_orders_by_meters(db_postgis):
-    moscow = await Place.objects.create(name="Moscow center", location=(55.7558, 37.6173))
-    kyiv = await Place.objects.create(name="Kyiv", location=(50.0, 30.0))
-
+async def test_distance_orders_geography_by_meters(db_postgis):
+    near = await Place.objects.create(name="Near", location=Point(37.6173, 55.7558))
+    far = await Place.objects.create(name="Far", location=Point(30.0, 50.0))
     rows = (
-        await Place.objects.all()
-        .annotate(dist=STDistance("location", (55.7558, 37.6173)))
-        .order_by("dist")
-        .values("id", "dist")
+        await Place.objects.annotate(distance=Distance("location", Point(37.6173, 55.7558)))
+        .order_by("distance")
+        .values("id", "distance")
     )
-    assert rows[0]["id"] == moscow.id
-    assert rows[0]["dist"] < 1
-    assert rows[-1]["id"] == kyiv.id
-    assert rows[-1]["dist"] > 500_000
+    assert [row["id"] for row in rows] == [near.id, far.id]
+    assert rows[0]["distance"] < 1
+    assert rows[1]["distance"] > 500_000
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_within_km_lookup_runs_the_field_s_own_validators_on_the_query_point(db_postgis):
-    """__within_km's own value_encoder used to skip field_object.to_db_value()/validate()
-    entirely for the query point - a custom validators=[...] on the field never ran for it, even
-    though create()/save() already run it for a stored point."""
-    await PlaceWithValidatedLocation.objects.create(name="Moscow center", location=(55.7558, 37.6173))
+@pytest.mark.parametrize("operation", ["lookup", "predicate", "distance"])
+async def test_spatial_query_arguments_run_field_validators(db_postgis, operation):
+    await PlaceWithValidatedLocation.objects.create(name="North", location=Point(37.6173, 55.7558))
+    point = Point(151.2093, -33.8688)
     with pytest.raises(ValidationError, match="northern hemisphere"):
-        await PlaceWithValidatedLocation.objects.filter(location__within_km=(-33.8688, 151.2093, 5.0))
+        if operation == "lookup":
+            await PlaceWithValidatedLocation.objects.filter(location__dwithin=(point, 5000))
+        elif operation == "predicate":
+            await PlaceWithValidatedLocation.objects.annotate(near=DWithin("location", point, 5000)).values("near")
+        else:
+            await PlaceWithValidatedLocation.objects.annotate(distance=Distance("location", point)).values("distance")
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_stdwithin_runs_the_field_s_own_validators_on_the_query_point(db_postgis):
-    """STDWithin used to build the geography literal straight from the raw query point via
-    as_geography_term(), skipping the target field's own validate() - same bug class as
-    __within_km above."""
-    await PlaceWithValidatedLocation.objects.create(name="Moscow center", location=(55.7558, 37.6173))
-    with pytest.raises(ValidationError, match="northern hemisphere"):
-        await (
-            PlaceWithValidatedLocation.objects.all()
-            .annotate(within=STDWithin("location", (-33.8688, 151.2093), 5000))
-            .filter(within=True)
-        )
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_stdistance_runs_the_field_s_own_validators_on_the_query_point(db_postgis):
-    """Same bug class as the two tests above, for STDistance."""
-    await PlaceWithValidatedLocation.objects.create(name="Moscow center", location=(55.7558, 37.6173))
-    with pytest.raises(ValidationError, match="northern hemisphere"):
-        await (
-            PlaceWithValidatedLocation.objects.all()
-            .annotate(dist=STDistance("location", (-33.8688, 151.2093)))
-            .values("dist")
-        )
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_the_tables_and_views_of_the_extension_are_no_models(db_postgis):
-    # spatial_ref_sys, geometry_columns, geography_columns are PostGIS's: drift and inspectdb skip them.
+async def test_extension_tables_and_views_are_not_models(db_postgis):
     connection = Connections.get("models")
     table_names = await DatabaseCatalog.get_table_names(connection)
     view_names = [name for name, _is_materialized, _triggers in await DatabaseCatalog.get_views(connection)]
@@ -128,65 +83,59 @@ async def test_the_tables_and_views_of_the_extension_are_no_models(db_postgis):
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_a_not_equal_filter_of_a_point_leaves_the_equal_row_out(db_postgis):
-    """geography has an = operator and no <>: __not and __not_in compared its text on rust_pg - every row
-    "not equal", an update of them too - and failed on asyncpg."""
-    await Place.objects.create(id=1, name="a", location=(1, 2))
-    await Place.objects.create(id=2, name="b", location=(3, 4))
-    assert await Place.objects.filter(location__not=(1, 2)).values_list("id", flat=True) == [2]
-    assert await Place.objects.filter(location__not_in=[(1, 2)]).values_list("id", flat=True) == [2]
-    assert await Place.objects.filter(location__not_in=[(1, 2), (3, 4)]).count() == 0
-    assert await Place.objects.filter(location__not=(1, 2)).update(name="c") == 1
+async def test_geography_inequality_excludes_equal_points_for_reads_and_writes(db_postgis):
+    first, second = Point(2, 1), Point(4, 3)
+    await Place.objects.create(id=1, name="a", location=first)
+    await Place.objects.create(id=2, name="b", location=second)
+    assert await Place.objects.filter(location__not=first).values_list("id", flat=True) == [2]
+    assert await Place.objects.filter(location__not_in=[first]).values_list("id", flat=True) == [2]
+    assert await Place.objects.filter(location__not_in=[first, second]).count() == 0
+    assert await Place.objects.filter(location__not=first).update(name="c") == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("location", "message"),
-    [
-        ((91, 0), "latitude 91 is off the globe"),
-        ((0, 181), "longitude 181 is off the globe"),
-        ((float("nan"), 0), "latitude nan is off the globe"),
-        (("1e5", "0"), "latitude takes a number, got str"),
-        ((True, False), "latitude takes a number, got bool"),
-    ],
-    ids=["latitude", "longitude", "nan", "text", "bool"],
-)
-async def test_a_point_off_the_globe_is_refused(db_postgis, location, message):
-    """PostGIS wrapped it around the globe - (91, 0) read back as (89, 0), (0, 181) as (0, -179) - and
-    stored NaN; a numeric text was parsed by the database."""
-    with pytest.raises(ValidationError, match=message):
-        await Place.objects.create(id=1, name="a", location=location)
+@pytest.mark.parametrize("coordinates", [(0, 91), (181, 0), (0, float("nan")), ("0", "1e5"), (True, False)])
+async def test_invalid_geography_coordinates_are_refused_before_storage(db_postgis, coordinates):
+    with pytest.raises(ValidationError):
+        await Place.objects.create(name="Invalid", location=Point(*coordinates))
     assert await Place.objects.count() == 0
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "build",
-    [
-        lambda point: Place.objects.annotate(dist=STDistance("location", point)).values("dist"),
-        lambda point: Place.objects.annotate(near=STDWithin("location", point, 5000)).filter(near=True),
-    ],
-    ids=["stdistance", "stdwithin"],
-)
-async def test_a_query_point_off_the_globe_is_refused_by_a_reused_plan_too(db_postgis, build):
-    """The point was checked only while the plan was built - after one valid query, (91, 2) wrapped
-    around the globe and NaN or text measured 0 meters."""
-    await Place.objects.create(id=1, name="a", location=(5, 5))
-    await build((5, 5))
-    for point, message in (((91, 2), "off the globe"), ((float("nan"), 2), "off the globe"), (("1", "2"), "str")):
-        with pytest.raises(ValidationError, match=message):
-            await build(point)
+@pytest.mark.parametrize("function", [Distance, DWithin])
+async def test_a_later_query_validates_its_current_geography(db_postgis, function):
+    await Place.objects.create(name="Valid", location=Point(5, 5))
+
+    def build(point):
+        expression = function("location", point, *([5000] if function is DWithin else []))
+        return Place.objects.annotate(result=expression).values("result")
+
+    await build(Point(5, 5))
+    with pytest.raises(ValidationError, match="off the globe"):
+        await build(Point(2, 91))
+    with pytest.raises(ValidationError):
+        await build("POINT(2 NaN)")
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("radius", ["10", True, float("nan"), float("inf"), -5])
-async def test_a_radius_that_is_no_finite_number_of_zero_or_more_is_refused(db_postgis, radius):
-    """A text radius went to the database repeated a thousand times, True was 1 km, NaN, infinity and a
-    negative radius ran silently - and the two drivers answered a text radius of STDWithin differently."""
-    with pytest.raises(ValidationError, match="radius"):
-        await Place.objects.filter(location__within_km=(1, 2, radius))
-    with pytest.raises(ValidationError, match="radius"):
-        STDWithin("location", (1, 2), radius)
+async def test_distance_predicates_reject_invalid_radii(db_postgis, radius):
+    with pytest.raises(ValidationError, match="distance"):
+        await Place.objects.filter(location__dwithin=(Point(2, 1), radius))
+    with pytest.raises(ValidationError, match="distance"):
+        DWithin("location", Point(2, 1), radius)
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_dwithin_accepts_geometry_and_radius_expressions(db_postgis):
+    place = await Place.objects.create(name="Here", location=Point(37.6173, 55.7558))
+    result = (
+        await Place.objects.filter(pk=place.pk)
+        .annotate(near=DWithin("location", F("location"), F("id")))
+        .values_list("near", flat=True)
+    )
+    assert result == [True]

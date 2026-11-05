@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -87,12 +86,12 @@ class CountQuery(RowsSummaryQuery):
             )
         return DistinctCount(self._effective_basetable()[self.model._meta.db_pk_column]).distinct()
 
-    def __await__(self) -> Generator[Any, None, int]:
+    async def _execute_bound(self) -> int:
         if self._is_none:
-            return self._execute_none().__await__()
+            return await self._execute_none()
         query = self._get_execution_query()
         query._make_query_to_run()
-        return query._execute_with_retry_context(query._execute()).__await__()
+        return await query._execute_reading(query._execute())
 
     async def _execute_none(self) -> int:
         return 0
@@ -101,7 +100,7 @@ class CountQuery(RowsSummaryQuery):
         connection = self._connection
         by_position = connection.features.supports_positional_rows
         _, result = await connection.execute(
-            *self._get_parameterized_sql(), returns_rows=True, rows_by_position=by_position
+            *self._get_parameterized_sql(), returns_rows=True, rows_by_position=by_position, retry_read=True
         )
         if not result:
             return 0

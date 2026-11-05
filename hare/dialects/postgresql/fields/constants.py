@@ -56,18 +56,6 @@ MULTIRANGE_SPAN_PATH_SEGMENT = "span"
 
 MULTIRANGE_SPAN_PATH_FUNCTION = "range_merge"
 
-#: The methods a range field reads a value through - a subclass overriding one reads it in Python.
-RANGE_READING_METHOD_NAMES = (
-    "from_db_value",
-    "to_python",
-    "get_range",
-    "canonicalize",
-    "coerce_bound",
-    "get_python_bound",
-    "get_python_range",
-    "get_infinite_bound",
-)
-
 #: hstore path segments reading every key or value as a text array, by the PostgreSQL function.
 HSTORE_ARRAY_PATH_FUNCTIONS = {"keys": "akeys", "values": "avals"}
 
@@ -111,7 +99,6 @@ EXPORTED_MODULES = {
     "NaiveDatetimeField": "hare.dialects.postgresql.fields.naive_datetime_field",
     "NaiveTimeField": "hare.dialects.postgresql.fields.naive_time_field",
     "NativeEnumField": "hare.dialects.postgresql.fields.native_enum",
-    "PostGISField": "hare.dialects.postgresql.fields.postgis_field",
     "Range": "hare.dialects.postgresql.fields.ranges",
     "RangeField": "hare.dialects.postgresql.fields.ranges",
     "TSVectorField": "hare.dialects.postgresql.fields.ts_vector_field",

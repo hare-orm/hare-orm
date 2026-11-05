@@ -3,22 +3,29 @@ of its filters and the values of its writes, its managers and the methods of its
 
 from __future__ import annotations
 
+import ast
+import dataclasses
+import sys
 from enum import StrEnum
+from types import MappingProxyType, ModuleType
 from typing import Annotated, Literal
 
 import pytest
 
-from hare import fields
+from hare import Hare, fields
 from hare.core.config import HareConfig
+from hare.core.registries import Registries
 from hare.dialects.postgresql.postgresql_dialect import PostgresqlDialect
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
 from hare.models import Model
+from hare.query.enums import LookupValueShape
 from hare.query.queryset.extensions import QuerySetExtensions
 from hare.stubs.model_stub import ModelStub
 from hare.stubs.stub_imports import StubImports
 from hare.stubs.stub_writer import StubWriter
 from hare.stubs.value_type_text import ValueTypeText
 from hare.typing_info.bound_models import BoundModels
+from hare.typing_info.declarations import ValueType
 from tests.stubs.stub_configs import CONFIG, MANAGERS_STUB_PATH, STUB_PATH, write_stubs
 
 pytestmark = pytest.mark.database_independent
@@ -26,6 +33,42 @@ pytestmark = pytest.mark.database_independent
 
 class StubStatus(StrEnum):
     ACTIVE = "active"
+
+
+@pytest.mark.parametrize("shadowed", (False, True))
+def test_generated_signatures_and_value_shapes_use_builtin_import_names(monkeypatch, shadowed):
+    module = ModuleType("stub_builtin_signatures")
+    if shadowed:
+        for name in ("str", "dict", "tuple", "list", "bool", "property"):
+            setattr(module, name, object())
+    module.Book = type(
+        "Book",
+        (Model,),
+        {"__module__": module.__name__, "id": fields.IntField(primary_key=True)},
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    Hare.bind_models(
+        {
+            "connections": {"default": "sqlite+aiosqlite://:memory:"},
+            "apps": {"models": {"models": [module.__name__]}},
+        }
+    )
+    imports = StubImports(module.__name__)
+    stub = ModelStub(module.Book, SqliteDialect(), imports, 0)
+    declarations = "\n".join(stub.get_declarations())
+    primary_key = "class Book:\n" + "\n".join(stub.get_primary_key_lines())
+    prefix = "builtins_" if shadowed else ""
+    assert f"defaults: {prefix}dict[{prefix}str, Any]" in declarations
+    assert f"-> {prefix}tuple[Book, {prefix}bool]" in declarations
+    assert f"*fields_: {prefix}str, flat: {prefix}bool = False, named: {prefix}bool" in declarations
+    assert f"@{prefix}property" in primary_key
+
+    value_text = ValueTypeText(imports)
+    assert value_text.get_text(ValueType(classes=(int,), shape=LookupValueShape.RANGE)) == (
+        f"{prefix}tuple[int | None, int | None] | {prefix}list[int | None]"
+    )
+    assert value_text.get_class_text((int, str)) == f"{prefix}tuple[int, {prefix}str]"
+    ast.parse("\n".join([*imports.render(), declarations, primary_key]))
 
 
 @pytest.mark.parametrize(
@@ -93,7 +136,7 @@ def test_a_stub_declares_the_methods_of_the_dialect(tmp_path, monkeypatch):
     def first_matching(builder, extension_query, condition):
         return builder
 
-    monkeypatch.setattr(QuerySetExtensions, "registered", {})
+    monkeypatch.setattr(Registries, "snapshot", dataclasses.replace(Registries.snapshot, methods=MappingProxyType({})))
     QuerySetExtensions.register("first_rows", SqliteDialect, first_rows)
     QuerySetExtensions.register(
         "first_matching", SqliteDialect, first_matching, reads_query=True, takes_condition=True
@@ -189,5 +232,24 @@ def test_a_stub_takes_the_values_and_paths_of_ranges_geometries_and_addresses(po
     )
     # An address is read as an ipaddress object - on an instance and from values_list().
     assert "    address: Field[IPv4Address | IPv6Address]" in text
-    assert "def values_list(self, field: Literal['address'], /, *, flat: Literal[True], named: Literal[False] = "
-    assert "False) -> QuerySet[Booking, IPv4Address | IPv6Address, Any]: ..." in text
+    queryset = next(
+        node for node in ast.parse(text).body if isinstance(node, ast.ClassDef) and node.name == "BookingQuerySet"
+    )
+    overloads = [
+        node
+        for node in queryset.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "values_list"
+        and len(node.args.posonlyargs) == 2
+        and ast.unparse(node.args.posonlyargs[1].annotation) == "Literal['address']"
+    ]
+    assert len(overloads) == 1
+    signature = overloads[0]
+    assert [argument.arg for argument in signature.args.posonlyargs] == ["self", "field"]
+    assert [(argument.arg, ast.unparse(argument.annotation)) for argument in signature.args.kwonlyargs] == [
+        ("flat", "Literal[True]"),
+        ("named", "Literal[False]"),
+    ]
+    assert signature.args.kw_defaults[0] is None
+    assert ast.literal_eval(signature.args.kw_defaults[1]) is False
+    assert ast.unparse(signature.returns) == "QuerySet[Booking, IPv4Address | IPv6Address, Any]"

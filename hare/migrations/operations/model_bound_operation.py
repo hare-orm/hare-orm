@@ -6,7 +6,6 @@ from hare.ddl.conditions.field_condition import FieldCondition
 from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 
 if TYPE_CHECKING:
@@ -14,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ModelBoundOperation(HareOperation):
-    """Mixin for an operation whose database_forward/database_backward act on one named
+    """Base for an operation whose database_forward/database_backward act on one named
     model - `self.model_name` - resolved from whichever State the direction requires."""
 
     model_name: str
@@ -38,7 +37,7 @@ class ModelBoundOperation(HareOperation):
             return None
         return self.get_models_labels(app_label, [self.model_name], self.get_fields())
 
-    def get_changed_model_keys(self, app_label: str, field: Any) -> set[tuple[str, str]]:
+    def get_changed_model_keys(self, app_label: str, field: Any, state: State) -> set[tuple[str, str]]:
         """The models a change of one of this model's fields changes - the model, and the model a
         foreign key or one-to-one field points at.
 
@@ -51,7 +50,7 @@ class ModelBoundOperation(HareOperation):
         """
         changed_model_keys = {(app_label, self.model_name)}
         if isinstance(field, DIRECT_RELATION_FIELDS):
-            changed_model_keys.add(StateApps.split_reference(field.model_name))
+            changed_model_keys.add(state.get_model_key(field.model_name))
         return changed_model_keys
 
     def _model(self, state: State, app_label: str) -> type[Model]:

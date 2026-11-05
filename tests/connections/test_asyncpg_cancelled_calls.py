@@ -7,8 +7,6 @@ import pytest
 
 from hare.dialects.postgresql.drivers.asyncpg.client.asyncpg_client import AsyncpgClient  # noqa: E402
 
-REQUIRES = ("asyncpg",)
-
 pytestmark = pytest.mark.database_independent
 
 

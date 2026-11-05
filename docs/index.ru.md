@@ -4,8 +4,9 @@
 моделями. Модели — обычные классы, запросы строятся лениво через `QuerySet`, а миграции создаются по
 изменениям моделей. См. [Если вы пришли с Django](getting-started/coming-from-django.ru.md).
 
-- **Быстрая.** Драйвер PostgreSQL на Rust разбирает строки и преобразует значения вне Python, а каждая
-  форма запроса строится один раз: повторный запрос только подставляет новые значения — см.
+- **Быстрая.** Драйвер PostgreSQL на Rust разбирает строки и преобразует значения вне Python. Планы
+  поддерживаемых форм запросов кэшируются: повторные выполнения подставляют новые значения, пока план в
+  кэше — см.
   [Производительность](benchmarks/index.ru.md).
 - **Связи как надо.** Составные первичные ключи везде — и как цель внешнего ключа, обобщённые связи из
   настоящих внешних ключей, `select_related()`/`prefetch_related()` с условиями, рекурсивные запросы по
@@ -14,12 +15,13 @@
   представления, материализованные представления, функции, последовательности, политики защиты строк,
   права и секционирование описываются в `Meta` модели, а создают и меняют их миграции — см.
   [Схема в `Meta`](#schema-in-meta).
-- **Готовые прикладные приёмы.** Мягкое удаление, версии строк, разделение данных по арендаторам (по
+- **Готовые прикладные приёмы.** Мягкое удаление, разделение данных по арендаторам (по
   колонке, по схеме или защитой строк в самой базе), оптимистичная блокировка, отслеживание изменённых
-  полей и transactional outbox — опции `Meta` — см. [Поведение в `Meta`](#behavior-in-meta).
+  полей и transactional outbox — опции `Meta`; версии строк используют `VersionedModel` — см.
+  [Поведение в `Meta`](#behavior-in-meta).
 - **Миграциям можно доверять.** Они выводятся из моделей, проверяются на операции, блокирующие
-  нагруженную таблицу, сравниваются с живой базой (`hare drift`) и создаются по существующей базе
-  (`hare inspectdb`) — см. [Миграции](#migrations).
+  нагруженную таблицу, и сравниваются с живой базой (`hare drift`). `hare inspectdb` восстанавливает
+  модели по существующей базе — см. [Миграции](#migrations).
 - **Каждая база — на своих условиях.** SQLite, PostgreSQL и ClickHouse — диалекты на том же публичном
   API, которым пользуется сторонний пакет; с PostgreSQL приходят его типы, индексы, PostGIS, pgvector,
   полнотекстовый поиск и `LISTEN`/`NOTIFY`, а база без нужной возможности отвечает понятной ошибкой
@@ -67,15 +69,16 @@ from library.models import Author, Book
 
 async def main() -> None:
     await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models": ["library.models"]}))
-    await Hare.generate_schemas()
+    try:
+        await Hare.generate_schemas()
 
-    author = await Author.objects.create(name="Ursula K. Le Guin")
-    await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
+        author = await Author.objects.create(name="Ursula K. Le Guin")
+        await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
 
-    async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
-        print(book.title, "—", book.author.name)
-
-    await Hare.close_connections()
+        async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
+            print(book.title, "—", book.author.name)
+    finally:
+        await Hare.close_connections()
 
 
 asyncio.run(main())
@@ -208,9 +211,8 @@ await Book.objects.bulk_create(books, on_conflict=["isbn"], update_fields=["pric
 - **Операции над множествами** (`union()`, `intersection()`, `difference()`), `FilteredRelation`,
   `Lateral`, `JsonTable`, CTE (`with_cte()`), `distinct(<fields>)`, случайная выборка и
   `iterator()`/`stream()` для больших результатов.
-- **[Кэш планов запросов](querying/query-plan-cache.ru.md)** хранит SQL каждой формы запроса: второй
-  `filter(title__icontains=...)` с другим значением не строит запрос заново, а только подставляет
-  значение.
+- **[Кэш планов запросов](querying/query-plan-cache.ru.md)** хранит скомпилированные планы поддерживаемых
+  форм. Повторные выполнения подставляют новые значения, пока план остаётся в ограниченном кэше.
 - **[Готовый SQL](querying/raw-sql.ru.md)**, когда он нужен: `RawSQL(...)` внутри запроса, `raw()` с
   экземплярами моделей, `execute_sql()`.
 
@@ -410,21 +412,38 @@ SQLite, PostgreSQL и ClickHouse — диалекты одного API; что �
 | `UPDATE` на месте | ✓ | ✓ | мутация, которая завершается до возврата из вызова, или лёгкий `UPDATE` |
 | Полнотекстовый поиск (`__search`, `SearchRank`, `SearchHeadline`) | FTS5 | `tsvector` | — |
 | Векторный поиск (`VectorField`, `CosineDistance`) | sqlite-vec | pgvector | — |
-| Геометрия (`PointField`, `__dwithin`, `__contains`) | SpatiaLite | PostGIS | гео-типы ClickHouse |
+| Геометрия | Поля и предикаты SpatiaLite | Поля и предикаты PostGIS | Геометрические типы и функции ClickHouse |
 
 ```python
-from hare import Connections
 from hare.dialects.postgresql.functions import TrigramSimilarity
 from hare.search import SearchQuery, SearchRank, SearchType
-from hare.vectors import CosineDistance
 
-await Book.objects.filter(description__search=SearchQuery("white whale", search_type=SearchType.PHRASE))
-await Book.objects.annotate(rank=SearchRank(("title", "description"), "white whale")).order_by("-rank")
-await Book.objects.annotate(distance=CosineDistance("embedding", query_vector)).order_by("distance")[:10]
+await Book.objects.filter(title__search=SearchQuery("white whale", search_type=SearchType.PHRASE))
+await Book.objects.annotate(rank=SearchRank("title", "white whale")).order_by("-rank")
 await Author.objects.annotate(score=TrigramSimilarity("name", "Gerard")).filter(score__gt=0.3)
-
-listener = await Connections.get("default").listen("book_returned", on_notify)   # LISTEN/NOTIFY в PostgreSQL
 ```
+
+Эти запросы полнотекстового и триграммного поиска предназначены для PostgreSQL; для триграммного поиска
+объявите `pg_trgm` в `Author.Meta.extensions` (см. [триграммный поиск](dialects/postgresql/trigrams.ru.md)).
+Для векторного поиска
+объявите модель в настроенном модуле моделей до инициализации и создайте её схему миграциями:
+
+```python
+from hare import fields
+from hare.models import Model
+from hare.vectors import CosineDistance, VectorField
+
+
+class BookVector(Model):
+    id = fields.IntField(primary_key=True)
+    embedding = VectorField(dimensions=3)
+
+
+query_vector = [0.1, 0.2, 0.3]
+await BookVector.objects.annotate(distance=CosineDistance("embedding", query_vector)).order_by("distance")[:10]
+```
+
+PostgreSQL также поддерживает [подписку на уведомления](dialects/postgresql/listen-notify.ru.md).
 
 PostgreSQL добавляет `ArrayField`, поля диапазонов и мультидиапазонов, `HStoreField`, `CitextField`,
 [PostGIS](dialects/search-and-geodata/gis.ru.md), поиск по триграммам и `unaccent`, а также индексы GIN,
@@ -480,8 +499,9 @@ async def list_books(books: BookQuery = RequestQueryDependency.provide(BookQuery
 [Robyn](integrations/robyn.ru.md) открывают ORM вместе с приложением, могут выполнять каждый запрос в
 транзакции и превращают ошибки ORM в HTTP-статусы; схемы [Pydantic](integrations/pydantic.ru.md)
 создаются по моделям, а воркеры [taskiq](integrations/taskiq.ru.md) выполняют каждую задачу в пределах
-арендатора кода, который её отправил, помечают её запросы задачей, а сама задача отправляется только
-после фиксации транзакции, которая её поставила.
+арендатора кода, который её отправил, и помечают её запросы задачей.
+[`TaskiqDelivery.kiq_on_commit()`](integrations/taskiq.ru.md#kiq-on-commit) отправляет задачи через outbox
+после фиксации транзакции, которая их поставила.
 
 ## <a id="observability"></a>Наблюдаемость
 
@@ -507,7 +527,8 @@ async with RepeatedQueryDetector(threshold=10, window_seconds=1.0):  # пред�
 
 ## <a id="testing-and-type-checking"></a>Тесты и проверка типов
 
-Фабрики создают объекты теста, плагин pytest даёт каждому тесту базу, а плагин mypy проверяет запросы до
+Фабрики создают объекты теста, фикстуры pytest управляют тестовыми базами и изоляцией, а mypy проверяет
+запросы до
 запуска — см. [Настройка тестов](testing/setup.ru.md).
 
 ```python
@@ -539,10 +560,11 @@ rows = await Book.objects.values("id", "title", "author__name")
 reveal_type(rows[0])   # TypedDict({'id': int, 'title': str, 'author__name': str})
 ```
 
-Плагин pytest создаёт тестовые базы, изолирует каждый тест транзакцией, которая затем откатывается, и
-запускает тест только там, где у базы есть нужные ему возможности;
-[плагин mypy и заглушки для pyright](querying/type-checking.ru.md) проверяют фильтры, сортировки и
-`values()` по моделям.
+Фикстуры pytest создают тестовые базы на сессию. `hare_db` изолирует изменения откатом транзакции или
+очисткой таблиц; `hare_transactional_db` допускает настоящие коммиты и затем очищает таблицы.
+`hare_requires` отбирает тесты по возможностям базы.
+[Плагин mypy](querying/type-checking.ru.md) проверяет фильтры, сортировки и `values()` по моделям;
+заглушки также дают pyright типы моделей, полей и связей.
 
 ## <a id="where-to-go-next"></a>Что дальше
 

@@ -18,6 +18,9 @@ from hare.query.queryset.pending_calls.pending_filter_calls import PendingFilter
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.statements.awaitable_query import AwaitableQuery
+from hare.query.statements.building.query_conditions import QueryConditions
+from hare.query.statements.building.query_grouping import QueryGrouping
+from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.identifiers import Identifiers
 from hare.sql.order import Order
@@ -67,6 +70,28 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         # The LIMIT the build put in the statement (or its matching-rows subquery).
         self._limit_term: ValueWrapper | None = None
 
+    def _build_matching_rows(self, value_wrapper_references: RecordedValueReferences | None) -> None:
+        """Build the SELECT whose filters and slice select the rows to write.
+
+        UPDATE and DELETE turn this selection into their statement directly or match its
+        primary keys through a subquery. Filter aggregates receive their required grouping.
+
+        Args:
+            value_wrapper_references: The bound values recorded for a statement plan, if any.
+        """
+        self.query = self._get_base_query()
+        if self._limit is not None:
+            self.query._limit = self._limit_term = self.query._wrapper_class(self._limit)
+            QueryOrdering.get_ordering(
+                self, self.model, self.model._meta.basetable, self._get_slice_orderings(), self._annotations
+            )
+
+        QueryConditions.get_filters(self, value_wrapper_references=value_wrapper_references)
+        self._record_matching_rows_limit(value_wrapper_references)
+        # An aggregate annotation in the filters needs its GROUP BY, or the HAVING aggregates over
+        # the whole joined result.
+        QueryGrouping.apply_auto_group_by(self)
+
     def _restrict_to_keys(self, pks: list[Any]) -> None:
         """Narrows the write to the rows of some primary keys - the rows read before it, so a row
         committed by another transaction in between is left as it is.
@@ -112,7 +137,7 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         if moved_keys:
             # The rows are read again by the keys the write gave them.
             read_before = {moved_keys[pk]: values for pk, values in read_before.items()}
-            pks = [moved_keys[pk] for pk in pks]
+            pks = list(moved_keys.values())
         await captured.capture_read(read_before, pks)
         return count, pks
 
@@ -179,7 +204,7 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         description = self._get_build_plan_description()
         if description is None:
             return None, None
-        return description, StatementPlans.find(description.structure)
+        return description, StatementPlans.find(self.model, description.structure)
 
     def _get_build_plan_description(self) -> PlanDescription | None:
         self._raise_if_rows_unwritable()
@@ -231,6 +256,8 @@ class MatchingRowsQuery(AwaitableQuery[Any]):
         Raises:
             QueryError: The rows are such rows.
         """
+        if self._extension_calls:
+            WrittenTargetChecks.raise_if_refused_calls(self)
         if self._offset or (self._limit is not None and not self.features.supports_update_limit_order_by):
             raise QueryError(f"Cannot {self._get_written_method_name()}() a query once a slice has been taken.")
         if self._distinct_on:

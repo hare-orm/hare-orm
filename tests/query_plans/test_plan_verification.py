@@ -3,13 +3,41 @@ its description, by the calls of its queryset, by a direct ``get()`` - is compar
 query built in full, and a plan giving another statement is caught."""
 
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.statements.awaitable_query import AwaitableQuery
 from tests.plan_verification.exceptions import PlanMismatchError
 from tests.plan_verification.plan_verification import PlanVerification
 from tests.shared_models.testmodels import IntFields
+
+
+def test_verification_rejects_close_but_different_automatic_timestamps():
+    moment = datetime.now(UTC)
+    assert not PlanVerification.parameter_matches(moment, moment + timedelta(microseconds=1))
+
+
+def test_verification_rejects_different_strings_that_resemble_encrypted_tokens():
+    assert not PlanVerification.parameter_matches("gAAAAA-first", "gAAAAA-other")
+
+
+def test_failed_verifier_installation_restores_already_patched_methods():
+    class FailingVerification(PlanVerification):
+        originals = []
+
+        @classmethod
+        def patch(cls, owner, name, make_replacement):
+            if name == "find":
+                raise RuntimeError("installation failed")
+            super().patch(owner, name, make_replacement)
+
+    original = AwaitableQuery._make_query_to_run
+    with pytest.raises(RuntimeError, match="installation failed"):
+        FailingVerification.install()
+    assert AwaitableQuery._make_query_to_run is original
+    assert not FailingVerification.originals
 
 
 @contextmanager
@@ -34,7 +62,7 @@ def broken_plans_of(model: type):
     for the block."""
     original_sqls = {
         id(plan): (plan, plan.sql)
-        for plan in StatementPlans.plans.values()
+        for plan in StatementPlans.plans.get_model_bucket(model).values()
         if plan.sql is not None and model._meta.db_table in plan.sql
     }
     for plan, sql in original_sqls.values():

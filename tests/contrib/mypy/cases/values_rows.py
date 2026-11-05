@@ -4,9 +4,9 @@ from datetime import date
 from decimal import Decimal
 from typing import Any, assert_type
 
-from hare.query.expressions import F
+from hare.query.expressions import F, Value
 from hare.query.functions import Count
-from tests.contrib.mypy.models import Address, Shelf, ShelfStatus, Volume, Writer, WriterCard
+from tests.contrib.mypy.models import Address, Printing, Shelf, ShelfStatus, Volume, Writer, WriterCard
 
 
 async def value_rows() -> None:
@@ -39,6 +39,8 @@ async def value_rows() -> None:
 async def value_list_rows(names: list[str]) -> None:
     pairs = await Volume.objects.values_list("id", "price")
     assert_type(pairs, list[tuple[int, Decimal]])
+    repeated = await Volume.objects.values_list("id", "price", "id")
+    assert_type(repeated, list[tuple[int, Decimal, int]])
     titles = await Volume.objects.values_list("title", flat=True)
     assert_type(titles, list[str])
     first_title = await Volume.objects.values_list("title", flat=True).first()
@@ -53,3 +55,29 @@ async def value_list_rows(names: list[str]) -> None:
     assert_type(expressions, list[tuple[int, str]])
     unknown = await Volume.objects.values_list(*names)
     assert_type(unknown, list[tuple[Any, ...]])
+    projected = Volume.objects.values_list("id").filter(id=1)
+    assert_type(await projected.annotate(label=Value("book")), list[tuple[int, str]])
+    assert_type(await projected, list[tuple[int]])
+    repeated_annotations = Volume.objects.annotate(marker=Value(1)).values_list("marker", "marker")
+    assert_type(await repeated_annotations.annotate(marker=Value("book")), list[tuple[str, str]])
+    assert_type(await repeated_annotations.alias(marker=Value("book")), list[tuple[str, str]])
+    assert_type(await repeated_annotations, list[tuple[int, int]])
+    assert_type(
+        await Printing.objects.values_list("pk", flat=True).annotate(label=Value("book")), list[tuple[int, int]]
+    )
+    flat = Volume.objects.annotate(marker=Value(1)).values_list("marker", flat=True)
+    assert_type(await flat.annotate(marker=Value("book"), extra=Value(True)), list[str])
+    renamed = Volume.objects.annotate(marker=Value(1)).values(renamed="marker")
+    changed = await renamed.annotate(marker=Value("book"))
+    assert_type(changed[0]["renamed"], str)
+    assert_type(changed[0]["marker"], str)
+    assert_type((await renamed)[0]["renamed"], int)
+    reselected = repeated_annotations.values_list("id").annotate(extra=Value(True))
+    assert_type(await reselected, list[tuple[int, bool]])
+    all_columns = Printing.objects.annotate(marker=Value(1)).values_list()
+    assert_type(await all_columns.alias(marker=Value("book")), list[tuple[int, int, int]])
+    assert_type(await all_columns, list[tuple[int, int, int, int]])
+    all_keys = await Printing.objects.annotate(marker=Value(1)).values().alias(marker=Value("book"))
+    all_keys[0]["marker"]  # E: "marker" is not a valid TypedDict key
+    assert_type(await projected.values_list(*names).annotate(extra=Value(1)), list[tuple[Any, ...]])
+    assert_type(await projected.values_list("id", named=True).annotate(extra=Value(1)), list[Any])

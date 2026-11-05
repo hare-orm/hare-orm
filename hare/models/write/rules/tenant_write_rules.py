@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.exceptions import QueryError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions.expression import Expression
-from hare.query.scopes.tenants.all_tenants import AllTenants
-from hare.query.scopes.tenants.tenant_values import TenantValues
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -45,14 +43,13 @@ class TenantWriteRules:
         """
         tenant_field = cast("str", model._meta.tenant_field)
         scope = Tenancy.get_scope(model)
-        scope_class = type(scope)
         if scope is None and requires_active:
             raise QueryError(
                 f"{model.__name__} has Meta.tenant_field {tenant_field!r} set but no tenant is active - "
                 f"wrap this call in Tenancy.scope(...), or use {model.__name__}.objects.all_tenants() to "
                 f"intentionally {operation}() across every tenant"
             )
-        has_one_value = scope is not None and scope_class is not TenantValues and scope_class is not AllTenants
+        has_one_value = scope is not None and Tenancy.has_one_value(scope)
         mismatched_pks = []
         for obj in objs:
             current_value = getattr(obj, tenant_field, None)

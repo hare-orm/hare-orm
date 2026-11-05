@@ -1,4 +1,4 @@
-"""Native and Python codecs agree on sampled fields and actual values returned by the driver."""
+"""Model readers and bound writers preserve sampled field contracts on real driver values."""
 
 import pytest
 
@@ -10,14 +10,12 @@ from tests.contracts.generated_field_contract import GeneratedFieldContract
 from tests.contracts.sample_database import SampleDatabase
 from tests.native_acceleration.test_field_codecs import assert_reads_match, assert_writes_match
 
-REQUIRES = ("native",)
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "sample", [sample.get_parameter() for sample in FIELD_SAMPLES if sample.values and not sample.related]
 )
-async def test_sampled_fields_have_the_same_native_and_python_codecs(contract_database, sample):
+async def test_sampled_field_conversions_match_bound_readers_and_writers(contract_database, sample):
     SampleDatabase.skip_unless_stored(sample)
     model = (await SampleDatabase.create(contract_database, GeneratedFieldContract.with_generated_copy(sample)))[-1]
     await SampleDatabase.create_rows(model, sample)

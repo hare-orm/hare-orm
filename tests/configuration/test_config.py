@@ -91,7 +91,8 @@ def test_app_config_accepts_iterable_of_str_or_module_type(models):
     hint, dict[str, Iterable[str | ModuleType]]) to accept any iterable of dotted-path strings
     or already-imported modules, not just a list of strings."""
     app_config = AppConfig(models=models)
-    assert app_config.models == ["tests.shared_models.testmodels"]
+    assert app_config.models == list(models)
+    assert app_config.to_dict()["models"] == list(models)
 
 
 @pytest.mark.parametrize(

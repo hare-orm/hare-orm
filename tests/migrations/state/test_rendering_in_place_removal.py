@@ -9,10 +9,9 @@ import pytest
 
 from hare import fields
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.migrations.operations import AddField, CreateModel, RemoveField, RenameModel
-from hare.migrations.state.model_state import ModelState
+from hare.migrations.operations import AddField, CreateModel, DeleteModel, RemoveField, RenameModel
+from hare.migrations.state.prepared_operation_states import PreparedOperationStates
 from hare.migrations.state.state import State
-from hare.migrations.state.state_change_journal import StateChangeJournal
 from hare.models import Model
 
 pytestmark = pytest.mark.database_independent
@@ -74,36 +73,17 @@ def get_apps_description(state: State) -> dict[str, tuple[Any, ...]]:
     return {name: get_meta_description(model) for name, model in state.apps.apps.get("app", {}).items()}
 
 
-@pytest.fixture
-def render_count(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    rendered_names: list[str] = []
-    render = ModelState.render
-
-    def counting_render(model_state: ModelState, *args: object, **kwargs: object) -> object:
-        rendered_names.append(model_state.name)
-        return render(model_state, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(ModelState, "render", counting_render)
-    return rendered_names
-
-
-def test_models_taken_back_one_by_one_leave_the_classes_a_fresh_rendering_draws(render_count: list[str]) -> None:
-    state = State()
-    undos = [StateChangeJournal.forward(state, "app", operation) for operation in get_operations()]
-    _ = state.apps
-    for undo in reversed(undos):
-        state.undo(undo)
-        fresh_state = state.clone()
-        assert get_apps_description(state) == get_apps_description(fresh_state)
+def test_each_prepared_boundary_renders_the_same_relations_as_a_fresh_snapshot() -> None:
+    prepared = PreparedOperationStates("app", get_operations(), State())
+    for item in reversed(prepared.operations):
+        assert get_apps_description(item.before) == get_apps_description(item.before.clone())
 
 
 def test_a_model_nothing_points_at_is_taken_out_without_rendering(render_count: list[str]) -> None:
-    state = State()
-    undos = [StateChangeJournal.forward(state, "app", operation) for operation in get_operations()]
+    state = PreparedOperationStates("app", get_operations(), State()).after
     _ = state.apps
     render_count.clear()
-    for undo in reversed(undos[-1:]):
-        state.undo(undo)
+    DeleteModel("Review").state_forward("app", state)
     author = state.apps.get_model("app.Author")
     assert render_count == []
     assert "reviews" not in author._meta.fields_map
@@ -111,11 +91,10 @@ def test_a_model_nothing_points_at_is_taken_out_without_rendering(render_count: 
 
 
 def test_a_through_model_a_model_left_goes_through_is_rendered_again(render_count: list[str]) -> None:
-    state = State()
-    undos = [StateChangeJournal.forward(state, "app", operation) for operation in get_operations()[:-1]]
+    state = PreparedOperationStates("app", get_operations()[:-1], State()).after
     _ = state.apps
     render_count.clear()
-    state.undo(undos[-1])
+    DeleteModel("Membership").state_forward("app", state)
     assert state.apps.get_model("app.Shelf")._meta._inited is False
     assert render_count != []
 
@@ -123,10 +102,9 @@ def test_a_through_model_a_model_left_goes_through_is_rendered_again(render_coun
 def test_a_model_rendered_again_keeps_the_hidden_backward_relations_pointing_at_it() -> None:
     """A relation of related_name=False has no field on its target - the model declaring it wasn't rendered
     again with the target, and the target lost the hidden backward relation hare cascades deletes through."""
-    state = State()
-    undos = [
-        StateChangeJournal.forward(state, "app", operation)
-        for operation in [
+    prepared = PreparedOperationStates(
+        "app",
+        [
             get_create_model("Author"),
             get_create_model("Tag"),
             get_create_model(
@@ -137,9 +115,10 @@ def test_a_model_rendered_again_keeps_the_hidden_backward_relations_pointing_at_
             RenameModel("Author", "Writer"),
             AddField("Tag", "writer", fields.ForeignKeyField("app.Writer", related_name=False, null=True)),
             RemoveField("Book", "tags"),
-        ]
-    ]
-    _ = state.apps
-    state.undo(undos[-1])
+        ],
+        State(),
+    )
+    _ = prepared.after.apps
+    state = prepared.operations[-1].before
     assert get_apps_description(state) == get_apps_description(state.clone())
     assert list(state.apps.get_model("app.Writer")._meta.hidden_backward_relations) == ["app.Tag.writer"]

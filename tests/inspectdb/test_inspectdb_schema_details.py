@@ -7,11 +7,13 @@ from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.ddl.constraints import UniqueConstraint
 from hare.ddl.indexes.index import Index
+from hare.dialects.postgresql.introspection.postgresql_catalog_reader import PostgresqlCatalogReader
 from hare.exceptions import HareError
 from hare.fields.data.numeric import IntField
 from hare.fields.data.text import CharField
 from hare.inspectdb import SchemaIntrospector
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.migrations.drift import detect_drift
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.database_under_test import DatabaseUnderTest
@@ -31,6 +33,36 @@ async def generated_source(connection, table: str, schema: str | None = None) ->
     source = ModelSourceGenerator.generate_model_source(table_info, connection.dialect.name)
     compile(source, "<generated>", "exec")
     return source
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_identity_sequence_settings_are_captured_with_the_column(connection):
+    table = "catalog_sequence_book"
+    await connection.execute_script(
+        f"CREATE TABLE {table} (number integer GENERATED ALWAYS AS IDENTITY "
+        "(START WITH 5 INCREMENT BY 2 MINVALUE 1 MAXVALUE 100 CACHE 4 CYCLE))"
+    )
+    try:
+        snapshot = await PostgresqlCatalogReader.read_tables(
+            connection, [table], DatabaseUnderTest.get_public_schema()
+        )
+        columns = snapshot.copy_records()["columns"]
+        assert len(columns) == 1
+        [sequence] = columns[0]["column_sequences"]
+        assert {name: value for name, value in sequence.items() if name not in ("name", "schema")} == {
+            "type": "integer",
+            "start": 5,
+            "increment": 2,
+            "minimum": 1,
+            "maximum": 100,
+            "cache": 4,
+            "cycle": True,
+            "dependency_type": "i",
+            "is_column_default": None,
+        }
+    finally:
+        await connection.execute_script(f"DROP TABLE {table}")
 
 
 @requires_features(dialect="postgresql")
@@ -101,7 +133,7 @@ async def test_a_partitioning_no_model_declares_is_flagged(connection):
     assert '# TODO: the table is partitioned as "PARTITION BY RANGE (date_trunc(' in expression_source
     assert "partitioned partitions inspect_nested_parts_eu" in nested_source
     [expression_table] = await DatabaseCatalog.inspect_tables(connection, ["inspect_expression_parts"])
-    assert expression_table.unparsed_partitioning is not None
+    assert expression_table.get_diagnostics(CatalogDiagnosticCode.PARTITIONING)
 
 
 @requires_features(dialect="postgresql")
@@ -131,8 +163,7 @@ async def test_a_partitioning_no_model_declares_is_drift(db_isolated_no_schema):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_an_invalid_index_is_flagged_and_drift(db_isolated_no_schema):
-    """A unique index whose concurrent build failed is kept INVALID - it enforces nothing, yet drift matched it
-    with the declared index and inspectdb rendered it as a working one."""
+    """A failed concurrent index build remains INVALID; drift and inspectdb must report that state."""
     round_trip = RoundTrip(db_isolated_no_schema.get_connection())
     loan = build_model("Loan", "inspect_invalid_index", {"status": CharField(max_length=10)})
     await round_trip.migrate_to(loan)

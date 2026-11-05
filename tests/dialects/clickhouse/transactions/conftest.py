@@ -1,7 +1,4 @@
-"""The ClickHouse transaction tests run on the ClickHouse test server, its connection asking for
-transactions (``transactions=true``) - the server is its own Keeper with transactions on; the refusal
-tests name it in ``keeper_hosts`` too. A server running no transactions refuses the connection, and the
-tests are skipped there."""
+"""Transaction tests require a configured ClickHouse server with Keeper and experimental transactions enabled."""
 
 import contextlib
 import os
@@ -10,30 +7,22 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import hare_test_context, truncate_all_models
-from hare.exceptions import ConfigurationError
 from tests.dialects.clickhouse.constants import CLICKHOUSE_KEEPER_HOSTS
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
 @contextlib.asynccontextmanager
 async def open_transactions_context(url_options):
-    """The test context of the transaction models on a connection with the given URL options - the tests
-    skipped on a server refusing it."""
+    """Open the transaction models; setup failures fail the selected profile."""
     db_url = os.getenv("HARE_TEST_DB", "")
     if not db_url.startswith("clickhouse"):
         pytest.skip("runs against the ClickHouse test server - make test_clickhouse")
-    async with contextlib.AsyncExitStack() as stack:
-        try:
-            context = await stack.enter_async_context(
-                hare_test_context(
-                    modules=["tests.dialects.clickhouse.transactions.models"],
-                    db_url=DatabaseUnderTest.get_url_with_options(url_options, db_url),
-                    app_label="models",
-                    connection_label="models",
-                )
-            )
-        except ConfigurationError as error:
-            pytest.skip(f"the server runs no transactions: {error}")
+    async with hare_test_context(
+        modules=["tests.dialects.clickhouse.transactions.models"],
+        db_url=DatabaseUnderTest.get_url_with_options(url_options, db_url),
+        app_label="models",
+        connection_label="models",
+    ) as context:
         yield context
 
 

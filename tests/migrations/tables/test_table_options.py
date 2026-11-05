@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOptions
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
@@ -13,7 +15,6 @@ from hare.fields import CharField, IntField
 from hare.inspectdb import SchemaInspector
 from hare.migrations.drift import detect_drift
 from hare.migrations.operations import AlterModelOptions
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.fake_client import FakeClient
@@ -21,7 +22,7 @@ from tests.utils.fake_client import FakeClient
 
 @pytest.mark.database_independent
 def test_options_render_their_own_dialect_sql():
-    editor = SimpleNamespace(quote=lambda name: f'"{name}"')
+    editor = SimpleNamespace(quote=lambda name: f'"{name}"', client=SimpleNamespace(dialect=POSTGRESQL_DIALECT))
     assert SqliteTableOptions(without_rowid=True).get_create_suffix_sql(Model, editor) == " WITHOUT ROWID"
     assert SqliteTableOptions().get_create_suffix_sql(Model, editor) == ""
     options = PostgresqlTableOptions(
@@ -29,7 +30,7 @@ def test_options_render_their_own_dialect_sql():
     )
     assert options.get_create_prefix_sql() == "UNLOGGED "
     assert options.get_create_suffix_sql(Model, editor) == (
-        ' WITH (autovacuum_enabled = false, fillfactor = 70) TABLESPACE "fast"'
+        ' WITH (autovacuum_enabled = FALSE, fillfactor = 70) TABLESPACE "fast"'
     )
 
 
@@ -81,7 +82,7 @@ def test_a_connection_uses_its_own_dialect_entry():
 @pytest.mark.database_independent
 def test_options_are_written_into_migrations():
     imports = ImportManager()
-    rendered = MigrationWriter.render_value(
+    rendered = DeclarationValueSerializer.render_value(
         (SqliteTableOptions(without_rowid=True), PostgresqlTableOptions(storage_parameters={"fillfactor": 70})),
         imports,
     )

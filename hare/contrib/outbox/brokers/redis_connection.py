@@ -22,7 +22,7 @@ class RedisConnection:
 
     def __init__(self, url: str | None, client: Any) -> None:
         self.url = url
-        self.owns_client = client is None
+        self.closes_client = client is None
         self.client: Any = client
 
     def get_client(self) -> Any:
@@ -37,6 +37,6 @@ class RedisConnection:
 
     async def close(self) -> None:
         """Closes a client made of the URL; one given by the application stays open."""
-        if self.owns_client and self.client is not None:
+        if self.closes_client and self.client is not None:
             client, self.client = self.client, None
             await client.aclose()

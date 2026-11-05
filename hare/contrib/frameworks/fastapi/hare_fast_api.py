@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +19,7 @@ from hare.contrib.frameworks.request_transaction import RequestTransaction
 
 if TYPE_CHECKING:
     from hare.core.config import HareConfig
+    from hare.core.hare_context import HareContext
 
 #: What ``FastAPI(lifespan=...)`` takes: the application's own lifespan.
 type Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[Any]]
@@ -47,14 +48,15 @@ class HareFastAPI(FastAPI):
 
     Args:
         hare_config: The Hare configuration, as for ``Hare.init(config=...)``.
-        atomic_requests: True for a transaction per request on the default connection, the
+        hare_context: An initialized context to borrow without closing it, None to create one.
+        atomic_requests: True for a transaction per request on the automatically selected connection, the
             connection aliases for one on each of them, False for none.
         lifespan: The application's own lifespan - it runs inside the Hare context.
         health_routes: The readiness and liveness routes to add - none when None.
         kwargs: What ``FastAPI()`` takes.
 
     Raises:
-        ConfigurationError: ``atomic_requests`` is neither a bool nor a sequence of names, or the
+        ConfigurationError: ``atomic_requests`` is neither a bool nor an iterable of names, or the
             configuration is wrong.
     """
 
@@ -62,12 +64,13 @@ class HareFastAPI(FastAPI):
         self,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         lifespan: Lifespan | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
     ) -> None:
-        self.hare = HareLifecycle(hare_config, atomic_requests=atomic_requests)
+        self.hare = HareLifecycle(hare_config, atomic_requests=atomic_requests, context=hare_context)
         self.hare.bind_models()
         self.application_lifespan = lifespan
         super().__init__(lifespan=self.run_lifespan, **kwargs)
@@ -78,7 +81,6 @@ class HareFastAPI(FastAPI):
                 TransactionMiddleware,
                 connection_aliases=self.hare.transaction_connection_names,
             )
-        self.add_middleware(RequestStateResetMiddleware)
         if health_routes is not None:
             self.add_health_routes(health_routes)
 
@@ -104,21 +106,22 @@ class HareFastAPI(FastAPI):
         self.add_api_route(health_routes.liveness_path, liveness, methods=["GET"], include_in_schema=False)
 
     def build_middleware_stack(self) -> Any:
-        """Builds the application, each exception handler rolling back the request's transaction
-        first when ``atomic_requests`` is on - the handlers the application added after it was
-        created included.
+        """Build the application with exception handlers that mark request transactions for rollback.
+
+        With ``atomic_requests``, the mark is set before the exception handler runs; rollback
+        happens when the response starts. Handlers added after application creation are included.
 
         Returns:
             The application wrapped in its middleware.
         """
         if not self.hare.transaction_connection_names:
-            return super().build_middleware_stack()
+            return RequestStateResetMiddleware(super().build_middleware_stack(), self.hare)
         exception_handlers = self.exception_handlers
         self.exception_handlers = {
             key: TransactionFailingHandler(handler) for key, handler in exception_handlers.items()
         }
         try:
-            return super().build_middleware_stack()
+            return RequestStateResetMiddleware(super().build_middleware_stack(), self.hare)
         finally:
             self.exception_handlers = exception_handlers
 

@@ -37,15 +37,15 @@ The URL's path names the database; the port is the one of the driver's interface
 |---|---|
 | `secure` | TLS: HTTPS instead of HTTP, the native protocol's secure port (9440 on a default server — name it in the URL). Default `false`. |
 | `compress` | Compressed data: the HTTP responses, the blocks of the native protocol (LZ4). Default `true`. |
-| `connect_timeout` | Seconds to wait for a connection, above 0 and up to 3600. Default 10. |
-| `send_receive_timeout` | Seconds a statement may take, above 0 and up to 86400. Default 300. The server stops a statement running longer (`max_execution_time`, `OperationalError` of code 159) over either driver — the HTTP client waits a second more for its answer; a statement's own `settings(max_execution_time=...)` takes precedence. |
+| `connect_timeout` | Seconds to wait for a connection. Default 10. |
+| `send_receive_timeout` | Seconds a statement may take. Default 300. The server stops a statement running longer (`max_execution_time`, `OperationalError` of code 159) over either driver — the HTTP client waits a second more for its answer; a statement's own `settings(max_execution_time=...)` takes precedence. |
 | `native_port` | The port of the native protocol `hare dbshell` runs `clickhouse-client` on, 1 to 65535. Default: the client's own (9000, 9440 with `secure`) on `clickhouse+clickhouse-connect`, the connection's own port on `clickhouse+clickhouse-driver`. |
-| `max_size` | `clickhouse+clickhouse-driver` only: the most connections the client keeps — the statements it runs at once — 1 to 1024. Default 16. |
-| `cluster` | The name of the cluster the server belongs to: every statement of the schema runs `ON CLUSTER` it, and the journal of migrations is replicated — see [Cluster](schema-objects.md#cluster). Default none. |
+| `max_size` | `clickhouse+clickhouse-driver` only: the most connections the client keeps — the statements it runs at once — default 16. Its thread pool enforces valid worker counts. |
+| `cluster` | The cluster used for explicit schema placement, taking the database engine into account; the migration journal is replicated. See [Cluster](schema-objects.md#cluster). Default none. |
 | `async_insert` | The server collects the inserts of many statements and writes them together (`async_insert=1`) — for many small inserts. Default `false`. |
 | `wait_for_async_insert` | With `async_insert`: an insert returns once its rows are written, its error raised (`wait_for_async_insert=1`); `false` returns at once, before a row is written and with no error. Default `true`. |
 | `transactions` | `atomic()` runs a ClickHouse transaction — on a server with a ClickHouse Keeper and `allow_experimental_transactions`, checked when the connection opens. See [Transactions and locks](transactions-and-locks.md). Default `false`. |
-| `keeper_hosts` | The ClickHouse Keeper servers hare takes `migrate`'s [migration lock](../../migrations/migrations.md#migration-lock) in, `host[:port]` separated by commas (port 9181 by default). A session is opened when the connection opens — `ConfigurationError` when none does. Default none. |
+| `keeper_hosts` | The ClickHouse Keeper servers hare takes `migrate`'s [migration lock](../../migrations/migrations.md#migration-lock) in, `host[:port]` separated by commas (port 9181 by default). A session is opened when the connection opens — `ConfigurationError` when none does. Default none. Requires `hare-orm[clickhouse-keeper]`. |
 
 ## <a id="statement-settings"></a>What every statement runs with
 
@@ -58,13 +58,14 @@ Every statement runs with these settings:
 | `session_timezone='UTC'` | Moments are read and written in UTC. |
 | `max_query_size=1 GiB`, `max_ast_elements` and `max_expanded_ast_elements=100,000,000` | Almost every value of a statement is written into its text (a long `__in` list of a read goes as an external table — see [Long `__in` lists](differences.md#long-in-lists)); the defaults (256 KiB of text) refuse a long `__in` list of a write or an UPDATE writing a large JSON document. |
 | `allow_simdjson=0` | A JSON text is read by the parser taking an integer beyond 64 bits as a number — the default one reads no path of a document holding one. |
-| `input_format_json_read_bools_as_numbers=0` | A JSON boolean stays a boolean — an array of numbers and booleans would hold `true` as `1`. |
+| `input_format_json_read_bools_as_numbers=0`, `input_format_json_read_bools_as_strings=0` | A JSON boolean stays a boolean — an array of numbers and booleans would hold `true` as `1`. |
 | `input_format_try_infer_dates=0`, `input_format_try_infer_datetimes=0` | A JSON string looking like a date or a moment stays a string — a JSON column would hold it as a date, its offset lost. |
 | `cast_string_to_dynamic_use_inference=0`, `cast_string_to_variant_use_inference=0` | A text cast to a `Dynamic` or `Variant` value stays a text — the server would read `'5'` as a number. |
 | `json_type_escape_dots_in_keys=1` | A dot in a key of a JSON value is part of the key, not a nested path. |
 | `allow_suspicious_types_in_order_by=1` | A `Dynamic` value (a JSON path) can be ordered by. |
 | `allow_suspicious_types_in_group_by=1` | A grouping can take such an ordering — `values("data__n").annotate(...).order_by("data__n")`. |
 | `calculate_text_stack_trace=0` | An error's text is the server's message, without the server's own stack trace the native protocol sends. |
+| `optimize_distinct_in_order=0` | DISTINCT processes ordered input without the optimization that can retain duplicates from set operations. |
 
 A wrong password or user and a missing database of the connection raise `ConfigurationError` on both
 drivers, as on PostgreSQL — no retry fixes them; a server that refuses or drops the connection raises
@@ -103,22 +104,44 @@ number of threads: that many statements run at once, the others wait their turn.
   metrics count them (`Features.supports_pool_status`).
 - **A cancelled statement.** Cancelling a task drops its statement when it has not started yet. A
   statement already sent runs to its end on the server — its result is thrown away.
-- **Closing.** `close()` waits up to 10 seconds for the statements still running. After that the ones not
-  started fail with `DBConnectionError`, and a statement still running ends on its own — its thread
-  closes its connection then.
+- **Closing.** `close()` immediately stops accepting new statements (`DBConnectionError`) and waits up
+  to 10 seconds for admitted work. After that queued statements are cancelled; a running statement
+  finishes on its worker, which then closes the connection. Cancellation of the caller does not skip
+  cleanup, and simultaneous close calls share the same completion.
+- **Streaming.** Worker completion also signals the end of a stream, including connection failures
+  before the first batch. Closing a stream releases its bounded queue and waits for the worker to
+  release its connection; an unread result disconnects that connection.
 - **A failed statement.** The library closes the connection of a statement that failed; the next
   statement of that thread opens another one.
-- **The ping.** The library asks the server whether the connection is alive before every statement — one
-  more round trip each time. hare sends that ping only on a connection idle for more than 10 seconds: a
-  busy connection starts its statement at once, and one the server closed while it sat idle is opened
-  again unnoticed.
+- **Connection checks.** The library checks connection liveness before statements and manages reconnection.
 - **Moments.** A binary insert writes each moment as the whole ticks of the server's column (`DateTime64`
-  of any precision, `DateTime`), and a `DateTime64` is read from its ticks the same way — exactly, before
-  1970 and up to 2299 alike. The library itself goes through a floating-point number of seconds, a
-  microsecond off past 2242, and Windows refuses its conversion of any moment before 1970.
+  of any precision, `DateTime`), and a `DateTime64` is read from its ticks the same way — exactly within
+  the [range of its precision](#values-and-rows). The library itself goes through a floating-point
+  number of seconds, a microsecond off past 2242, and Windows refuses its conversion of any moment
+  before 1970.
 - **`compress`** needs the `lz4` and `clickhouse-cityhash` packages, which the
   `hare-orm[clickhouse-driver]` extra installs. For a server on the same machine `compress=false` saves
   the work of compressing.
+
+## <a id="client-codecs"></a>Client-local codecs
+
+Both drivers keep hare's codecs local to their clients. Constructing or using a hare client does
+not replace functions, classes or type aliases used by another application's client.
+
+The TCP adapter supplies a column factory for native blocks, including nested Dynamic, Variant,
+JSON, Decimal and temporal values. The library handles sockets, compression, checksums and service
+packets. The HTTP adapter supplies a per-client Transform and local column trees; requests, retries,
+streaming and response cleanup use clickhouse-connect's standard transport. `WITH TOTALS` uses the
+JSONCompact result path because the HTTP Native format carries no totals row.
+
+The HTTP client's cached insert-column types are invalidated by schema-editor operations, including
+failed DDL attempts. After changing the schema through raw SQL outside that editor, call
+`await connection.invalidate_schema_cache()` before the next insert; SQL text is not parsed to infer
+whether a command changed the schema.
+
+The adapter boundaries target the minimum supported clickhouse-driver 0.2.11 and
+clickhouse-connect 1.10.0. A dependency upgrade requires the codec and stream contracts as well as
+the normal database tests.
 
 ## <a id="choosing-a-driver"></a>Choosing a driver
 

@@ -15,12 +15,25 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import zipfile
-from pathlib import Path
+from dataclasses import dataclass
+from email.parser import BytesParser
+from itertools import product
+from pathlib import Path, PurePosixPath
+
+
+@dataclass(frozen=True, slots=True)
+class BuildSpec:
+    """One wheel's ABI/platform and the exact extension archives staged for it."""
+
+    tag: str | None
+    extension_wheels: tuple[tuple[str, Path], ...] = ()
 
 
 class WheelBuilder:
@@ -40,20 +53,47 @@ class WheelBuilder:
             repository: The repository root.
             out: The directory the wheel is written to.
         """
-        self.repository = repository
-        self.extension_directory = repository / "rust"
-        self.bundled_libraries_directory = repository / self.BUNDLED_LIBRARIES_DIRECTORY_NAME
-        self.out = out
+        self.repository = repository.absolute()
+        self.out = out.absolute()
 
-    def get_extension_files(self) -> list[Path]:
-        """The compiled extensions in ``rust/``."""
-        return [
-            path
-            for path in self.extension_directory.iterdir()
-            if path.is_file() and path.suffix in self.EXTENSION_SUFFIXES
-        ]
+    def stage_source(self, destination: Path) -> None:
+        """Copy the package sources and build metadata without checkout-native artifacts.
 
-    def get_wheel_tag(self, wheel: Path) -> str:
+        Package declarations and the readme come from pyproject.toml. Bytecode and local
+        compiled extensions are excluded; the selected archives supply native files later.
+        The staging directory is fresh for each BuildSpec and is never the checkout.
+        """
+        destination.mkdir(parents=True)
+        metadata = self.repository / "pyproject.toml"
+        with metadata.open("rb") as source:
+            project = tomllib.load(source)
+        shutil.copy2(metadata, destination / metadata.name)
+        for declaration in project["tool"]["poetry"]["packages"]:
+            relative = Path(declaration.get("from", "")) / declaration["include"]
+            source_path = self.repository / relative
+            if source_path.is_dir():
+                shutil.copytree(
+                    source_path,
+                    destination / relative,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.so", "*.pyd"),
+                )
+            else:
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, target)
+        readme = project["project"]["readme"]
+        if isinstance(readme, dict):
+            readme = readme.get("file")
+        if readme:
+            target = destination / readme
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.repository / readme, target)
+        for license_file in self.repository.glob("LICENSE*"):
+            if license_file.is_file():
+                shutil.copy2(license_file, destination / license_file.name)
+
+    @staticmethod
+    def get_wheel_tag(wheel: Path) -> str:
         """The ``python-abi-platform`` tag of a wheel, from its file name.
 
         Args:
@@ -95,12 +135,13 @@ class WheelBuilder:
                 raise SystemExit(f"no wheel of {', '.join(missing_modules)} for {tag}")
         return wheels_by_tag
 
-    def extract_extensions(self, module_wheels: dict[str, Path]) -> list[str]:
+    def extract_extensions(self, spec: BuildSpec, destination: Path) -> list[str]:
         """Puts the extension modules of maturin's wheels of one tag into ``rust/``, and the shared
         libraries bundled with them into ``hare_native.libs/``.
 
         Args:
-            module_wheels: The wheel of every extension module, by module.
+            spec: The wheel of every extension module, by module.
+            destination: This build's isolated source directory.
 
         Returns:
             The wheel paths of the bundled libraries.
@@ -109,7 +150,9 @@ class WheelBuilder:
             SystemExit: A wheel carries no single extension file.
         """
         bundled_libraries = []
-        for module, wheel in module_wheels.items():
+        extension_directory = destination / "rust"
+        extension_directory.mkdir(exist_ok=True)
+        for module, wheel in spec.extension_wheels:
             with zipfile.ZipFile(wheel) as archive:
                 members = [
                     name
@@ -120,61 +163,71 @@ class WheelBuilder:
                     raise SystemExit(
                         f"{wheel.name} carries {len(members)} rust.{module} extension files, expected one"
                     )
-                target = self.extension_directory / Path(members[0]).name
-                with archive.open(members[0]) as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
+                target = extension_directory / Path(members[0]).name
+                with archive.open(members[0]) as source, target.open("wb") as output_file:
+                    shutil.copyfileobj(source, output_file)
                 print(f"{wheel.name}: {members[0]}")
                 for name in archive.namelist():
                     if not name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/") or name.endswith("/"):
                         continue
-                    target = self.repository / name
-                    target.parent.mkdir(exist_ok=True)
-                    with archive.open(name) as source, target.open("wb") as destination:
-                        shutil.copyfileobj(source, destination)
+                    relative = PurePosixPath(name)
+                    if relative.is_absolute() or ".." in relative.parts or "\\" in name or ":" in name:
+                        raise SystemExit(f"invalid bundled library path in {wheel.name}: {name}")
+                    target = destination / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if target.exists():
+                        if target.read_bytes() != archive.read(name):
+                            raise SystemExit(f"conflicting bundled library in {wheel.name}: {name}")
+                        continue
+                    with archive.open(name) as source, target.open("wb") as output_file:
+                        shutil.copyfileobj(source, output_file)
                     bundled_libraries.append(name)
                     print(f"{wheel.name}: {name}")
         return bundled_libraries
 
-    def build(self, tag: str | None) -> Path:
-        """Builds the wheel with poetry and gives it ``tag``.
-
-        Args:
-            tag: The ``python-abi-platform`` tag, None for the pure wheel.
-
-        Returns:
-            The wheel.
-        """
-        with tempfile.TemporaryDirectory() as build_directory:
+    @staticmethod
+    def build(spec: BuildSpec, source_directory: Path, output_directory: Path) -> Path:
+        """Build and tag a wheel inside staging; no output is published until check succeeds."""
+        subprocess.run(
+            ["poetry", "build", "--format", "wheel", "--output", str(output_directory)],
+            cwd=source_directory,
+            check=True,
+        )
+        (wheel,) = output_directory.glob("*.whl")
+        if spec.tag is not None:
+            python_tag, abi_tag, platform_tag = spec.tag.split("-")
             subprocess.run(
-                ["poetry", "build", "--format", "wheel", "--output", build_directory],
-                cwd=self.repository,
+                [
+                    sys.executable,
+                    "-m",
+                    "wheel",
+                    "tags",
+                    "--remove",
+                    "--python-tag",
+                    python_tag,
+                    "--abi-tag",
+                    abi_tag,
+                    "--platform-tag",
+                    platform_tag,
+                    str(wheel),
+                ],
                 check=True,
             )
-            (wheel,) = Path(build_directory).glob("*.whl")
-            if tag is not None:
-                python_tag, abi_tag, platform_tag = tag.split("-")
-                subprocess.run(
-                    [
-                        sys.executable,
-                        "-m",
-                        "wheel",
-                        "tags",
-                        "--remove",
-                        "--python-tag",
-                        python_tag,
-                        "--abi-tag",
-                        abi_tag,
-                        "--platform-tag",
-                        platform_tag,
-                        str(wheel),
-                    ],
-                    check=True,
-                )
-                (wheel,) = Path(build_directory).glob("*.whl")
-            self.out.mkdir(parents=True, exist_ok=True)
-            built = self.out / wheel.name
-            shutil.copy2(wheel, built)
-        return built
+            (wheel,) = output_directory.glob("*.whl")
+            # Poetry packages the supplied binaries as data. Retagging does not change
+            # the installation scheme; set it explicitly and let wheel regenerate RECORD.
+            unpacked = output_directory / "unpacked"
+            subprocess.run([sys.executable, "-m", "wheel", "unpack", "-d", str(unpacked), str(wheel)], check=True)
+            (package,) = unpacked.iterdir()
+            (metadata_path,) = package.glob("*.dist-info/WHEEL")
+            metadata = BytesParser().parsebytes(metadata_path.read_bytes())
+            metadata.replace_header("Root-Is-Purelib", "false")
+            metadata_path.write_bytes(metadata.as_bytes())
+            repacked = output_directory / "repacked"
+            repacked.mkdir()
+            subprocess.run([sys.executable, "-m", "wheel", "pack", "-d", str(repacked), str(package)], check=True)
+            (wheel,) = repacked.glob("*.whl")
+        return wheel
 
     def check(self, wheel: Path, tag: str | None, bundled_libraries: list[str]) -> None:
         """Checks the wheel carries exactly the extension modules its tag promises, and the shared
@@ -191,6 +244,16 @@ class WheelBuilder:
         """
         with zipfile.ZipFile(wheel) as archive:
             names = archive.namelist()
+            metadata_paths = [name for name in names if name.endswith(".dist-info/WHEEL")]
+            if len(metadata_paths) != 1:
+                raise SystemExit(f"{wheel.name} must carry exactly one WHEEL metadata file")
+            metadata = BytesParser().parsebytes(archive.read(metadata_paths[0]))
+        expected_tag = tag or "py3-none-any"
+        expected_tags = {"-".join(parts) for parts in product(*(part.split(".") for part in expected_tag.split("-")))}
+        if set(metadata.get_all("Tag", [])) != expected_tags:
+            raise SystemExit(f"{wheel.name} metadata tags differ from {expected_tag}")
+        if metadata.get("Root-Is-Purelib") != ("true" if tag is None else "false"):
+            raise SystemExit(f"{wheel.name} has the wrong Root-Is-Purelib installation scheme")
         extensions = [name for name in names if name.startswith("rust/") and name.endswith(self.EXTENSION_SUFFIXES)]
         libraries = sorted(name for name in names if name.startswith(f"{self.BUNDLED_LIBRARIES_DIRECTORY_NAME}/"))
         if tag is None and (extensions or libraries):
@@ -210,37 +273,37 @@ class WheelBuilder:
                 raise SystemExit(f"{wheel.name} carries extensions of another Python: {other_version_extensions}")
         print(f"built {wheel.name}: {extensions + libraries or 'no extensions'}")
 
-    def run(self, extension_wheels: Path | None) -> None:
-        """Builds the wheels - one per tag of maturin's wheels, or the pure one.
+    def get_specs(self, extension_wheels: Path | None) -> tuple[BuildSpec, ...]:
+        """Describe every requested build before staging or invoking build tools."""
+        if extension_wheels is None:
+            return (BuildSpec(None),)
+        return tuple(
+            BuildSpec(tag, tuple(module_wheels.items()))
+            for tag, module_wheels in self.get_extension_wheels_by_tag(extension_wheels).items()
+        )
 
-        Args:
-            extension_wheels: The directory with maturin's wheels of one platform, None for the
-                pure wheel.
-        """
-        # The extensions a checkout carries are built for other platforms: they are set aside
-        # while the wheels are built and put back afterwards.
-        # Left by an interrupted build, they would go into the next wheel.
-        shutil.rmtree(self.bundled_libraries_directory, ignore_errors=True)
-        with tempfile.TemporaryDirectory() as set_aside_directory:
-            set_aside = []
-            for path in self.get_extension_files():
-                set_aside.append(Path(shutil.move(path, Path(set_aside_directory) / path.name)))
-            try:
-                if extension_wheels is None:
-                    self.check(self.build(None), None, [])
-                else:
-                    for tag, module_wheels in self.get_extension_wheels_by_tag(extension_wheels).items():
-                        bundled_libraries = self.extract_extensions(module_wheels)
-                        self.check(self.build(tag), tag, bundled_libraries)
-                        for path in self.get_extension_files():
-                            path.unlink()
-                        shutil.rmtree(self.bundled_libraries_directory, ignore_errors=True)
-            finally:
-                for path in self.get_extension_files():
-                    path.unlink()
-                shutil.rmtree(self.bundled_libraries_directory, ignore_errors=True)
-                for path in set_aside:
-                    shutil.move(path, self.extension_directory / path.name)
+    def publish(self, wheel: Path) -> None:
+        """Atomically replace the output wheel after its contents have been verified."""
+        self.out.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=self.out, suffix=".tmp", delete=False) as output:
+            temporary = Path(output.name)
+        try:
+            shutil.copy2(wheel, temporary)
+            os.replace(temporary, self.out / wheel.name)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def run(self, extension_wheels: Path | None) -> None:
+        """Build each ABI in a fresh directory; failures leave the checkout untouched."""
+        for spec in self.get_specs(extension_wheels):
+            with tempfile.TemporaryDirectory(prefix="hare-wheel-") as directory:
+                staging = Path(directory)
+                source = staging / "source"
+                self.stage_source(source)
+                libraries = self.extract_extensions(spec, source) if spec.extension_wheels else []
+                wheel = self.build(spec, source, staging / "wheels")
+                self.check(wheel, spec.tag, libraries)
+                self.publish(wheel)
 
 
 if __name__ == "__main__":

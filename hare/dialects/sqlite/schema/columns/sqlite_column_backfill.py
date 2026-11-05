@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.schema.columns.column_backfill import ColumnBackfill
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.sqlite.schema.constants import SQLITE_ROW_IDENTITY_COLUMN
 
 if TYPE_CHECKING:
@@ -22,8 +23,8 @@ class SqliteColumnBackfill(ColumnBackfill):
         # A table without a primary key is never WITHOUT ROWID - SQLite refuses that.
         return SQLITE_ROW_IDENTITY_COLUMN
 
-    async def set_added_column_not_null(self, model: type[Model], field: Field[Any], db_field: str) -> bool:
+    def get_added_column_not_null_plan(self, model: type[Model], field: Field[Any], db_field: str) -> SchemaChangePlan:
         # No ALTER COLUMN ... SET NOT NULL on SQLite - the rebuild takes the column's NOT NULL
         # (and every other property) from the model's current metadata.
-        await self.editor.table_rebuild.remake_table(model, model)
-        return True
+        plan = self.editor.table_rebuild.get_rebuild_plan(model, model)
+        return SchemaChangePlan(plan.steps, after=plan.after)

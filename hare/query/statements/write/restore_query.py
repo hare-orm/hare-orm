@@ -9,6 +9,7 @@ from hare.models.deletion.cascade.cascade_restore import CascadeRestore
 from hare.models.deletion.cascade.related_rows import RelatedRows
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.statements.write.update_query import UpdateQuery
 
 if TYPE_CHECKING:
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 class RestoreQuery:
     """``QuerySet.restore(cascade=False)``: reverses the soft delete of the queryset's rows - of those
     among them that are soft-deleted, whatever visibility the queryset has. Awaits to the number of
-    rows restored.
+    rows restored, or None when the database does not report an affected-row count.
 
     Args:
         source: The queryset.
@@ -42,16 +43,19 @@ class RestoreQuery:
         self.cascade = cascade
 
     def __await__(self) -> Generator[Any, None, int | None]:
+        return QueryExecution.run_operation((self.source,), self._execute_bound).__await__()
+
+    async def _execute_bound(self) -> int | None:
         # On a database without transactions the rows and their cascade are one step a cancel can't split.
-        connection = self.source._get_execution_query(for_write=True)._connection
-        return WriteSteps.get_whole_run(connection, self._execute()).__await__()
+        connection = cast("DatabaseClient", self.source._get_execution_query(for_write=True)._connection)
+        return await WriteSteps.get_whole_run(connection, self._execute())
 
     async def _execute(self) -> int | None:
         """Restores the rows - one ``UPDATE`` without ``cascade``; with it, or for a model overriding
         ``restore()``, in a transaction.
 
         Returns:
-            The number of rows restored.
+            The number of rows restored, or None when the database does not report it.
         """
         # Local import: the queryset package imports the query statements.
         from hare.models import Model
@@ -62,7 +66,7 @@ class RestoreQuery:
         overrides_restore = model.restore is not Model.restore
         if not self.cascade and not overrides_restore:
             return await UpdateQuery(self.source, {soft_delete_field: None}, WriteType.SOFT_DELETE, "restore")
-        connection = self.source._get_execution_query(for_write=True)._connection
+        connection = cast("DatabaseClient", self.source._get_execution_query(for_write=True)._connection)
         async with connection._in_transaction() as transaction_connection:
             matching_rows = self.get_rows_on(self.source, transaction_connection)
             keys = list(dict.fromkeys(await StatementSelection.get_primary_key_values_query(matching_rows)))

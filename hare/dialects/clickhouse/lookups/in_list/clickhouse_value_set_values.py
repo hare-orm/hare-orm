@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.clickhouse.client.declarations import ClickhouseValueSet
@@ -10,7 +10,7 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.sql import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class ClickhouseValueSetValues(Term, ListParameter):
@@ -25,9 +25,8 @@ class ClickhouseValueSetValues(Term, ListParameter):
         super().__init__()
         self.value_set = ValueWrapper(value_set)
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.value_set.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.value_set
 
     def get_sql(self, sql_context: SqlContext) -> str:
         return self.value_set.get_sql(sql_context)
@@ -35,11 +34,11 @@ class ClickhouseValueSetValues(Term, ListParameter):
     def get_parameter_source(self) -> Term:
         return self.value_set
 
-    def get_parameter(self, values: list[Any], *, holds_no_term: bool = False) -> ClickhouseValueSet | None:
-        # Local import: the large list class names this one.
+    def get_parameter_encoder(self) -> Callable[[list[Any]], ClickhouseValueSet | None]:
         from hare.dialects.clickhouse.lookups.in_list.clickhouse_large_in_list import ClickhouseLargeInList
 
-        current = self.value_set.value
-        if len(current.column_types) == 1:
-            return ClickhouseLargeInList.get_value_set(values)
-        return ClickhouseLargeInList.get_row_value_set(values)
+        return (
+            ClickhouseLargeInList().get_value_set
+            if len(self.value_set.value.column_types) == 1
+            else ClickhouseLargeInList().get_row_value_set
+        )

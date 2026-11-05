@@ -13,6 +13,21 @@ from hare.sql.terms.term import Term
 class Interval(Term):
     """An ``INTERVAL`` literal of years, months, days and times."""
 
+    structure_attributes = (
+        "years",
+        "months",
+        "days",
+        "hours",
+        "minutes",
+        "seconds",
+        "microseconds",
+        "quarters",
+        "weeks",
+        "largest",
+        "smallest",
+        "is_negative",
+    )
+
     # A constant - abstains from the aggregate vote, like ValueWrapper.
     is_aggregate = None
 

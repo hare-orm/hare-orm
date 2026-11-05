@@ -129,13 +129,13 @@ class TableOptions:
         """
         return ""
 
-    def get_after_create_sqls(self, model: type[Model], table_sql: str, editor: BaseSchemaEditor) -> list[str]:
+    def get_after_create_sqls(self, model: type[Model], table_name: str, editor: BaseSchemaEditor) -> list[str]:
         """Returns the statements the options run right after the table's ``CREATE TABLE`` - what
         the table gets by a statement of its own.
 
         Args:
             model: The model the table is created for.
-            table_sql: The created table, quoted - the model's own, or the copy a rebuild fills.
+            table_name: The unquoted physical table name; its namespace comes from the model.
             editor: The schema editor of the connection the DDL runs on.
 
         Returns:

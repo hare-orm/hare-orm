@@ -34,7 +34,10 @@ class DatabaseShellCommands:
         if connection_alias is not None and connection_alias not in hare_config.connections:
             raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
         opened_connection_alias = connection_alias or next(iter(hare_config.connections))
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config.to_dict()):
+        async with (
+            CommandContext.database_error_boundary(),
+            CommandContext.hare_cli_context(hare_config, connect=False),
+        ):
             client = Connections.get(opened_connection_alias)
             try:
                 command = await client.get_shell_command()

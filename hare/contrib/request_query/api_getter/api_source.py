@@ -9,6 +9,7 @@ from hare.contrib.request_query.api_getter.api_getter_triggers import ApiGetterT
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.request_query.api_getter.constants import (
     API_PATH_SEPARATOR,
+    API_POSITIVE_CAPACITY_MESSAGE,
     DEFAULT_API_BATCH_SIZE,
     DEFAULT_API_CONCURRENCY,
     DEFAULT_API_TIMEOUT_SECONDS,
@@ -40,7 +41,8 @@ class ApiSource:
         headers: The headers of every request, or an ``async`` function giving them - called once a run;
             left out of the source's repr.
         required: A value without an answer raises instead of leaving its targets empty.
-        timeout_seconds: The longest a request may take.
+        timeout_seconds: HTTPX's timeout for each connect, read, write and pool wait; not a total deadline.
+            Header generation and retry delays are outside these timeouts.
         concurrency: The most requests of the source at a time.
         batch_size: The most values one ``QUERY_MANY`` request asks for.
         retry: How a failed request is repeated.
@@ -71,6 +73,8 @@ class ApiSource:
     triggers: ApiGetterTriggers = ApiGetterTriggers()
 
     def __post_init__(self) -> None:
+        if self.concurrency <= 0 or self.batch_size <= 0:
+            raise ConfigurationError(API_POSITIVE_CAPACITY_MESSAGE)
         if self.request_mode is ApiRequestMode.PATH:
             placeholder = "{" + self.get_key_name() + "}"
             if placeholder not in self.url:

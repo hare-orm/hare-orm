@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
 from enum import Enum, IntEnum, StrEnum
 from typing import Any, cast
 
@@ -9,8 +11,6 @@ from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_DEFAULT_DATETIME_FIELD_PATH,
     CLICKHOUSE_TYPE_MAP,
 )
-from hare.dialects.clickhouse.drivers.clickhouse_shared_variant_values import ClickhouseSharedVariantValues
-from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_ARRAY_FIELD_PATH,
     CLICKHOUSE_CHAR_ENUM_FIELD_PATH,
@@ -27,7 +27,7 @@ from hare.dialects.clickhouse.schema.constants import (
     CLICKHOUSE_VARIANT_FIELD_PATH,
 )
 from hare.dialects.clickhouse.types.clickhouse_enum_types import ClickhouseEnumTypes
-from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.constants import CLICKHOUSE_NULLABLE_TYPE
 from hare.inspectdb.constants import INSPECTED_ENUM_MODULE_NAME
 from hare.inspectdb.generation.model_naming import ModelNaming
@@ -40,7 +40,7 @@ class ClickhouseTypeParser:
     ``MapField`` of a ``TextField`` and an ``ArrayField`` of a nullable ``IntField``."""
 
     #: The spec of a type no field maps to - its values read as text.
-    FALLBACK_SPECIFICATION = InspectedFieldSpecification(CLICKHOUSE_FALLBACK_FIELD_PATH, {})
+    FALLBACK_SPECIFICATION = InspectedFieldSpecification(CLICKHOUSE_FALLBACK_FIELD_PATH, is_ambiguous=True)
 
     @staticmethod
     def unwrap(type_sql: str) -> tuple[str, bool]:
@@ -52,31 +52,22 @@ class ClickhouseTypeParser:
         Returns:
             The type, and whether it is nullable.
         """
-        name, arguments = ClickhouseTypeNames.get_type_parts(type_sql)
-        if name == CLICKHOUSE_NULLABLE_TYPE and len(arguments) == 1:
-            return arguments[0], True
+        physical_type = ClickhousePhysicalType.from_sql(type_sql)
+        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+            return physical_type.elements[0].sql, True
         return type_sql, False
 
     @classmethod
     def get_named_elements(
-        cls, arguments: list[str], enum_name: str = CLICKHOUSE_INSPECTED_ENUM_NAME
+        cls, physical_type: ClickhousePhysicalType, enum_name: str = CLICKHOUSE_INSPECTED_ENUM_NAME
     ) -> dict[str, InspectedFieldSpecification] | None:
-        """The elements of a tuple by name, when every element is named (``name Type``).
-
-        Args:
-            arguments: The tuple's arguments.
-            enum_name: The name an enum class of an element is named after.
-
-        Returns:
-            The element fields by name, None for a tuple of unnamed elements.
-        """
-        named: dict[str, InspectedFieldSpecification] = {}
-        for argument in arguments:
-            name, _separator, element_type = argument.partition(" ")
-            if not element_type or not name.isidentifier() or "(" in name:
-                return None
-            named[name] = cls.get_specification(element_type.strip(), enum_name)
-        return named
+        """Field specifications of a tuple whose elements all have catalog names."""
+        if not physical_type.elements or not all(name is not None for name in physical_type.element_names):
+            return None
+        return {
+            cast(str, name): cls.get_physical_specification(element, enum_name)
+            for name, element in zip(physical_type.element_names, physical_type.elements, strict=True)
+        }
 
     @classmethod
     def get_specification(
@@ -91,69 +82,67 @@ class ClickhouseTypeParser:
         Returns:
             The field's specification - a ``TextField`` for a type no field maps.
         """
-        unwrapped_sql, nullable = cls.unwrap(type_sql.strip())
-        specification = cls.get_unwrapped_specification(unwrapped_sql, enum_name)
-        if nullable:
-            return InspectedFieldSpecification(specification.path, {**specification.kwargs, "null": True})
-        return specification
+        return cls.get_physical_specification(ClickhousePhysicalType.from_sql(type_sql), enum_name)
 
     @classmethod
-    def get_array_specification(cls, element_type_sql: str, enum_name: str) -> InspectedFieldSpecification:
-        """The field an array maps to - a nested field for an array of tuples whose elements are all
-        named, an array field for any other.
+    def get_physical_specification(
+        cls, physical_type: ClickhousePhysicalType, enum_name: str
+    ) -> InspectedFieldSpecification:
+        """Map an existing type tree without reparsing each container's declaration."""
+        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+            specification = cls.get_physical_specification(physical_type.elements[0], enum_name)
+            return replace(specification, kwargs={**specification.kwargs, "null": True})
+        return cls.get_unwrapped_specification(physical_type, enum_name)
 
-        Args:
-            element_type_sql: The type of the array's elements.
-            enum_name: The name an enum class of an element is named after.
-
-        Returns:
-            The field's specification.
-        """
-        element_type, _nullable = cls.unwrap(element_type_sql)
-        if element_type.startswith("Tuple("):
-            named = cls.get_named_elements(ClickhouseSqlParts.split(element_type[len("Tuple(") : -1]), enum_name)
+    @classmethod
+    def get_array_specification(
+        cls, element_type: ClickhousePhysicalType, enum_name: str
+    ) -> InspectedFieldSpecification:
+        """Named tuple arrays map to NestedField; other arrays retain their element field."""
+        if element_type.name == "Tuple":
+            named = cls.get_named_elements(element_type, enum_name)
             if named is not None:
                 return InspectedFieldSpecification(CLICKHOUSE_NESTED_FIELD_PATH, {"element_fields": named})
         return InspectedFieldSpecification(
-            CLICKHOUSE_ARRAY_FIELD_PATH, {"base_field": cls.get_specification(element_type_sql, enum_name)}
+            CLICKHOUSE_ARRAY_FIELD_PATH, {"base_field": cls.get_physical_specification(element_type, enum_name)}
         )
 
     @classmethod
     def get_unwrapped_specification(
-        cls, type_sql: str, enum_name: str = CLICKHOUSE_INSPECTED_ENUM_NAME
+        cls, physical_type: ClickhousePhysicalType, enum_name: str = CLICKHOUSE_INSPECTED_ENUM_NAME
     ) -> InspectedFieldSpecification:
         """The field a type without wrappers maps to.
 
         Args:
-            type_sql: The type.
+            physical_type: The parsed type without its nullable wrapper.
             enum_name: The name an enum class read off the type is named after.
 
         Returns:
             The field's specification.
         """
-        type_name, _separator, rest = type_sql.partition("(")
-        arguments = ClickhouseSqlParts.split(rest[:-1]) if rest.endswith(")") else []
+        type_name, arguments = physical_type.name, physical_type.arguments
+        elements = physical_type.elements
         if type_name == "Array" and len(arguments) == 1:
-            return cls.get_array_specification(arguments[0], enum_name)
+            return cls.get_array_specification(elements[0], enum_name)
         if type_name == "Nested" and arguments:
-            named = cls.get_named_elements(arguments, enum_name)
+            named = cls.get_named_elements(physical_type, enum_name)
             if named is not None:
                 return InspectedFieldSpecification(CLICKHOUSE_NESTED_FIELD_PATH, {"element_fields": named})
         if type_name == "Map" and len(arguments) == 2:
             return InspectedFieldSpecification(
                 CLICKHOUSE_MAP_FIELD_PATH,
                 {
-                    "key_field": cls.get_specification(arguments[0], enum_name),
-                    "value_field": cls.get_specification(arguments[1], enum_name),
+                    "key_field": cls.get_physical_specification(elements[0], enum_name),
+                    "value_field": cls.get_physical_specification(elements[1], enum_name),
                 },
             )
         if type_name == "LowCardinality" and len(arguments) == 1:
-            base_specification = cls.get_specification(arguments[0], enum_name)
+            base_specification = cls.get_physical_specification(elements[0], enum_name)
             base_kwargs = {name: value for name, value in base_specification.kwargs.items() if name != "null"}
             return InspectedFieldSpecification(
                 CLICKHOUSE_LOW_CARDINALITY_FIELD_PATH,
                 {
-                    "base_field": InspectedFieldSpecification(base_specification.path, base_kwargs),
+                    "base_field": replace(base_specification, kwargs=base_kwargs),
                     **({"null": True} if base_specification.kwargs.get("null") else {}),
                 },
             )
@@ -171,12 +160,14 @@ class ClickhouseTypeParser:
         if type_name == "Variant" and arguments:
             return InspectedFieldSpecification(
                 CLICKHOUSE_VARIANT_FIELD_PATH,
-                {"variant_fields": [cls.get_specification(argument, enum_name) for argument in arguments]},
+                {"variant_fields": [cls.get_physical_specification(element, enum_name) for element in elements]},
             )
         if type_name == "Tuple" and arguments:
-            named = cls.get_named_elements(arguments)
+            named = cls.get_named_elements(physical_type, enum_name)
             element_fields: Any = (
-                named if named is not None else [cls.get_specification(argument, enum_name) for argument in arguments]
+                named
+                if named is not None
+                else [cls.get_physical_specification(element, enum_name) for element in elements]
             )
             return InspectedFieldSpecification(CLICKHOUSE_TUPLE_FIELD_PATH, {"element_fields": element_fields})
         lowered_name = type_name.strip().lower()
@@ -185,43 +176,30 @@ class ClickhouseTypeParser:
                 continue
             kwargs = dict(default_kwargs)
             if lowered_name == "decimal" and len(arguments) == 2:
-                kwargs["max_digits"], kwargs["decimal_places"] = int(arguments[0]), int(arguments[1])
+                kwargs["max_digits"], kwargs["decimal_places"] = physical_type.precision, physical_type.scale
             if lowered_name == "fixedstring" and len(arguments) == 1:
                 kwargs["length"] = int(arguments[0])
             if lowered_name in {"datetime", "datetime64"}:
-                return ClickhouseTypeParser.get_moment_specification(type_sql, lowered_name, arguments)
+                return ClickhouseTypeParser.get_moment_specification(physical_type)
             return InspectedFieldSpecification(path, kwargs)
         return ClickhouseTypeParser.FALLBACK_SPECIFICATION
 
     @staticmethod
-    def get_moment_specification(
-        type_sql: str, lowered_name: str, arguments: list[str]
-    ) -> InspectedFieldSpecification:
-        """The field a ``DateTime``/``DateTime64`` column maps to - a ``DatetimeField`` for its own
-        ``DateTime64(6, 'UTC')``, else a ``ClickhouseDatetimeField`` of the column's precision and time
-        zone.
-
-        Args:
-            type_sql: The type.
-            lowered_name: ``datetime`` or ``datetime64``.
-            arguments: The type's arguments.
-
-        Returns:
-            The field's specification.
-        """
-        if type_sql == CLICKHOUSE_DATETIME_COLUMN_TYPE:
+    def get_moment_specification(physical_type: ClickhousePhysicalType) -> InspectedFieldSpecification:
+        """Map catalog precision/timezone without inventing a timezone for an unzoned type."""
+        if physical_type.sql == CLICKHOUSE_DATETIME_COLUMN_TYPE:
             return InspectedFieldSpecification(CLICKHOUSE_DEFAULT_DATETIME_FIELD_PATH, {})
-        zone_arguments = arguments[1:] if lowered_name == "datetime64" else arguments
         kwargs: dict[str, Any] = {}
-        if lowered_name == "datetime64" and arguments:
-            kwargs["precision"] = int(arguments[0])
-        timezone = ClickhouseSharedVariantValues.get_unquoted_text(zone_arguments[0]) if zone_arguments else None
-        if timezone != "UTC":
-            kwargs["timezone"] = timezone
+        if physical_type.name == "DateTime64" and physical_type.precision is not None:
+            kwargs["precision"] = physical_type.precision
+        if physical_type.timezone != "UTC":
+            kwargs["timezone"] = physical_type.timezone
         return InspectedFieldSpecification(CLICKHOUSE_DATETIME_FIELD_PATH, kwargs)
 
     @staticmethod
-    def get_enum_specification(type_name: str, arguments: list[str], enum_name: str) -> InspectedFieldSpecification:
+    def get_enum_specification(
+        type_name: str, arguments: Sequence[str], enum_name: str
+    ) -> InspectedFieldSpecification:
         """The field an enum maps to - a ``CharEnumField`` when its labels are numbered as one numbers
         its values, an ``IntEnumField`` when its labels are member names, each only when it writes the
         same ``Enum8``/``Enum16``; a ``CharField`` of the labels otherwise.
@@ -234,7 +212,7 @@ class ClickhouseTypeParser:
         Returns:
             The field's specification.
         """
-        numbers_by_label = ClickhouseSharedVariantValues.get_enum_numbers(arguments)
+        numbers_by_label = ClickhousePhysicalType.get_enum_members(arguments)
         labels = list(numbers_by_label)
         class_name = ModelNaming.get_class_name(enum_name)
         enum_field: tuple[str, type[Enum]] | None = None
@@ -268,7 +246,7 @@ class ClickhouseTypeParser:
             True when none is.
         """
         if isinstance(value, InspectedFieldSpecification):
-            return value is not cls.FALLBACK_SPECIFICATION and cls.holds_only_mapped_types(value.kwargs)
+            return not value.is_ambiguous and cls.holds_only_mapped_types(value.kwargs)
         if isinstance(value, dict):
             return all(cls.holds_only_mapped_types(item) for item in value.values())
         if isinstance(value, (list, tuple)):

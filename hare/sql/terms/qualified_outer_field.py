@@ -11,12 +11,14 @@ if TYPE_CHECKING:
     from typing import Self
 
     from hare.sql.builder.tables.table import Table
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class QualifiedOuterField(Term):
     """ "table"."column" - always table-qualified, unlike a plain Field/table[column], which the
     child QueryBuilder could silently re-resolve against its own table."""
+
+    structure_attributes = ("column", "reads_unique_column", "table")
 
     def __init__(self, table: Table, column: str, *, reads_unique_column: bool = False) -> None:
         """
@@ -31,9 +33,8 @@ class QualifiedOuterField(Term):
         self.column = column
         self.reads_unique_column = reads_unique_column
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.table.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.table
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
@@ -51,7 +52,7 @@ class QualifiedOuterField(Term):
         return self
 
     def get_sql(self, sql_context: SqlContext) -> str:
-        table_name = self.table.get_table_name()
+        table_name = sql_context.source_aliases.get(self.table.source_binding, self.table.get_table_name())
         sql = f"{sql_context.quote(table_name)}.{sql_context.quote(self.column)}"
         if sql_context.with_alias and self.alias:
             return sql_context.format_alias_sql(sql, self.alias)

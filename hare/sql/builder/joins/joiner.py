@@ -34,5 +34,5 @@ class Joiner:
                 f"Parameter 'criterion' is required for a {self.type_label} JOIN but was not supplied."
             )
 
-        self.query.do_join(JoinOn(self.item, self.how, criterion, collate))  # type:ignore[arg-type]
+        self.query.do_join(JoinOn(self.item, self.how, criterion, collate))
         return self.query

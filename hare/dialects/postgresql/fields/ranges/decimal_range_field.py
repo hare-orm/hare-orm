@@ -3,7 +3,6 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.ranges.range import Range
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.exceptions import ValidationError
@@ -15,7 +14,6 @@ class DecimalRangeField(RangeField):
 
     SQL_TYPE = "numrange"
     ELEMENT_SQL_TYPE = "numeric"
-    NATIVE_BOUND_TYPE = RangeBoundType.DECIMAL
 
     def get_bound_field(self) -> Field[Any]:
         from hare.query.expressions.numeric.numeric_typing import NumericTyping

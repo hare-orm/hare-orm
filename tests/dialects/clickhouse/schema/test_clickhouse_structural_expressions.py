@@ -13,9 +13,12 @@ from hare import fields
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.schema_objects.clickhouse_materialized_view import ClickhouseMaterializedView
+from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
+from hare.exceptions import ConfigurationError
 from hare.migrations.drift import detect_drift
 from hare.query.expressions import F
-from hare.query.functions import Trunc
+from hare.query.functions import Sum, Trunc
+from hare.query.plans.statement.statement_plans import StatementPlans
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
 from tests.utils.cli_project_factory import project_factory  # noqa: F401
 
@@ -153,6 +156,38 @@ async def test_a_projection_keeps_every_row(project_factory):  # noqa: F811
 
 
 @pytest.mark.asyncio
+async def test_projection_compilation_preserves_the_queryset_and_runnable_plans(round_trip):
+    round_trip.tracked_state.default_connections[APP_LABEL] = round_trip.connection.connection_alias
+    declared = build_model(
+        "ProjectionReading",
+        "projection_reading",
+        {"site": fields.CharField(max_length=32), "score": fields.IntField()},
+    )
+    await round_trip.migrate_to(declared)
+    model = round_trip.tracked_state.apps.get_model(f"{APP_LABEL}.ProjectionReading")
+    query = (
+        model.objects.all().using(round_trip.connection).values("site").annotate(total=Sum("score")).order_by("site")
+    )
+    original_sql = query.sql(parameters_inline=True)
+    bucket = StatementPlans.plans.get_model_bucket(model)
+    original_plans = {key: (id(plan), plan.sql) for key, plan in bucket.items()}
+    hits = StatementPlans.hits
+    projection = ClickhouseProjection("by_site", query)
+    first_sql = projection.get_query_sql(round_trip.connection)
+    assert "FROM" not in first_sql and "GROUP BY" in first_sql
+    assert projection.get_read_columns() == ("score", "site")
+    assert projection.get_query_sql(round_trip.connection) == first_sql
+    assert StatementPlans.hits == hits
+    assert {key: (id(plan), plan.sql) for key, plan in bucket.items()} == original_plans
+    assert query.sql(parameters_inline=True) == original_sql
+    for restricted in (query.filter(site="a"), query.limit(1), query.distinct(), query.prewhere(site="a")):
+        with pytest.raises(ConfigurationError):
+            ClickhouseProjection("restricted", restricted).get_query_sql(round_trip.connection)
+    raw = "  SELECT site ORDER BY site  "
+    assert ClickhouseProjection("literal", RawSQLTerm(raw)).get_query_sql() == raw
+
+
+@pytest.mark.asyncio
 async def test_a_column_a_projection_reads_changes_its_type(project_factory):  # noqa: F811
     """A column a projection reads changed its type with a raw ALTER_OF_COLUMN_IS_FORBIDDEN - the
     projection is dropped before and added after."""
@@ -261,7 +296,7 @@ async def test_a_projection_sorts_its_rows_ascending(project_factory):  # noqa: 
     )
     refused = await project.cli("makemigrations")
     assert refused.exit_code not in (0, None)
-    assert "ascending only" in refused.output
+    assert "structured projections require ascending ordering" in refused.output
 
 
 @pytest.mark.asyncio

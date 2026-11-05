@@ -8,8 +8,6 @@ import pytest_asyncio
 from hare.contrib.test import truncate_all_models
 from hare.contrib.test.isolated_contexts import hare_test_context
 
-REQUIRES = ("taskiq",)
-
 
 @pytest_asyncio.fixture(scope="module")
 async def db_taskiq_module():

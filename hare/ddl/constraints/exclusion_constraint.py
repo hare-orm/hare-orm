@@ -25,6 +25,7 @@ class ExclusionConstraint:
     ``expressions`` (with ``"="``) to check per tenant.
 
     Args:
+        name: The constraint's name in the database schema.
         expressions: ``(expression, operator)`` pairs - a field name (a relation means its key
             column), an expression of hare over the model's fields (``Lower("code")``, ``F("start") + 1``)
             written in the database's own SQL and renamed with the fields it reads, or a ``RawSQLTerm``
@@ -32,8 +33,8 @@ class ExclusionConstraint:
         using: The index access method - see ExclusionConstraintUsing.
         condition: Makes it partial - a ``Q`` over the model's fields or a ``RawSQLTerm`` predicate.
         include: Fields stored in the index as non-key columns (``INCLUDE``).
-        deferrable: Check at transaction end (or after ``SET CONSTRAINTS ... DEFERRED``) instead of
-            after each statement.
+        deferrable: Allow postponing the check until transaction end with
+            ``SET CONSTRAINTS ... DEFERRED``; initially immediate unless ``initially_deferred=True``.
         initially_deferred: Only with ``deferrable=True`` - every transaction starts deferred.
 
     Raises:

@@ -4,7 +4,7 @@ import importlib
 import json
 import keyword
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
@@ -37,7 +37,7 @@ class HareConfig(ConfigSection):
 
     connections: dict[str, ConnectionConfig | DBUrlConfig]
     apps: dict[str, AppConfig]
-    routers: list[str | type] | None = None
+    routers: list[str | Callable[[], object]] | None = None
     #: How long after a write the reads of the written connection's models stay on it, in
     #: seconds - None for the rest of the asyncio task (``hare.core.routing.Routing``).
     read_your_writes_seconds: float | None = None
@@ -160,7 +160,7 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: It, or a section, isn't a mapping, or a section is missing or unknown.
+            ConfigurationError: A required section is missing or a key is unknown.
         """
         cls.check_known_keys(data, "the config")
 
@@ -168,8 +168,6 @@ class HareConfig(ConfigSection):
             raise ConfigurationError('Config must define "connections" section')
         if "apps" not in data:
             raise ConfigurationError('Config must define "apps" section')
-        cls.raise_if_not_mapping(data["connections"], 'the "connections" section')
-        cls.raise_if_not_mapping(data["apps"], 'the "apps" section')
 
         connections: dict[str, ConnectionConfig | DBUrlConfig] = {
             name: DBUrlConfig(connection_config)
@@ -214,8 +212,8 @@ class HareConfig(ConfigSection):
             The configuration.
 
         Raises:
-            ConfigurationError: The file is missing, unreadable or of another extension, its contents aren't a
-                valid configuration, or a YAML file is read without PyYAML installed.
+            ConfigurationError: Reading or parsing fails, the extension is unsupported, required sections
+                are missing, keys are unknown, or a YAML file is read without PyYAML installed.
         """
         _, extension = os.path.splitext(config_file)
         extension = extension.lower()

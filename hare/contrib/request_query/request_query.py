@@ -4,27 +4,26 @@ filters by, the search, the orderings a request may choose and the pagination.""
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
-from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast, overload
 from urllib.parse import parse_qsl
-from weakref import WeakKeyDictionary, WeakSet, ref
+from weakref import WeakKeyDictionary, WeakSet
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 from pydantic.fields import FieldInfo
 
+from hare.contrib.pydantic_field_aliases import PydanticFieldAliases
 from hare.contrib.request_query.api_getter.api_getter import ApiGetter
 from hare.contrib.request_query.api_getter.api_source import ApiSource
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
 from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger
 from hare.contrib.request_query.constants import (
-    DECLARATION_BUCKET_KEY,
     DESCENDING_PREFIX,
     EMPTY_TEXT_MATCHING_LOOKUPS,
+    GENERATION_BUCKET_KEY,
     INVALID_VALUE_ERROR_TYPE,
     LOOKUP_SEPARATOR,
     MANY_VALUE_PARAMETERS_BUCKET_KEY,
@@ -33,16 +32,16 @@ from hare.contrib.request_query.constants import (
     PARAMETER_OPTION_NAMES,
     REQUEST_OPTIONS_BUCKET_KEY,
 )
-from hare.contrib.request_query.declaration.declaration_builder import DeclarationBuilder
 from hare.contrib.request_query.declaration.filter_declaration import FilterDeclaration
-from hare.contrib.request_query.declaration.filter_parameter_builder import FilterParameterBuilder
 from hare.contrib.request_query.declaration.meta_option_checks import MetaOptionChecks
 from hare.contrib.request_query.declaration.request_query_declaration import RequestQueryDeclaration
+from hare.contrib.request_query.declaration.request_query_generation import RequestQueryGeneration
+from hare.contrib.request_query.declaration.request_query_generation_builder import RequestQueryGenerationBuilder
 from hare.contrib.request_query.declaration.request_query_parameters import RequestQueryParameters
 from hare.contrib.request_query.declaration.request_query_registry import RequestQueryRegistry
 from hare.contrib.request_query.descriptions.parameter_describer import ParameterDescriber
 from hare.contrib.request_query.descriptions.parameter_description import ParameterDescription
-from hare.contrib.request_query.enums import DeletedRows, EachRowOnce
+from hare.contrib.request_query.enums import DeletedRows, EachRowOnce, ParameterDefault
 from hare.contrib.request_query.exceptions import InvalidRequestQuery, RequestQueryForbidden
 from hare.contrib.request_query.options.deleted_config import DeletedConfig
 from hare.contrib.request_query.options.fields_config import FieldsConfig
@@ -59,6 +58,7 @@ from hare.contrib.request_query.value_annotation import ValueAnnotation
 from hare.contrib.request_query.value_counter import ValueCounter
 from hare.contrib.request_query.value_target import ValueTarget
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.core.caching.caches import Caches
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, QueryError, ValidationError as FieldValidationError
@@ -108,26 +108,23 @@ class RequestQuery[ModelType: Model](BaseModel):
     against that dialect only, and may use the lookups only it runs.
     """
 
-    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True, populate_by_name=True)
 
     #: The dialect the class's filters are checked against, None for every dialect.
     dialect: ClassVar[Dialect | None] = None
 
-    #: The buckets of the caches the class reads (``Cache.get_owner_bucket()``) - a dict of its
+    #: The buckets of the caches the class reads (``Cache.get_bucket()``) - a dict of its
     #: own for every request query class.
     cache_buckets: ClassVar[dict[int, Any]] = {}
 
-    #: The checked declaration of each request query class, its options that add parameters and
+    #: The completed generation of each request query class, its options that add parameters and
     #: the parameters taking every value of a repeated query parameter, in a bucket the class
     #: keeps - so a class nothing else holds (one a test declares) is gone with it.
-    declarations: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    declarations: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
-    #: The request query classes ``prepare_parameters()`` completed - weakly, as ``declarations``.
-    prepared_classes: ClassVar[WeakSet[type]] = WeakSet()
-
-    #: The parameters of each prepared class as they were before ``prepare_parameters()`` added
-    #: ``Meta.filters``' and described the filters - put back when the class is forgotten.
-    unprepared_fields: ClassVar[WeakKeyDictionary[type, dict[str, FieldInfo]]] = WeakKeyDictionary()
+    #: True only on an unpublished candidate or a completed generated parameter class.
+    is_parameter_schema: ClassVar[bool] = False
+    parameter_generation: ClassVar[RequestQueryGeneration | None] = None
 
     #: The request query classes whose parameters or declaration read each model - both weakly.
     #: A change to the model (``Caches.forget_model_caches()``: a live model unregistered or
@@ -182,6 +179,10 @@ class RequestQuery[ModelType: Model](BaseModel):
     _explicit_ordering: tuple[OrderingItem, ...] | None = PrivateAttr(default=None)
     _queryset_changes: tuple[Callable[[QuerySet[Any]], QuerySet[Any]], ...] = PrivateAttr(default=())
 
+    def __new__(cls, *args: Any, **kwargs: Any) -> Self:
+        """Allocate from the completed generation without changing the source class."""
+        return object.__new__(cls if cls.is_parameter_schema else cls.prepare_parameters())
+
     def __init__(self, request: Any = None, **values: Any) -> None:
         """Reads the parameters of a request.
 
@@ -194,9 +195,11 @@ class RequestQuery[ModelType: Model](BaseModel):
                 parameter names what the option doesn't allow, or a field's bounds leave no value
                 between them (``published_at__gte`` after ``published_at__lte``).
         """
-        type(self).prepare_parameters()
+        declaration = type(self).get_declaration()
         try:
-            super().__init__(**values)
+            super().__init__(
+                **{name: value for name, value in values.items() if value is not ParameterDefault.MISSING}
+            )
         except ValidationError as error:
             raise InvalidRequestQuery(
                 [
@@ -208,7 +211,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         parameter_values = RequestQueryParameters.get_parameter_values(self)
         for option in self.get_request_options():
             option.check_request(parameter_values)
-        for bounds in self.get_declaration().bounds:
+        for bounds in declaration.bounds:
             bounds.check(parameter_values)
 
     @classmethod
@@ -236,6 +239,11 @@ class RequestQuery[ModelType: Model](BaseModel):
         """Builds the query from query parameters as pairs, a name repeated for each of its values.
         A parameter taking a list gets every value, any other the last one; a name the query
         doesn't have is ignored, as a web framework ignores it.
+        Aliases sharing an input root receive the same value. The root keeps all repeated
+        values when any of its fields needs a list or an indexed alias path; Pydantic checks
+        whether that shared representation satisfies each field.
+        An explicit field value removes that field's URL alias roots for every consumer.
+        Other fields sharing those roots need another accepted input or a default.
 
         Args:
             parameters: ``(name, value)`` pairs.
@@ -248,17 +256,34 @@ class RequestQuery[ModelType: Model](BaseModel):
         Raises:
             InvalidRequestQuery: See ``__init__()``.
         """
-        cls.prepare_parameters()
+        schema = cls.prepare_parameters()
         collected: dict[str, list[str]] = {}
         for name, value in parameters:
             collected.setdefault(name, []).append(value)
-        many_value_names = cls.get_many_value_parameter_names()
-        arguments: dict[str, Any] = {}
-        for name in cls.model_fields:
-            if name in collected:
-                arguments[name] = collected[name] if name in many_value_names else collected[name][-1]
+        many_value_names = schema.get_many_value_parameter_names()
+        paths_by_field = {
+            name: PydanticFieldAliases.get_paths(name, field_info, schema.model_config)
+            for name, field_info in schema.model_fields.items()
+        }
+        overridden_roots = {
+            path[0]
+            for name, paths in paths_by_field.items()
+            if name in values or any(path[0] in values for path in paths)
+            for path in paths
+        }
+        input_shapes: dict[str, bool] = {}
+        for name, input_paths in paths_by_field.items():
+            for path in input_paths:
+                input_name = cast("str", path[0])
+                if input_name in overridden_roots or input_name not in collected:
+                    continue
+                takes_many = name in many_value_names or (len(path) > 1 and isinstance(path[1], int))
+                input_shapes[input_name] = input_shapes.get(input_name, False) or takes_many
+        arguments: dict[str, Any] = {
+            name: collected[name] if takes_many else collected[name][-1] for name, takes_many in input_shapes.items()
+        }
         arguments.update(values)
-        return cls(request=request, **arguments)
+        return schema(request=request, **arguments)
 
     @classmethod
     def get_many_value_parameter_names(cls) -> frozenset[str]:
@@ -268,6 +293,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             Their names.
         """
+        if not cls.is_parameter_schema:
+            return cls.prepare_parameters().get_many_value_parameter_names()
         bucket = cls.get_cache_bucket()
         names: frozenset[str] | None = bucket.get(MANY_VALUE_PARAMETERS_BUCKET_KEY)
         if names is None:
@@ -276,21 +303,17 @@ class RequestQuery[ModelType: Model](BaseModel):
                 for name, field_info in cls.model_fields.items()
                 if ValueAnnotation.takes_many_values(field_info.annotation, field_info.metadata)
             )
-            # The parameters of a class not prepared yet still change.
-            if cls in RequestQuery.prepared_classes:
-                bucket[MANY_VALUE_PARAMETERS_BUCKET_KEY] = names
+            bucket[MANY_VALUE_PARAMETERS_BUCKET_KEY] = names
         return names
 
     @classmethod
-    def get_cache_bucket(cls) -> dict[Any, Any]:
-        """The bucket of ``declarations`` the class keeps - read off the class's own buckets, which
-        costs less than asking the cache.
+    def get_cache_bucket(cls) -> CacheBucket[Any]:
+        """The bounded declaration bucket attached to this request query class.
 
         Returns:
             The bucket.
         """
-        bucket = cls.cache_buckets.get(RequestQuery.declarations.bucket_id)
-        return bucket if bucket is not None else RequestQuery.declarations.get_owner_bucket(cls)
+        return RequestQuery.declarations.get_bucket(cls)
 
     @classmethod
     def get_meta_option(cls, name: str) -> Any:
@@ -314,6 +337,12 @@ class RequestQuery[ModelType: Model](BaseModel):
         return None
 
     @classmethod
+    def __init_subclass__(cls, *, parameter_schema: bool = False, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.is_parameter_schema = parameter_schema
+        cls.parameter_generation = None
+
+    @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         """Adds the parameters the class's options bring - the search, the ordering, the
         pagination parameters and the others - once pydantic built the class. A parameter the
@@ -324,6 +353,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         """
         super().__pydantic_init_subclass__(**kwargs)
         cls.cache_buckets = {}
+        if cls.is_parameter_schema:
+            return
         RequestQueryParameters.add_parameter_fields(
             cls,
             {
@@ -338,29 +369,30 @@ class RequestQuery[ModelType: Model](BaseModel):
         )
 
     @classmethod
-    def prepare_parameters(cls) -> None:
-        """Adds the parameters of ``Meta.filters`` and describes the filter parameters the class
-        declares, from the ORM's descriptions of their filters - once per class. It needs the
-        models bound (``Hare.bind_models()`` or ``Hare.init()``), not the connections:
-        a framework adapter calls it before it reads the parameters for the handlers' signatures,
-        and the query calls it when it is first built.
+    def prepare_parameters(cls) -> type[Self]:
+        """Return the completed Pydantic class for this declaration.
 
-        Raises:
-            ConfigurationError: ``Meta.filters`` is wrong - see ``FilterParameterBuilder`` - or the
-                queryset's model was unregistered.
+        The source class retains only its declared fields and option parameters.
+        Use the returned class for ``model_fields``, ``TypeAdapter`` and nested
+        Pydantic annotations. Ordinary construction selects this class automatically.
+        Each returned class is a snapshot; registry invalidation affects future calls.
         """
-        if cls in RequestQuery.prepared_classes:
-            return
-        queryset = cls.get_meta_option("queryset")
-        if queryset is not None:
-            RequestQueryRegistry.check_model_registered(cls, queryset.model)
-            builder = FilterParameterBuilder(cls)
-            fields = builder.build_fields(queryset)
-            RequestQuery.unprepared_fields.setdefault(cls, dict(cls.__pydantic_fields__))
-            RequestQueryParameters.add_parameter_fields(cls, fields)
-            RequestQueryRegistry.track_models(cls, {queryset.model, *builder.described_models})
-            RequestQuery.bound_models.add(queryset.model)
-        RequestQuery.prepared_classes.add(cls)
+        if cls.is_parameter_schema:
+            return cls
+        with RequestQueryRegistry.lock:
+            bucket = cls.get_cache_bucket()
+            generation = bucket.get(GENERATION_BUCKET_KEY)
+            while generation is None:
+                revision = RequestQueryRegistry.revision
+                try:
+                    candidate = RequestQueryGenerationBuilder.build(cls)
+                except BaseException:
+                    RequestQueryRegistry.forget_parameters(cls)
+                    raise
+                if revision != RequestQueryRegistry.revision:
+                    continue
+                generation = bucket[GENERATION_BUCKET_KEY] = candidate
+            return cast("type[Self]", generation.schema)
 
     @classmethod
     def forget_model(cls, model: type[Model]) -> None:
@@ -371,16 +403,18 @@ class RequestQuery[ModelType: Model](BaseModel):
         Args:
             model: The model that changed.
         """
-        for request_query_class in list(RequestQuery.classes_by_model.pop(model, ())):
-            RequestQueryRegistry.forget_parameters(cast("type[RequestQuery[Any]]", request_query_class))
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            for request_query_class in list(RequestQuery.classes_by_model.pop(model, ())):
+                RequestQueryRegistry.forget_parameters(cast("type[RequestQuery[Any]]", request_query_class))
 
     @classmethod
     def forget_all(cls) -> None:
         """Forgets the declaration and the prepared parameters of every request query class."""
-        request_query_classes = {*RequestQuery.declarations.owners, *RequestQuery.prepared_classes}
-        RequestQuery.classes_by_model.clear()
-        for request_query_class in request_query_classes:
-            RequestQueryRegistry.forget_parameters(cast("type[RequestQuery[Any]]", request_query_class))
+        with RequestQueryRegistry.lock:
+            RequestQueryRegistry.revision += 1
+            RequestQuery.declarations.clear()
+            RequestQuery.classes_by_model.clear()
 
     @classmethod
     def get_request_options(cls) -> tuple[RequestOption, ...]:
@@ -389,6 +423,8 @@ class RequestQuery[ModelType: Model](BaseModel):
         Returns:
             The options that are set.
         """
+        if cls.parameter_generation is not None:
+            return cls.parameter_generation.options
         bucket = cls.get_cache_bucket()
         options: tuple[RequestOption, ...] | None = bucket.get(REQUEST_OPTIONS_BUCKET_KEY)
         if options is None:
@@ -411,24 +447,13 @@ class RequestQuery[ModelType: Model](BaseModel):
                 or ordering the model doesn't have or the class's dialects don't run, or its
                 queryset's model was unregistered.
         """
-        declarations = cls.get_cache_bucket()
-        declaration = declarations.get(DECLARATION_BUCKET_KEY)
-        # A registration while the declaration is built (a driver or dialect loaded on first use)
-        # forgets the half-prepared class - its parameters are put back - so it is built again.
-        while declaration is None:
-            queryset = cls.get_meta_option("queryset")
-            if isinstance(queryset, QuerySet):
-                RequestQueryRegistry.check_model_registered(cls, queryset.model)
-            cls.prepare_parameters()
-            builder = DeclarationBuilder(cls)
-            built_declaration = dataclasses.replace(
-                builder.build(), on_describe=partial(RequestQueryRegistry.track_described_models, ref(cls))
-            )
-            if cls not in RequestQuery.prepared_classes:
-                continue
-            RequestQueryRegistry.track_models(cls, builder.described_models)
-            declaration = declarations[DECLARATION_BUCKET_KEY] = built_declaration
-        return cast("RequestQueryDeclaration", declaration)
+        schema = cls.prepare_parameters()
+        generation = schema.parameter_generation
+        if generation is None or generation.declaration is None:
+            raise ConfigurationError(f"{cls.__qualname__}.Meta.queryset is required")
+        declaration = generation.declaration
+        RequestQueryRegistry.check_model_registered(cls, declaration.queryset.model)
+        return declaration
 
     @overload
     @classmethod
@@ -577,7 +602,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         Raises:
             ConfigurationError: See ``get_declaration()``.
         """
-        return ParameterDescriber(cls).describe()
+        return ParameterDescriber(cls.prepare_parameters()).describe()
 
     @classmethod
     def check_declaration(cls) -> None:
@@ -587,7 +612,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         Raises:
             ConfigurationError: See ``get_declaration()``.
         """
-        RequestQuery.declarations.forget_owner(cls)
+        RequestQueryRegistry.forget_parameters(cls)
         cls.get_declaration()
 
     @classmethod
@@ -629,7 +654,8 @@ class RequestQuery[ModelType: Model](BaseModel):
             if subclass in found:
                 continue
             if (
-                subclass.get_meta_option("queryset") is not None
+                not subclass.is_parameter_schema
+                and subclass.get_meta_option("queryset") is not None
                 and not subclass.__pydantic_generic_metadata__["origin"]
             ):
                 found[subclass] = None
@@ -1168,7 +1194,7 @@ class RequestQuery[ModelType: Model](BaseModel):
 
     @staticmethod
     @contextmanager
-    def refusing_invalid_values() -> Iterator[None]:
+    def refusing_invalid_values() -> Generator[None]:
         """Refuses a value of the request its field or the database doesn't take - out of the
         column's range, too long, holding a null byte - as an invalid request.
 
@@ -1296,7 +1322,7 @@ class RequestQuery[ModelType: Model](BaseModel):
         filters never deletes everything the user may see.
 
         Returns:
-            How many rows were deleted.
+            How many rows were deleted, or None if the driver reports no row count.
 
         Raises:
             InvalidRequestQuery: Nothing filters the rows.
@@ -1313,7 +1339,7 @@ class RequestQuery[ModelType: Model](BaseModel):
             values: The new values by field, as for ``QuerySet.update()``.
 
         Returns:
-            How many rows were updated.
+            How many rows were updated, or None if the driver reports no row count.
 
         Raises:
             QueryError: No value is given.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.exceptions import UnSupportedError
 
@@ -51,8 +52,10 @@ class Schemas(SchemaEditorPart):
             model: The model, rendered in the schema it moves from.
         """
 
-    async def move_table_to_schema(self, table_name: str, old_schema: str | None, new_schema: str | None) -> None:
-        """Moves an existing table to another schema, with its rows, constraints and indexes.
+    def get_table_schema_move_plan(
+        self, table_name: str, old_schema: str | None, new_schema: str | None
+    ) -> SchemaChangePlan:
+        """Prepares moving an existing table with its rows, constraints and indexes to another schema.
 
         Args:
             table_name: The table.

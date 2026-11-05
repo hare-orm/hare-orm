@@ -6,4 +6,4 @@ from hare.query.expressions import Expression
 class RawSearchQueryText(Expression, abstract=True):
     """An expression giving a search query in the database's own syntax - a dialect's lexemes. A
     ``SearchQuery`` of one reads it as ``SearchType.RAW``, on a connection with
-    ``features.supports_text_search_configurations``."""
+    ``features.text_search_operations.raw_query_expression``."""

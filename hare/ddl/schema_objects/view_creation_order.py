@@ -10,9 +10,7 @@ TItem = TypeVar("TItem")
 
 
 class ViewCreationOrder:
-    """The order views and materialized views are created in - each after the ones its ``read_columns``
-    name: a view reading a materialized view after it, and the other way round. Raw SQL is never read for
-    it - an object naming none keeps its place."""
+    """Order views by declared and queryset-derived dependencies, without parsing raw SQL."""
 
     @staticmethod
     def get_ordered(items: Sequence[TItem], get_view: Callable[[TItem], View]) -> list[TItem]:
@@ -25,19 +23,18 @@ class ViewCreationOrder:
         Returns:
             The items; a cycle keeps the given order.
         """
-        names = {get_view(item).name for item in items}
+        views = [get_view(item) for item in items]
+        names = {view.name for view in views}
+        dependencies = {
+            view.name: {table for table, _column in view.get_read_columns() if table in names} - {view.name}
+            for view in views
+        }
         pending = list(items)
         ordered: list[TItem] = []
         created_names: set[str] = set()
         while pending:
             next_item = next(
-                (
-                    item
-                    for item in pending
-                    if {table for table, _column in get_view(item).read_columns if table in names}
-                    - {get_view(item).name}
-                    <= created_names
-                ),
+                (item for item in pending if dependencies[get_view(item).name] <= created_names),
                 pending[0],
             )
             pending.remove(next_item)

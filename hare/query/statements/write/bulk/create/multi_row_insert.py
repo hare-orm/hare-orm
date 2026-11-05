@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from hare.query.statements.write.bulk.create.bulk_create_reports import BulkCreateReports
 from hare.query.statements.write.bulk.create.conflict_clause import ConflictClause
+from hare.query.statements.write.bulk.create.declarations import BoundInsertBatch
+from hare.query.statements.write.bulk.create.inline_insert import InlineInsert
 from hare.query.statements.write.bulk.create.returned_rows_matching import ReturnedRowsMatching
 from hare.query.statements.write.bulk.create.template_insert import TemplateInsert
 from hare.sql.terms.parameters.query_parameters import QueryParameters
+from hare.sql.terms.term import Term
 from hare.sql.terms.values.literal_value import LiteralValue
 
 TModel = TypeVar("TModel", bound="Model")
@@ -24,7 +28,7 @@ class MultiRowInsert:
     back when asked."""
 
     @staticmethod
-    async def execute_via_multi_row_statement(
+    def bind_batches(
         bulk_create: BulkCreateQuery[Any],
         db_columns: list[str],
         field_names: list[str],
@@ -32,8 +36,10 @@ class MultiRowInsert:
         omit_fields: set[str],
         populate_returned_fields: bool = False,
         column_arrays_source_sql: str | None = None,
-    ) -> None:
-        """Inserts the objects by multi-row INSERTs, batched by the database's limit of parameters - the
+        *,
+        parameters_inline: bool = False,
+    ) -> list[BoundInsertBatch]:
+        """Binds the objects into multi-row INSERTs, batched by the database's limit of parameters - the
         values the database writes read back when asked.
 
         Args:
@@ -44,12 +50,13 @@ class MultiRowInsert:
             omit_fields: The fields left to the database.
             populate_returned_fields: Whether the values the database writes are read back.
             column_arrays_source_sql: The source of the rows as column arrays, where the database takes them.
+            parameters_inline: Retain literal SQL from these same converted rows for a preview.
         """
         # An array per column binds as many parameters whatever the row count.
         batch_size = (
             bulk_create._batch_size
             if column_arrays_source_sql is not None
-            else MultiRowInsert.get_multi_row_batch_size(bulk_create, db_columns, omit_fields)
+            else MultiRowInsert.get_multi_row_batch_size(bulk_create, db_columns)
         )
         returning_columns = (
             ReturnedRowsMatching.get_returning_columns(bulk_create, omit_fields) if populate_returned_fields else []
@@ -84,42 +91,32 @@ class MultiRowInsert:
             if bulk_create.model._meta.sensitive_fields
             else []
         )
+        batches: list[BoundInsertBatch] = []
         for objects_item in statement_objects:
             if not objects_item:
                 continue
-            if column_arrays_source_sql is not None:
-                parameters = BulkWriteBatches.write_statement_column_parameters(
-                    bulk_create.model, bulk_create._connection, objects_item, field_names
-                )
-            else:
-                parameters = BulkWriteBatches.write_statement_parameters(
-                    bulk_create.model, bulk_create._connection, objects_item, field_names, []
-                )
-            rows = (
-                BulkWriteBatches.serialize_instances(
-                    bulk_create.model, bulk_create._connection.dialect.types, objects_item, field_names
-                )
-                if parameters is None
-                else None
+            rows = BulkWriteBatches.serialize_instances(
+                bulk_create.model,
+                bulk_create._connection.dialect.types,
+                objects_item,
+                field_names,
             )
             returns_rows = populate_returned_fields or BulkCreateReports.reports_returned_rows(bulk_create)
             sql, conflict_values = MultiRowInsert.get_multi_row_template(
                 bulk_create,
                 db_columns,
-                len(objects_item) if rows is None else len(rows),
+                len(rows),
                 returning_columns if returns_rows else None,
                 column_arrays_source_sql,
             )
             values: Any
-            if parameters is not None:
-                values = parameters.extended(conflict_values) if conflict_values else parameters
-            elif column_arrays_source_sql is not None:
+            if column_arrays_source_sql is not None:
                 values = [list(column) for column in zip(*rows or (), strict=True)]
                 values.extend(conflict_values)
             else:
                 values = [value for row in rows or () for value in row]
                 values.extend(conflict_values)
-            if sensitive_positions and rows is not None:
+            if sensitive_positions:
                 # A parameter per value, or one per column holding the column's values.
                 hidden_positions = (
                     sensitive_positions
@@ -131,25 +128,40 @@ class MultiRowInsert:
                     ]
                 )
                 values = QueryParameters(values, hidden_positions)
-            statement = bulk_create._connection.execute(sql, values, returns_rows=returns_rows)
-            __, returned_rows = (
-                await BulkWriteBatches.run_hiding_sensitive_values(
-                    statement, bulk_create.model, objects_item, field_names
+            inline_statements: tuple[str, ...] = ()
+            if parameters_inline:
+                inline_source = (
+                    MultiRowInsert.get_column_arrays_rows_source_sql(
+                        bulk_create, field_names, column_values=[list(column) for column in zip(*rows, strict=True)]
+                    )
+                    if column_arrays_source_sql is not None
+                    else None
                 )
-                if sensitive_positions and parameters is not None
-                else await statement
-            )
-            if populate_returned_fields:
-                ReturnedRowsMatching.populate_returned_fields_from_returning_rows(
-                    bulk_create,
+                inline_statements = (
+                    InlineInsert.render(
+                        bulk_create,
+                        db_columns,
+                        rows,
+                        returning=(
+                            [*returning_columns, *BulkCreateReports.get_reported_returning_terms(bulk_create)]
+                            if returns_rows
+                            else ()
+                        ),
+                        rows_source_sql=inline_source,
+                    ),
+                )
+            batches.append(
+                BoundInsertBatch(
+                    WriteStatement(sql, values, returns_rows),
                     objects_item,
-                    returned_rows,
-                    conflict_field_names,
-                    written_field_names,
-                    applied_columns,
+                    populate_returned_fields,
+                    tuple(conflict_field_names),
+                    tuple(written_field_names),
+                    tuple(applied_columns),
+                    inline_statements,
                 )
-            if bulk_create._reported_rows is not None:
-                bulk_create._reported_rows.extend(dict(row) for row in returned_rows)
+            )
+        return batches
 
     @staticmethod
     def get_multi_row_template(
@@ -193,7 +205,7 @@ class MultiRowInsert:
         )
         cacheable = True
         try:
-            template = StatementPlans.insert_templates.get(key)
+            template = StatementPlans.insert_templates.get_model_bucket(bulk_create.model).get(key)
         except TypeError:
             # A tenant value the conflict update is limited to that can't be hashed - built each time.
             cacheable = False
@@ -212,7 +224,7 @@ class MultiRowInsert:
             )
             template = TemplateInsert.get_row_template_sql(query, len(db_columns))
             if cacheable:
-                StatementPlans.insert_templates[key] = template
+                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
         if template is None:
             # A row's placeholders are one string in one LiteralValue term, not a Parameter per value.
             dialect = bulk_create._connection.dialect
@@ -240,40 +252,39 @@ class MultiRowInsert:
             )
             template = TemplateInsert.get_row_template_sql(query, row_count * column_count)
             if cacheable:
-                StatementPlans.insert_templates[key] = template
+                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
         return template
 
     @staticmethod
-    def get_multi_row_batch_size(
-        bulk_create: BulkCreateQuery[Any], db_columns: list[str], omit_fields: set[str]
-    ) -> int:
+    def get_multi_row_batch_size(bulk_create: BulkCreateQuery[Any], db_columns: list[str]) -> int:
         """Objects per multi-row ``INSERT``, kept under the backend's bind-parameter ceiling
         together with the parameters the statement binds besides its rows.
 
         Args:
             bulk_create: The bulk insert.
             db_columns: The INSERT's columns.
-            omit_fields: Fields left out of the INSERT because every object relies on its DB default.
 
         Returns:
             The batch size.
         """
         max_bind_parameters = (
-            bulk_create._connection.features.max_bind_parameters
-            - bulk_create._get_fixed_parameter_count(db_columns, omit_fields)
+            bulk_create._connection.features.max_bind_parameters - bulk_create._get_fixed_parameter_count(db_columns)
         )
         return BulkWriteBatches.get_bind_parameter_safe_batch_size(
             bulk_create._batch_size, len(db_columns), max_bind_parameters
         )
 
     @staticmethod
-    def get_column_arrays_rows_source_sql(bulk_create: BulkCreateQuery[Any], field_names: list[str]) -> str | None:
+    def get_column_arrays_rows_source_sql(
+        bulk_create: BulkCreateQuery[Any], field_names: list[str], *, column_values: list[list[Any]] | None = None
+    ) -> str | None:
         """The dialect's source of the rows of a multi-row INSERT binding one array per column -
         None where the dialect binds a parameter per value, or a column's type isn't known.
 
         Args:
             bulk_create: The bulk insert.
             field_names: The written fields, in column order.
+            column_values: Bound column arrays to render as literals, only for a preview.
 
         Returns:
             The SQL, or None.
@@ -285,4 +296,11 @@ class MultiRowInsert:
         ]
         if not cast_types or any(cast_type is None for cast_type in cast_types):
             return None
-        return dialect.parameters.get_column_arrays_rows_source_sql(cast_types, 1)  # type: ignore[arg-type]
+        if column_values is None:
+            return dialect.parameters.get_column_arrays_rows_source_sql(cast_types, 1)  # type: ignore[arg-type]
+        context = bulk_create._connection.query_class.SQL_CONTEXT
+        return dialect.parameters.get_column_arrays_rows_source_sql(
+            cast_types,  # type: ignore[arg-type]
+            1,
+            column_values_sql=[Term.wrap_constant(values).get_sql(context) for values in column_values],
+        )

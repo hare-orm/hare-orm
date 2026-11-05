@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 
 
 class TransactionFailingHandler:
-    """An exception handler of the application that first rolls back the request's transaction -
-    a handler that raised and was answered (``404``, ``HTTPException(403)``) keeps no writes.
+    """Mark the request transaction for rollback before calling the application's exception handler.
+
+    Rollback occurs when the response starts, including a handled ``404`` or ``HTTPException(403)``.
 
     Args:
         handler: The application's exception handler.

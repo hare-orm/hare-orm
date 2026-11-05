@@ -60,7 +60,7 @@ def test_a_description_made_while_another_is_made_lists_its_origins_too():
 @pytest.mark.database_independent
 def test_values_of_one_origin_bind_from_the_first_and_only_when_they_are_one_object():
     shared = Q(intnum=1)
-    description = PlanOrigins.describe(lambda: Q(shared, shared).get_plan_description(PlanContext.EMPTY))
+    description = PlanOrigins.describe(lambda: Q(shared, shared).get_plan_description(PlanContext(model=IntFields)))
     assert len(description.values) == 2
     assert description.origins[0] == description.origins[1]
     # No reference of the second value is needed - it is the first one's.
@@ -72,7 +72,7 @@ def test_values_of_one_origin_bind_from_the_first_and_only_when_they_are_one_obj
 
 @pytest.mark.database_independent
 def test_a_reference_of_no_described_value_keeps_no_plan():
-    description = PlanOrigins.describe(lambda: Q(intnum=1).get_plan_description(PlanContext.EMPTY))
+    description = PlanOrigins.describe(lambda: Q(intnum=1).get_plan_description(PlanContext(model=IntFields)))
     assert StatementPlanRuns.get_value_sources(description, [(("elsewhere", "intnum"), object())]) is None
     assert StatementPlanRuns.get_value_sources(description, []) is None
 
@@ -157,7 +157,7 @@ class Point(Plannable):
 @pytest.mark.database_independent
 def test_part_types_describe_their_values():
     point = Point((1.5, 2.5))
-    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext.EMPTY))
+    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext(model=IntFields)))
     # The pair is bound whole, the text a method gives, each parameter, then the condition's value.
     assert description.values == [(1.5, 2.5), "POINT(1.5, 2.5)", 1, 2, 3]
     assert description.origins[:4] == [
@@ -174,7 +174,7 @@ def test_part_types_describe_their_values():
 @pytest.mark.database_independent
 def test_a_value_of_a_condition_folded_into_no_join_binds_nothing():
     point = Point((1.5, 2.5))
-    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext.EMPTY))
+    description = PlanOrigins.describe(lambda: point.get_plan_description(PlanContext(model=IntFields)))
     references = [(origin, object()) for origin in description.origins[:4]]
     sources = StatementPlanRuns.get_value_sources(description, references)
     assert sources is not None
@@ -216,3 +216,43 @@ def test_declared_slots_generate_the_key():
     assert own.values == [5]
     assert describe(query, True).values == [5, 10]
     assert describe(Sliced(None, None), False).structure[-2:] == (False, False)
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("part_type", [PlanPartType.ARGUMENTS, PlanPartType.FIELDS, PlanPartType.EXPRESSIONS])
+@pytest.mark.parametrize("items", [None, [], ()])
+def test_empty_declared_sequences_have_no_parameters(part_type, items):
+    class EmptyParts(Plannable):
+        plan_parts: ClassVar[DeclaredPlanParts] = (("items", part_type),)
+
+        def __init__(self):
+            self.items = items
+
+    expression = EmptyParts()
+    description = PlanOrigins.describe(lambda: expression.get_plan_description(PlanContext.EMPTY))
+    assert description.structure == (EmptyParts, ())
+    assert description.values == []
+    assert description.origins == []
+
+
+@pytest.mark.database_independent
+def test_statement_key_uses_state_prepared_by_its_value_description():
+    class Prepared:
+        plan_slots = (("name", PlanKeyForm.VALUE), ("get_values", PlanKeyForm.BOUND_VALUES_METHOD))
+
+        def __init__(self):
+            self.name = "unprepared"
+
+        def get_values(self):
+            self.name = "prepared"
+            return [3, 5]
+
+    query = Prepared()
+    describe = QueryKeyCompiler.compile(Prepared, "plan_slots")
+    description = PlanOrigins.describe(lambda: describe(query, False))
+    assert description.structure == (Prepared, "plan_slots", "prepared", 2)
+    assert description.values == [3, 5]
+    assert description.origins == [
+        PlanOrigins.get_value_origin(query, "get_values", 0),
+        PlanOrigins.get_value_origin(query, "get_values", 1),
+    ]

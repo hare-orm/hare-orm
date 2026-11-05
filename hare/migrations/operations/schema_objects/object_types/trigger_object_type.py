@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
@@ -17,10 +16,6 @@ class TriggerObjectType(SchemaObjectType):
     option: ClassVar[ModelOption] = ModelOption.TRIGGERS
     noun: ClassVar[str] = "trigger"
     reaches_other_tables: ClassVar[bool] = True
-
-    @classmethod
-    def renamed(cls, schema_object: Any, new_name: str) -> Any:
-        return dataclasses.replace(schema_object, name=new_name)
 
     @classmethod
     def raise_if_object_unsupported(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any) -> None:

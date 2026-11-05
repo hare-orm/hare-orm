@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -13,7 +12,6 @@ from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
 
 from hare.dialects.base.client.database_client import DatabaseClient
-from hare.dialects.base.results.statement_result import StatementResult
 from hare.exceptions import (
     QueryError,
 )
@@ -25,6 +23,7 @@ from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.enums import PlanKeyForm
 from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
+from hare.query.queryset.extensions.query_set_extension_result import QuerySetExtensionResult
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.queryset.selection.values_selection import ValuesSelection
@@ -33,15 +32,14 @@ from hare.query.rows.values_rows.dict_rows import DictRows
 from hare.query.rows.values_rows.flat_rows import FlatRows
 from hare.query.rows.values_rows.named_rows import NamedRows
 from hare.query.rows.values_rows.tuple_rows import TupleRows
-from hare.query.rows.values_rows.value_field import ValueField
 from hare.query.rows.values_rows.values_rows import ValuesRows
 from hare.query.statements.building.keyset_bounds import KeysetBounds
-from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.query.statements.building.query_ordering import QueryOrdering
 from hare.query.statements.constants import (
     WINDOW_FILTER_COLUMN_ALIAS_PREFIX,
 )
+from hare.query.statements.projections.derived_projection import DerivedProjection
 from hare.query.statements.select.select_query import SelectQuery
 from hare.query.statements.select.values.values_distinct import ValuesDistinct
 from hare.query.statements.select.values.values_grouping import ValuesGrouping
@@ -152,9 +150,9 @@ class ValuesQuery(SelectQuery[Any]):
         self._selected_fields_by_alias: dict[str, str] = {}
         output_column_aliases: list[tuple[str, ...]] = []
         for output_name, field_name in outputs:
-            components = ValuesOutput.get_composite_key_components(
-                self.model, field_name, annotations, source_queryset._alias_keys
-            ) or (field_name,)
+            components = ValuesOutput.get_composite_key_components(self.model, field_name, annotations) or (
+                field_name,
+            )
             column_aliases = rows_class.get_column_aliases(
                 output_name, len(self._selected_fields_by_alias), len(components)
             )
@@ -469,17 +467,10 @@ class ValuesQuery(SelectQuery[Any]):
             ]
         return None
 
-    async def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
+    def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
         value_fields = ValuesOutput.get_value_fields(self)
         column_converters = ValuesOutput.get_column_converters(self, value_fields)
-        async with contextlib.aclosing(
-            connection.stream_batches(*self._get_parameterized_sql(), chunk_size=chunk_size)
-        ) as batches:
-            async for rows in batches:
-                # A batch of the driver's rows, read by name too.
-                yield self._rows.convert_batch(
-                    connection, StatementResult(len(rows), rows), column_converters, self.model, value_fields
-                )
+        return self._rows.stream_batches(connection, *self._get_parameterized_sql(), column_converters, chunk_size)
 
     async def _execute(self) -> Any:
         values_reading = self._values_reading
@@ -490,13 +481,25 @@ class ValuesQuery(SelectQuery[Any]):
                 # A plan another row shape recorded (the same SQL text) - read this shape's rows from
                 # it from now on too.
                 plan.result_reading.setdefault(cast("ValuesSelection", self._selection).shape, values_reading)
-        rows = await self._fetch_rows(
+        statement_result = await values_reading.rows.fetch_result(
             self._connection,
             *self._get_parameterized_sql(),
-            column_converters=values_reading.column_converters,
-            value_fields=values_reading.value_fields,
+            retry_read=self.is_read_only,
         )
-        return self._get_single_or_list_result(rows)
+        reader = (
+            values_reading.rows.get_result_reader(
+                self._connection,
+                statement_result,
+                values_reading.column_converters,
+            )
+            if statement_result.rows or statement_result.column_names
+            else None
+        )
+        rows = [reader(row) for row in statement_result.rows] if reader is not None else []
+        result = self._get_single_or_list_result(rows)
+        if self._extension_calls and self._applies_result_transform:
+            self._extension_result = QuerySetExtensionResult(result, statement_result, reader)
+        return result
 
     def get_values_reading(self) -> ValuesReading:
         """How the rows of this query, built, are read.
@@ -505,7 +508,7 @@ class ValuesQuery(SelectQuery[Any]):
             The reading.
         """
         value_fields = ValuesOutput.get_value_fields(self)
-        return ValuesReading(self._rows, ValuesOutput.get_column_converters(self, value_fields), value_fields)
+        return ValuesReading(self._rows, ValuesOutput.get_column_converters(self, value_fields))
 
     def _get_call_signature_type_part(self) -> tuple[Any, list[Any]]:
         # The shape the rows are read in - the same calls read with another shape (named=True)
@@ -610,53 +613,29 @@ class ValuesQuery(SelectQuery[Any]):
                 "select_for_update() can't be combined with a filter on a window function (Window(...)) - "
                 "the filter applies to the query wrapped in a subquery, whose rows can't be locked."
             )
-        inner_query = self.query
-        namespaced_context = inner_query._sql_context_with_namespace(inner_query.query_class.SQL_CONTEXT)
-        aliasless_context = namespaced_context.copy(with_alias=False)
-        selects = inner_query._mutable("_selects")
-        alias_by_sql: dict[str, str] = {}
-        # Each column of the derived table goes by a name of hare's, the outer query selects it under the
-        # query's own alias - two aliases a database takes for one name (``a``, ``A`` where names ignore the
-        # letter case) never meet.
-        column_by_alias: dict[str, str] = {}
-        for position, select_term in enumerate(selects):
-            column = f"{WINDOW_FILTER_COLUMN_ALIAS_PREFIX}{position}"
-            if select_term.alias:
-                column_by_alias.setdefault(select_term.alias, column)
-            alias_by_sql.setdefault(WindowFilterWrapping.get_aliasless_sql(select_term, aliasless_context), column)
-            selects[position] = copy(select_term).as_(column)
-        grouped_sql = {QueryGrouping.get_group_by_sql(term, namespaced_context) for term in inner_query._groupbys}
-
-        def get_column(term: Term) -> Field:
-            if isinstance(term, Field) and term.table is None and term.name in column_by_alias:
-                return cast("Field", inner_query[column_by_alias[term.name]])
-            term_sql = WindowFilterWrapping.get_aliasless_sql(term, aliasless_context)
-            alias = alias_by_sql.get(term_sql)
-            if alias is None:
-                alias = f"{WINDOW_FILTER_COLUMN_ALIAS_PREFIX}{len(selects)}"
-                alias_by_sql[term_sql] = alias
-                selects.append(copy(term).as_(alias))
-                if inner_query._groupbys:
-                    for group_by_term in term.get_group_by_terms():
-                        group_by_sql = QueryGrouping.get_group_by_sql(group_by_term, namespaced_context)
-                        if group_by_sql not in grouped_sql:
-                            grouped_sql.add(group_by_sql)
-                            aliasless_term = copy(group_by_term)
-                            aliasless_term.alias = None
-                            inner_query._mutable("_groupbys").append(aliasless_term)
-            return cast("Field", inner_query[alias])
-
+        output_aliases = list(ValuesOutput.get_output_aliases(self))
+        projection = DerivedProjection(
+            self.query,
+            column_prefix=WINDOW_FILTER_COLUMN_ALIAS_PREFIX,
+            output_fields=self._annotation_output_fields,
+        )
+        inner_query = projection.query
         outer_criterion = WindowFilterWrapping.get_derived_table_criterion(
-            cast("Criterion", self._window_filter_criterion), get_column
+            cast("Criterion", self._window_filter_criterion), projection.get_reference
         )
-        order_columns = [(get_column(term), order) for term, order in inner_query._orderbys]
-        distinct_on_columns = [get_column(term) for term in inner_query._distinct_on]
-        output_columns = {alias: column_by_alias.get(alias, alias) for alias in ValuesOutput.get_output_aliases(self)}
-        outer_query = self._connection.query_class.from_(inner_query).select(
-            *(cast("Field", inner_query[column]).as_(alias) for alias, column in output_columns.items())
-        )
+        order_columns = [(projection.get_reference(term), order) for term, order in inner_query._orderbys]
+        distinct_on_columns = [projection.get_reference(term) for term in inner_query._distinct_on]
+        output_columns = {alias: projection.by_alias[alias].name for alias in output_aliases}
+        distinct, inner_query._distinct = inner_query._distinct, False
+        inner_query._distinct_on = []
+        inner_query._orderbys = []
+        limit, offset = inner_query._limit, inner_query._offset
+        inner_query._limit = inner_query._offset = None
+        with_clauses, inner_query._with = inner_query._with, []
+        # FROM captures a copy; move outer clauses before embedding the inner query.
+        outer_query = self._connection.query_class.from_(inner_query).select(*projection.get_output(output_aliases))
         outer_query = outer_query.where(outer_criterion)
-        if inner_query._distinct:
+        if distinct:
             outer_query._distinct = True
             selected_columns = set(output_columns.values())
             for order_column, _order in order_columns:
@@ -664,16 +643,12 @@ class ValuesQuery(SelectQuery[Any]):
                 if order_column.name not in selected_columns:
                     selected_columns.add(order_column.name)
                     outer_query = outer_query.select(order_column)
-            inner_query._distinct = False
         if distinct_on_columns:
             outer_query = outer_query.distinct_on(*distinct_on_columns)
-            inner_query._distinct_on = []
         for order_column, order in order_columns:
             outer_query = outer_query.orderby(order_column, order=order)
-        inner_query._orderbys = []
-        outer_query._limit, outer_query._offset = inner_query._limit, inner_query._offset
-        inner_query._limit = inner_query._offset = None
-        outer_query._with, inner_query._with = inner_query._with, []
+        outer_query._limit, outer_query._offset = limit, offset
+        outer_query._with = with_clauses
         self.query = outer_query
 
     def _orders_rows(self) -> bool:
@@ -766,7 +741,6 @@ class ValuesQuery(SelectQuery[Any]):
         sql: str,
         parameters: list[Any],
         column_converters: list[tuple[str, Callable[[Any], Any] | None]],
-        value_fields: tuple[ValueField, ...] | None = None,
     ) -> list[Any]:
         """Runs a query selecting this query's columns and builds the output rows.
 
@@ -775,24 +749,8 @@ class ValuesQuery(SelectQuery[Any]):
             sql: The SQL.
             parameters: Its parameters.
             column_converters: Each column's alias and decoder.
-            value_fields: What each column is read as - for reading the rows in one
-                ``rust.native.rows`` call; None reads them in Python.
 
         Returns:
             The output rows.
         """
-        return await self._rows.fetch(connection, sql, parameters, column_converters, self.model, value_fields)
-
-    def _convert_row(
-        self, row: dict[str, Any], column_converters: list[tuple[str, Callable[[Any], Any] | None]]
-    ) -> Any:
-        """Builds one output row.
-
-        Args:
-            row: The fetched row, by column alias.
-            column_converters: Each column's alias and decoder.
-
-        Returns:
-            The output row.
-        """
-        return self._rows.convert(row, column_converters)
+        return await self._rows.fetch(connection, sql, parameters, column_converters, retry_read=self.is_read_only)

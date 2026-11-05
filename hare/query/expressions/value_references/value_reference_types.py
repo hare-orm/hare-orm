@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from hare.query.expressions.value_references.array_value_reference import ArrayValueReference
 from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
+from hare.query.expressions.value_references.container_value_reference import ContainerValueReference
 from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
 from hare.query.expressions.value_references.encoded_value_reference import EncodedValueReference
 from hare.query.expressions.value_references.like_value_reference import LikeValueReference
@@ -12,17 +12,16 @@ from hare.query.expressions.value_references.list_value_reference import ListVal
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.expressions.value_references.open_range_value_reference import OpenRangeValueReference
 from hare.query.expressions.value_references.range_value_reference import RangeValueReference
-from hare.query.expressions.value_references.rebuilt_criterion_value_reference import RebuiltCriterionValueReference
 from hare.query.expressions.value_references.related_key_value_reference import RelatedKeyValueReference
 from hare.query.expressions.value_references.related_value_reference import RelatedValueReference
 from hare.query.expressions.value_references.row_list_value_reference import RowListValueReference
 from hare.query.expressions.value_references.scalar_value_reference import ScalarValueReference
 from hare.query.expressions.value_references.write_value_reference import WriteValueReference
+from hare.query.plans.statement.parameter_slot import ParameterSlot
+from hare.sql.terms.term import Term
 
-#: The parameters one value of a query gives: per parameter the ``id()`` of the term it stands for
-#: in the built query, the bound value, and whether the term always renders as a parameter
-#: (``ParameterizedValueWrapper``) rather than only when the value is one a parameter can carry.
-type ParameterValues = list[tuple[int, Any, bool]]
+#: A converted parameter and its prepared slot (a SQL term only during initial preparation).
+type ParameterValues = list[tuple[ParameterSlot | Term, Any, bool]]
 
 
 #: A reference to the value a filter compares with.
@@ -33,7 +32,7 @@ type FilterValueReference = (
     | RangeValueReference
     | OpenRangeValueReference
     | LikeValueReference
-    | ArrayValueReference
+    | ContainerValueReference
     | EncodedValueReference
 )
 
@@ -49,13 +48,12 @@ type ValueReference = (
     | RelatedKeyValueReference
     | RangeValueReference
     | OpenRangeValueReference
-    | RebuiltCriterionValueReference
     | CompositeKeyValueReference
     | LiteralValueReference
     | CursorValueReference
     | RelatedValueReference
     | LikeValueReference
-    | ArrayValueReference
+    | ContainerValueReference
     | EncodedValueReference
 )
 

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.dialects.enums import ParameterPosition
 from hare.fields.data.json.json_field import JSONField
 from hare.fields.generated_field import GeneratedField
 from hare.gis.geometries.geometry import Geometry
 from hare.query.expressions.arithmetic.combinable_expression import CombinableExpression
+from hare.query.expressions.bound_expression import BoundExpression
+from hare.query.expressions.case.when import When
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
-from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.enums import TemporalType
 from hare.query.expressions.expression_context import ExpressionContext
-from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.expression_result import ExpressionResult, TableCriterionTuple
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.value import Value
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -24,9 +26,6 @@ from hare.sql.terms.term import Term
 if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
-from hare.query.expressions.case.case_branch_value import CaseBranchValue
-from hare.query.expressions.case.when import When
-from hare.sql.terms.case.when_then import WhenThen
 
 
 class Case(CombinableExpression):
@@ -34,7 +33,9 @@ class Case(CombinableExpression):
 
     Args:
         args: The branches, ``When(...)`` each.
-        default: The value when no branch holds - the ``ELSE``; None gives ``NULL``.
+        default: The expression, SQL term or Python literal used when no branch holds.
+            Literal support follows the value field and dialect, including custom field types;
+            None gives ``NULL``.
     """
 
     # The result is decoded by the branches' field - a JSONField branch gives a dict, not JSON text.
@@ -45,7 +46,7 @@ class Case(CombinableExpression):
     def __init__(
         self,
         *args: When,
-        default: CaseBranchValue = None,
+        default: Any = None,
     ) -> None:
         self.args = args
         # A geometry is written as Value() writes it - a driver binds none.
@@ -64,28 +65,17 @@ class Case(CombinableExpression):
 
         Returns:
             For a date literal among datetime literals a datetime at midnight; for a UUID literal its
-            field's stored form; a dict, a naive datetime and a timedelta as they are - encoded once the
-            result's field is known; None otherwise.
+            field's stored form; otherwise the literal type's conversion.
         """
         literal = value.value if isinstance(value, Value) else value
-        if isinstance(literal, (dict, timedelta)) or (isinstance(literal, datetime) and literal.tzinfo is None):
-            return Case.keep_value
         if isinstance(literal, date) and not isinstance(literal, datetime):
             branch_values = [when.then for when in self.args if isinstance(when, When)] + [self.default]
             if any(
                 isinstance(branch_value.value if isinstance(branch_value, Value) else branch_value, datetime)
                 for branch_value in branch_values
             ):
-                return TemporalArithmetic.get_field_encoder(
-                    TemporalArithmetic.DATETIME_OUTPUT_FIELD,
-                    dialect,
-                )
+                return dialect.types.get_field_encoder(TemporalArithmetic.DATETIME_OUTPUT_FIELD)
         return Value.get_literal_encoder(literal, dialect)
-
-    @staticmethod
-    def keep_value(value: Any) -> Any:
-        """A literal left as it is until the result's field encodes it."""
-        return value
 
     @staticmethod
     def get_wall_clock_literal_term(
@@ -107,23 +97,6 @@ class Case(CombinableExpression):
         return SqlCast(term, output_field.get_column_type(expression_context.dialect))
 
     @staticmethod
-    def is_deferred_literal(value: Any, literal_type: type) -> bool:
-        """Whether a branch is a literal encoded once the result's field is known - a dict, a naive
-        datetime, a timedelta.
-
-        Args:
-            value: The branch's ``then=``/``default=`` value.
-            literal_type: ``dict``, ``datetime`` or ``timedelta``.
-
-        Returns:
-            Whether it is such a literal.
-        """
-        literal = value.value if isinstance(value, Value) else value
-        if literal_type is datetime:
-            return isinstance(literal, datetime) and literal.tzinfo is None
-        return isinstance(literal, literal_type)
-
-    @staticmethod
     def get_timedelta_literal_encoder(
         output_field: Field[Any] | None, dialect: Dialect
     ) -> Callable[[Any], Any] | None:
@@ -138,7 +111,7 @@ class Case(CombinableExpression):
             The encoder.
         """
         if TemporalArithmetic.get_field_temporal_type(output_field) is TemporalType.INTERVAL:
-            return TemporalArithmetic.get_field_encoder(output_field, dialect)  # type: ignore[arg-type]
+            return dialect.types.get_field_encoder(output_field)  # type: ignore[arg-type]
         return Value.get_literal_encoder(timedelta(0), dialect)
 
     @staticmethod
@@ -156,7 +129,7 @@ class Case(CombinableExpression):
             The encoder.
         """
         if output_field is not None and TemporalArithmetic.is_naive_field(output_field):
-            return TemporalArithmetic.get_field_encoder(output_field, dialect)
+            return dialect.types.get_field_encoder(output_field)
         return Value.get_literal_encoder(datetime.min, dialect)
 
     @staticmethod
@@ -173,84 +146,78 @@ class Case(CombinableExpression):
         """
         if output_field is None or isinstance(GeneratedField.get_effective_field(output_field), JSONField):
             return Value.get_literal_encoder({}, dialect)
-        return TemporalArithmetic.get_field_encoder(output_field, dialect)
+        return dialect.types.get_field_encoder(output_field)
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        branch_terms: list[tuple[Any, Any]] = []
-        joins = []
-        # The result's field comes from every branch together (see OutputFieldCompatibility.
-        # get_common_output_field()): numbers of different types widen to a float or a Decimal
-        # with the largest scale, any other field is kept only when every branch fits it.
-        branches: list[ResultBranch] = []
-        for arg in self.args:
-            if not isinstance(arg, When):
+        """Select the branch type before encoding literals; bind every condition exactly once."""
+        conditions: list[ExpressionResult] = []
+        values: list[BoundExpression] = []
+        for branch in self.args:
+            if not isinstance(branch, When):
                 raise TypeError("expected When objects as args")
-            when = arg.get_branch_result(
-                expression_context, self._get_branch_encoder(arg.then, expression_context.dialect)
+            conditions.append(branch.get_condition_result(expression_context))
+            values.append(
+                BoundExpression.prepare_argument(
+                    branch,
+                    "then",
+                    branch.then,
+                    expression_context,
+                    label="a When(then=...) branch",
+                )
             )
-            when_term = cast("WhenThen", when.term)
-            branch_terms.append((when_term.when, when_term.then))
-            joins.extend(when.joins)
-            branches.append(ResultBranch.of(arg.then, when.output_field))
-
-        default_result = When.get_value_result(
+        default = BoundExpression.prepare_argument(
             self,
             "default",
             self.default,
-            self._get_branch_encoder(self.default, expression_context.dialect),
             expression_context,
-            "a Case(default=...) branch",
+            label="a Case(default=...) branch",
         )
-        joins.extend(default_result.joins)
-        branches.append(ResultBranch.of(self.default, default_result.output_field))
-
+        branches = [value.branch for value in (*values, default)]
         OutputFieldCompatibility.raise_if_value_types_mix(branches, "Case()")
         output_field = OutputFieldCompatibility.get_common_output_field(branches)
-        is_wall_clock = output_field is not None and TemporalArithmetic.is_naive_field(output_field)
-        for literal_type, deferred_encoder in (
-            (dict, self.get_dict_literal_encoder(output_field, expression_context.dialect)),
-            (datetime, self.get_naive_datetime_literal_encoder(output_field, expression_context.dialect)),
-            (timedelta, self.get_timedelta_literal_encoder(output_field, expression_context.dialect)),
-        ):
-            # A wall clock literal is typed by the wall clocks beside it - its own type is a moment's.
-            types_literal = not (literal_type is datetime and is_wall_clock)
-            # A dict literal is written as the result's field writes it - a map's, or JSON text; a naive
-            # datetime as a wall clock beside one, else as a moment of the configured zone.
-            positions = [
-                position for position, arg in enumerate(self.args) if self.is_deferred_literal(arg.then, literal_type)
-            ]
-            for position in positions:
-                when_term = cast(
-                    "WhenThen",
-                    self.args[position].get_branch_result(expression_context, deferred_encoder, types_literal).term,
-                )
-                branch_terms[position] = (
-                    when_term.when,
-                    self.get_wall_clock_literal_term(when_term.then, output_field, expression_context)
-                    if not types_literal
-                    else when_term.then,
-                )
-            if self.is_deferred_literal(self.default, literal_type):
-                default_result = When.get_value_result(
-                    self,
-                    "default",
-                    self.default,
-                    deferred_encoder,
-                    expression_context,
-                    "a Case(default=...) branch",
-                    types_literal,
-                )
-                if not types_literal:
-                    default_result.term = self.get_wall_clock_literal_term(
-                        default_result.term, output_field, expression_context
-                    )
         renderers = expression_context.dialect.renderers
         case = HareSqlCase()
-        for criterion, then_term in branch_terms:
-            case = case.when(criterion, renderers.get_result_branch_term(then_term, output_field))
+        joins: list[TableCriterionTuple] = []
+        for condition, value in zip(conditions, values, strict=True):
+            result = self._lower_branch(value, output_field, expression_context)
+            joins.extend((*condition.joins, *result.joins))
+            case = case.when(condition.term, renderers.get_result_branch_term(result.term, output_field))
+        default_result = self._lower_branch(default, output_field, expression_context)
+        joins.extend(default_result.joins)
         case = case.else_(renderers.get_result_branch_term(default_result.term, output_field))
         return ExpressionResult(
             term=case,
             joins=ExpressionResult.dedup_joins(joins),
             output_field=output_field,
         )
+
+    def _lower_branch(
+        self,
+        value: BoundExpression,
+        output_field: Field[Any] | None,
+        context: ExpressionContext,
+    ) -> ExpressionResult:
+        """Choose the literal conversion from the common branch type and lower it once."""
+        literal = value.branch.value
+        wall_clock = False
+        if value.branch.is_literal and isinstance(literal, dict):
+            encoder = self.get_dict_literal_encoder(output_field, context.dialect)
+        elif value.branch.is_literal and isinstance(literal, datetime) and literal.tzinfo is None:
+            encoder = self.get_naive_datetime_literal_encoder(output_field, context.dialect)
+            wall_clock = output_field is not None and TemporalArithmetic.is_naive_field(output_field)
+        elif value.branch.is_literal and isinstance(literal, timedelta):
+            encoder = self.get_timedelta_literal_encoder(output_field, context.dialect)
+        else:
+            encoder = self._get_branch_encoder(value.value, context.dialect)
+        result = value.lower(
+            context,
+            encoder=encoder,
+            position=None if wall_clock else ParameterPosition.CASE_BRANCH,
+        )
+        if wall_clock:
+            return ExpressionResult(
+                term=self.get_wall_clock_literal_term(result.term, output_field, context),
+                joins=result.joins,
+                output_field=result.output_field,
+            )
+        return result

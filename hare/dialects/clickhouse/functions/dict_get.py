@@ -16,6 +16,8 @@ from hare.exceptions import QueryError
 from hare.fields.field import Field
 from hare.query.expressions import Expression, ExpressionContext, ExpressionResult, F, Value
 from hare.query.expressions.dialect_expressions import DialectExpressions
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.functions.function import Function
@@ -53,6 +55,8 @@ class DictGet(Expression):
             number of keys.
         ValidationError: A key literal of a declared dictionary isn't a value of its key field.
     """
+
+    structure = ExpressionStructure(positions=((2, ArgumentRole.FIELD),), keywords=(("key", ArgumentRole.FIELD),))
 
     populate_field_object = True
 
@@ -141,11 +145,14 @@ class DictGet(Expression):
                     return model, dictionary
         return None
 
-    def get_attribute_column(self, types: TypeRegistry) -> str:
+    def get_attribute_column(
+        self, types: TypeRegistry, declaration: tuple[type[Model], ClickhouseDictionary] | None
+    ) -> str:
         """The dictionary's column of the attribute read - checked against a declared dictionary.
 
         Args:
             types: The types of the dialect a key literal is written by.
+            declaration: The model and dictionary selected for this expression build, if declared.
 
         Returns:
             The column.
@@ -154,7 +161,6 @@ class DictGet(Expression):
             QueryError: A declared dictionary has no such attribute or another number of keys.
             ValidationError: A key literal isn't a value of the dictionary's key field.
         """
-        declaration = self.get_declaration()
         if declaration is None:
             return self.attribute
         model, dictionary = declaration
@@ -178,20 +184,22 @@ class DictGet(Expression):
                 key_field.validate(types.get_db_value(key_field, key.value, model))
         return column or self.attribute
 
-    def get_qualified_name(self, expression_context: ExpressionContext) -> str:
+    def get_qualified_name(
+        self, expression_context: ExpressionContext, declaration: tuple[type[Model], ClickhouseDictionary] | None
+    ) -> str:
         """The dictionary's name with its database - the database of the model declaring it, else the
         connection's: the shards a distributed table's query runs on look a bare name up in their default
         database.
 
         Args:
             expression_context: The context the query is built in.
+            declaration: The model and dictionary selected for this expression build, if declared.
 
         Returns:
             The name - as given when it names a database already, or none is known.
         """
         if "." in self.dictionary:
             return self.dictionary
-        declaration = self.get_declaration()
         database = declaration[0]._meta.schema if declaration is not None else None
         if database is None and expression_context.connection is not None:
             database = getattr(expression_context.connection, "database", None)
@@ -200,7 +208,8 @@ class DictGet(Expression):
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         literals = expression_context.dialect.literals
-        attribute_column = self.get_attribute_column(expression_context.dialect.types)
+        declaration = self.get_declaration()
+        attribute_column = self.get_attribute_column(expression_context.dialect.types, declaration)
         key_results = [key.get_result(expression_context) for key in self.keys]
         joins = [join for key_result in key_results for join in key_result.joins]
         key_term = (
@@ -209,7 +218,7 @@ class DictGet(Expression):
             else Function(CLICKHOUSE_TUPLE_FUNCTION, *(key_result.term for key_result in key_results))
         )
         arguments = [
-            LiteralValue(literals.get_string_literal_sql(self.get_qualified_name(expression_context))),
+            LiteralValue(literals.get_string_literal_sql(self.get_qualified_name(expression_context, declaration))),
             LiteralValue(literals.get_string_literal_sql(attribute_column)),
             key_term,
         ]

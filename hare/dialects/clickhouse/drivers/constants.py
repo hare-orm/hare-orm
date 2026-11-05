@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-import re
 
 #: The DB_URL scheme and the connection config ``engine`` of the clickhouse-connect driver.
 CLICKHOUSE_CONNECT_DRIVER_NAME = "clickhouse+clickhouse-connect"
@@ -88,12 +87,6 @@ CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS = {
 }
 #: The type named by each byte of a type of no argument.
 CLICKHOUSE_BINARY_PLAIN_TYPES_BY_TAG = {tag: type_name for type_name, tag in CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS.items()}
-#: A named element of a tuple's type - its name, then its type.
-CLICKHOUSE_BINARY_NAMED_ELEMENT_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*) (.+)")
-#: An enum's member - its quoted label and its number.
-CLICKHOUSE_BINARY_ENUM_MEMBER_PATTERN = re.compile(r"'((?:[^'\\]|\\.)*)'\s*=\s*(-?\d+)")
-#: A character of a quoted text escaped with a backslash.
-CLICKHOUSE_BINARY_ESCAPED_CHARACTER_PATTERN = re.compile(r"\\(.)")
 #: The most types whose parsed text and binary encoding are kept.
 CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE = 1024
 

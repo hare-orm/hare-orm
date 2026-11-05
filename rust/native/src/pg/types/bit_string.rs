@@ -1,6 +1,6 @@
 //! `BIT`/`VARBIT`.
 
-use bytes::Buf;
+use postgres_protocol::types::varbit_from_sql;
 use tokio_postgres::types::{FromSql, Type};
 
 use crate::pg::value::BoxError;
@@ -10,22 +10,11 @@ use crate::pg::value::BoxError;
 pub(crate) struct PgBitText(pub(crate) String);
 
 impl<'a> FromSql<'a> for PgBitText {
-    fn from_sql(_ty: &Type, mut raw: &'a [u8]) -> Result<Self, BoxError> {
-        if raw.len() < 4 {
-            return Err("invalid bit/varbit payload: too short".into());
-        }
-        let nbits = usize::try_from(raw.get_i32()).map_err(|_| "invalid bit/varbit payload: negative bit length")?;
-        let expected_bytes = nbits.div_ceil(8);
-        if raw.len() != expected_bytes {
-            return Err(format!(
-                "invalid bit/varbit payload: expected {expected_bytes} data bytes for {nbits} bits, got {}",
-                raw.len()
-            )
-            .into());
-        }
-        let mut text = String::with_capacity(nbits);
-        for bit_index in 0..nbits {
-            let byte = raw[bit_index / 8];
+    fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, BoxError> {
+        let value = varbit_from_sql(raw)?;
+        let mut text = String::with_capacity(value.len());
+        for bit_index in 0..value.len() {
+            let byte = value.bytes()[bit_index / 8];
             let bit = (byte >> (7 - (bit_index % 8))) & 1;
             text.push(if bit == 1 { '1' } else { '0' });
         }

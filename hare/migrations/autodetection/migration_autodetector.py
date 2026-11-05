@@ -19,6 +19,7 @@ from hare.migrations.constants import (
 )
 from hare.migrations.exceptions import UnknownMigrationError
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 from hare.migrations.migration import Migration
@@ -27,8 +28,10 @@ from hare.migrations.operations import (
     CreateModel,
     HareOperation,
 )
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
+from hare.migrations.state.state_apps import StateApps
 from hare.migrations.swappable_dependency import SwappableDependency
 from hare.migrations.writer.migration_writer import MigrationWriter
 
@@ -48,6 +51,7 @@ class MigrationAutodetector:
         now: Callable[[], dt.datetime] | None = None,
         target_app_labels: list[str] | None = None,
         rename_questions: RenameQuestions | None = None,
+        definitions: MigrationDefinitions | None = None,
     ) -> None:
         """Prepares the detection of changes between the migrations and the models.
 
@@ -59,13 +63,15 @@ class MigrationAutodetector:
                 by default.
             target_app_labels: The apps to detect changes for - every app in ``apps_config`` by
                 default.
-            rename_questions: The answers whether a removed field, model or app's model is renamed
-                or moved - none renamed without them.
+            rename_questions: Answers for candidate renames and moves. Unambiguous field matches
+                by column identity or relation signature need no answer.
+            definitions: Captured migration declarations, or None to load them from configured modules.
         """
         self.apps = apps
+        self.environment = apps.environment if isinstance(apps, StateApps) else MigrationEnvironment.from_apps(apps)
         self.apps_config = apps_config
         self._now = now or dt.datetime.now
-        self.loader = MigrationLoader(apps_config, NoopRecorder(), ignore_no_migrations=True)
+        self.loader = MigrationLoader(apps_config, NoopRecorder(), ignore_no_migrations=True, definitions=definitions)
         self.target_app_labels = target_app_labels if target_app_labels is not None else list(apps_config)
         self.rename_questions = rename_questions or RenameQuestions()
         #: The advisories of every diffed app, printed by makemigrations.
@@ -148,7 +154,9 @@ class MigrationAutodetector:
                 )
             else:
                 dependencies.add((app_label, names[previous_position]))
-                swappable_dependencies = self._get_operations_swappable_dependencies(split_migration.operations)
+                swappable_dependencies = self._get_operations_swappable_dependencies(
+                    split_migration.operations, new_state
+                )
             dependencies.update(swappable_dependencies)
             swappable_app_labels = {dependency[0] for dependency in swappable_dependencies}
             dependencies.update(
@@ -207,7 +215,7 @@ class MigrationAutodetector:
         Returns:
             The state of every managed model, plus the unmanaged ones ``tracked_state`` holds.
         """
-        state = State()
+        state = State(environment=self.environment)
         for app_label, models in self.apps.items():
             for model in models.values():
                 model_key = (app_label, model.__name__)
@@ -218,26 +226,31 @@ class MigrationAutodetector:
         return state
 
     async def _project_state(self) -> State:
-        state = State(ignores_missing_swappable_relations=True)
+        state = State(ignores_missing_swappable_relations=True, environment=self.environment)
         for key in self.loader.graph.full_forwards_plan():
             migration = self.loader.graph.nodes[key]
             if not isinstance(migration, Migration):
                 raise UnknownMigrationError(MISSING_MIGRATION_MESSAGE_TEMPLATE.format(key=key))
-            await migration.apply(state, dry_run=True, schema_editor=None)
+            state = await migration.apply(state, dry_run=True, schema_editor=None)
         return state
 
     @classmethod
-    def _get_operations_swappable_dependencies(cls, operations: list[HareOperation]) -> set[SwappableDependency]:
+    def _get_operations_swappable_dependencies(
+        cls, operations: list[HareOperation], state: State
+    ) -> set[SwappableDependency]:
         """The swappable dependencies of the ``swappable()`` relation fields `operations` add.
 
         Args:
             operations: A migration's operations.
+            state: The captured application state selecting swappable models.
 
         Returns:
             One dependency per setting.
         """
         return {
-            SwappableDependency(field.model_name.setting)
+            SwappableDependency.from_app_label(
+                field.model_name.setting, state.get_swappable_label(field.model_name.setting).split(".", 1)[0]
+            )
             for field in cls._get_operations_relation_fields(operations)
             if isinstance(field.model_name, SwappableModelReference)
         }
@@ -291,7 +304,10 @@ class MigrationAutodetector:
             and isinstance(field, RELATION_FIELDS)
             and isinstance(field.model_name, SwappableModelReference)
         }
-        return {SwappableDependency(setting) for setting in settings}
+        return {
+            SwappableDependency.from_app_label(setting, new_state.get_swappable_label(setting).split(".", 1)[0])
+            for setting in settings
+        }
 
     def leaf_nodes(self, app_label: str) -> list[MigrationKey]:
         """The last migrations of an app in the loaded graph - every migration on disk is in it.

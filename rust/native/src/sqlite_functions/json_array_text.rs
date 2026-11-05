@@ -6,8 +6,8 @@ use std::fmt::Write;
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};
 
+use crate::json_string::write_json_string;
 use crate::python::ffi::get_i64;
-use crate::sqlite_functions::json_string::write_json_string;
 
 /// The JSON array of a list of exact integers within 64 bits and exact strings; None for a list
 /// holding any other value.

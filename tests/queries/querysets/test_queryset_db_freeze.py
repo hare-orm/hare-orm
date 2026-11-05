@@ -15,8 +15,8 @@ import pytest
 import pytest_asyncio
 
 from hare import fields
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.functions import Length
@@ -62,9 +62,7 @@ async def _make_context(tmp_path, connection_aliases: list[str], router: type, a
     sys.modules[MODULE_NAME] = module
 
     connections = {
-        name: DbUrlConfigGenerator.expand(
-            f"sqlite+aiosqlite:///{tmp_path / f'{name}.sqlite'}?synchronous=OFF", testing=True
-        )
+        name: DatabaseConfig.from_url(f"sqlite+aiosqlite:///{tmp_path / f'{name}.sqlite'}?synchronous=OFF").config
         for name in connection_aliases
     }
     context = HareContext()

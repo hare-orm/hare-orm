@@ -28,9 +28,6 @@ class CreateCollation(HareOperation):
         ConfigurationError: The name isn't a plain collation name, or the provider is unknown.
     """
 
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
-
     def __init__(self, name: str, locale: str, *, provider: str = "libc", deterministic: bool = True) -> None:
         if not isinstance(name, str) or not COLLATION_NAME_PATTERN.fullmatch(name):
             raise ConfigurationError(f"Invalid collation name {name!r}")

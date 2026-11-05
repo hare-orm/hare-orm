@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.joins.named_columns import NamedColumns
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.sql.builder.tables.lateral_query import LateralQuery
 from hare.sql.terms.criteria.true_criterion import TrueCriterion
@@ -38,6 +39,8 @@ class Lateral(NamedColumns):
     Raises:
         QueryError: ``query`` isn't a ``values()``/``values_list()`` queryset.
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     def __init__(self, query: QuerySet[Any, Any]) -> None:
         # Local import: the queryset package imports this module.
@@ -74,11 +77,12 @@ class Lateral(NamedColumns):
                 f"Lateral {self.name!r} reads one of the columns its queryset selects ({', '.join(selected_names)}) "
                 f"as {self.name}__<column>, got {path!r}"
             )
-        lateral_query = LateralQuery(self.name, cast("Selectable", subquery.get_result(expression_context).term))
+        bound_subquery = cast("Subquery", subquery.get_result(expression_context).term)
+        lateral_query = LateralQuery(self.name, cast("Selectable", bound_subquery))
         return ExpressionResult(
             term=lateral_query.field(path),
             joins=[(cast("Table", lateral_query), TrueCriterion())],
-            output_field=subquery.get_selected_field(path),
+            output_field=bound_subquery.get_selected_field(path),
         )
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:

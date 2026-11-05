@@ -1,6 +1,6 @@
 # SQL comment tags
 
-`hare.instrumentation.QueryTags` tags every SQL statement executed inside a block with a trailing,
+`hare.instrumentation.QueryTags` tags every SQL statement executed inside a block with a
 [sqlcommenter-style](https://google.github.io/sqlcommenter/) SQL comment — for tracing the SQL text seen
 by `pg_stat_statements`/`auto_explain`/a slow-query log back to the application call site that issued it,
 without hare depending on any particular tracing/APM library.
@@ -29,9 +29,9 @@ with QueryTags.scope(application="ops", job="remind_overdue_loans"):
 
 ## <a id="the-comment"></a>The comment
 
-- The comment is **appended**, never prepended — a leading comment would perturb PostgreSQL's
-  prefix-based statement-cache behavior and confuse tools that read only the first N characters of a
-  query. After a statement ending in a line comment (`-- ...`) it goes on a line of its own.
+- The dialect places the comment: PostgreSQL and SQLite append it, using a separate line after a
+  possible final line comment. ClickHouse prefixes every statement so a trailing data block cannot
+  consume the comment. Raw SQL is preserved; placement does not depend on parsing its first keyword.
 - Keys and values are URL-encoded — a key is a non-empty string and a value isn't None, else
   `ConfigurationError`; keys are sorted, so the same tag set always produces the same comment text
   regardless of the order you passed them in.
@@ -50,7 +50,7 @@ an `await` boundary spanning multiple callback invocations).
 ## <a id="tagged-statements"></a>Which statements get the comment
 
 - Every query-executing call, including a DDL script run through `execute_script()` — a multi-statement
-  script gets exactly one trailing comment for the whole script, not one per statement.
+  script gets exactly one comment for the whole script, not one per statement.
 - A PostgreSQL bulk `COPY` (`bulk_create(use_copy=True)`): on `asyncpg`, which writes the statement
   itself, the comment follows a `WHERE TRUE` every row meets.
 - `QueryExecuted.sql` and `QueryCall.sql` carry the already-tagged SQL text, since tagging happens before

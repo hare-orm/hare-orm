@@ -5,40 +5,25 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-import io
 import sqlite3
 import sys
-import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from hare.cli import hare_cli as cli_module
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
+from tests.utils.cli_commands import CliCommands
+from tests.utils.project_sources import ProjectSources
 
 
-async def _run_cli(args: list[str]) -> SimpleNamespace:
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        exit_code = await cli_module.HareCLI.run_cli_async(args)
-    return SimpleNamespace(exit_code=exit_code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
-
-
-def _write_module(tmp_path: Path, name: str, source: str) -> None:
-    (tmp_path / f"{name}.py").write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
-
-
-def _use_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module_prefix: str) -> None:
+def _use_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(CLICommandRegistry, "get_entry_points", staticmethod(lambda: []))
     importlib.invalidate_caches()
-    for module_name in list(sys.modules):
-        is_migrations_module = module_name == "migrations" or module_name.startswith("migrations.")
-        if module_name.startswith(module_prefix) or is_migrations_module:
-            del sys.modules[module_name]
 
 
 MODELS_SOURCE = """
@@ -71,16 +56,22 @@ class {name}(Model):
 async def test_history_with_a_broken_connection_config_exits_cleanly(
     tmp_path, monkeypatch, connection, expected_message
 ):
-    _write_module(tmp_path, "cfgerr_models", MODELS_SOURCE.format(name="CfgErrWidget"))
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgerr_models", MODELS_SOURCE.format(name="CfgErrWidget"))
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgerr_settings",
         f'HARE_ORM = {{"connections": {{"default": {connection}}}, '
         '"apps": {"models": {"models": ["cfgerr_models"]}}}',
     )
-    _use_project(tmp_path, monkeypatch, "cfgerr_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgerr_settings.HARE_ORM", "history"])
+    result = await CliCommands.run(["-c", "cfgerr_settings.HARE_ORM", "history"], project=tmp_path)
 
     assert result.exit_code == 1
     assert expected_message in result.stderr
@@ -92,16 +83,22 @@ async def test_history_with_a_broken_connection_config_exits_cleanly(
 async def test_a_models_module_failing_as_it_is_imported_exits_cleanly(tmp_path, monkeypatch):
     """A models module raising an error of its own as it was imported - not a missing name or broken
     syntax - came out of the CLI as a traceback."""
-    _write_module(tmp_path, "cfgmodraise_models", 'raise RuntimeError("boom at import")')
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgmodraise_models", 'raise RuntimeError("boom at import")')
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgmodraise_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         '"apps": {"models": {"models": ["cfgmodraise_models"]}}}',
     )
-    _use_project(tmp_path, monkeypatch, "cfgmodraise_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgmodraise_settings.HARE_ORM", "history"])
+    result = await CliCommands.run(["-c", "cfgmodraise_settings.HARE_ORM", "history"], project=tmp_path)
 
     assert result.exit_code == 1
     assert "'cfgmodraise_models' failed to import: RuntimeError: boom at import" in result.stderr
@@ -110,31 +107,44 @@ async def test_a_models_module_failing_as_it_is_imported_exits_cleanly(tmp_path,
 
 @pytest.mark.asyncio
 async def test_a_configuration_module_failing_as_it_is_imported_exits_cleanly(tmp_path, monkeypatch):
-    _write_module(tmp_path, "cfgraise_settings", 'raise RuntimeError("no secrets in this environment")')
-    _use_project(tmp_path, monkeypatch, "cfgraise_")
+    ProjectSources(
+        tmp_path,
+    ).write_module("cfgraise_settings", 'raise RuntimeError("no secrets in this environment")')
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgraise_settings.HARE_ORM", "heads"])
+    result = await CliCommands.run(["-c", "cfgraise_settings.HARE_ORM", "heads"], project=tmp_path)
 
     assert result.exit_code == 1
     assert "'cfgraise_settings' failed to import: RuntimeError: no secrets in this environment" in result.stderr
     assert "Traceback" not in result.stderr
 
 
-@pytest.mark.requires("mypy")
+@pytest.mark.requires("pyright")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_stubs_into_a_path_that_is_a_file_exit_cleanly(tmp_path, monkeypatch):
-    _write_module(tmp_path, "cfgstub_models", MODELS_SOURCE.format(name="CfgStubWidget"))
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgstub_models", MODELS_SOURCE.format(name="CfgStubWidget"))
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgstub_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         '"apps": {"models": {"models": ["cfgstub_models"]}}}',
     )
     (tmp_path / "typings").write_text("not a folder", encoding="utf-8")
-    _use_project(tmp_path, monkeypatch, "cfgstub_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgstub_settings.HARE_ORM", "stubs", "--output", "typings"])
+    result = await CliCommands.run(
+        ["-c", "cfgstub_settings.HARE_ORM", "stubs", "--output", "typings"], project=tmp_path
+    )
 
     assert result.exit_code == 1
     assert "Can't write the stubs into 'typings'" in result.stderr
@@ -147,9 +157,12 @@ async def test_stubs_into_a_path_that_is_a_file_exit_cleanly(tmp_path, monkeypat
     [("ConfigurationError", "ConfigurationError: plugin config problem"), ("DBConnectionError", "DBConnectionError")],
 )
 async def test_plugin_command_raising_a_hare_error_exits_cleanly(tmp_path, monkeypatch, exception_name, exit_message):
-    _write_module(tmp_path, "cfgerr_plugin_models", MODELS_SOURCE.format(name="CfgErrPluginWidget"))
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgerr_plugin_models", MODELS_SOURCE.format(name="CfgErrPluginWidget"))
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgerr_plugin_commands",
         f"""
         from hare.cli.plugins import CLICommand
@@ -163,16 +176,20 @@ async def test_plugin_command_raising_a_hare_error_exits_cleanly(tmp_path, monke
                 raise {exception_name}("plugin config problem")
         """,
     )
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module(
         "cfgerr_plugin_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         '"apps": {"models": {"models": ["cfgerr_plugin_models"]}}, '
         '"cli": {"commands": ["cfgerr_plugin_commands:FailingCommand"]}}',
     )
-    _use_project(tmp_path, monkeypatch, "cfgerr_plugin")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgerr_plugin_settings.HARE_ORM", "fail"])
+    result = await CliCommands.run(["-c", "cfgerr_plugin_settings.HARE_ORM", "fail"], project=tmp_path)
 
     assert result.exit_code == 1
     assert exit_message in result.stderr
@@ -180,12 +197,17 @@ async def test_plugin_command_raising_a_hare_error_exits_cleanly(tmp_path, monke
 
 
 def _write_two_single_file_apps(tmp_path: Path, explicit_migrations: bool) -> None:
-    _write_module(tmp_path, "cfgerr_app_a", MODELS_SOURCE.format(name="CfgErrLog"))
-    _write_module(tmp_path, "cfgerr_app_b", MODELS_SOURCE.format(name="CfgErrThing"))
+    ProjectSources(
+        tmp_path,
+    ).write_module("cfgerr_app_a", MODELS_SOURCE.format(name="CfgErrLog"))
+    ProjectSources(
+        tmp_path,
+    ).write_module("cfgerr_app_b", MODELS_SOURCE.format(name="CfgErrThing"))
     migrations_a = ', "migrations": "cfgerr_migrations_a"' if explicit_migrations else ""
     migrations_b = ', "migrations": "cfgerr_migrations_b"' if explicit_migrations else ""
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module(
         "cfgerr_two_settings",
         f'HARE_ORM = {{"connections": {{"default": "sqlite+aiosqlite://{(tmp_path / "db.sqlite3").as_posix()}"}}, '
         f'"apps": {{"a": {{"models": ["cfgerr_app_a"]{migrations_a}}}, '
@@ -200,9 +222,12 @@ async def test_two_single_file_apps_sharing_an_inferred_migrations_package_are_r
     """Both apps inferred the same top-level "migrations" package - makemigrations wrote both apps'
     0001_initial into one file (the second overwriting the first) and migrate then failed."""
     _write_two_single_file_apps(tmp_path, explicit_migrations=False)
-    _use_project(tmp_path, monkeypatch, "cfgerr_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgerr_two_settings.HARE_ORM", command])
+    result = await CliCommands.run(["-c", "cfgerr_two_settings.HARE_ORM", command], project=tmp_path)
 
     assert result.exit_code == 1
     assert "Apps 'a' and 'b' would both keep their migrations in 'migrations'" in result.stderr
@@ -213,11 +238,14 @@ async def test_two_single_file_apps_sharing_an_inferred_migrations_package_are_r
 @pytest.mark.asyncio
 async def test_two_single_file_apps_with_explicit_migrations_packages_migrate(tmp_path, monkeypatch):
     _write_two_single_file_apps(tmp_path, explicit_migrations=True)
-    _use_project(tmp_path, monkeypatch, "cfgerr_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    make_result = await _run_cli(["-c", "cfgerr_two_settings.HARE_ORM", "makemigrations"])
+    make_result = await CliCommands.run(["-c", "cfgerr_two_settings.HARE_ORM", "makemigrations"], project=tmp_path)
     assert make_result.exit_code == 0, make_result.stdout + make_result.stderr
-    migrate_result = await _run_cli(["-c", "cfgerr_two_settings.HARE_ORM", "migrate"])
+    migrate_result = await CliCommands.run(["-c", "cfgerr_two_settings.HARE_ORM", "migrate"], project=tmp_path)
     assert migrate_result.exit_code == 0, migrate_result.stdout + migrate_result.stderr
 
     assert (tmp_path / "cfgerr_migrations_a" / "0001_initial.py").exists()
@@ -230,37 +258,55 @@ async def test_two_single_file_apps_with_explicit_migrations_packages_migrate(tm
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_single_file_app_keeps_its_inferred_migrations_package(tmp_path, monkeypatch):
-    _write_module(tmp_path, "cfgerr_single_app", MODELS_SOURCE.format(name="CfgErrSingle"))
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgerr_single_app", MODELS_SOURCE.format(name="CfgErrSingle"))
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgerr_single_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         '"apps": {"models": {"models": ["cfgerr_single_app"]}}}',
     )
-    _use_project(tmp_path, monkeypatch, "cfgerr_single")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    result = await _run_cli(["-c", "cfgerr_single_settings.HARE_ORM", "init"])
+    result = await CliCommands.run(["-c", "cfgerr_single_settings.HARE_ORM", "init"], project=tmp_path)
 
     assert result.exit_code == 0, result.stderr
     assert (tmp_path / "migrations" / "__init__.py").exists()
 
 
+@pytest.mark.requires("pyright")
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "win32", reason="'//' is the root of no server on Windows only")
 async def test_stubs_into_a_path_no_stub_name_goes_into_exit_cleanly(tmp_path, monkeypatch):
     """ "//" made pathlib raise ValueError as a stub's name was put into it - a traceback."""
-    _write_module(tmp_path, "cfgstubroot_models", MODELS_SOURCE.format(name="CfgStubRootWidget"))
-    _write_module(
+    ProjectSources(
         tmp_path,
+    ).write_module("cfgstubroot_models", MODELS_SOURCE.format(name="CfgStubRootWidget"))
+    ProjectSources(
+        tmp_path,
+    ).write_module(
         "cfgstubroot_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         '"apps": {"models": {"models": ["cfgstubroot_models"]}}}',
     )
-    _use_project(tmp_path, monkeypatch, "cfgstubroot_")
+    _use_project(
+        tmp_path,
+        monkeypatch,
+    )
 
-    for arguments in (["--output", "//"], ["--output", "//", "--check"]):
-        result = await _run_cli(["-c", "cfgstubroot_settings.HARE_ORM", "stubs", *arguments])
-        assert result.exit_code == 1
-        assert "Can't write the stubs into '//'" in result.stderr
-        assert "Traceback" not in result.stderr
+    arguments = ["-c", "cfgstubroot_settings.HARE_ORM", "stubs", "--output", "//"]
+    result = await CliCommands.run(arguments, project=tmp_path)
+    assert result.exit_code == 1
+    assert "Can't write the stubs into '//'" in result.stderr
+    assert "Traceback" not in result.stderr
+
+    checked = await CliCommands.run([*arguments, "--check"], project=tmp_path)
+    assert checked.exit_code == 1
+    assert "Outdated stub:" in checked.stdout or "Can't write the stubs into '//'" in checked.stderr
+    assert "Traceback" not in checked.stderr

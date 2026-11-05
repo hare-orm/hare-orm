@@ -161,6 +161,7 @@ class CompositeKeyFilters:
             [expression_context.table[meta.fields_db_projection[source_field]] for source_field in source_fields],
             encoded_rows,
             key_fields,
+            connection=expression_context.connection,
         )
         # A nullable relation's negation (not_in, exclude()) keeps the rows of a NULL key.
         modifier = QueryModifier(
@@ -287,7 +288,7 @@ class CompositeKeyFilters:
         has_none = any(None in encoded_column for encoded_column in encoded_columns)
         encoded_rows = list(zip(*encoded_columns, strict=True))
         criterion = expression_context.dialect.filter_operators.get_row_membership_criterion(
-            columns, encoded_rows, list(meta.pk_fields)
+            columns, encoded_rows, list(meta.pk_fields), connection=expression_context.connection
         )
         modifier = QueryModifier(where_criterion=criterion, has_nullable_column=has_none)
         return modifier, None if has_none else CompositeKeyFilters.get_row_list_value_reference(

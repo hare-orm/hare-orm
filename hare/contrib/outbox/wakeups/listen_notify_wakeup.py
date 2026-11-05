@@ -89,9 +89,9 @@ class ListenNotifyWakeup(OutboxWakeup):
         # Every signal is a notification sent by signal_written() in the events' own transaction.
         raise NotImplementedError
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         self.listener = NotificationListener(
-            connection_alias,
+            connection,
             self.channel,
             self.on_notification,
             reconnect_attempts=WAKEUP_MAX_RECONNECT_ATTEMPTS,

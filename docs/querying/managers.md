@@ -49,26 +49,66 @@ class Book(Model):
 await Book.objects.published().by(author).order_by("title")
 ```
 
-## <a id="default-filter"></a>Rows every query leaves out: `get_queryset()`
+### <a id="custom-queryset-state"></a>State of a custom queryset
 
-Rows no query should see are left out in `get_queryset()` of a `Manager` subclass. The default manager's
-filter also scopes every JOIN to the model (see [`Meta.manager`](../models/meta-options.md#manager)):
+A queryset method creates a branch without calling its constructor again. ORM settings and mutable
+prefetch containers are copied independently. Custom slots and dictionary attributes are copied
+shallowly by default. For mutable custom state, override `copy_extension_state(target)`, call
+`super().copy_extension_state(target)`, then copy that state explicitly, for example
+`target.tags = list(self.tags)`.
+
+The hook also runs when a custom queryset is bound to an instance's related queryset. The target
+already has its ORM settings. Preparing a SQL statement transfers only the ORM declaration:
+custom methods must express their SQL behavior through the queryset's filters, annotations and options.
+
+## <a id="default-filter"></a>Row visibility: `RowScopeProvider`
+
+Declare a predicate through `Manager(scope=...)`. The provider's
+`get_condition(model, visibility)` returns `Q`, a boolean `Expression`, or `None`.
+It performs no database IO. The default manager's provider also scopes JOINs and
+related loading (see [`Meta.manager`](../models/meta-options.md#manager)).
+
+Expression predicates follow [`Q.from_expression`](expressions.md#q): the result must be a SQL
+criterion or have explicit `BooleanField` metadata. `ConditionValue(Q(...))`, `Exists(...)`, and
+`F("is_active")` for a boolean field are supported. A text or numeric `F(...)` is not a truthiness
+test and raises `QueryError` during preparation. Tenant and soft-delete restrictions still apply
+to expression predicates on root queries, JOINs and prefetches.
 
 ```python
-class PublishedManager(Manager):
-    def get_queryset(self):
-        return super().get_queryset().filter(published_at__isnull=False)
+from hare import Manager, RowScopeProvider
+from hare.query.expressions import Q
+
+
+class PublishedRows(RowScopeProvider):
+    def get_condition(self, model, visibility):
+        return Q(published_at__isnull=False)
 
 
 class Book(Model):
     ...
-    objects = PublishedManager()   # the default manager: Book.objects, and JOINs to Book
-    everything = Manager()         # any number of further managers
+    objects = Manager(BookQuerySet, scope=PublishedRows())
+    everything = Manager(BookQuerySet)
 ```
 
-The default manager is the `objects` the class body declares, else `Meta.manager`, else the `objects` of
-a base model, else a plain `Manager()`. `objects` assigned anything but a `Manager` is a
-`ConfigurationError`. Each concrete subclass gets its own copy of the managers its bases declare.
+The provider is evaluated during execution preparation, rather than when `Book.objects`
+is read. Reusing a queryset in a different context obtains fresh values. One execution
+shares its prepared predicates with JOINs and prefetch queries. `visibility` carries the
+resolved tenant and `all_tenants`/`include_deleted`/`only_deleted` flags. Tenant and
+soft-delete conditions are applied independently; omitting a custom provider does not
+disable them.
+
+`get_queryset()` is a factory for the queryset class and its local options. Its filters,
+annotations and ordering are not inspected to infer a JOIN policy. Use a provider for
+predicates that must apply across relations. A JOIN predicate must use the joined
+model's direct fields; a condition requiring another JOIN raises `ConfigurationError`.
+
+The default manager is the `objects` declared on the class, else `Meta.manager`, else
+an inherited `objects`, else `Manager()`. Additional managers apply their own providers
+to their root queries; relation traversal uses the related model's default provider.
+Managers inherited from bases are copied and bound to each concrete model.
+`refresh_from_db()`, version allocation and referential-integrity/cascade operations
+use their operation-specific policies. Raw SQL does not receive these ORM filters.
+This mechanism is not database row-level security.
 
 ## <a id="related-querysets"></a>Relations of an instance
 

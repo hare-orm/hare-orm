@@ -24,7 +24,6 @@ from hare.fields import CASCADE, NO_ACTION, PROTECT, RESTRICT, SET_DEFAULT, SET_
 from hare.fields.db_defaults import Now, RandomHex, SqlDefault
 from hare.fields.generated_field import GeneratedField
 from hare.models import Model
-from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.f import F
 from hare.query.functions import Coalesce, Lower
@@ -64,8 +63,9 @@ class Tournament(Model):
     uniquetogetherfieldswithfks: fields.ReverseRelation[UniqueTogetherFieldsWithFK]
     composite_owners: fields.ReverseRelation[CompositePkOwningFK]
 
-    class PydanticMeta:
-        exclude = ("minrelations", "uniquetogetherfieldswithfks", "composite_owners")
+    class Meta:
+        class pydantic:
+            exclude = ("minrelations", "uniquetogetherfieldswithfks", "composite_owners")
 
     def __str__(self):
         return self.name
@@ -115,8 +115,9 @@ class Event(Model):
 
 
 class ModelTestPydanticMetaBackwardRelations1(Model):
-    class PydanticMeta:
-        backward_relations = False
+    class Meta:
+        class pydantic:
+            backward_relations = False
 
 
 class ModelTestPydanticMetaBackwardRelations2(Model): ...
@@ -136,8 +137,9 @@ class ModelTestPydanticAnnotatedBackwardRel(Model):
 
     annotated_children: fields.ReverseRelation[ModelTestPydanticAnnotatedChild]
 
-    class PydanticMeta:
-        backward_relations = False
+    class Meta:
+        class pydantic:
+            backward_relations = False
 
 
 class ModelTestPydanticAnnotatedChild(Model):
@@ -228,8 +230,8 @@ class Team(Model):
     class Meta:
         ordering = ["id"]
 
-    class PydanticMeta:
-        exclude = ("minrelations",)
+        class pydantic:
+            exclude = ("minrelations",)
 
     def __str__(self):
         return self.name
@@ -699,11 +701,11 @@ class Employee(Model):
     class Meta:
         ordering = ["id"]
 
-    class PydanticMeta:
-        computed = ["name_length", "team_size", "not_annotated"]
-        exclude = ["manager", "gets_talked_to"]
-        allow_cycles = True
-        max_recursion = 2
+        class pydantic:
+            computed = ["name_length", "team_size", "not_annotated"]
+            exclude = ["manager", "gets_talked_to"]
+            allow_cycles = True
+            max_recursion = 2
 
 
 class StraightFields(Model):
@@ -2182,12 +2184,11 @@ class ManagerModelExtra(AbstractManagerModel):
     extra = fields.CharField(max_length=200)
 
 
-class ActiveManager(Manager):
-    """A default-scope Manager whose get_queryset() takes no parameters at all (unlike the base
-    one) and just chains one extra domain-specific filter onto super().get_queryset()."""
+class ActiveRows:
+    """The declared visibility predicate of active rows."""
 
-    def get_queryset(self):
-        return super().get_queryset().filter(is_active=True)
+    def get_condition(self, model, visibility):
+        return Q(is_active=True)
 
 
 class ActiveAuthor(Model):
@@ -2197,7 +2198,7 @@ class ActiveAuthor(Model):
     books: fields.ReverseRelation["ActiveAuthorBook"]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
 class ActiveAuthorBook(Model):
@@ -2215,7 +2216,7 @@ class VersionedActiveDocument(VersionedModel):
     is_active = fields.BooleanField(default=True)
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
 class TenantActiveAuthor(Model):
@@ -2229,7 +2230,7 @@ class TenantActiveAuthor(Model):
     books: fields.ReverseRelation["TenantActiveAuthorBook"]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
         tenant_field = "company_id"
         soft_delete_field = "deleted_at"
 
@@ -2294,12 +2295,12 @@ class ActiveAuthorTag(Model):
     books: fields.ManyToManyRelation[TenantActiveAuthorBook]
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
 
 
-class CrossRelationManager(Manager):
-    def get_queryset(self):
-        return super().get_queryset().filter(owner__is_active=True)
+class CrossRelationRows:
+    def get_condition(self, model, visibility):
+        return Q(owner__is_active=True)
 
 
 class CrossRelationScopedAuthor(Model):
@@ -2312,7 +2313,7 @@ class CrossRelationScopedAuthor(Model):
     )
 
     class Meta:
-        manager = CrossRelationManager()
+        manager = Manager(scope=CrossRelationRows())
 
 
 class CrossRelationScopedBook(Model):
@@ -2329,7 +2330,7 @@ class AnnotatedManager(Manager):
 
 
 class AnnotatedScopedAuthor(Model):
-    """Default scope applies annotate() - has no JOIN ON equivalent."""
+    """A factory adds a selected annotation without declaring a row visibility predicate."""
 
     id = fields.IntField(primary_key=True)
     name = fields.CharField(max_length=50)
@@ -2882,7 +2883,7 @@ class TenantActiveAuthorNote(Model):
     )
 
     class Meta:
-        manager = ActiveManager()
+        manager = Manager(scope=ActiveRows())
         tenant_field = "company_id"
         soft_delete_field = "deleted_at"
 
@@ -3758,29 +3759,28 @@ class BulkUpdateValuesAliasClash(Model):
         optimistic_lock_field = "version"
 
 
-class OwnerScopedManager(Manager):
+class OwnerScopedRows:
     """A default scope whose filter value is read from a runtime context value at query time."""
 
     current_owner: ClassVar[ContextVar[str | None]] = ContextVar("owner_scoped_manager_current_owner", default=None)
 
-    def get_queryset(self):
-        return super().get_queryset().filter(owner=OwnerScopedManager.current_owner.get())
+    def get_condition(self, model, visibility):
+        return Q(owner=OwnerScopedRows.current_owner.get())
 
 
-class OptionalOwnerScopedManager(Manager):
+class OptionalOwnerScopedRows:
     """Filters by the current owner only while one is set - the scope's shape changes per call."""
 
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        owner = OwnerScopedManager.current_owner.get()
-        return queryset if owner is None else queryset.filter(owner=owner)
+    def get_condition(self, model, visibility):
+        owner = OwnerScopedRows.current_owner.get()
+        return None if owner is None else Q(owner=owner)
 
 
-class SharedOrOwnTenantManager(Manager):
+class SharedTenantRows:
     """Rows shared by every tenant (company_id NULL) plus the active tenant's own."""
 
-    def get_queryset(self):
-        return super().get_queryset().filter(Q(company_id__isnull=True) | Q(company_id=Tenancy.current.get()))
+    def get_condition(self, model, visibility):
+        return Q(company_id__isnull=True) | Q(company_id=visibility.tenant)
 
 
 class OwnerScopedLabel(Model):
@@ -3797,7 +3797,7 @@ class OwnerScopedSecret(Model):
     )
 
     class Meta:
-        manager = OwnerScopedManager()
+        manager = Manager(scope=OwnerScopedRows())
 
 
 class OptionalOwnerScopedSecret(Model):
@@ -3806,7 +3806,7 @@ class OptionalOwnerScopedSecret(Model):
     text = fields.CharField(max_length=100)
 
     class Meta:
-        manager = OptionalOwnerScopedManager()
+        manager = Manager(scope=OptionalOwnerScopedRows())
 
 
 class SharedOrOwnTemplate(Model):
@@ -3815,7 +3815,7 @@ class SharedOrOwnTemplate(Model):
     body = fields.CharField(max_length=100)
 
     class Meta:
-        manager = SharedOrOwnTenantManager()
+        manager = Manager(scope=SharedTenantRows())
 
 
 class OwnerScopedSecretRef(Model):
@@ -3855,7 +3855,7 @@ class OwnerScopedRoster(Model):
     owner = fields.CharField(max_length=50)
 
     class Meta:
-        manager = OwnerScopedManager()
+        manager = Manager(scope=OwnerScopedRows())
 
 
 class SlugTenantAccount(Model):

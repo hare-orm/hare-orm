@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.exceptions import FieldError
+from hare.query.generic_foreign_keys.generic_foreign_key_types import GenericForeignKeyTypes
+from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
 from hare.query.queryset.arguments.ordering_arguments import OrderingArguments
+from hare.query.queryset.combination.queryset_combination import QuerySetCombination
+from hare.query.queryset.constants import LATEST_WITHOUT_FIELDS_MESSAGE
 from hare.query.queryset.selection.statement_selection import StatementSelection
 from hare.query.queryset.single_rows.query_set_single import QuerySetSingle
 
 if TYPE_CHECKING:
+    from hare.query.expressions.expression import Expression
+    from hare.query.expressions.ordering import Ordering
     from hare.query.queryset.queryset import QuerySet
 
 
@@ -101,3 +109,40 @@ class SingleRow:
         """
         if queryset._selection is not None and (queryset._limit is not None or queryset._offset):
             StatementSelection.get_values_query(queryset)._raise_if_sliced_rows_differ_from_source(method_name)
+
+    @staticmethod
+    def get_extreme(
+        queryset: QuerySet[Any, Any], orderings: Sequence[str | Expression | Ordering], *, reverse: bool
+    ) -> QuerySetSingle[Any]:
+        """Select the earliest or latest row using the shared ordering and slice rules.
+
+        Args:
+            queryset: The declaration to select from, left unchanged.
+            orderings: Explicit orderings, or empty to use Meta.get_latest_by.
+            reverse: Reverse the orderings for latest(); explicit NULL placement reverses too.
+
+        Returns:
+            The single-row query, with expression and path orderings declared as aliases.
+        """
+        method_name = "latest" if reverse else "earliest"
+        QuerySetCombination.raise_if_combined(queryset, method_name)
+        SingleRow.raise_if_sliced_values_rows_differ(queryset, method_name)
+        orderings = orderings or queryset.model._meta.get_latest_by
+        if not orderings:
+            raise FieldError(LATEST_WITHOUT_FIELDS_MESSAGE.format(method=method_name))
+        expression_aliases, orderings = OrderingArguments.get_expression_aliases(orderings)
+        if expression_aliases:
+            return getattr(queryset._alias(expression_aliases), method_name)(*orderings)
+        if type_aliases := GenericForeignKeyTypes.get_pending_type_aliases(queryset, tuple(orderings)):
+            return getattr(queryset.alias(**type_aliases), method_name)(*orderings)
+        # A path into a JSON field, a date or an array orders by an alias of its own, as in order_by().
+        if path_annotations := AnnotationArguments.get_path_annotations(
+            queryset, (queryset._get_ordering_name(ordering)[0] for ordering in orderings)
+        ):
+            return getattr(queryset._alias(path_annotations), method_name)(*orderings)
+        OrderingArguments.forbid_reordering_after_cursor(queryset, method_name)
+        result = SingleRow.with_rows_as_subquery(queryset)
+        result._orderings = OrderingArguments.parse_orderings(
+            queryset, orderings, reverse=reverse, nulls_last_by_default=True
+        )
+        return SingleRow.as_single(result)

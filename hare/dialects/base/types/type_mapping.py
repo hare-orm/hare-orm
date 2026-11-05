@@ -25,9 +25,6 @@ class TypeMapping:
         function_cast: A ``(field, term) -> term`` wrapping the column wherever it is compared,
             ordered or copied.
         to_db: A ``(field, value, instance) -> value`` replacing the field's ``to_db_value()``.
-        to_db_refuses_only: ``to_db`` only refuses a value - one the field's ``native_write_check``
-            leaves to it - and writes any other as the field does: the write accelerator writes every
-            other value itself.
         to_lookup: A ``(field, value, instance) -> value`` replacing the field's
             ``to_lookup_value()``.
         to_python: A ``(field, value) -> value`` replacing the field's ``from_db_value()``.
@@ -39,8 +36,6 @@ class TypeMapping:
         holds_null: Whether the column type holds NULL - False for a type the database has no NULL
             of (an array, a map or a tuple of a columnar database), whose aggregates give its empty
             value over no rows; None leaves it to the mapping of a base class.
-        naive_datetime_is_utc: ``to_python`` is the field's own ``from_db_value()`` with a naive
-            datetime from the driver read as a UTC instant.
         extension: The database extension the column type needs - created wherever a field of the
             class is used.
         inserted_by_select: Whether an INSERT writing the column writes its rows as a ``SELECT`` of
@@ -52,12 +47,10 @@ class TypeMapping:
     generated_sql: str | None = None
     function_cast: Callable[[Field[Any], Term], Term] | None = None
     to_db: DbConverter | None = None
-    to_db_refuses_only: bool = False
     to_lookup: DbConverter | None = None
     to_python: PythonConverter | None = None
     json_term: Callable[[Field[Any], Term], Term] | None = None
     ordering_key: Callable[[Field[Any], Term], Term | None] | None = None
     holds_null: bool | None = None
-    naive_datetime_is_utc: bool = False
     extension: str | None = None
     inserted_by_select: bool | Callable[[Field[Any]], bool] = False

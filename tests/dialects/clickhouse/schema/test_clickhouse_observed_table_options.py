@@ -5,6 +5,7 @@ and compared by drift with the declared ones as the server writes them."""
 import pytest
 
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_observed_table_options import ClickhouseObservedTableOptions
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
@@ -15,12 +16,13 @@ from hare.migrations.drift import detect_drift
 from hare.migrations.operations import AlterModelOptions
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
+from hare.query.expressions import F
 from tests.dialects.clickhouse import models
 from tests.dialects.clickhouse.models import Hit, PageView, Team
 from tests.utils.model_source_generator import ModelSourceGenerator
 
 OBSERVED = ClickhouseTableOptions(
-    engine="ReplacingMergeTree(duration_ms)",
+    engine=ClickhouseEngine("ReplacingMergeTree", F("duration_ms")),
     order_by=("id", "site", RawSQLTerm("intHash32(id)")),
     sample_by=RawSQLTerm("intHash32(id)"),
     partition_by=RawSQLTerm("toYYYYMM(seen)"),
@@ -104,7 +106,7 @@ async def test_options_are_read_back_and_written_by_inspectdb(clickhouse_db):
     )
     compile(source, "<generated>", "exec")
     for expected in (
-        "engine='ReplacingMergeTree(duration_ms)'",
+        "engine=ClickhouseEngine('ReplacingMergeTree', F('duration_ms'))",
         "order_by=('id', 'site', RawSQLTerm('intHash32(id)'))",
         "column_codecs=(('page', 'ZSTD(3)'), ('duration_ms', 'Delta(4), ZSTD(1)'))",
     ):

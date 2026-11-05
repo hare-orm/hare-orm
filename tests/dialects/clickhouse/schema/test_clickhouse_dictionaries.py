@@ -8,10 +8,11 @@ import pytest
 
 from hare import fields
 from hare.ddl.raw_sql_term import RawSQLTerm
+from hare.declarations.environment_value import EnvironmentValue
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.fields import UInt64Field
 from hare.dialects.clickhouse.functions import DictGet
-from hare.dialects.clickhouse.schema_objects import ClickhouseDictionary
+from hare.dialects.clickhouse.schema_objects import ClickhouseDictionary, DictionarySource
 from hare.exceptions import ConfigurationError, FieldError, QueryError, ValidationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations.drift import detect_drift
@@ -49,8 +50,8 @@ async def get_dictionaries(connection, prefix):
     return {row["name"]: tuple(list(row.values())[1:]) for row in rows}
 
 
-async def run(operation, state, editor):
-    await apply_operations("models", state, operation, schema_editor=editor)
+async def run(operation, state, editor) -> State:
+    return await apply_operations("models", state, operation, schema_editor=editor)
 
 
 @pytest.mark.asyncio
@@ -142,7 +143,7 @@ async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_
     connection = Country._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await run(
+    state = await run(
         CreateModel(
             name="Airport",
             fields=[
@@ -162,8 +163,8 @@ async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_
         await connection.execute_script(
             "INSERT INTO dict_airport VALUES (1, 'fr', 'cdg', 'Paris'), (2, 'de', 'ber', 'Berlin')"
         )
-        await run(AddDictionary("Airport", by_code), state, editor)
-        await run(AddDictionary("Airport", by_number), state, editor)
+        state = await run(AddDictionary("Airport", by_code), state, editor)
+        state = await run(AddDictionary("Airport", by_number), state, editor)
         assert await get_dictionaries(connection, "dict_") == {
             "dict_by_number": ("Hashed", ["id"], ["city", "code"], 0, 0),
             "dict_cities": ("ComplexKeyHashed", ["country", "code"], ["city"], 10, 60),
@@ -185,15 +186,15 @@ async def test_migrations_add_replace_rename_and_remove_dictionaries(clickhouse_
             await Player.objects.annotate(city=by_literals).values_list("city", flat=True)
 
         replaced = ClickhouseDictionary("dict_cities", key=("code",), attributes=("city", "country"), lifetime=5)
-        await run(AlterDictionary("Airport", replaced), state, editor)
-        await run(RenameDictionary("Airport", "dict_by_number", "dict_numbers"), state, editor)
+        state = await run(AlterDictionary("Airport", replaced), state, editor)
+        state = await run(RenameDictionary("Airport", "dict_by_number", "dict_numbers"), state, editor)
         assert await get_dictionaries(connection, "dict_") == {
             "dict_cities": ("ComplexKeyHashed", ["code"], ["city", "country"], 0, 5),
             "dict_numbers": ("Hashed", ["id"], ["city", "code"], 0, 0),
         }
         by_code_alone = DictGet("dict_cities", "country", "name", output_field=fields.CharField(max_length=2))
         assert await Player.objects.annotate(country=by_code_alone).values_list("country", flat=True) == ["fr"]
-        await run(RemoveDictionary("Airport", "dict_numbers"), state, editor)
+        state = await run(RemoveDictionary("Airport", "dict_numbers"), state, editor)
         assert list(await get_dictionaries(connection, "dict_")) == ["dict_cities"]
     finally:
         # The dictionaries a model declares go with its table.
@@ -207,7 +208,7 @@ async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     by_code = ClickhouseDictionary("dict_follow", key=("code",), attributes=("city",))
-    await run(
+    state = await run(
         CreateModel(
             name="Airport",
             fields=[
@@ -225,7 +226,7 @@ async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
         await connection.execute_script("INSERT INTO dict_airport VALUES (1, 'cdg', 'Paris')")
         await Player.objects.create(id=1, name="cdg", rating=1)
         # Another sort key remakes the table the dictionary reads.
-        await run(
+        state = await run(
             AlterModelOptions(
                 name="Airport",
                 options={
@@ -239,7 +240,7 @@ async def test_a_dictionary_follows_its_table_remade_and_renamed(clickhouse_db):
         )
         await connection.execute_script("SYSTEM RELOAD DICTIONARY dict_follow")
         assert await Player.objects.annotate(city=city).values_list("city", flat=True) == ["Paris"]
-        await run(AlterModelTable("Airport", "dict_airport_renamed"), state, editor)
+        state = await run(AlterModelTable("Airport", "dict_airport_renamed"), state, editor)
         await connection.execute_script("SYSTEM RELOAD DICTIONARY dict_follow")
         assert await Player.objects.annotate(city=city).values_list("city", flat=True) == ["Paris"]
     finally:
@@ -254,7 +255,7 @@ async def test_a_dictionary_takes_the_new_type_of_a_field_it_reads(clickhouse_db
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     by_code = ClickhouseDictionary("dict_typed", key=("code",), attributes=("city", "passengers"))
-    await run(
+    state = await run(
         CreateModel(
             name="Airport",
             fields=[
@@ -270,8 +271,8 @@ async def test_a_dictionary_takes_the_new_type_of_a_field_it_reads(clickhouse_db
     )
     try:
         await connection.execute_script("INSERT INTO dict_airport VALUES (1, 'cdg', 'Paris', 70)")
-        await run(AlterField("Airport", "city", fields.CharField(max_length=60)), state, editor)
-        await run(AlterField("Airport", "passengers", fields.BigIntField(null=True)), state, editor)
+        state = await run(AlterField("Airport", "city", fields.CharField(max_length=60)), state, editor)
+        state = await run(AlterField("Airport", "passengers", fields.BigIntField(null=True)), state, editor)
         (row,) = await connection.execute_dicts("SHOW CREATE DICTIONARY dict_typed")
         assert "VARCHAR(60)" in row["statement"] and "Nullable(BIGINT)" in row["statement"]
         await connection.execute_script("SYSTEM RELOAD DICTIONARY dict_typed")
@@ -296,15 +297,22 @@ async def test_a_source_is_declared_with_its_secrets_left_out(clickhouse_db, mon
         "country_external",
         key=("code",),
         attributes=("name",),
-        source=RawSQLTerm(
-            "CLICKHOUSE(TABLE 'country' USER '{env:HARE_TEST_DICTIONARY_USER}' "
-            "PASSWORD '{env:HARE_TEST_DICTIONARY_PASSWORD}')"
+        source=DictionarySource(
+            "CLICKHOUSE",
+            table="country",
+            user=EnvironmentValue("HARE_TEST_DICTIONARY_USER"),
+            password=EnvironmentValue("HARE_TEST_DICTIONARY_PASSWORD"),
         ),
     )
     assert "HARE_TEST_DICTIONARY_PASSWORD" in repr(external.deconstruct())
     monkeypatch.delenv("HARE_TEST_DICTIONARY_PASSWORD", raising=False)
     monkeypatch.setenv("HARE_TEST_DICTIONARY_USER", connection.user)
+    preview = shown.dictionaries.get_dictionary_create_sqls(Country, external)[0]
+    assert "PASSWORD '[HIDDEN]'" in preview and "USER '[HIDDEN]'" in preview
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
+    raw = "  CLICKHOUSE(TABLE '{env:HARE_TEST_DICTIONARY_PASSWORD}')  "
+    literal = ClickhouseDictionary("literal", key=("code",), attributes=("name",), source=RawSQLTerm(raw))
+    assert editor.dictionaries.get_source_sql(Country, literal) == raw
     with pytest.raises(ConfigurationError, match="HARE_TEST_DICTIONARY_PASSWORD"):
         editor.dictionaries.get_dictionary_create_sqls(Country, external)
     monkeypatch.setenv("HARE_TEST_DICTIONARY_PASSWORD", connection.password)
@@ -363,7 +371,7 @@ async def test_drift_finds_no_change_of_a_declared_dictionary_and_a_changed_one(
         await editor.dictionaries.drop_dictionary(Country, changed)
         assert await get_dictionary_operations() == [("AddDictionary", declared)]
     finally:
-        await editor.dictionaries.drop_model_dictionaries(Country)
+        await editor.run_sqls(editor.dictionaries.get_model_drop_sqls(Country))
         await editor.dictionaries.create_dictionary(Country, declared)
     assert await get_dictionary_operations() == []
 

@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from annotated_types import BaseMetadata
 from fastapi import Depends, Path, Query, Request
+from pydantic import SkipValidation
 
 from hare.contrib.frameworks.parameter_annotation import ParameterAnnotation
 from hare.contrib.request_query.constants import REQUEST_ARGUMENT_NAME
+from hare.contrib.request_query.declaration.request_query_parameters import RequestQueryParameters
 
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
@@ -55,9 +57,9 @@ class RequestQueryDependency:
     @property
     def __signature__(self) -> inspect.Signature:
         """The parameters FastAPI reads the query from - the class's, and the request."""
-        self.request_query_class.prepare_parameters()
+        schema = self.request_query_class.prepare_parameters()
         parameters = [inspect.Parameter(REQUEST_ARGUMENT_NAME, inspect.Parameter.KEYWORD_ONLY, annotation=Request)]
-        for name, field_info in self.request_query_class.model_fields.items():
+        for name, field_info in schema.model_fields.items():
             parameters.append(self.get_parameter(name, field_info))
         return inspect.Signature(parameters, return_annotation=self.request_query_class)
 
@@ -73,14 +75,25 @@ class RequestQueryDependency:
             The parameter: its type - ``str`` for a type read from one text value - with its
             limits and a ``Query()`` describing it, a ``Path()`` for one marked ``InPath()``.
         """
-        constraints = [item for item in field_info.metadata if isinstance(item, BaseMetadata)]
+        constraints: list[Any] = [item for item in field_info.metadata if isinstance(item, BaseMetadata)]
         in_path = ParameterAnnotation.is_in_path(field_info)
-        marker = Path(description=field_info.description) if in_path else Query(description=field_info.description)
+        if field_info.default_factory is not None and not in_path:
+            # The whole request model must validate first: a factory can depend on
+            # preceding values. The transport must not validate our missing marker.
+            constraints.append(SkipValidation)
+            marker = Query(
+                description=field_info.description,
+                alias=field_info.alias,
+                default_factory=RequestQueryParameters.get_missing_default,
+            )
+        else:
+            marker_type = Path if in_path else Query
+            marker = marker_type(description=field_info.description, alias=field_info.alias)
         annotation: Any = Annotated[(ParameterAnnotation.get_type(field_info), *constraints, marker)]
         default = (
             inspect.Parameter.empty
-            if field_info.is_required() or in_path
-            else field_info.get_default(call_default_factory=True, validated_data={})
+            if field_info.is_required() or in_path or field_info.default_factory is not None
+            else field_info.get_default(call_default_factory=False)
         )
         return inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation, default=default)
 

@@ -28,8 +28,7 @@ class NumericTyping:
     makes the result a float, otherwise a Decimal one makes it a Decimal, otherwise it is an
     integer."""
 
-    #: Shared, long-lived result fields - the statement plans hold an annotation's
-    #: output field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     INTEGER_OUTPUT_FIELD: ClassVar[BigIntField[int]] = BigIntField()
     FLOAT_OUTPUT_FIELD: ClassVar[FloatField[float]] = FloatField()
     DECIMAL_QUOTIENT_OUTPUT_FIELD: ClassVar[UnroundedDecimalField] = UnroundedDecimalField(
@@ -38,7 +37,7 @@ class NumericTyping:
     #: (scale,) -> the field a computed Decimal of that scale is decoded through. Room for every
     #: scale there is.
     DECIMAL_OUTPUT_FIELDS: ClassVar[Cache[DecimalField[Decimal]]] = Cache(
-        DECIMAL_OUTPUT_FIELD_MAX_DIGITS + 1, holds_sql=False, keyed_by_model=False
+        DECIMAL_OUTPUT_FIELD_MAX_DIGITS + 1, holds_sql=False
     )
 
     @classmethod
@@ -217,6 +216,20 @@ class NumericTyping:
         if timedelta_as_integer and isinstance(effective_field, TimeDeltaField):
             return NumericType(NumericValueType.INTEGER)
         return None
+
+    @classmethod
+    def get_field_types(cls, fields: Iterable[Field[Any] | None]) -> list[NumericType] | None:
+        """Read every field's numeric type, or return None at the first unknown or non-number.
+
+        The input order is preserved; no literal inference or duration conversion is applied.
+        """
+        numeric_types = []
+        for field in fields:
+            numeric_type = cls.get_field_type(field)
+            if numeric_type is None:
+                return None
+            numeric_types.append(numeric_type)
+        return numeric_types
 
     @classmethod
     def get_literal_type(cls, value: Any) -> NumericType | None:

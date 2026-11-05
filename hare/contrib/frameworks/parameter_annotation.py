@@ -31,18 +31,6 @@ class ParameterAnnotation:
         """
         return next((item for item in metadata if isinstance(item, TextParameter)), None)
 
-    @classmethod
-    def is_text(cls, field_info: FieldInfo) -> bool:
-        """Whether a parameter is read from text as a whole.
-
-        Args:
-            field_info: The parameter's pydantic field.
-
-        Returns:
-            True when its top-level metadata marks a text type.
-        """
-        return cls.get_text_parameter(field_info.metadata) is not None
-
     @staticmethod
     def get_text_type(text_parameter: TextParameter) -> Any:
         """The type a framework reads a type read from text as.

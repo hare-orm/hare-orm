@@ -97,10 +97,6 @@ BIG_INTEGER_LITERAL_RANGE = (-(2**63), 2**63 - 1)
 
 RAW_SQL_TOKEN_RE = re.compile(r"%%|%s")
 
-#: The levels a list, tuple or dict given as a value (``Value()``, a ``RawSQL`` parameter) may nest -
-#: the depth a JSON text is written to; a value holding itself nests without end.
-VALUE_PARAMETER_MAX_DEPTH = 255
-
 #: The origin a reference no later query can bind is recorded under (``PlanOrigins``) - a value
 #: of a query built into another one keeping no plan, a SQL term binding a value no term holds: the
 #: query keeps no plan.
@@ -108,7 +104,6 @@ UNBINDABLE_VALUE_ORIGIN = "unbindable"
 
 
 #: The name of a ``JsonTable`` column - a Python identifier without ``__``.
-JSON_TABLE_COLUMN_NAME_PATTERN = re.compile(r"(?!.*__)[A-Za-z_][A-Za-z0-9_]*")
 
 #: The JSON path a ``JsonTable`` column reads when it names none - the item's key of its name.
 JSON_TABLE_DEFAULT_COLUMN_PATH = "$.{name}"

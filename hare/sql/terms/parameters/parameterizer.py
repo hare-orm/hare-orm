@@ -33,7 +33,8 @@ class Parameterizer:
         #: so no term made while rendering takes the id of one already collected.
         self.indexes_by_source_id: dict[int, tuple[Term, int]] = {}
 
-    def should_parameterize(self, value: Any) -> bool:
+    @staticmethod
+    def should_parameterize(value: Any) -> bool:
         # A DatePart is an SQL keyword (EXTRACT(YEAR FROM ...)), not a value.
         if isinstance(value, DatePart):
             return False

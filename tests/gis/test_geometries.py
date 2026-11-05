@@ -7,6 +7,8 @@ import struct
 
 import pytest
 
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.base.types import TypeMapping, TypeRegistry
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.sqlite.sqlite_dialect import SqliteDialect
@@ -24,8 +26,6 @@ from hare.gis import (
 )
 from hare.gis.fields.extent_field import ExtentField
 from hare.gis.readers import EwkbReader, GeoJsonReader, WktReader
-from hare.migrations.writer.import_manager import ImportManager
-from hare.migrations.writer.migration_writer import MigrationWriter
 
 SQUARE = [(0, 0), (4, 0), (4, 4), (0, 4), (0, 0)]
 HOLE = [(1, 1), (2, 1), (2, 2), (1, 1)]
@@ -284,7 +284,7 @@ def test_a_database_without_spatial_types_refuses_the_field():
 def test_a_geometry_is_written_into_a_migration_as_the_call_building_it(geometry):
     # A field's default: the migration imports the class and rebuilds the same geometry.
     imports = ImportManager()
-    code = MigrationWriter.render_value(geometry, imports)
+    code = DeclarationValueSerializer.render_value(geometry, imports)
     namespace: dict = {}
     exec("\n".join(imports.render()), namespace)  # noqa: S102 - the code the writer generated
     assert eval(code, namespace) == geometry  # noqa: S307

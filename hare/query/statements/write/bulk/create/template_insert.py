@@ -3,9 +3,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.query.execution.write_statements import WriteMany
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from hare.query.statements.write.bulk.create.conflict_clause import ConflictClause
+from hare.query.statements.write.bulk.create.declarations import BoundInsertBatch
+from hare.query.statements.write.bulk.create.inline_insert import InlineInsert
 from hare.query.statements.write.bulk.create.returned_rows_matching import ReturnedRowsMatching
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.terms.parameters.parameterizer import Parameterizer
@@ -52,7 +55,7 @@ class TemplateInsert:
         )
         cacheable = True
         try:
-            template = StatementPlans.insert_templates.get(key)
+            template = StatementPlans.insert_templates.get_model_bucket(bulk_create.model).get(key)
         except TypeError:
             # A tenant value the conflict update is limited to that can't be hashed - built each time.
             cacheable = False
@@ -67,7 +70,7 @@ class TemplateInsert:
                 )
                 template = TemplateInsert.get_row_template_sql(query, len(columns))
             if cacheable:
-                StatementPlans.insert_templates[key] = template
+                StatementPlans.insert_templates.get_model_bucket(bulk_create.model)[key] = template
         return template
 
     @staticmethod
@@ -105,7 +108,7 @@ class TemplateInsert:
             omit_fields = set()
         conflict = ConflictClause.get_conflict(bulk_create)
         if conflict is None and not omit_fields:
-            return (bulk_create._writer.insert_query, []), (bulk_create._writer.insert_query_all, [])
+            return (bulk_create._writer.templates.insert_sql, []), (bulk_create._writer.templates.explicit_key_sql, [])
 
         insert_statement = bulk_create._get_insert_statement()
         templates: list[tuple[str, list[Any]]] = []
@@ -122,40 +125,35 @@ class TemplateInsert:
         return templates[0], templates[1]
 
     @staticmethod
-    async def execute_via_execute_many(
+    def bind_batches(
         bulk_create: BulkCreateQuery[Any],
         db_columns: list[str],
         field_names: list[str],
         objects: list[TModel],
-    ) -> None:
-        """Inserts the objects by one statement run for each row (``execute_many()``), batched by
-        ``batch_size``.
+        *,
+        parameters_inline: bool = False,
+    ) -> list[BoundInsertBatch]:
+        """Binds the objects to one statement template with one parameter row per object (``execute_many()``),
+        batched by ``batch_size``.
 
         Args:
             bulk_create: The insert.
             db_columns: The columns written.
             field_names: Their fields.
             objects: The objects.
+            parameters_inline: Retain literal SQL for each row of a preview.
         """
         sql, statement_values = TemplateInsert.get_row_template(bulk_create, db_columns)
+        batches: list[BoundInsertBatch] = []
         for objects_item in BulkWriteBatches.get_batches(objects, bulk_create._batch_size):
             objects_item = list(objects_item)
             if not objects_item:
                 continue
-            parameter_rows = BulkWriteBatches.write_statement_parameter_rows(
-                bulk_create.model, bulk_create._connection, objects_item, field_names, statement_values
-            )
-            if parameter_rows is not None:
-                statement = bulk_create._connection.execute_many(sql, parameter_rows)
-                if bulk_create.model._meta.sensitive_fields:
-                    await BulkWriteBatches.run_hiding_sensitive_values(
-                        statement, bulk_create.model, objects_item, field_names
-                    )
-                else:
-                    await statement
-                continue
             rows = BulkWriteBatches.serialize_instances(
                 bulk_create.model, bulk_create._connection.dialect.types, objects_item, field_names
+            )
+            inline_statements = (
+                tuple(InlineInsert.render(bulk_create, db_columns, [row]) for row in rows) if parameters_inline else ()
             )
             if statement_values:
                 rows = [[*row, *statement_values] for row in rows]
@@ -163,7 +161,8 @@ class TemplateInsert:
                 rows = BulkWriteBatches.hide_row_values(
                     rows, BulkWriteBatches.get_sensitive_positions(bulk_create.model, field_names)
                 )
-            await bulk_create._connection.execute_many(sql, rows)
+            batches.append(BoundInsertBatch(WriteMany(sql, rows), objects_item, inline_statements=inline_statements))
+        return batches
 
     @staticmethod
     def build_default_values_sql(bulk_create: BulkCreateQuery[Any], omit_fields: set[str] | None = None) -> str:

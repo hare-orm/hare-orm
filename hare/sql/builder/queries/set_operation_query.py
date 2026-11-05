@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from hare.sql.builder.queries.query_sql_rendering import QuerySqlRendering
 from hare.sql.builder.tables.cte import Cte
+from hare.sql.builder.tables.declarations import SourceBinding
 from hare.sql.builder.tables.selectable import Selectable
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
@@ -21,7 +22,7 @@ from hare.sql.builder.queries.pagination_sql import PaginationSql
 from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
-class SetOperationQuery(PaginationSql, Selectable, Term):  # type:ignore[misc]
+class SetOperationQuery(Selectable, Term):  # type: ignore[misc]
     """
     A query of a set operation - UNION (DISTINCT or ALL), INTERSECT or EXCEPT.
 
@@ -50,6 +51,12 @@ class SetOperationQuery(PaginationSql, Selectable, Term):  # type:ignore[misc]
         # CTEs of the whole set operation - a branch's own WITH would land after UNION.
         self._with: list[Cte] = []
 
+    def __eq__(self, other: object) -> bool:  # type: ignore[override]
+        return isinstance(other, SetOperationQuery) and self.source_binding is other.source_binding
+
+    def __hash__(self) -> int:
+        return hash(self.source_binding)
+
     def get_read_columns(self) -> set[tuple[str, str]]:
         """The columns every query of the set operation reads, by the tables they belong to.
 
@@ -70,8 +77,8 @@ class SetOperationQuery(PaginationSql, Selectable, Term):  # type:ignore[misc]
     def __copy__(self) -> Self:
         # The lists are copied, or every operation would change them for every branch built from one
         # base.
-        newone = type(self).__new__(type(self))
-        newone.__dict__.update(self.__dict__)
+        newone = self._copy_state()
+        newone.source_binding = SourceBinding()
         newone._set_operation = list(self._set_operation)
         newone._orderbys = list(self._orderbys)
         newone._with = list(self._with)
@@ -170,7 +177,7 @@ class SetOperationQuery(PaginationSql, Selectable, Term):  # type:ignore[misc]
         if self._orderbys:
             querystring += self._orderby_sql(sql_context)
 
-        querystring += self._limit_offset_sql(sql_context)
+        querystring += PaginationSql.get_sql(self._limit, self._offset, sql_context)
 
         if sql_context.subquery:
             querystring = f"({querystring})"

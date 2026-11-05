@@ -13,8 +13,6 @@ from hare import Hare
 from hare.contrib.frameworks.litestar import HareDTO, HarePlugin
 from tests.contrib.frameworks.models import Badge, Chapter, Draft, Memo, Tag, Writer
 
-REQUIRES = ("litestar",)
-
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {
@@ -183,7 +181,7 @@ ROUTES = [
 
 
 def build_app() -> Litestar:
-    return Litestar(ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_rows])
+    return Litestar(ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_rows], logging_config=None)
 
 
 @pytest.mark.asyncio

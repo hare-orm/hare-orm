@@ -10,8 +10,6 @@ from hare.exceptions import ValidationError
 from hare.fields.encrypted.field_encryption import FieldEncryption
 from tests.fields.models_encrypted_pydantic import EncryptedSettingsRecord, EncryptedWebhookSettings
 
-REQUIRES = ("encryption", "pydantic")
-
 SECRET_KEY = "test-field-encryption-secret"
 
 

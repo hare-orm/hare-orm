@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.enums import DependencyType
 from hare.migrations.state.state_apps import StateApps
@@ -20,13 +19,14 @@ class RelationDependencies:
     once it no longer does."""
 
     @staticmethod
-    def get_target_key(reference: Any, app_label: str) -> tuple[str, str] | None:
+    def get_target_key(reference: Any, app_label: str, state: State) -> tuple[str, str] | None:
         """The (app, model) key a model reference names - ``"app.Model"``, ``"Model"`` of the app, a model
         class or ``swappable()``.
 
         Args:
             reference: The reference.
             app_label: The app a bare model name belongs to.
+            state: The captured application state selecting swappable models.
 
         Returns:
             The key; None for a reference naming no model now (a swappable setting not set).
@@ -36,7 +36,7 @@ class RelationDependencies:
         if isinstance(reference, str) and "." not in reference:
             return (app_label, reference)
         try:
-            reference = SwappableModelReference.get_model_reference(reference)
+            reference = state.get_model_reference(reference)
             if reference is None:
                 return None
             return StateApps.split_reference(reference)
@@ -44,7 +44,9 @@ class RelationDependencies:
             return None
 
     @classmethod
-    def get_required_for_relation(cls, app_label: str, model_name: str, field: Any) -> list[OperationDependency]:
+    def get_required_for_relation(
+        cls, app_label: str, model_name: str, field: Any, state: State
+    ) -> list[OperationDependency]:
         """What a relation field needs before it's created or changed: the model it points at (but its own),
         the fields its ``to_field`` names, its through model.
 
@@ -52,6 +54,7 @@ class RelationDependencies:
             app_label: The relation's app.
             model_name: The relation's model.
             field: The field - none needed for one that isn't a relation.
+            state: The captured application state selecting swappable models.
 
         Returns:
             The dependencies.
@@ -60,7 +63,7 @@ class RelationDependencies:
             return []
         model_key = (app_label, model_name.lower())
         dependencies: list[OperationDependency] = []
-        target_key = cls.get_target_key(field.model_name, app_label)
+        target_key = cls.get_target_key(field.model_name, app_label, state)
         if target_key is not None:
             if (target_key[0], target_key[1].lower()) != model_key:
                 dependencies.append(OperationDependency.of_model(*target_key, DependencyType.CREATED))
@@ -71,7 +74,7 @@ class RelationDependencies:
                 for to_field_name in to_field_names
             )
         if isinstance(field, ManyToManyFieldInstance) and field.through_model is not None:
-            through_key = cls.get_target_key(field.through_model, app_label)
+            through_key = cls.get_target_key(field.through_model, app_label, state)
             if through_key is not None and (through_key[0], through_key[1].lower()) != model_key:
                 dependencies.append(OperationDependency.of_model(*through_key, DependencyType.CREATED))
         return dependencies
@@ -96,9 +99,9 @@ class RelationDependencies:
             for field_name, field in model_state.fields.items():
                 if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
                     continue
-                keys = [cls.get_target_key(field.model_name, model_key[0])]
+                keys = [cls.get_target_key(field.model_name, model_key[0], state)]
                 if isinstance(field, ManyToManyFieldInstance):
-                    keys.append(cls.get_target_key(field.through_model, model_key[0]))
+                    keys.append(cls.get_target_key(field.through_model, model_key[0], state))
                 if any(key is not None and (key[0], key[1].lower()) == target_key for key in keys):
                     relations.append((model_key, field_name, field))
         return relations
@@ -121,7 +124,7 @@ class RelationDependencies:
             for field_name, field in model_state.fields.items():
                 if not isinstance(field, ManyToManyFieldInstance):
                     continue
-                key = cls.get_target_key(field.through_model, model_key[0])
+                key = cls.get_target_key(field.through_model, model_key[0], state)
                 if key is not None and (key[0], key[1].lower()) == through_key:
                     relations.append((model_key, field_name))
         return relations
@@ -147,7 +150,7 @@ class RelationDependencies:
             for relation_name, field in model_state.fields.items():
                 if not isinstance(field, ForeignKeyFieldInstance):
                     continue
-                key = cls.get_target_key(field.model_name, model_key[0])
+                key = cls.get_target_key(field.model_name, model_key[0], state)
                 if key is None or (key[0], key[1].lower()) != target_key:
                     continue
                 to_field = field.to_field

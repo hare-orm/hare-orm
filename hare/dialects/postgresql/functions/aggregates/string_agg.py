@@ -9,13 +9,12 @@ from hare.fields.data.text.text_field import TextField
 from hare.fields.field import Field
 from hare.query.expressions import (
     Aggregate,
-    CombinedExpression,
     Expression,
     ExpressionResult,
-    F,
 )
 from hare.sql.functions.cast import Cast
 from hare.sql.terms.field import Field as HareSqlField
+from hare.sql.terms.term import Term
 
 
 class StringAgg(Aggregate):
@@ -28,11 +27,10 @@ class StringAgg(Aggregate):
     database_function = StringAggFunction
     allows_order_by = True
 
-    #: Shared, long-lived instance - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Reuse the same descriptor for the aggregate's text result.
     STRING_AGG_OUTPUT_FIELD = TextField()
 
-    def __init__(self, field: str | F | CombinedExpression, delimiter: str | Expression, **options: Any) -> None:
+    def __init__(self, field: str | Expression | Term, delimiter: str | Expression, **options: Any) -> None:
         """
         Args:
             field: The aggregated field or expression.

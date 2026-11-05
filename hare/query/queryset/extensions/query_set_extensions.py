@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, cast
 
+from hare.core.extensions.declarations import ExtensionContribution, MethodRegistration
 from hare.core.registries import Registries
-from hare.exceptions import ConfigurationError, QueryError, UnSupportedError
+from hare.exceptions import QueryError, UnSupportedError
 from hare.query.queryset.constants import WRITE_REFUSED_EXTENSION_MESSAGE
+from hare.query.queryset.extensions.declarations import BoundExtensionCall
+from hare.query.queryset.extensions.enums import ExtensionPhase
 from hare.query.queryset.extensions.query_set_extension import QuerySetExtension
 from hare.query.queryset.extensions.query_set_extension_call import QuerySetExtensionCall
 from hare.query.queryset.extensions.query_set_extension_query import QuerySetExtensionQuery
+from hare.query.queryset.extensions.query_set_extension_result import QuerySetExtensionResult
 from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 
 if TYPE_CHECKING:
@@ -32,7 +36,10 @@ class QuerySetExtensions:
     """
 
     #: The implementation of each method by dialect class, by method name.
-    registered: ClassVar[dict[str, dict[type[Dialect], QuerySetExtension]]] = {}
+    @staticmethod
+    def get_registered() -> Mapping[str, Mapping[type[Dialect], QuerySetExtension]]:
+        """The methods in the currently published generation."""
+        return Registries.current().methods
 
     @classmethod
     def register(
@@ -44,8 +51,9 @@ class QuerySetExtensions:
         reads_query: bool = False,
         takes_condition: bool = False,
         changes_rows: bool = False,
-        run_query: Callable[..., Awaitable[Any]] | None = None,
+        transform_result: Callable[..., Any] | None = None,
         refuses_writes: bool = False,
+        phase: ExtensionPhase = ExtensionPhase.ROW_SOURCE,
     ) -> None:
         """Adds a QuerySet method for one dialect.
 
@@ -59,35 +67,33 @@ class QuerySetExtensions:
                 recorded as one ``Q``. Every dialect registering the name declares it alike.
             changes_rows: Whether a call changes which rows the query returns beyond its conditions
                 - ``count()``/``exists()`` then count the rows returned.
-            run_query: Runs a rows query with the call in place of its plain run:
-                ``await run_query(extension_query, *args, **kwargs)``.
+            transform_result: Shapes an already executed QuerySetExtensionResult.
+            phase: Whether SQL applies before derived wrapping or on the final statement.
             refuses_writes: Whether a write (``update()``, ``delete()``) refuses the call.
 
         Raises:
             ConfigurationError: The name is private or one of QuerySet's own attributes; another
                 dialect registered it with another ``takes_condition``.
         """
-        # Local import: the queryset module imports this one.
-        from hare.query.queryset.queryset import QuerySet
-
-        if name.startswith("_") or hasattr(QuerySet, name):
-            raise ConfigurationError(
-                f"A dialect's QuerySet method can't be named {name!r} - QuerySet already has it, or it is private"
+        Registries.register(
+            ExtensionContribution(
+                methods=(
+                    MethodRegistration(
+                        name,
+                        dialect_class,
+                        QuerySetExtension(
+                            apply,
+                            reads_query,
+                            takes_condition,
+                            changes_rows,
+                            transform_result,
+                            refuses_writes,
+                            phase,
+                        ),
+                    ),
+                )
             )
-        implementations = cls.registered.setdefault(name, {})
-        if any(
-            implementation.takes_condition != takes_condition
-            for registered_dialect_class, implementation in implementations.items()
-            if registered_dialect_class is not dialect_class
-        ):
-            raise ConfigurationError(
-                f"The QuerySet method {name!r} is registered by another dialect with takes_condition="
-                f"{not takes_condition} - its arguments are recorded alike for every dialect"
-            )
-        implementations[dialect_class] = QuerySetExtension(
-            apply, reads_query, takes_condition, changes_rows, run_query, refuses_writes
         )
-        Registries.changed()
 
     @classmethod
     def get_method(cls, queryset: QuerySet[Any], name: str) -> Callable[..., QuerySet[Any]]:
@@ -102,7 +108,7 @@ class QuerySetExtensions:
         """
 
         def call(*args: Any, **kwargs: Any) -> QuerySet[Any]:
-            if any(implementation.takes_condition for implementation in cls.registered.get(name, {}).values()):
+            if any(implementation.takes_condition for implementation in cls.get_registered().get(name, {}).values()):
                 # Local import: the conditions import the queryset package this module is part of.
                 from hare.query.expressions.conditions.q import Q
 
@@ -133,7 +139,7 @@ class QuerySetExtensions:
         Raises:
             UnSupportedError: The connection's dialect has no implementation of the method.
         """
-        implementations = cls.registered.get(extension_call.name, {})
+        implementations = cls.get_registered().get(extension_call.name, {})
         implementation = implementations.get(type(query.dialect))
         if implementation is None:
             dialect_names = sorted(str(dialect_class.name) for dialect_class in implementations)
@@ -145,76 +151,54 @@ class QuerySetExtensions:
         return implementation
 
     @classmethod
+    def bind(cls, query: AwaitableQuery[Any]) -> tuple[BoundExtensionCall, ...]:
+        """Bind declarations to the actual connection before choosing SQL behavior.
+
+        Multiple result handlers are rejected rather than silently choosing one or
+        assuming that unrelated result shapes can be composed.
+        """
+        calls = tuple(BoundExtensionCall(call, cls.get_implementation(query, call)) for call in query._extension_calls)
+        handlers = [bound.call.name for bound in calls if bound.implementation.transform_result is not None]
+        if len(handlers) > 1:
+            raise QueryError(f"Only one result-shaping extension can be used: {', '.join(handlers)}")
+        query._bound_extensions = calls
+        return calls
+
+    @classmethod
+    def get_bound_calls(cls, query: AwaitableQuery[Any]) -> tuple[BoundExtensionCall, ...]:
+        """The implementations selected for this execution, without consulting other dialects."""
+        calls = query._bound_extensions
+        return cls.bind(query) if calls is None else calls
+
+    @classmethod
     def apply(
-        cls, query: AwaitableQuery[Any], value_wrapper_references: RecordedValueReferences | None = None
+        cls,
+        query: AwaitableQuery[Any],
+        value_wrapper_references: RecordedValueReferences | None = None,
+        *,
+        phase: ExtensionPhase | None = None,
     ) -> None:
-        """Applies every recorded call to a query built for its connection.
-
-        Args:
-            query: The query, its ``query`` builder already built.
-            value_wrapper_references: The list the query's value references are recorded into, None when
-                none are.
-
-        Raises:
-            UnSupportedError: The connection's dialect has no implementation of a called method.
-        """
+        """Apply the selected SQL calls at their declared phase, preserving call order."""
         extension_query = QuerySetExtensionQuery(query, value_wrapper_references)
-        for extension_call in query._extension_calls:
-            implementation = cls.get_implementation(query, extension_call)
-            query.query = implementation.apply_call(
-                query.query, extension_query, extension_call.args, extension_call.kwargs
-            )
+        for bound in cls.get_bound_calls(query):
+            implementation, call = bound.implementation, bound.call
+            if phase is None or implementation.phase == phase:
+                query.query = implementation.apply_call(query.query, extension_query, call.args, call.kwargs)
 
     @classmethod
-    async def run(cls, query: AwaitableQuery[Any]) -> Any:
-        """Runs a query built with calls - by the first call running it (``run_query``).
-
-        Args:
-            query: The query, built.
-
-        Returns:
-            What the query returns.
-        """
-        extension_query = QuerySetExtensionQuery(query, None)
-        for extension_call in query._extension_calls:
-            run_query = cls.get_implementation(query, extension_call).run_query
-            if run_query is not None:
-                return await run_query(extension_query, *extension_call.args, **extension_call.kwargs)
-        return await query._execute()
+    def transform_result(cls, query: AwaitableQuery[Any], result: Any) -> Any:
+        """Shape the ordinary result without executing another SQL statement."""
+        context = query._extension_result or QuerySetExtensionResult(result)
+        for bound in cls.get_bound_calls(query):
+            transform = bound.implementation.transform_result
+            if transform is not None:
+                return transform(context, *bound.call.args, **bound.call.kwargs)
+        return result
 
     @classmethod
-    def runs_queries(cls, query: QuerySpecification[Any]) -> bool:
-        """Whether a call of the query runs it (``QuerySetExtension.run_query``) on some
-        dialect.
-
-        Args:
-            query: The query or queryset.
-
-        Returns:
-            True when one does.
-        """
-        return any(
-            implementation.run_query is not None
-            for extension_call in query._extension_calls
-            for implementation in cls.registered.get(extension_call.name, {}).values()
-        )
-
-    @classmethod
-    def changes_rows(cls, query: QuerySpecification[Any]) -> bool:
-        """Whether a call of the query changes which rows it returns beyond its conditions
-        (``QuerySetExtension.changes_rows``) on some dialect.
-
-        Args:
-            query: The query or queryset.
-
-        Returns:
-            True when one does.
-        """
-        return any(
-            implementation.changes_rows
-            for extension_call in query._extension_calls
-            for implementation in cls.registered.get(extension_call.name, {}).values()
-        )
+    def changes_rows(cls, query: AwaitableQuery[Any]) -> bool:
+        """Whether a selected implementation changes the rows of this execution."""
+        return any(bound.implementation.changes_rows for bound in cls.get_bound_calls(query))
 
     @classmethod
     def raise_if_refused_in_write(cls, query: QuerySpecification[Any]) -> None:
@@ -234,14 +218,5 @@ class QuerySetExtensions:
 
     @classmethod
     def check(cls, query: AwaitableQuery[Any]) -> None:
-        """Checks that the dialect of the query's connection implements every called method - for
-        a query run on its plan's SQL text, which holds the calls already.
-
-        Args:
-            query: The query.
-
-        Raises:
-            UnSupportedError: The connection's dialect has no implementation of a called method.
-        """
-        for extension_call in query._extension_calls:
-            cls.get_implementation(query, extension_call)
+        """Check all implementations and result-handler composition before executing cached SQL."""
+        cls.get_bound_calls(query)

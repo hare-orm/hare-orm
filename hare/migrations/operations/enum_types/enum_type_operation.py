@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from hare.exceptions import ConfigurationError
@@ -11,8 +12,6 @@ class EnumTypeOperation(HareOperation):
 
     name: str
     schema: str | None
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
 
     @staticmethod
     def get_checked_labels(labels: Any, label: str) -> tuple[str, ...]:
@@ -26,10 +25,14 @@ class EnumTypeOperation(HareOperation):
             The labels.
 
         Raises:
-            ConfigurationError: ``labels`` isn't a list or tuple of texts.
+            ConfigurationError: ``labels`` isn't a sequence of texts, or is itself a text or bytes value.
         """
-        if not isinstance(labels, (list, tuple)) or not all(isinstance(value, str) for value in labels):
-            raise ConfigurationError(f"{label} takes a list of texts, got {labels!r}")
+        if (
+            isinstance(labels, (str, bytes, bytearray))
+            or not isinstance(labels, Sequence)
+            or not all(isinstance(value, str) for value in labels)
+        ):
+            raise ConfigurationError(f"{label} takes a sequence of texts, got {labels!r}")
         return tuple(labels)
 
     def get_type_label(self) -> str:

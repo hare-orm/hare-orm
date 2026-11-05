@@ -7,6 +7,7 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.base.search.text_search import TextSearch
 from hare.dialects.sqlite.indexes.full_text_index import FullTextIndex
 from hare.dialects.sqlite.search.constants import (
+    FULL_TEXT_INDEX_REQUIRED_FEATURE,
     SQLITE_FULL_TEXT_EXCLUDING_ALTERNATIVE_MESSAGE,
     SQLITE_FULL_TEXT_NOT_OPERATOR,
     SQLITE_FULL_TEXT_QUERY_OPERATORS,
@@ -22,7 +23,6 @@ from hare.exceptions import ConfigurationError, QueryError, UnSupportedError, Va
 from hare.fields import FloatField, TextField
 from hare.fields.constants import NULL_BYTE_MESSAGE
 from hare.query.expressions import ExpressionContext, ExpressionResult
-from hare.search.constants import FULL_TEXT_INDEX_REQUIRED_FEATURE
 from hare.search.enums import SearchOperator, SearchType
 from hare.search.query.search_query import SearchQuery
 from hare.search.search_arguments import SearchArguments
@@ -111,6 +111,7 @@ class SqliteTextSearch(TextSearch):
         return term
 
     def get_query_result(self, query: SearchQuery, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_query(query, expression_context)
         if query.invert:
             raise UnSupportedError(
                 "~SearchQuery can't run on SQLite on its own: FTS5 negates a query only as the right side of "
@@ -198,6 +199,7 @@ class SqliteTextSearch(TextSearch):
         return field_names
 
     def get_rank_result(self, rank: SearchRank, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_rank(rank, expression_context)
         SearchFeatures.raise_if_unsupported(expression_context, "SearchRank", FULL_TEXT_INDEX_REQUIRED_FEATURE)
         field_names = self.get_ranked_field_names(rank)
         model = expression_context.model
@@ -228,6 +230,7 @@ class SqliteTextSearch(TextSearch):
         return ExpressionResult(term=term, joins=query_result.joins, output_field=FloatField())
 
     def get_headline_result(self, headline: SearchHeadline, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_headline(headline, expression_context)
         SearchFeatures.raise_if_unsupported(expression_context, "SearchHeadline", FULL_TEXT_INDEX_REQUIRED_FEATURE)
         if not isinstance(headline.expression, str):
             raise UnSupportedError(

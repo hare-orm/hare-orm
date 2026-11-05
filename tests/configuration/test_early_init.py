@@ -242,7 +242,7 @@ async def test_early_init():
             "    return original_entry_points(*args, **kwargs)\n"
             "importlib.metadata.entry_points = counting_entry_points\n"
             "from hare import Hare, fields\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
             "import hare.dialects.dialect_registry as registry_module\n"
             "registry_module.entry_points = counting_entry_points\n"
             "from hare.models import Model\n"
@@ -258,7 +258,7 @@ async def test_early_init():
             "    await Hare.close_connections()\n"
             "asyncio.run(main())\n"
             "print(sorted(name for name in sys.modules if name.startswith('hare.dialects.postgresql')))\n"
-            "print(len(scans), sorted(str(name) for name in DialectRegistry.dialects_by_name))\n",
+            "print(len(scans), sorted(str(name) for name in Registries.snapshot.dialects))\n",
             ["[]", "0 ['sqlite']"],
             id="init_loads_only_the_driver_its_connection_uses",
         ),
@@ -268,7 +268,7 @@ async def test_early_init():
         pytest.param(
             "import asyncio, sys\n"
             "from hare import Hare, fields\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
             "from hare.models import Model\n"
             "class Plain(Model):\n"
             "    id = fields.IntField(primary_key=True)\n"
@@ -280,7 +280,7 @@ async def test_early_init():
             "asyncio.run(main())\n"
             "prefixes = ('hare.dialects.sqlite', 'sqlite3', 'getpass')\n"
             "print(sorted(name for name in sys.modules if name.startswith(prefixes)))\n"
-            "print(sorted(str(name) for name in DialectRegistry.dialects_by_name))\n",
+            "print(sorted(str(name) for name in Registries.snapshot.dialects))\n",
             ["[]", "['postgresql']"],
             id="init_on_postgresql_loads_nothing_of_sqlite",
         ),
@@ -289,7 +289,7 @@ async def test_early_init():
         # to validate the default timezone - a few milliseconds of every start.
         pytest.param(
             "import sys\n"
-            "from hare.dialects.dialect_registry import DialectRegistry\n"
+            "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
             "from hare.time.timezone import Timezone\n"
             "DialectRegistry.load_builtin_dialects()\n"
             "Timezone.validate('UTC')\n"
@@ -359,7 +359,7 @@ def test_a_step_loads_nothing_it_does_not_use(script, expected_lines):
 
 def test_dialects_are_listed_in_builtin_order_whichever_registered_first():
     script = (
-        "from hare.dialects.dialect_registry import DialectRegistry\n"
+        "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
         "DialectRegistry.get_dialect('postgresql')\n"
         "print([str(dialect.name) for dialect in DialectRegistry.get_dialects()][:3])\n"
     )
@@ -404,10 +404,10 @@ def test_clickhouse_engines_are_found_without_reading_installed_packages(engine)
         "    scans.append(kwargs)\n"
         "    return original_entry_points(*args, **kwargs)\n"
         "importlib.metadata.entry_points = counting_entry_points\n"
-        "from hare.dialects.dialect_registry import DialectRegistry\n"
+        "from hare.dialects.dialect_registry import DialectRegistry\nfrom hare.core.registries import Registries\n"
         f"driver = DialectRegistry.get_driver({engine!r})\n"
         "print(driver.name, driver.dialect.name, len(scans))\n"
-        "print(sorted(str(name) for name in DialectRegistry.dialects_by_name))\n"
+        "print(sorted(str(name) for name in Registries.snapshot.dialects))\n"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120

@@ -19,6 +19,8 @@ class MapValueTerm(ContainerFunction):
         alias: The alias.
     """
 
+    structure_attributes = ("key", "key_field", "value_field")
+
     function_name: ClassVar[str] = "map_value"
 
     def __init__(

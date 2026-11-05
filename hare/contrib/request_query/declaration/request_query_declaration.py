@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.request_query.api_getter.api_source import ApiSource
@@ -18,7 +19,6 @@ from hare.query.enums import Connector
 from hare.query.queryset import QuerySet
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.models import Model
     from hare.query.lookup_info.lookup_info import LookupInfo
     from hare.query.lookup_info.ordering_info import OrderingInfo
@@ -34,16 +34,7 @@ class RequestQueryDeclaration:
         filters: The parameters it filters by.
         bounds: The checks that the bounds a request gives a field leave any value between them.
         search: The search option, None without a search.
-        lookup_infos: The ORM's description of each filter key, by key: the parameters' and the
-            search's, read when the declaration is built, and every other key the query meets
-            (a filter method's condition, a handler's ``where()``, the access condition), read the
-            first time - so a request reads no description of its conditions.
         ordering: The ordering option, None when a request can't choose the ordering.
-        ordering_infos: The ORM's description of each ordering name without its direction, by
-            name: the names a request may order by and the default ones, read when the declaration
-            is built, and every other name the query meets (the queryset's own ordering, the model's
-            ``Meta.ordering``, a handler's ``order_by()``), read the first time - so a request reads
-            no description of its ordering.
         key_ordering_paths: The primary key's fields every ordering ends with - empty for a model
             without a primary key.
         fields: The fields option, None when a request can't choose the fields to load.
@@ -56,49 +47,43 @@ class RequestQueryDeclaration:
         versions: The option keeping only the latest version of a ``VersionedModel``'s records,
             None without it.
         deleted: The option letting a request see soft-deleted rows, None without it.
-        dialects: The dialects every filter was checked against.
         api_sources: The sources of ``Meta.api_getter``.
         api_mappings: The mappings of ``Meta.api_getter`` taking a value from the row itself.
         api_target_fields: The fields of the row each target of ``Meta.api_getter`` is filled from, by the
             target's name - loaded whenever a request's ``fields`` names the target.
-        on_describe: Told of each description read after the declaration was built (a key or a
-            name the query meets later) - the request query then knows every model its
-            descriptions read; None to tell no one.
+        on_describe: Tracks the models of descriptions obtained through the queryset's shared
+            caches, including paths first used after the declaration was built.
     """
 
     queryset: QuerySet[Any]
     filters: tuple[FilterDeclaration, ...]
     bounds: tuple[ParameterBounds, ...]
     search: SearchConfig | None
-    lookup_infos: dict[str, LookupInfo]
     ordering: OrderingConfig | None
-    ordering_infos: dict[str, OrderingInfo]
     key_ordering_paths: tuple[str, ...]
     fields: FieldsConfig | None
     include: IncludeConfig | None
-    include_to_many: dict[str, bool]
+    include_to_many: Mapping[str, bool]
     pagination: Pagination | None
     join_type: Connector
     versions: LatestVersions | None
     deleted: DeletedConfig | None
-    dialects: tuple[Dialect, ...]
     api_sources: tuple[ApiSource, ...]
     api_mappings: tuple[ApiValueMapping, ...]
-    api_target_fields: dict[str, tuple[str, ...]]
+    api_target_fields: Mapping[str, tuple[str, ...]]
     on_describe: Callable[[LookupInfo | OrderingInfo], None] | None = dataclasses.field(
         default=None, compare=False, repr=False
     )
 
-    @property
-    def model(self) -> Any:
-        """The model of the queryset."""
-        return self.queryset.model
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "include_to_many", MappingProxyType(dict(self.include_to_many)))
+        object.__setattr__(self, "api_target_fields", MappingProxyType(dict(self.api_target_fields)))
 
     def get_lookup_info(self, queryset: QuerySet[Any], key: str) -> LookupInfo:
-        """The ORM's description of a filter key, read once per key.
+        """Get a filter description through the queryset's model and annotation caches.
 
         Args:
-            queryset: The filtered queryset - it describes a key the declaration hasn't met.
+            queryset: The filtered queryset, including its current annotations.
             key: The filter key.
 
         Returns:
@@ -107,30 +92,24 @@ class RequestQueryDeclaration:
         Raises:
             FieldError: The key names no field, relation or annotation.
         """
-        lookup_info = self.lookup_infos.get(key)
-        if lookup_info is None:
-            lookup_info = queryset.get_lookup_info(key)
-            self.lookup_infos[key] = lookup_info
-            if self.on_describe is not None:
-                self.on_describe(lookup_info)
+        lookup_info = queryset.get_lookup_info(key)
+        if self.on_describe is not None:
+            self.on_describe(lookup_info)
         return lookup_info
 
     def get_ordering_info(self, queryset: QuerySet[Any], name: str) -> OrderingInfo:
-        """The ORM's description of an ordering name, read once per name.
+        """Get an ordering description through the queryset's shared caches.
 
         Args:
-            queryset: The queryset being ordered - it describes a name the declaration hasn't met.
+            queryset: The queryset being ordered, including its current annotations.
             name: The ordering name, without its direction.
 
         Returns:
             The description.
         """
-        ordering_info = self.ordering_infos.get(name)
-        if ordering_info is None:
-            ordering_info = queryset.get_ordering_info(name)
-            self.ordering_infos[name] = ordering_info
-            if self.on_describe is not None:
-                self.on_describe(ordering_info)
+        ordering_info = queryset.get_ordering_info(name)
+        if self.on_describe is not None:
+            self.on_describe(ordering_info)
         return ordering_info
 
     @staticmethod

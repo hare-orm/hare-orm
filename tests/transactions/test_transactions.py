@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import sqlite3
 import threading
@@ -10,9 +11,9 @@ import pytest_asyncio
 
 from hare import Connections
 from hare.contrib.test import requires_features
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.exceptions import OperationalError, QueryError, TransactionManagementError
 from hare.transactions.transactions import Transactions
@@ -500,7 +501,7 @@ async def test_savepoint_lock_leaves_no_open_spans_after_gather_tree_completes(d
 async def test_get_own_ancestor_span_filters_out_a_span_owned_by_a_different_lock():
     """The unit under test for the cross-connection savepoint hang: a span read off
     current_savepoint_span while inside connection A's own nested savepoint must never be handed
-    straight to connection B's own NestedSavepointLock.acquire() - B's _current_top() can never
+    straight to connection B's own NestedSavepointLock.acquire() - B's topmost open span can never
     become a span it never created, so acquire() would wait for it forever (confirmed live: a
     misleading 30s "concurrent gather()/TaskGroup sibling" TransactionManagementError from a task
     that never existed). get_nearest_span_of_lock() must recognize a span (or a whole chain of
@@ -636,8 +637,8 @@ async def two_independent_sqlite_aliases():
             await ctx.init(
                 config={
                     "connections": {
-                        "alias_a": DbUrlConfigGenerator.expand(db_url, testing=True),
-                        "alias_b": DbUrlConfigGenerator.expand(db_url, testing=True),
+                        "alias_a": DatabaseConfig.from_url(db_url).config,
+                        "alias_b": DatabaseConfig.from_url(db_url).config,
                     },
                     "apps": {
                         "models": {"models": ["tests.shared_models.testmodels"], "default_connection": "alias_a"},
@@ -987,6 +988,24 @@ def test_on_commit_async_callback_outside_transaction_raises_without_calling_it(
     assert callback.called is False
 
 
+@pytest.mark.database_independent
+def test_on_commit_closes_coroutine_returned_by_synchronous_factory(monkeypatch):
+    from hare.transactions.atomic.atomic import Atomic
+
+    monkeypatch.setattr(Atomic, "get_connection", lambda using: object())
+
+    async def callback():
+        raise AssertionError("the refused callback must not run")
+
+    coroutine = callback()
+    try:
+        with pytest.raises(QueryError):
+            Transactions.on_commit(lambda: coroutine)
+        assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+    finally:
+        coroutine.close()
+
+
 @requires_features(supports_transactions=True)
 @pytest.mark.asyncio
 async def test_on_commit_fires_after_transaction_commits(db_truncate):
@@ -1057,7 +1076,7 @@ async def test_on_commit_discarded_on_own_savepoint_rollback(db_truncate):
 @pytest.mark.asyncio
 async def test_on_commit_fires_after_manual_top_level_commit(db_truncate):
     """A manual `await conn.commit()` (bypassing the async with block's own __aexit__ entirely,
-    which never runs the commit/callback logic itself since client._finalized is already True
+    which never runs the commit/callback logic itself since client.transaction_state.finished is already True
     by the time it checks) used to silently lose every on_commit() callback registered before
     it - confirmed live. commit() itself now runs them."""
     fired = []
@@ -1074,8 +1093,8 @@ async def test_sqlite_manual_commit_finalizes_before_on_commit_callback_raises(d
     """SQLite's top-level commit() used to set _finalized=True only AFTER running its
     on_commit() callbacks, unlike asyncpg/rust_pg - confirmed live. That left _finalized False
     if a callback raised, even though the real SQL COMMIT had already landed, so __aexit__'s
-    _commit_or_rollback (whose own docstring asserts client._finalized is already True by the
-    time it runs, for every backend) saw `not client._finalized` and issued a spurious extra
+    _commit_or_rollback (whose own docstring asserts client.transaction_state.finished is already True by the
+    time it runs, for every backend) saw `not client.transaction_state.finished` and issued a spurious extra
     rollback() call once the callback's exception propagated out of the `async with` block.
     commit() now flips _finalized right after the real COMMIT succeeds, before running
     callbacks, matching every other backend."""
@@ -1083,7 +1102,7 @@ async def test_sqlite_manual_commit_finalizes_before_on_commit_callback_raises(d
     finalized_during_callback = []
 
     async def raising_callback():
-        finalized_during_callback.append(conn._finalized)
+        finalized_during_callback.append(conn.transaction_state.finished)
         raise SomeException("boom")
 
     with pytest.raises(SomeException):
@@ -1094,7 +1113,7 @@ async def test_sqlite_manual_commit_finalizes_before_on_commit_callback_raises(d
             await conn.commit()
 
     assert finalized_during_callback == [True], "commit() must finalize before running callbacks"
-    assert conn._finalized is True
+    assert conn.transaction_state.finished is True
     conn.rollback.assert_not_awaited()
 
     # The real COMMIT already took effect - the callback's exception propagating out of the
@@ -1175,7 +1194,7 @@ async def test_sqlite_cancelled_commit_still_lands_and_finalizes(db_truncate):
         real_connection.commit = original_commit
 
     conn = captured["wrapper"]
-    assert conn._finalized is True, "commit() must finalize once the real COMMIT actually lands"
+    assert conn.transaction_state.finished is True, "commit() must finalize once the real COMMIT actually lands"
     conn.rollback.assert_not_awaited()
 
     # The real COMMIT already landed - a caller retrying after CancelledError must see it, not a
@@ -1245,7 +1264,7 @@ async def test_sqlite_cancelled_commit_still_runs_on_commit_callbacks(db_truncat
         real_connection.commit = original_commit
 
     conn = captured["wrapper"]
-    assert conn._finalized is True
+    assert conn.transaction_state.finished is True
     on_commit_callback.assert_called_once()
 
 
@@ -1341,7 +1360,7 @@ async def test_sqlite_cancelled_savepoint_rollback_still_lands_and_updates_state
         real_connection._execute = original_execute
 
     inner = captured["inner"]
-    assert inner._finalized is True, "savepoint_rollback() must finalize the savepoint once it lands"
+    assert inner.transaction_state.finished is True, "savepoint_rollback() must finalize the savepoint once it lands"
     assert fired == [], "the discarded on_commit() callback must never fire"
 
     # The real ROLLBACK TO already ran - the row created inside the savepoint must be gone.
@@ -1771,7 +1790,7 @@ async def test_finalized_wrapper_rejects_query_after_commit(db_truncate):
         await Tournament.objects.create(name="inside-committed-tx")
         await conn.commit()
 
-    assert conn._finalized is True
+    assert conn.transaction_state.finished is True
     with pytest.raises(TransactionManagementError):
         await conn.execute("SELECT 1")
 
@@ -1788,7 +1807,7 @@ async def test_finalized_wrapper_rejects_query_after_rollback(db_truncate):
             raise SomeException("boom")
 
     conn = captured["conn"]
-    assert conn._finalized is True
+    assert conn.transaction_state.finished is True
     with pytest.raises(TransactionManagementError):
         await conn.execute("SELECT 1")
 
@@ -1819,7 +1838,7 @@ async def test_savepoint_wrapper_finalizes_and_rejects_queries_after_release(db_
     async with Transactions.atomic():
         async with Transactions.atomic() as inner:
             await Tournament.objects.create(name="inside-released-savepoint")
-        assert inner._finalized is True
+        assert inner.transaction_state.finished is True
         with pytest.raises(TransactionManagementError):
             await inner.execute("SELECT 1")
 
@@ -1840,7 +1859,7 @@ async def test_savepoint_wrapper_finalizes_and_rejects_queries_after_rollback(db
                 raise SomeException("boom")
 
     inner = captured["inner"]
-    assert inner._finalized is True
+    assert inner.transaction_state.finished is True
     with pytest.raises(TransactionManagementError):
         await inner.execute("SELECT 1")
     assert await Tournament.objects.filter(name="inside-rolled-back-savepoint").first() is None
@@ -1860,7 +1879,7 @@ async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
     sending a genuine Postgres CancelRequest, which (confirmed live via a pg_sleep() inside a
     DEFERRED constraint trigger) actually aborts the in-flight COMMIT server-side rather than
     leaving it to land silently. The real race is narrower - cancellation landing in the gap
-    AFTER Postgres has already acknowledged the COMMIT but BEFORE `self._finalized = True` runs
+    AFTER Postgres has already acknowledged the COMMIT but BEFORE `self.transaction_state.finished = True` runs
     - so it's forced directly here: letting the real `Transaction.commit()` complete first
     (proving the COMMIT already 100% landed), then introducing an artificial cancellable await
     only reachable once the real work is done.
@@ -1908,7 +1927,7 @@ async def test_asyncpg_cancelled_commit_still_lands_and_finalizes(db_truncate):
         asyncpg.transaction.Transaction._Transaction__commit = original_commit
 
     conn = captured["wrapper"]
-    assert conn._finalized is True, "commit() must finalize once the real COMMIT actually lands"
+    assert conn.transaction_state.finished is True, "commit() must finalize once the real COMMIT actually lands"
 
     saved = await Tournament.objects.filter(id=tournament.id).first()
     assert saved is not None
@@ -1973,7 +1992,7 @@ async def test_asyncpg_cancelled_commit_still_runs_on_commit_callbacks(db_trunca
         asyncpg.transaction.Transaction._Transaction__commit = original_commit
 
     conn = captured["wrapper"]
-    assert conn._finalized is True
+    assert conn.transaction_state.finished is True
     on_commit_callback.assert_called_once()
 
 
@@ -2037,7 +2056,7 @@ async def test_rust_pg_cancelled_commit_still_lands_and_finalizes(db_truncate):
         await task
 
     conn = captured["conn"]
-    assert conn._finalized is True, "commit() must finalize once the real COMMIT actually lands"
+    assert conn.transaction_state.finished is True, "commit() must finalize once the real COMMIT actually lands"
     on_commit_callback.assert_called_once()
 
     # The real COMMIT already landed - the row it created must be there.
@@ -2097,7 +2116,7 @@ async def test_rust_pg_cancelled_rollback_still_lands_and_finalizes(db_truncate)
         await task
 
     conn = captured["conn"]
-    assert conn._finalized is True, "rollback() must finalize once the real ROLLBACK actually lands"
+    assert conn.transaction_state.finished is True, "rollback() must finalize once the real ROLLBACK actually lands"
     on_rollback_callback.assert_called_once()
 
     # The real ROLLBACK already landed - the row it created must be gone.
@@ -2180,7 +2199,9 @@ async def test_rust_pg_cancelled_release_savepoint_still_lands_and_finalizes(db_
     await do_transaction()
 
     inner = captured["inner"]
-    assert inner._finalized is True, "release_savepoint() must finalize once the real RELEASE SAVEPOINT actually lands"
+    assert inner.transaction_state.finished is True, (
+        "release_savepoint() must finalize once the real RELEASE SAVEPOINT actually lands"
+    )
 
     # The real RELEASE SAVEPOINT already landed and the outer transaction committed normally -
     # the row it kept must be there, not dropped by a spurious rollback.
@@ -2243,7 +2264,9 @@ async def test_rust_pg_cancelled_savepoint_rollback_still_lands_and_updates_stat
         await task
 
     inner = captured["inner"]
-    assert inner._finalized is True, "savepoint_rollback() must finalize once the real ROLLBACK TO actually lands"
+    assert inner.transaction_state.finished is True, (
+        "savepoint_rollback() must finalize once the real ROLLBACK TO actually lands"
+    )
     assert fired == [], "the discarded on_commit() callback must never fire"
 
     # The real ROLLBACK TO already ran - the row created inside the savepoint must be gone.
@@ -2382,7 +2405,9 @@ async def test_rust_pg_begin_cancelled_after_landing_rolls_back_and_finalizes(db
     assert wrapper._native_transaction is not None, (
         "the real BEGIN landed - _native_transaction must have been constructed"
     )
-    assert wrapper._finalized is True, "the landed transaction must be rolled back and finalized, not leaked"
+    assert wrapper.transaction_state.finished is True, (
+        "the landed transaction must be rolled back and finalized, not leaked"
+    )
 
     # The pinned connection isn't left corrupted (mid-transaction, permanently unavailable) - a
     # subsequent transaction can still acquire it from the pool. Bounded by a timeout so a
@@ -2421,6 +2446,7 @@ async def test_transaction_finishes_when_its_context_replaces_its_connections(re
         transaction_task = asyncio.create_task(run_transaction())
         await asyncio.wait_for(entered.wait(), 10)
         connections_before = ctx._connections
+        clients_before = connections_before.all()
         if replacement == "reinit":
             replacing_task = asyncio.create_task(ctx.init(config=config))
         else:
@@ -2429,7 +2455,7 @@ async def test_transaction_finishes_when_its_context_replaces_its_connections(re
         await wait_until(
             lambda: (
                 ctx._connections is not connections_before
-                or all(connection.discarded for connection in connections_before.all())
+                or all(connection.discarded for connection in clients_before)
             )
         )
         release.set()

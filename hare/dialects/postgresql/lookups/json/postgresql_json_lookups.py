@@ -58,4 +58,4 @@ class PostgresqlJsonLookups:
 
     @staticmethod
     def filter(term: Term, value: dict[str, Any]) -> Criterion:
-        return PostgresqlJsonFilterGuards.build(term, value)
+        return PostgresqlJsonFilterGuards().build(term, value)

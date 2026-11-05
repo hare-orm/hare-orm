@@ -12,7 +12,6 @@ from hare.dialects.postgresql.partitioning.constants import (
     PARTITION_STRATEGY_BY_CATALOG_CODE,
     PARTITION_VALUE_NOT_SET,
     PARTITIONS_DIFFER_TEMPLATE,
-    POSTGRESQL_TYPE_ARGUMENTS_PATTERN,
     RANGE_BOUND_PATTERN,
 )
 from hare.dialects.postgresql.partitioning.hash_partitioning import HashPartitioning
@@ -21,37 +20,14 @@ from hare.dialects.postgresql.partitioning.partitioning import Partitioning
 from hare.dialects.postgresql.partitioning.partitions.list_partition import ListPartition
 from hare.dialects.postgresql.partitioning.partitions.range_partition import RangePartition
 from hare.dialects.postgresql.partitioning.range_partitioning import RangePartitioning
+from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.exceptions import ConfigurationError
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
 class ObservedPartitioning:
     """Reads how a table is partitioned off the PostgreSQL catalog - what ``inspectdb`` writes as
     ``PostgresqlTableOptions(partitioning=...)`` and ``hare drift`` compares with the declared one."""
-
-    @staticmethod
-    def split_values(text: str) -> list[str]:
-        """Splits the list of a bound (``'a', 'b''c', 3``) into its literals.
-
-        Args:
-            text: The list's text, without its parentheses.
-
-        Returns:
-            The literals, each as written.
-        """
-        values: list[str] = []
-        current: list[str] = []
-        in_string = False
-        for character in text:
-            if character == "'":
-                in_string = not in_string
-            if character == "," and not in_string:
-                values.append("".join(current).strip())
-                current = []
-            else:
-                current.append(character)
-        if current or values:
-            values.append("".join(current).strip())
-        return values
 
     @staticmethod
     def read_value(literal: str, column_type: str) -> Any:
@@ -72,7 +48,7 @@ class ObservedPartitioning:
         if text.startswith("'"):
             # 'it''s'::text - the literal, then a cast PostgreSQL may write after it.
             text = text[1 : text.rindex("'")].replace("''", "'")
-        base_type = POSTGRESQL_TYPE_ARGUMENTS_PATTERN.sub("", column_type).strip()
+        base_type = PostgresqlPhysicalType.from_sql(column_type).without_modifiers
         if base_type == "boolean":
             return text.lower() in {"true", "t"}
         reader = BOUND_VALUE_READERS_BY_COLUMN_TYPE.get(base_type)
@@ -90,7 +66,7 @@ class ObservedPartitioning:
         Returns:
             The values.
         """
-        literals = ObservedPartitioning.split_values(text)
+        literals = [term.strip() for term in CatalogSql.split_terms(text)] if text else []
         if len(column_types) == 1:
             return tuple(ObservedPartitioning.read_value(literal, column_types[0]) for literal in literals)
         return tuple(

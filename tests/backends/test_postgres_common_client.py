@@ -2,18 +2,21 @@
 (used by both AsyncpgClient and RustPgClient via their own get_driver_error override) -
 pure decorator-level tests against a fake client, no real DB connection needed. See
 tests/backends/test_sqlite_client.py for the equivalent sqlite-side tests, and
-tests/backends/test_read_query_retry.py for PostgresqlClient._execute_read_query_with_retry()
-itself (the retry loop translate_exceptions dispatches into below)."""
+tests/backends/test_read_query_retry.py for the shared per-statement retry loop."""
 
+import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
-from hare.dialects.base.client import retryable_read_query_active
+from hare.dialects.base.client.enums import StatementForm
+from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.client import PostgresqlClient
 from hare.exceptions import DBConnectionError, OperationalError
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
+from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 
 class _FakeClient:
@@ -30,7 +33,7 @@ class _FakeClient:
 
 @pytest.mark.asyncio
 async def test_translate_exceptions_attaches_sql_and_params_on_failure():
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         raise ValueError("boom")
 
@@ -48,7 +51,7 @@ async def test_translate_exceptions_does_not_attach_sql_for_non_query_methods():
     (sql, params) pair, so nothing should be attached even though they can still raise a
     translated exception."""
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.CONTROL)
     async def create_connection(self, with_db):
         raise ValueError("boom")
 
@@ -70,7 +73,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
     Observers.observe(QueryExecuted, hook)
     try:
 
-        @PostgresqlClient.translate_exceptions
+        @PostgresqlClient.translate_exceptions(StatementForm.SQL)
         async def execute(self, query, values=None):
             if query.startswith("FAIL"):
                 raise ValueError("boom")
@@ -104,7 +107,7 @@ async def test_translate_exceptions_fires_query_hook_on_success_and_failure():
 async def test_translate_exceptions_logs_slow_query(caplog, monkeypatch):
     monkeypatch.setattr(Observers, "slow_query_threshold_ms", -1.0)
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         return "ok"
 
@@ -115,16 +118,11 @@ async def test_translate_exceptions_logs_slow_query(caplog, monkeypatch):
 
 
 class _RetryFakeClient(_FakeClient):
-    """Adds the retry-specific attributes/method translate_exceptions' new retry branch needs
-    (PostgresqlClient._execute_read_query_with_retry itself is exercised directly against a
-    real client in tests/backends/test_read_query_retry.py - this only needs to prove
-    translate_exceptions DISPATCHES into it under the right conditions)."""
+    """Driver error translation and retry settings without a server."""
 
     read_retry_max_retries = 3
     read_retry_backoff_base_seconds = 0.001
     log = logging.getLogger("test_translate_exceptions_read_retry")
-    _execute_read_query_with_retry = PostgresqlClient._execute_read_query_with_retry
-    _translate_exceptions = PostgresqlClient._translate_exceptions
 
     def get_driver_error(self, error, call_arguments):
         if isinstance(error, ConnectionAbortedError):
@@ -132,40 +130,134 @@ class _RetryFakeClient(_FakeClient):
         return OperationalError(error) if isinstance(error, ValueError) else None
 
 
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_explicit_read_retry_does_not_spread_to_nested_wrapper_writes():
+    client = _RetryFakeClient()
+    client.dialect = DialectRegistry.get_dialect("postgresql")
+    client.read_retry_backoff_base_seconds = 0
+    reads, writes = [], []
+
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
+    async def read_rows(self, query, values=None):
+        reads.append(query)
+        if len(reads) == 1:
+            raise ConnectionAbortedError("lost read")
+        return "rows"
+
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
+    async def write_rows(self, query, values=None):
+        writes.append(query)
+        raise ConnectionAbortedError("unknown write outcome")
+
+    async def around(call, proceed):
+        if call.method_name == "read_rows":
+            with pytest.raises(DBConnectionError):
+                await write_rows(client, "UPDATE book SET title = 'new'")
+        return await proceed()
+
+    wrapper = SimpleNamespace(around=around)
+    Observers.wrap_queries(wrapper)
+    try:
+        assert await read_rows(client, "SELECT 1", retry_read=True) == "rows"
+    finally:
+        Observers.unwrap_queries(wrapper)
+    assert len(reads) == 2
+    assert len(writes) == 1
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_cancelled_statement_reports_cancellation_once():
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
+    async def cancelled(self, query, values=None):
+        raise asyncio.CancelledError()
+
+    events = []
+    Observers.observe(QueryExecuted, events.append)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled(_FakeClient(), "SELECT 1")
+        await Observers.wait_for_pending()
+    finally:
+        Observers.unobserve(QueryExecuted, events.append)
+    assert len(events) == 1
+    assert isinstance(events[0].error, asyncio.CancelledError)
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("form", list(StatementForm))
+@pytest.mark.asyncio
+async def test_only_single_statement_form_can_accept_read_retry(form):
+    client = _RetryFakeClient()
+    client.dialect = DialectRegistry.get_dialect("postgresql")
+    client.read_retry_max_retries = 1
+    client.read_retry_backoff_base_seconds = 0
+    attempts = []
+
+    @PostgresqlClient.translate_exceptions(form)
+    async def execute(self, query, values=None):
+        attempts.append(1)
+        raise ConnectionAbortedError("connection lost")
+
+    with pytest.raises(DBConnectionError):
+        await execute(client, "book", ["id"], retry_read=True)
+    assert len(attempts) == (2 if form is StatementForm.SQL else 1)
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_each_retry_event_hides_sensitive_driver_error_and_parameters():
+    client = _RetryFakeClient()
+    client.read_retry_max_retries = 1
+    client.read_retry_backoff_base_seconds = 0
+    secret = "sensitive-input"
+    events = []
+
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
+    async def execute(self, query, values=None):
+        raise ConnectionAbortedError(secret)
+
+    Observers.observe(QueryExecuted, events.append)
+    try:
+        with pytest.raises(DBConnectionError):
+            await execute(client, "SELECT $1", QueryParameters([secret], [0]), retry_read=True)
+        await Observers.wait_for_pending()
+    finally:
+        Observers.unobserve(QueryExecuted, events.append)
+    assert len(events) == 2
+    for event in events:
+        assert event.parameters == ["<hidden>"]
+        assert secret not in str(event.error)
+        assert event.error.__context__ is None
+
+
 @pytest.mark.asyncio
 async def test_translate_exceptions_retries_read_only_query_on_connection_loss():
-    """The new parallel retry mechanism (translate_exceptions -> _execute_read_query_with_retry)
-    only engages when retryable_read_query_active is set - i.e. the currently-executing query's
-    SQL-builder class is statically read-only (AwaitableQuery.is_read_only)."""
+    """A declared SQL invocation retries only with its explicit read permission."""
     client = _RetryFakeClient()
     attempts = []
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         attempts.append(1)
         if len(attempts) < 3:
             raise ConnectionAbortedError("simulated: connection lost mid-query")
         return "ok"
 
-    token = retryable_read_query_active.set(True)
-    try:
-        result = await execute(client, "SELECT 1")
-    finally:
-        retryable_read_query_active.reset(token)
+    result = await execute(client, "SELECT 1", retry_read=True)
 
     assert result == "ok"
     assert len(attempts) == 3
 
 
 @pytest.mark.asyncio
-async def test_translate_exceptions_does_not_retry_when_context_inactive():
-    """Without retryable_read_query_active set (a write query, or code outside any AwaitableQuery
-    at all), a connection lost mid-query still raises DBConnectionError immediately - exactly
-    today's behavior, no retry."""
+async def test_translate_exceptions_does_not_retry_without_explicit_permission():
+    """SQL returning rows does not by itself authorize retrying after connection loss."""
     client = _RetryFakeClient()
     attempts = []
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         attempts.append(1)
         raise ConnectionAbortedError("simulated: connection lost mid-query")
@@ -179,23 +271,17 @@ async def test_translate_exceptions_does_not_retry_when_context_inactive():
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_translate_exceptions_does_not_retry_non_query_executing_methods():
-    """commit()/rollback() (and any other non-query-executing method) must never be retried by
-    this mechanism even if retryable_read_query_active is somehow set - only a real
-    QUERY_EXECUTING_METHOD_NAMES method is eligible."""
+    """Transaction control cannot opt into read retry."""
     client = _RetryFakeClient()
     attempts = []
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.CONTROL)
     async def commit(self):
         attempts.append(1)
         raise ConnectionAbortedError("simulated: connection lost mid-commit")
 
-    token = retryable_read_query_active.set(True)
-    try:
-        with pytest.raises(DBConnectionError):
-            await commit(client)
-    finally:
-        retryable_read_query_active.reset(token)
+    with pytest.raises(DBConnectionError):
+        await commit(client, retry_read=True)
 
     assert len(attempts) == 1
 
@@ -205,7 +291,7 @@ async def test_translate_exceptions_does_not_retry_inside_a_transaction():
     """Retrying against a connection pinned to an open transaction would either re-run the read
     outside the transaction's isolation/locks entirely, or just fail again on the same dead
     connection - neither is useful, so a TransactionClient is never retried even when
-    retryable_read_query_active is set."""
+    retry_read=True is passed."""
 
     class _RetryFakeTransactionalClient(_RetryFakeClient):
         is_transaction_client = True
@@ -219,44 +305,12 @@ async def test_translate_exceptions_does_not_retry_inside_a_transaction():
     client = _RetryFakeTransactionalClient()
     attempts = []
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(self, query, values=None):
         attempts.append(1)
         raise ConnectionAbortedError("simulated: connection lost mid-query")
 
-    token = retryable_read_query_active.set(True)
-    try:
-        with pytest.raises(DBConnectionError):
-            await execute(client, "SELECT 1")
-    finally:
-        retryable_read_query_active.reset(token)
+    with pytest.raises(DBConnectionError):
+        await execute(client, "SELECT 1", retry_read=True)
 
     assert len(attempts) == 1
-
-
-@pytest.mark.parametrize(
-    ("query", "expected"),
-    [
-        ("UPDATE t SET a = 1", True),
-        ("/* audit */ UPDATE t SET a = 1", True),
-        ("/* outer /* nested */ still comment */ DELETE FROM t", True),
-        ("-- audit\nUPDATE t SET a = 1", True),
-        ("WITH x AS MATERIALIZED (SELECT id FROM t) UPDATE t SET a = 1 WHERE id IN (SELECT id FROM x)", True),
-        ('WITH x AS NOT MATERIALIZED (SELECT 1), "y"(a) AS (SELECT 2) DELETE FROM t', True),
-        ("UPDATE t SET name = 'returning'", True),
-        ('UPDATE t SET "returning" = 1', True),
-        ("UPDATE t SET a = $$ returning $$", True),
-        ("UPDATE t SET a = $tag$ it's returning $tag$", True),
-        (r"UPDATE t SET a = E'x\' RETURNING'", True),
-        ("WITH d AS (DELETE FROM t RETURNING id) UPDATE u SET a = 1 WHERE id IN (SELECT id FROM d)", True),
-        ("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", True),
-        ("UPDATE t SET a = 1 RETURNING id", False),
-        ("/* audit */ UPDATE t SET a = 1 RETURNING id", False),
-        ("WITH d AS (DELETE FROM t RETURNING id) SELECT * FROM d", False),
-        ("SELECT * FROM t WHERE a = 'UPDATE'", False),
-        ("(SELECT 1)", False),
-        ("", False),
-    ],
-)
-def test_is_write_without_returning_ignores_comments_ctes_and_quoted_text(query, expected):
-    assert PostgresqlClient._is_write_without_returning(query) is expected

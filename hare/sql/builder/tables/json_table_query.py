@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from hare.query.expressions.joins.json_table_column import JsonTableColumn
     from hare.sql.builder.tables.table import Table
     from hare.sql.sql_context import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
     from hare.sql.terms.term import Term
 
 
@@ -41,9 +41,9 @@ class JsonTableQuery(AliasedQuery):
         self.columns = tuple(columns)
         self.ordinality_name = ordinality_name
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield from super().nodes_()
-        yield from self.document.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from super().get_children()
+        yield self.document
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:

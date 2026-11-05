@@ -10,6 +10,9 @@ class TimestampComparand(Function):
     """A timestamp a date column is compared with - the column is compared as ``DateAsTimestamp``.
     Rendered as the timestamp itself."""
 
+    structure_attributes = ("zone_name",)
+    has_repeatable_value = True
+
     def __init__(self, term: Any, zone_name: str | None, alias: str | None = None) -> None:
         super().__init__("CAST", term, alias=alias)
         self.zone_name = zone_name

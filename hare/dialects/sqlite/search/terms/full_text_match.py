@@ -1,18 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 
 
 class FullTextMatch(Criterion):
@@ -25,6 +18,8 @@ class FullTextMatch(Criterion):
         index_schema: The FTS5 table's attached database; None for the main one.
         query: The search query, restricted to the searched columns.
     """
+
+    structure_attributes = ("row_key", "query", "index_table_name", "index_schema")
 
     def __init__(
         self,
@@ -40,24 +35,9 @@ class FullTextMatch(Criterion):
         self.index_schema = index_schema
         self.query = query
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.row_key.nodes_()
-        yield from self.query.nodes_()
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces the table of the row's key column.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy with the table replaced.
-        """
-        self.row_key = self.row_key.replace_table(current_table, new_table)
-        return self
+    def get_children(self) -> Iterator[Node]:
+        yield self.row_key
+        yield self.query
 
     def get_sql(self, sql_context: SqlContext) -> str:
         index_table_sql = sql_context.quote(self.index_table_name)
@@ -70,4 +50,4 @@ class FullTextMatch(Criterion):
             f"{row_key_sql} IN (SELECT rowid FROM {qualified_index_table_sql} "  # nosec B608
             f"WHERE {index_table_sql} MATCH {query_sql})"
         )
-        return sql_context.format_alias_sql(sql, self.alias)
+        return sql_context.format_alias_sql(sql, self.alias) if sql_context.with_alias else sql

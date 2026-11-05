@@ -207,11 +207,12 @@ async def test_rows_moved_into_a_through_model_refuse_a_callable_default_of_a_un
         class Meta:
             table = "book_tag"
     """)
-    await project.cli_ok("makemigrations")
-    result = await project.cli("migrate")
+    previous_migrations = project.migration_files()
+    result = await project.cli("makemigrations")
 
     assert result.exit_code not in (0, None)
     assert "its unique field 'token' has a callable default" in result.output
+    assert project.migration_files() == previous_migrations
 
 
 @pytest.mark.asyncio

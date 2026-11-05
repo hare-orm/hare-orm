@@ -16,7 +16,6 @@ from hare.migrations.operations import (
     CreateSchema,
     DeleteModel,
 )
-from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
 
 pytestmark = pytest.mark.database_independent
@@ -29,19 +28,6 @@ def get_create_model(name: str, *relation_targets: str, **options: object) -> Cr
         for target in relation_targets
     )
     return CreateModel(name=name, fields=model_fields, options={"table": name.lower(), "app": "app", **options})
-
-
-@pytest.fixture
-def render_count(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    rendered_names: list[str] = []
-    render = ModelState.render
-
-    def counting_render(model_state: ModelState, *args: object, **kwargs: object) -> object:
-        rendered_names.append(model_state.name)
-        return render(model_state, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(ModelState, "render", counting_render)
-    return rendered_names
 
 
 @pytest.mark.asyncio

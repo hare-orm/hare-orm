@@ -5,7 +5,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from hare.query.rows.values_rows.value_field import ValueField
     from hare.query.rows.values_rows.values_rows import ValuesRows
 
 
@@ -18,9 +17,7 @@ class ValuesReading:
         rows: The reader of the row shape asked for.
         column_converters: Each selected column's alias and the function decoding its value, None
             when the raw value is used as it is.
-        value_fields: What each column is read as.
     """
 
     rows: ValuesRows
     column_converters: list[tuple[str, Callable[[Any], Any] | None]]
-    value_fields: tuple[ValueField, ...]

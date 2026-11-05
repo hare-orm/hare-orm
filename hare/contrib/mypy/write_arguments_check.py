@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mypy.nodes import ARG_NAMED, CallExpr
-from mypy.typeops import make_simplified_union
-from mypy.types import NoneType, Type
-from mypy.types_utils import is_overlapping_none
+from mypy.types import Type
 
-from hare.contrib.mypy.constants import MANY_ROWS_RELATION_WRITE_MESSAGE, UNKNOWN_WRITE_NAME_MESSAGE
+from hare.contrib.mypy.constants import (
+    MANY_ROWS_RELATION_WRITE_MESSAGE,
+    REFUSED_UPDATE_NAME_MESSAGE,
+    UNKNOWN_WRITE_NAME_MESSAGE,
+)
 from hare.contrib.mypy.mypy_types import MypyTypes
-from hare.exceptions import HareError
+from hare.models.write.rules.enums import WriteType
+from hare.typing_info.write_value_types import WriteValueTypes
 
 if TYPE_CHECKING:
     from mypy.plugin import FunctionSigContext, MethodSigContext, Plugin
@@ -100,14 +103,15 @@ class WriteArgumentsCheck:
         for name, argument_style in zip(call.arg_names, call.arg_kinds, strict=True):
             if argument_style != ARG_NAMED or name is None or name in method_parameter_names:
                 continue
-            value_type = self.get_field_value_type(mypy_types, model, name, call)
-            if accepts_expressions:
-                value_type = make_simplified_union([value_type, *mypy_types.get_always_accepted_types()])
-            types_by_name[name] = value_type
+            types_by_name[name] = self.get_field_value_type(
+                mypy_types, model, name, call, accepts_expressions=accepts_expressions
+            )
         return MypyTypes.get_signature_with_keywords(signature, call, types_by_name)
 
     @staticmethod
-    def get_field_value_type(mypy_types: MypyTypes, model: type[Model], name: str, call: CallExpr) -> Type:
+    def get_field_value_type(
+        mypy_types: MypyTypes, model: type[Model], name: str, call: CallExpr, *, accepts_expressions: bool = False
+    ) -> Type:
         """The type of a value setting a field, reporting a name that sets none.
 
         Args:
@@ -119,44 +123,16 @@ class WriteArgumentsCheck:
         Returns:
             The type - ``Any`` for a wrong name, reported.
         """
-        meta = model._meta
-        if name == "pk":
-            try:
-                return mypy_types.get_python_type(meta.get_lookup_info(name).value_type)
-            except HareError:
-                return mypy_types.any()
-        if name in meta.generic_foreign_key_fields:
-            generic_field = meta.generic_foreign_key_fields[name]
-            branch_types = [
-                mypy_types.get_model_type(branch_model) or mypy_types.any()
-                for branch_model in generic_field.branch_by_model
-            ]
-            # A branch's row is taken as a dict too - {"type": <branch>, <key fields>}.
-            dict_type = mypy_types.get_python_type(dict)
-            return make_simplified_union([*branch_types, dict_type, *([NoneType()] if generic_field.null else [])])
-        field = meta.fields_map.get(name)
-        if field is None:
-            mypy_types.fail(UNKNOWN_WRITE_NAME_MESSAGE.format(model=model.__name__, name=name), call)
-            return mypy_types.any()
-        if (
-            name in meta.many_to_many_fields
-            or name in meta.backward_foreign_key_fields
-            or name in meta.backward_one_to_one_fields
-        ):
-            mypy_types.fail(MANY_ROWS_RELATION_WRITE_MESSAGE.format(model=model.__name__, name=name), call)
-            return mypy_types.any()
-        none_types: list[Type] = [NoneType()] if field.null else []
-        if name in meta.foreign_key_fields or name in meta.one_to_one_fields:
-            related_type = mypy_types.get_model_type(getattr(field, "related_model", model))
-            return make_simplified_union([related_type or mypy_types.any(), *none_types])
-        accepted_types = [mypy_types.get_python_type(accepted) for accepted in field.get_accepted_value_types()]
-        declared_type = mypy_types.get_declared_field_type(model, name)
-        if declared_type is not None:
-            value_type = make_simplified_union(
-                [mypy_types.with_raw_enum_values(declared_type, field), *accepted_types]
-            )
-            # A factory declaring the value itself (``CharEnumField``) leaves None out.
-            if none_types and not is_overlapping_none(value_type):
-                return make_simplified_union([value_type, *none_types])
-            return value_type
-        return make_simplified_union([mypy_types.get_python_type(field.field_type), *accepted_types, *none_types])
+        description = WriteValueTypes.get(
+            model,
+            name,
+            accepts_expressions=accepts_expressions,
+            write_type=WriteType.UPDATE if accepts_expressions else WriteType.INSERT,
+        )
+        if description is not None:
+            return mypy_types.get_value_type(description)
+        message = MANY_ROWS_RELATION_WRITE_MESSAGE if name in model._meta.fields_map else UNKNOWN_WRITE_NAME_MESSAGE
+        if accepts_expressions and name in WriteValueTypes.get_names(model):
+            message = REFUSED_UPDATE_NAME_MESSAGE
+        mypy_types.fail(message.format(model=model.__name__, name=name), call)
+        return mypy_types.any()

@@ -8,7 +8,7 @@ from hare.gis.constants import GEO_JSON_TYPE_NAMES, GEOMETRY_MAX_NESTING_DEPTH, 
 from hare.gis.enums import GeometryType
 from hare.gis.geometries.geometry import Geometry
 from hare.gis.geometries.geometry_collection import GeometryCollection
-from hare.gis.readers.wkt_reader import WktReader
+from hare.gis.readers.constants import GEOMETRY_CLASSES
 
 
 class GeoJsonReader:
@@ -17,8 +17,7 @@ class GeoJsonReader:
 
     #: The geometry class of each GeoJSON type name.
     GEOMETRY_CLASSES: ClassVar[dict[str, type[Geometry]]] = {
-        type_name: WktReader.GEOMETRY_CLASSES[geometry_type]
-        for geometry_type, type_name in GEO_JSON_TYPE_NAMES.items()
+        type_name: GEOMETRY_CLASSES[geometry_type] for geometry_type, type_name in GEO_JSON_TYPE_NAMES.items()
     }
 
     @classmethod

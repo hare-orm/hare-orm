@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.brokers.redis_connection import RedisConnection
 from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL, WAKEUP_TOPIC_SEPARATOR
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
 from hare.contrib.package_checks import PackageChecks
 from hare.exceptions import ConfigurationError
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class RedisWakeup(OutboxWakeup):
@@ -34,7 +37,7 @@ class RedisWakeup(OutboxWakeup):
     async def signal(self, topics: frozenset[str]) -> None:
         await self.broker_connection.get_client().publish(self.channel, WAKEUP_TOPIC_SEPARATOR.join(sorted(topics)))
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         pubsub = self.broker_connection.get_client().pubsub()
         try:
             await pubsub.subscribe(self.channel)

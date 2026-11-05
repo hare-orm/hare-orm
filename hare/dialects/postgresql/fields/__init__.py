@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from hare.dialects.postgresql.fields.naive_time_field import NaiveTimeField
     from hare.dialects.postgresql.fields.native_enum import NativeEnumField
     from hare.dialects.postgresql.fields.network import CidrField, InetField, MacAddressField
-    from hare.dialects.postgresql.fields.postgis_field import PostGISField
     from hare.dialects.postgresql.fields.ranges import (
         BigIntRangeField,
         DateRangeField,
@@ -58,7 +57,6 @@ __all__ = [
     "NaiveDatetimeField",
     "NaiveTimeField",
     "NativeEnumField",
-    "PostGISField",
     "Range",
     "RangeField",
     "TSVectorField",

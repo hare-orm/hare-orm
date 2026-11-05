@@ -14,9 +14,6 @@ if TYPE_CHECKING:
 class CreateSchema(HareOperation):
     """Creates a database schema - before the tables in it."""
 
-    backward_reads_state_left = False
-    backward_reads_state_reached = False
-
     def __init__(self, schema_name: str) -> None:
         self.schema_name = schema_name
 

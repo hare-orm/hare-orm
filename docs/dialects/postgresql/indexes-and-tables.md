@@ -105,7 +105,7 @@ class LoanRecord(Model):
 
 | Class | Arguments | Partitions |
 |---|---|---|
-| `HashPartitioning` | `fields`, `partition_count` (1 to 1024) | `<table>_p0` ... `<table>_p<n-1>`, rows spread evenly by a hash of the key. |
+| `HashPartitioning` | `fields`, `partition_count` (positive integer) | `<table>_p0` ... `<table>_p<n-1>`, rows spread evenly by a hash of the key. |
 | `ListPartitioning` | `fields` (one), `partitions` (`ListPartition(name, values)`), `default_partition` | Each partition holds the rows of the key values it lists; `None` among them means the rows with a `NULL` key. |
 | `RangePartitioning` | `fields`, `partitions` (`RangePartition(name, from_values, to_values)`), `default_partition` | Each partition holds the rows from its lower bound up to, not including, its upper one — one value per key column. `RangeBound.MINVALUE`/`RangeBound.MAXVALUE` stand below/above every value. |
 
@@ -135,6 +135,11 @@ Indexes and constraints are created on the table and reach every partition. A co
 (`AddIndex(concurrently=True)`) can't be built on a partitioned table as a whole: hare creates it on the
 table alone, builds it concurrently on each partition and attaches each — it is valid once the last one
 is attached; dropping it is never concurrent.
+
+Hare prepares the complete statement sequence before executing it; preview uses that same
+plan. Concurrent creation requires `atomic = False`. It is not an atomic operation: failure
+can leave an invalid parent or completed partition indexes. Inspect the database before
+retrying and remove or repair those indexes explicitly; Hare does not silently undo them.
 
 How a change reaches the database:
 

@@ -2665,12 +2665,7 @@ async def test_values_preserves_select_for_update(db):
 @requires_features(supports_select_for_update=True)
 @pytest.mark.asyncio
 async def test_values_select_for_update_with_joined_field_defaults_to_locking_the_base_table(db):
-    """A "related__field"-style .values()/.values_list() field goes through the same
-    _join_table()/_join_table_with_forwarded_fields() path select_related() does, always
-    building a LEFT OUTER JOIN - Postgres rejects a bare FOR UPDATE (no OF) against ANY query
-    containing an outer join at all, the identical crash select_related() +
-    select_for_update() already had fixed (cache_shape.py). FieldSelectQuery's own
-    _apply_limit_offset_group_by_and_lock() needed the same `of=` default."""
+    """Selecting a related field uses an outer JOIN; FOR UPDATE defaults to the base table."""
     qs = Book.objects.filter(name="x").select_for_update()
     values_qs = qs.values("id", "author__name")
     assert "FOR UPDATE OF" in values_qs.sql()

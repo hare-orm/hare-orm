@@ -1,37 +1,31 @@
 from __future__ import annotations
 
-import keyword
 import sys
-from collections.abc import Awaitable, Callable, Iterable, Sequence, Sized
+from collections.abc import Callable, Iterable, Sequence, Sized
 from itertools import batched
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.core.caching.model_cache import ModelCache
+from hare.core.caching.cache import Cache
 from hare.exceptions import (
-    DatabaseError,
     QueryError,
 )
-from hare.instrumentation.observers.observers import Observers
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 
 if TYPE_CHECKING:
-    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models import Model
 
 TModel = TypeVar("TModel", bound="Model")
-ResultType = TypeVar("ResultType")
 
 
 class BulkWriteBatches:
     """How bulk writes split their objects into statements and serialize them."""
 
-    SERIALIZE_INSTANCES_CACHE: ClassVar[
-        ModelCache[dict[tuple[tuple[str, ...], TypeRegistry], Callable[[Any], list[Any]]]]
-    ] = ModelCache()
+    SERIALIZE_INSTANCES_CACHE: ClassVar[Cache[Callable[[Any], list[Any]]]] = Cache(
+        holds_sql=False,
+    )
 
     @staticmethod
     def get_batches(instances: Iterable[Any], batch_size: int | None = None) -> Iterable[Iterable[Any]]:
@@ -73,9 +67,9 @@ class BulkWriteBatches:
         """
         key = (placeholder_templates, first_index, row_count)
         values_rows_sql = StatementPlans.values_rows_sql
-        sql = values_rows_sql.get_for_model(model, key)
+        sql = values_rows_sql.get_model_bucket(model).get(key)
         if sql is None:
-            sql = values_rows_sql[(model, *key)] = BulkWriteBatches.build_values_rows_sql(*key)
+            sql = values_rows_sql.get_model_bucket(model)[key] = BulkWriteBatches.build_values_rows_sql(*key)
         return sql
 
     @staticmethod
@@ -130,152 +124,28 @@ class BulkWriteBatches:
         return min(requested, max_rows) if requested is not None else max_rows
 
     @staticmethod
-    def get_compiled_instance_serializer(
-        model: type[Model], columns: tuple[str, ...], types: TypeRegistry
+    def get_instance_serializer(
+        model: type[Model],
+        columns: tuple[str, ...],
+        types: TypeRegistry,
     ) -> Callable[[Any], list[Any]]:
-        """Compiles, once per model, columns and type registry, a function building an instance's row:
-        one literal attribute read per column with the column's writer bound in - no field lookup or
-        ``getattr()`` per value.
-        """
-        per_model = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get(model)
-        if per_model is None:
-            per_model = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE[model] = {}
-        cached = per_model.get((columns, types))
-        if cached is not None:
-            return cached
-        fields_map = model._meta.fields_map
-        namespace: dict[str, Any] = {}
-        lines = ["def _serialize(instance):", "    return ["]
-        for position, field_name in enumerate(columns):
-            writer_reference = f"_writer_{position}"
-            namespace[writer_reference] = types.get_db_writer(fields_map[field_name])
-            # A name a model built with type() may hold that isn't an attribute of Python's syntax -
-            # read by getattr(), its text quoted.
-            if field_name.isidentifier() and not keyword.iskeyword(field_name):
-                attribute_source = f"instance.{field_name}"
-            else:
-                attribute_source = f"getattr(instance, {field_name!r})"
-            lines.append(f"        {writer_reference}({attribute_source}, instance),")
-        lines.append("    ]")
-        exec("\n".join(lines), namespace)  # nosec B102 - columns-derived source, no external input
-        compiled = cast("Callable[[Any], list[Any]]", namespace["_serialize"])
-        per_model[(columns, types)] = compiled
-        return compiled
+        """Bind Python field writers to a column layout without source generation."""
+        bucket = BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(model)
+        key = (columns, types)
+        serializer = bucket.get(key)
+        if serializer is None:
+            writers = tuple((name, types.get_db_writer(model._meta.fields_map[name])) for name in columns)
+
+            def serialize(obj: Any) -> list[Any]:
+                return [writer(getattr(obj, name), obj) for name, writer in writers]
+
+            serializer = bucket.store(key, serialize)
+        return serializer
 
     @staticmethod
-    def serialize_instance(model: type[TModel], types: TypeRegistry, obj: TModel, columns: list[str]) -> list[Any]:
-        """Builds the DB-ready row of one obj, in ``columns`` order - by the Rust accelerator when it
-        is built, else by the compiled Python function.
-        """
-        if HydrateAccelerator.module is not None:
-            try:
-                writer = HydrateAccelerator.get_model_writer(model, tuple(columns), types)
-                return writer.write_row(obj)
-            except (TypeError, AttributeError) as error:
-                # As in serialize_instances(): an object the caller got wrong fails the Python path too.
-                row = BulkWriteBatches.get_compiled_instance_serializer(model, tuple(columns), types)(obj)
-                HydrateAccelerator.disable(error)
-                return row
-        return BulkWriteBatches.get_compiled_instance_serializer(model, tuple(columns), types)(obj)
-
-    @staticmethod
-    def get_model_writer_for_parameters(model: type[TModel], connection: DatabaseClient, columns: list[str]) -> Any:
-        """The ``rust.native.rows.ModelWriter`` that writes the parameters of ``connection``'s driver
-        itself - where the driver binds them (``Features.binds_written_parameters``) and nothing is
-        given the parameters to look at (a query observer, the DEBUG log); None otherwise.
-
-        Args:
-            model: The model.
-            connection: The connection the statement runs on.
-            columns: The written columns.
-
-        Returns:
-            The writer, or None.
-        """
-        if (
-            not columns
-            or HydrateAccelerator.module is None
-            or not connection.features.binds_written_parameters
-            or Observers.sees_query_parameters()
-        ):
-            return None
-        return HydrateAccelerator.get_model_writer(model, tuple(columns), connection.dialect.types)
-
-    @staticmethod
-    def write_statement_parameters(
-        model: type[TModel], connection: DatabaseClient, objs: list[TModel], columns: list[str], before: list[Any]
-    ) -> Any | None:
-        """The parameters of one statement binding ``before``, then the row of each instance, as the
-        driver binds them - None where the rows are serialized as Python values.
-
-        Args:
-            model: The model.
-            connection: The connection the statement runs on.
-            objs: The objs, at least one.
-            columns: The written columns, in order.
-            before: The values bound before the rows.
-
-        Returns:
-            The parameters, or None.
-        """
-        try:
-            writer = BulkWriteBatches.get_model_writer_for_parameters(model, connection, columns)
-            return None if writer is None else writer.write_parameters(objs, before, ())
-        except (TypeError, AttributeError) as error:
-            # As in serialize_instances(): an object the caller got wrong fails the Python path too.
-            BulkWriteBatches.serialize_instances(model, connection.dialect.types, objs, columns)
-            HydrateAccelerator.disable(error)
-            return None
-
-    @staticmethod
-    def write_statement_column_parameters(
-        model: type[TModel], connection: DatabaseClient, objs: list[TModel], columns: list[str]
-    ) -> Any | None:
-        """The parameters of one statement binding an array per column - each column's values over
-        the objs - as the driver binds them; None where the rows are serialized as Python
-        values.
-
-        Args:
-            model: The model.
-            connection: The connection the statement runs on.
-            objs: The objs, at least one.
-            columns: The written columns, in order.
-
-        Returns:
-            The parameters, or None.
-        """
-        try:
-            writer = BulkWriteBatches.get_model_writer_for_parameters(model, connection, columns)
-            return None if writer is None else writer.write_column_parameters(objs)
-        except (TypeError, AttributeError) as error:
-            BulkWriteBatches.serialize_instances(model, connection.dialect.types, objs, columns)
-            HydrateAccelerator.disable(error)
-            return None
-
-    @staticmethod
-    def write_statement_parameter_rows(
-        model: type[TModel], connection: DatabaseClient, objs: list[TModel], columns: list[str], after: list[Any]
-    ) -> Any | None:
-        """The parameter rows of a statement run once per instance - its row, then ``after`` - as the
-        driver binds them; None where the rows are serialized as Python values.
-
-        Args:
-            model: The model.
-            connection: The connection the statement runs on.
-            objs: The objs, at least one.
-            columns: The written columns, in order.
-            after: The values bound after each row.
-
-        Returns:
-            The parameter rows, or None.
-        """
-        try:
-            writer = BulkWriteBatches.get_model_writer_for_parameters(model, connection, columns)
-            return None if writer is None else writer.write_parameter_rows(objs, after)
-        except (TypeError, AttributeError) as error:
-            BulkWriteBatches.serialize_instances(model, connection.dialect.types, objs, columns)
-            HydrateAccelerator.disable(error)
-            return None
+    def serialize_instance(model: type[TModel], types: TypeRegistry, obj: TModel, columns: Sequence[str]) -> list[Any]:
+        """Convert one object's values through its Python field writers."""
+        return BulkWriteBatches.get_instance_serializer(model, tuple(columns), types)(obj)
 
     @staticmethod
     def get_sensitive_positions(model: type[Model], field_names: Sequence[str]) -> list[int]:
@@ -295,40 +165,6 @@ class BulkWriteBatches:
         return [position for position, name in enumerate(field_names) if name in sensitive_fields]
 
     @staticmethod
-    async def run_hiding_sensitive_values(
-        statement: Awaitable[ResultType], model: type[TModel], objs: list[TModel], field_names: Sequence[str]
-    ) -> ResultType:
-        """Runs a statement binding the driver's own parameters (``write_parameters()``) - its
-        refusal shows no ``sensitive=True`` field's value, as one binding a ``QueryParameters``
-        doesn't: the driver's error, which may hold the value, isn't chained.
-
-        Args:
-            statement: The statement's run.
-            model: The written model.
-            objs: The objs it writes.
-            field_names: The fields of a row, in order.
-
-        Returns:
-            What the statement returns.
-
-        Raises:
-            DatabaseError: The database refused the statement.
-        """
-        refused_error: DatabaseError | None = None
-        try:
-            return await statement
-        except DatabaseError as error:
-            sensitive_positions = BulkWriteBatches.get_sensitive_positions(model, field_names)
-            hidden_values = [getattr(obj, field_names[position]) for obj in objs for position in sensitive_positions]
-            if not hidden_values:
-                raise
-            error.parameters = QueryParameters(hidden_values, range(len(hidden_values)))
-            error.drop_values(hidden_values)
-            refused_error = error
-        # Raised once the error is no longer handled - else it is its own context again.
-        raise refused_error
-
-    @staticmethod
     def hide_row_values(rows: list[Any], sensitive_positions: list[int]) -> list[Any]:
         """Rows of ``execute_many()``, the sensitive fields' values of each never shown.
 
@@ -345,24 +181,11 @@ class BulkWriteBatches:
 
     @staticmethod
     def serialize_instances(
-        model: type[TModel], types: TypeRegistry, objs: list[TModel], columns: list[str]
+        model: type[TModel],
+        types: TypeRegistry,
+        objs: list[TModel],
+        columns: list[str],
     ) -> list[list[Any]]:
-        """Builds one DB-ready row of values per instance, in ``columns`` order - by the Rust
-        accelerator when it is built, else by the compiled Python function. Empty ``objs`` or
-        ``columns`` give ``[]``.
-        """
-        if not objs or not columns:
-            return []
-        serialize = BulkWriteBatches.get_compiled_instance_serializer(model, tuple(columns), types)
-        if HydrateAccelerator.module is not None:
-            try:
-                writer = HydrateAccelerator.get_model_writer(model, tuple(columns), types)
-                return cast("list[list[Any]]", writer.write_rows(objs))
-            except (TypeError, AttributeError) as error:
-                # The pure-Python path decides whose fault it was: an object the caller got wrong
-                # fails there the same way and propagates, leaving the accelerator on; only when it
-                # succeeds was the compiled rust.native.rows out of step with this call (a stale build).
-                rows = [serialize(instance) for instance in objs]
-                HydrateAccelerator.disable(error)
-                return rows
-        return [serialize(instance) for instance in objs]
+        """Convert every row through the same field writers as a single-object write."""
+        serialize = BulkWriteBatches.get_instance_serializer(model, tuple(columns), types)
+        return [serialize(obj) for obj in objs]

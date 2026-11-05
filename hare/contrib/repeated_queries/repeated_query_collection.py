@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
+from operator import attrgetter
 from typing import TYPE_CHECKING
 
 from hare.contrib.repeated_queries.repeated_query_entry import RepeatedQueryEntry
@@ -86,7 +87,7 @@ class RepeatedQueryCollection:
             The entries.
         """
         matching_entries = [entry for entry in self.entries_by_shape_key.values() if entry.count >= threshold]
-        return sorted(matching_entries, key=lambda entry: entry.count, reverse=True)
+        return sorted(matching_entries, key=attrgetter("count"), reverse=True)
 
     def on_query(self, event: QueryExecuted) -> None:
         """Counts a query - the observer the block installs.

@@ -14,6 +14,7 @@ from clickhouse_driver.errors import (
     SocketTimeoutError,
 )
 
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
@@ -22,32 +23,11 @@ from hare.dialects.clickhouse.client.clickhouse_statement_result import Clickhou
 from hare.dialects.clickhouse.client.constants import CLICKHOUSE_BEGIN_TRANSACTION_SQL, CLICKHOUSE_ROLLBACK_SQL
 from hare.dialects.clickhouse.client.declarations import ClickhouseDriverErrors, ClickhouseExternalSet
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DEFAULT_NATIVE_PORT
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_client_info import (
-    ClickhouseDriverClientInfo,
-)
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_column_types import (
-    ClickhouseDriverColumnTypes,
-)
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_connections import (
     ClickhouseDriverConnections,
 )
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_decompressors import (
-    ClickhouseDriverDecompressors,
-)
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_map_columns import (
-    ClickhouseDriverMapColumns,
-)
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_moment_columns import (
-    ClickhouseDriverMomentColumns,
-)
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_row_stream import (
     ClickhouseDriverRowStream,
-)
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_settings import (
-    ClickhouseDriverSettings,
-)
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_tuple_columns import (
-    ClickhouseDriverTupleColumns,
 )
 from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import (
     CLICKHOUSE_DRIVER_COMPRESSION,
@@ -117,13 +97,6 @@ class ClickhouseDriverClient(ClickhouseClient):
             ClickhouseDriverClient.remove_stack_trace(error.nested)
 
     async def create_connection(self, with_db: bool) -> None:
-        ClickhouseDriverMomentColumns.install()
-        ClickhouseDriverMapColumns.install()
-        ClickhouseDriverColumnTypes.install()
-        ClickhouseDriverTupleColumns.install()
-        ClickhouseDriverClientInfo.install()
-        ClickhouseDriverDecompressors.install()
-        ClickhouseDriverSettings.install()
         connection_settings = self.get_connection_settings(with_db)
         connections = ClickhouseDriverConnections(self.options["max_size"], connection_settings, self.pool_statistics)
         try:
@@ -210,7 +183,7 @@ class ClickhouseDriverClient(ClickhouseClient):
     async def run_command_without_database(self, statement: str) -> None:
         await self._connection.run(self._run_command, statement)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SQL)
     async def execute(
         self,
         query: str,
@@ -218,6 +191,7 @@ class ClickhouseDriverClient(ClickhouseClient):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
     ) -> StatementResult:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
@@ -226,22 +200,12 @@ class ClickhouseDriverClient(ClickhouseClient):
             async with self.acquire_connection() as connections:
                 return await connections.run(self._read_rows, sql, rows_by_position, external_sets)
         sql = self.get_inlined_query(query, values)
-        # Built first: a cluster's statements may read the database.
-        row_write_sql = await self.get_row_write_sql(sql)
+        changes_rows = self.is_row_write_sql(sql)
         async with self.acquire_connection() as connections:
-            if returns_rows and row_write_sql is None:
-                return await connections.run(self._read_rows, sql, rows_by_position)
-            write_sql = sql if row_write_sql is None else row_write_sql
-            try:
-                if row_write_sql is not None:
-                    await connections.run(self._run_command, row_write_sql)
-                    return StatementResult(None, [])
-                return await connections.run(self._run_command, sql)
-            except self.driver_errors.driver as error:
-                await self.kill_failed_mutations(
-                    write_sql, error, lambda kill_sql: connections.run(self._run_command, kill_sql)
-                )
-                raise
+            if changes_rows:
+                await connections.run(self._run_command, sql)
+                return StatementResult(None, [])
+            return await connections.run(self._run_command, sql)
 
     @staticmethod
     def _read_rows(
@@ -295,7 +259,7 @@ class ClickhouseDriverClient(ClickhouseClient):
         for statement in statements:
             library_client.execute(statement)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query: str, values: list[Any] | None = None) -> DescribedResult:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
@@ -309,7 +273,7 @@ class ClickhouseDriverClient(ClickhouseClient):
             result = await connections.run(self._read_rows, sql, True, external_sets)
             return DescribedResult(columns=result.column_names, rows=tuple(result.rows), row_count=result.row_count)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[list[Any]]) -> None:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
@@ -318,7 +282,7 @@ class ClickhouseDriverClient(ClickhouseClient):
                 self._run_commands, [self.get_inlined_query(query, row_values) for row_values in values]
             )
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.BULK_LOAD)
     async def copy(
         self,
         table: str,
@@ -345,17 +309,9 @@ class ClickhouseDriverClient(ClickhouseClient):
     def _insert_records(cls, library_client: Client, statement: str, records: list[tuple[Any, ...]]) -> None:
         library_client.execute(statement, cls._get_inserted_columns(records), columnar=True)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         self.log.debug(query)
         statements = self.split_script(query)
         async with self.acquire_connection() as connections:
-            try:
-                await connections.run(self._run_commands, statements)
-            except self.driver_errors.driver as error:
-                # The statement that failed is the one the error names its mutations for.
-                for statement in statements:
-                    await self.kill_failed_mutations(
-                        statement, error, lambda kill_sql: connections.run(self._run_command, kill_sql)
-                    )
-                raise
+            await connections.run(self._run_commands, statements)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.classes.class_path import ClassPath
+from hare.ddl.constants import INDEX_KEYS_REQUIRE_MODEL
 from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.expressions.declared_expressions import DeclaredExpressions
 from hare.ddl.generated_names import GeneratedNames
+from hare.declarations.declaration_values import DeclarationValues
 from hare.dialects.base.constants import SQL_DIALECT
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.query.expressions import Expression, F, Ordering
@@ -114,11 +116,6 @@ class Index:
         #: The key expressions as declared - what a migration file keeps, and what each database
         #: renders its own SQL for.
         self.declared_expressions: tuple[Any, ...] = tuple(expressions)
-        #: The key expressions resolved against the model in plain SQL once ``get_expressions()``
-        #: ran - what the index's generated name and its comparisons use, the same on every
-        #: database; the declared ones before that.
-        self.expressions = expressions
-        self._expressions_compiled = False
         self.extra = ""
         self.opclasses = list(opclasses or [])
         self.unique = unique
@@ -155,7 +152,7 @@ class Index:
         if self.fields:
             return [Order.DESC_NULLS_FIRST if order else Order.ASC_NULLS_LAST for order in self.field_orders]
         orders: list[Order] = []
-        for expression in self.expressions:
+        for expression in self.declared_expressions:
             order = expression.order if isinstance(expression, (Ordering, OrderedIndexKey)) else Order.ASC
             nulls_first = order.nulls_first
             if nulls_first is None:
@@ -217,7 +214,7 @@ class Index:
         """
         if not dialect.features.supports_index_key_order and (
             any(self.field_orders)
-            or any(isinstance(expression, (Ordering, OrderedIndexKey)) for expression in self.expressions)
+            or any(isinstance(expression, (Ordering, OrderedIndexKey)) for expression in self.declared_expressions)
         ):
             raise UnSupportedError(
                 f'An index key\'s direction ("-field", .asc(), .desc()) is not supported on {dialect} - its '
@@ -225,7 +222,7 @@ class Index:
             )
         if dialect.features.supports_index_nulls_order:
             return
-        for expression in self.expressions:
+        for expression in self.declared_expressions:
             if isinstance(expression, (Ordering, OrderedIndexKey)) and expression.order.nulls_first is not None:
                 raise UnSupportedError(
                     f"An index key's NULL placement (nulls_first=/nulls_last=) is not supported on {dialect} - "
@@ -291,17 +288,19 @@ class Index:
             name_parts.append(self.extra.strip())
         return tuple(name_parts)
 
-    def get_generated_expression_name(self, table_name: str) -> str:
-        """The name an unnamed expression-based index gets on ``table_name``.
+    def get_generated_name(self, model: type[Model]) -> str:
+        """The name an unnamed index gets for the supplied model binding.
 
         Args:
-            table_name: The indexed table.
+            model: The indexed model.
 
         Returns:
             The generated index name.
         """
         prefix = GeneratedNamePrefix.UNIQUE_INDEX if self.unique else GeneratedNamePrefix.INDEX
-        return GeneratedNames.get_index_name(prefix, table_name, self.field_names, self.get_name_parts())
+        return GeneratedNames.get_index_name(
+            prefix, model, self.get_key_names(model), self.get_name_parts(), expression_keys=not bool(self.fields)
+        )
 
     def get_index_type_sql(self) -> str:
         """The index's type as its ``CREATE INDEX`` names it - with the arguments of a type taking
@@ -378,24 +377,8 @@ class Index:
             for _column_name in meta.get_column_names((name,))
         ]
 
-    def get_expressions(self, model: type[Model]) -> None:
-        """Resolves the declared key expressions against the model in the dialect of
-        ``get_expression_dialect()``, into ``expressions`` - once.
-
-        Args:
-            model: The indexed model.
-        """
-        if self._expressions_compiled or not self.expressions:
-            return
-        if not any(isinstance(expression, (Expression, Ordering)) for expression in self.declared_expressions):
-            self._expressions_compiled = True
-            return
-        self.expressions = tuple(self.get_key_terms(model, self.get_expression_dialect()))
-        self._expressions_compiled = True
-
     def get_expression_dialect(self) -> Dialect:
-        """The dialect the key expressions are resolved in once, for the index's name and its
-        comparison with other declarations and the database's indexes - plain SQL by default.
+        """The dialect used to bind expressions for a stable generated name - plain SQL by default.
 
         Returns:
             The dialect.
@@ -470,35 +453,33 @@ class Index:
         # Unqualified, as an introspected index's key is - the two compare by their SQL text.
         return HareSqlField(column_name)
 
-    @property
-    def has_unresolved_expressions(self) -> bool:
-        """Whether a key expression still waits to be resolved against the model (``get_expressions()``)."""
-        return any(isinstance(expression, (Expression, Ordering)) for expression in self.expressions or ())
+    def get_key_names(self, model: type[Model] | None = None) -> list[str]:
+        """Describe the physical keys without changing the declaration.
 
-    @property
-    def field_names(self) -> list[str]:
-        """The index's keys as text: its fields' names, or the SQL of each expression.
-
-        Raises:
-            ConfigurationError: The expressions aren't built yet, or the index has no key.
+        A model binds field references and expression trees. Without a model,
+        only declared field names or already constructed SQL terms are available;
+        catalog reconstruction uses that form before creating its model class.
+        The naming context is independent of the database executing the index.
         """
         if self.fields:
-            return list(self.fields)
-        if self.expressions:
-            if self.has_unresolved_expressions:
-                raise ConfigurationError("Index expressions must be resolved before accessing field_names.")
-            return [
-                expression.get_sql(INDEX_KEY_SQL_CONTEXT)
-                if isinstance(expression, OrderedIndexKey)
-                else f"({cast('Term', expression).get_sql(INDEX_KEY_SQL_CONTEXT)})"
-                for expression in self.expressions
-            ]
-        raise ConfigurationError("At least one field or expression is required to define an index.")
+            return model._meta.get_column_names(self.fields) if model is not None else list(self.fields)
+        if model is None:
+            if any(isinstance(expression, (Expression, Ordering)) for expression in self.declared_expressions):
+                raise ConfigurationError(INDEX_KEYS_REQUIRE_MODEL)
+            terms: Sequence[Term] = self.declared_expressions
+        else:
+            terms = self.get_key_terms(model, self.get_expression_dialect())
+        return [
+            term.get_sql(INDEX_KEY_SQL_CONTEXT)
+            if isinstance(term, OrderedIndexKey)
+            else f"({term.get_sql(INDEX_KEY_SQL_CONTEXT)})"
+            for term in terms
+        ]
 
     def __repr__(self) -> str:
         argument = ""
-        if self.expressions:
-            argument += ", ".join(map(str, self.expressions))
+        if self.declared_expressions:
+            argument += ", ".join(map(str, self.declared_expressions))
         if self.fields:
             fields = self.get_declared_fields()
             argument += f"{fields=}"
@@ -513,19 +494,7 @@ class Index:
         return self.__class__.__name__ + "(" + argument + ")"
 
     def __hash__(self) -> int:
-        # Changes once get_expressions() resolves the expressions - nothing puts an unresolved Index
-        # into a set or dict.
-        return hash(
-            (
-                tuple(self.fields),
-                tuple(self.field_orders),
-                self.name,
-                tuple(self.expressions),
-                tuple(self.opclasses),
-                self.unique,
-                tuple(self.include),
-            )
-        )
+        return hash(DeclarationValues.get_key(self))
 
     def __eq__(self, other: Any) -> bool:
-        return type(self) is type(other) and self.__dict__ == other.__dict__
+        return type(self) is type(other) and DeclarationValues.are_equal(self, other)

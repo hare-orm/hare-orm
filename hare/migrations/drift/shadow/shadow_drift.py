@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from hare.exceptions import UnSupportedError
@@ -9,7 +10,7 @@ from hare.inspectdb.exceptions import SchemaNotFoundError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.inspectdb.introspection.enums import SchemaPartType
 from hare.inspectdb.introspection.schema_part import SchemaPart
-from hare.migrations.autodetection.required_extensions import RequiredExtensions
+from hare.migrations.constants import DEFAULT_MIGRATION_TABLE_NAME
 from hare.migrations.drift.constants import (
     DRIFT_NAMED_OBJECT_OPERATIONS,
     DRIFT_SCHEMA_OBJECT_PART_TYPES,
@@ -18,7 +19,6 @@ from hare.migrations.drift.constants import (
 from hare.migrations.drift.drift_result import DriftResult
 from hare.migrations.drift.shadow.schema_comparison import SchemaComparison
 from hare.migrations.drift.shadow.shadow_state import ShadowState
-from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 from hare.migrations.operations import CreateExtension, CreateSchema, HareOperation
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
@@ -90,14 +90,16 @@ class ShadowDrift:
         schemas = {self.get_model_schema(model_state) for _key, model_state in built}
         async with shadow_database_class(connection, schemas) as shadow:
             shadow_client = cast("DatabaseClient", shadow.client)
-            shadow_state = ShadowState.get(built, shadow)
+            shadow_state = ShadowState.get(built, shadow, self.new_state)
             models = [shadow_state.apps.get_model(f"{app_label}.{name}") for (app_label, name), _state in built]
             shadow_editor = dialect.schema_editor_class(shadow_client)
             await shadow_client.execute_built_script(
                 shadow_editor.table_creation.get_create_schema_sql(safe=False, models=models)
             )
+            identities = shadow.get_catalog_identities()
+            real_parts = [identities.map_part(part) for part in real_parts]
             shadow_parts = [
-                part.with_texts_replaced(shadow.replace_shadow_names)
+                identities.map_part(part)
                 for part in await self.read_parts(
                     shadow_client, introspector_class, compared, shadow.get_shadow_schema_name, reading_shadow=True
                 )
@@ -121,6 +123,7 @@ class ShadowDrift:
             untracked_tables=untracked_tables,
             untracked_columns=sorted(comparison.untracked_columns),
             mismatched_columns=comparison.mismatched_columns,
+            mismatched_objects=comparison.mismatched_objects,
         )
 
     async def get_shared_schema(self) -> str | None:
@@ -128,10 +131,10 @@ class ShadowDrift:
         the default one of the connection outside the tenant's; None on another connection."""
         if self.connection.tenant_schema is None:
             return None
-        # Local import: the connections import the dialects.
-        from hare.core.connections.connections import Connections
-
-        shared_client = Connections.current().create_independent(self.connection.connection_alias)
+        connections = self.connection.connection_handler
+        if connections is None:
+            connections = self.new_state.environment.connections
+        shared_client = connections.create_independent(self.connection.connection_alias)
         try:
             return await DatabaseCatalog.get_default_schema(shared_client)
         finally:
@@ -303,12 +306,10 @@ class ShadowDrift:
             schema_parts = await introspector_class.fetch_schema_parts(client, read_schema, tables, object_names)
             prefix = self.get_table_prefix(schema)
             parts.extend(
-                SchemaPart(
-                    part.part_type,
-                    f"{prefix}{part.table}" if part.table else part.table,
-                    part.name if part.table else f"{prefix}{part.name}",
-                    part.definition,
-                    part.value,
+                replace(
+                    part,
+                    table=f"{prefix}{part.table}" if part.table else part.table,
+                    name=part.name if part.table else f"{prefix}{part.name}",
                 )
                 for part in schema_parts
             )
@@ -328,7 +329,7 @@ class ShadowDrift:
         """
         required: set[str] = set()
         for _key, model_state in compared:
-            required |= RequiredExtensions.get_for_model_state(model_state, [self.connection.dialect])
+            required |= model_state.get_required_extensions([self.connection.dialect])
         if not required:
             return []
         existing = await introspector_class.fetch_extensions(self.connection)
@@ -346,5 +347,5 @@ class ShadowDrift:
         swept_schema = self.default_schema if self.schema is None else self.schema
         real_tables = set(await DatabaseCatalog.get_table_names(self.connection, schema=swept_schema))
         known = {table for schema, table in known_tables if schema == swept_schema}
-        known |= {NoopRecorder().table_name, DISTRIBUTED_DECISIONS_TABLE_NAME, *self.journal_tables}
+        known |= {DEFAULT_MIGRATION_TABLE_NAME, DISTRIBUTED_DECISIONS_TABLE_NAME, *self.journal_tables}
         return sorted(real_tables - known)

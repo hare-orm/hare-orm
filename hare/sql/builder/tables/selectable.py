@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.sql.builder.tables.declarations import SourceBinding
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.identifiers import Identifiers
 from hare.sql.sql_context import SqlContext
@@ -27,13 +28,15 @@ class Selectable(Node):
 
     def __init__(self, alias: str | None) -> None:
         self.alias = alias
+        self.source_binding = SourceBinding()
 
     @BuilderMethods.builder
-    def as_(self, alias: str) -> Self:
+    def as_(self, alias: str | None) -> Self:
         # Join aliases are built cumulatively (previous alias + "__" + hop) with no length cap, so
         # two long multi-hop paths would collide once the database truncates them to its
         # identifier limit - they are shortened with a digest of the whole alias instead.
-        self.alias = Identifiers.get_within_limit(alias)
+        self.alias = Identifiers.get_within_limit(alias) if alias is not None else None
+        self.source_binding = SourceBinding()
         return self
 
     def field(self, name: str) -> Field:
@@ -70,6 +73,18 @@ class Selectable(Node):
 
     def get_table_name(self) -> str | None:
         return self.alias
+
+    def get_column_sql(self, name: str, sql_context: SqlContext) -> str:
+        """Render a column in this source's namespace.
+
+        Row references such as a trigger's NEW/OLD supply their namespace here, before SQL
+        rendering. A caller never needs to replace text inside a completed statement.
+        """
+        column_sql = sql_context.quote(name)
+        name = sql_context.source_aliases.get(self.source_binding, self.get_table_name())
+        if sql_context.with_namespace or self.alias or self.source_binding in sql_context.source_aliases:
+            return f"{sql_context.quote(name)}.{column_sql}"
+        return column_sql
 
     def get_sql(self, sql_context: SqlContext) -> str:
         """The SQL of the source of rows.

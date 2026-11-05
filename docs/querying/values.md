@@ -1,5 +1,11 @@
 # `values()` and `values_list()`
 
+All result shapes use one column layout for ordinary queries, streamed batches and
+write results with `RETURNING`. Column aliases determine which driver values are read;
+extra columns used for ordering do not enter the result. Each selected column is
+converted once. A composite key whose components are all NULL is returned as `None`;
+a partially NULL key retains its tuple of components.
+
 `.values()` and `.values_list()` return a full queryset of dicts / tuples (flat values, namedtuples).
 Every chained method applies the same `.values()` call to the chained queryset —
 `qs.values("a").filter(x=1)` is exactly `qs.filter(x=1).values("a")` — so all queryset semantics (slicing
@@ -59,8 +65,12 @@ Pages through the rows. Without an `order_by()`, pages follow `Meta.ordering`, e
 grouped query, else the primary key; the columns making the ordering unique per row are appended — the
 group key of a grouped query, the selected fields of a `.distinct()` one, otherwise the primary key (when
 the ordering isn't unique already) and every selected field across a to-many relation. Pages by keyset
-(safe under concurrent deletes) when every ordering column is a selected field of the model itself,
-otherwise by `OFFSET`. The query's own slice and `after_cursor()` bound the whole iteration.
+(safe under concurrent deletes) only when all ordering values can be read from selected direct model
+fields that support `<`/`>`, and the query's shape permits keyset boundaries. `distinct(<fields>)`,
+windows, composite-key output, row-changing extensions, repeated model rows and unresolved ordering
+ties on models without a primary key use `OFFSET`. Other unsupported ordering fields also use
+`OFFSET`, which does not preserve pagination under concurrent deletes. The query's own slice and
+`after_cursor()` bound the whole iteration.
 
 ## <a id="distinct-ordered"></a>`.distinct()` ordered by a field it doesn't select
 
@@ -95,8 +105,8 @@ with a values query raises `QueryError`.
 
 ## <a id="relation-field-paths"></a>Relations and `pk` in field paths
 
-A field path may end on a relation or on `pk`, everywhere a field path is accepted —
-`values()`/`values_list()`, `order_by()`, `group_by()`, `distinct(<fields>)`, `F()` and aggregates:
+A field path in `values()`/`values_list()`, `order_by()`, `group_by()` or `distinct(<fields>)`
+may end on a relation or on `pk`:
 
 - a forward FK/O2O name (`values("author")`) reads its own key column (`author_id`) with no `JOIN` — the
   value stays even when the related row is hidden by its default scope (tenant, soft delete,
@@ -107,6 +117,10 @@ A field path may end on a relation or on `pk`, everywhere a field path is accept
 - a trailing `pk` (`values("tags__pk")`, `values("author__pk")`, `order_by("tags__pk")`,
   `group_by("author__pk")`, `only("pk")`) reads the primary key field of the model it reaches — through
   the `JOIN`, so `author__pk` is `NULL` for a hidden author while `author` keeps the column value.
+
+Expression paths have their own semantics: `F("author")` reads the related primary key through a
+scoped JOIN, unlike `values("author")` (see [Expressions](expressions.md)). Aggregates apply their
+expression rules; `Count` also supports composite keys as described below.
 
 The output keeps the name you passed (`{"tags": 1}`, `row.tags` of a `named=True` row). A key read this
 way works like any selected field: `values("tags").annotate(n=Count("id"))` groups by the tag (a row per
@@ -119,8 +133,10 @@ give `(1, 2)`, and `None` when every component is `NULL`; `group_by()`, `order_b
 `Meta.ordering` too) and `distinct(<fields>)` use every component. Renamed (`values(key="pk")`), it is the
 same key under the new name: `filter(key=(1, 2))`, `filter(key__in=[...])`, `order_by("-key")` and
 `values("key")` read its components as `pk` does. `Count("shelf")` counts the rows with
-a key, `Count("shelf", distinct=True)` the distinct keys, never a `NULL` one. `F()` of such a relation
-raises `QueryError` naming its components.
+a key, `Count("shelf", distinct=True)` the distinct keys, never a `NULL` one.
+`annotate(key=F("shelf"))` and `alias(key=F("shelf"))` also expose the tuple through
+`values("key")` or `values_list("key", flat=True)`. Using that relation as a scalar expression,
+such as `F("shelf") + 1`, raises `QueryError` naming its components.
 
 ## <a id="date-part-paths"></a>Date parts in field paths
 

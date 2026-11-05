@@ -14,8 +14,12 @@ from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
 from hare.ddl.schema_objects.materialized_view import MaterializedView
 from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
+from hare.ddl.schema_requirements import SchemaRequirements
 from hare.dialects.base.schema.data.model_sql_data import ModelSqlData
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
+from hare.dialects.base.schema.tables.table_definition import TableDefinition
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.fields.enums import OnDelete
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -154,30 +158,15 @@ class TableCreation(SchemaEditorPart):
         storage_table_name = (
             table_options.get_storage_table_name(model._meta.db_table) if table_options else model._meta.db_table
         )
-        qualified_table_name = self.editor.qualify_table_name(storage_table_name, schema)
-        table_definitions, constraint_statements, references, deferred_foreign_key_constraints = (
-            self.get_table_definitions(model, safe, deferred_table_keys)
-        )
-
-        table_create_string = self.editor.TABLE_CREATE_TEMPLATE.format(
-            prefix=table_options.get_create_prefix_sql() if table_options else "",
-            exists=self.get_exists_sql(safe),
-            table_name=qualified_table_name,
-            fields="\n    {}\n".format(",\n    ".join(table_definitions)),
-            comment=self.editor.table_comments.get_table_comment_sql(
-                table=qualified_table_name, comment=model._meta.table_description
-            )
-            if model._meta.table_description
-            else "",
-            extra=table_options.get_create_suffix_sql(model, self.editor) if table_options else "",
-        )
+        definition = self.get_definition(model, safe, deferred_table_keys, storage_table_name=storage_table_name)
+        table_create_string = definition.get_create_sql(self.editor.TABLE_CREATE_TEMPLATE)
         table_create_string = "\n".join(
             [
                 table_create_string,
                 # First: what follows names the model's table, which may be this one.
                 *(table_options.get_companion_table_sqls(model, self.editor, replaces=False) if table_options else ()),
                 *(
-                    table_options.get_after_create_sqls(model, qualified_table_name, self.editor)
+                    table_options.get_after_create_sqls(model, storage_table_name, self.editor)
                     if table_options
                     else ()
                 ),
@@ -201,13 +190,69 @@ class TableCreation(SchemaEditorPart):
             table_key=(schema, model._meta.db_table),
             model=model,
             table_sql=table_create_string,
-            constraint_sqls=constraint_statements,
-            references=references,
+            definition=definition,
+            constraint_sqls=list(definition.constraints),
+            references=set(definition.references),
             many_to_many_tables_sql=many_to_many_tables_sql,
             deferred_foreign_key_sqls=[
                 self.get_add_foreign_key_sql(model, constraint, safe)
-                for constraint in deferred_foreign_key_constraints
+                for constraint in definition.deferred_foreign_keys
             ],
+        )
+
+    def get_create_plan(self, model: type[Model]) -> SchemaChangePlan:
+        """Prepare the whole creation before executing any of its schema objects."""
+        data = self.get_model_sql_data(model)
+        statements = [
+            *self.get_schema_objects_before_table_sqls(model),
+            "\n".join([data.table_sql, *data.many_to_many_tables_sql]),
+            *(
+                sql
+                for trigger in model._meta.triggers
+                for sql in self.editor.trigger_statements.get_trigger_create_sqls(model, trigger)
+            ),
+            *data.constraint_sqls,
+            *self.get_schema_objects_after_table_sqls(model),
+        ]
+        return SchemaChangePlan(tuple(SchemaStatement(sql) for sql in statements), after=data.definition)
+
+    def get_definition(
+        self,
+        model: type[Model],
+        safe: bool = False,
+        deferred_table_keys: frozenset[tuple[str | None, str]] = frozenset(),
+        *,
+        storage_table_name: str | None = None,
+    ) -> TableDefinition:
+        """Compile one table's declaration for creation or replacement without I/O.
+
+        Storage options, generated columns, constraints and comments use the same
+        compiler for both paths. The optional name is a physical replacement name,
+        not a model rename; references continue to describe the target model.
+        """
+        options = model._meta.get_table_options(self.editor.client.dialect)
+        if options is not None:
+            options.raise_if_unsupported(model, self.editor.client.features)
+        if storage_table_name is None:
+            storage_table_name = (
+                options.get_storage_table_name(model._meta.db_table) if options else model._meta.db_table
+            )
+        qualified_name = self.editor.qualify_table_name(storage_table_name, model._meta.schema)
+        columns, constraints, references, deferred = self.get_table_definitions(model, safe, deferred_table_keys)
+        return TableDefinition(
+            qualified_name=qualified_name,
+            columns=tuple(columns),
+            constraints=tuple(constraints),
+            references=frozenset(references),
+            deferred_foreign_keys=tuple(deferred),
+            prefix=options.get_create_prefix_sql() if options else "",
+            exists=self.get_exists_sql(safe),
+            suffix=options.get_create_suffix_sql(model, self.editor) if options else "",
+            comment=self.editor.table_comments.get_table_comment_sql(
+                table=qualified_name, comment=model._meta.table_description
+            )
+            if model._meta.table_description
+            else "",
         )
 
     def get_models_to_create(self) -> list[type[Model]]:
@@ -292,7 +337,7 @@ class TableCreation(SchemaEditorPart):
         fields_string = "\n    {}\n".format(",\n    ".join(column_lines))
         many_to_many_create_string = self.editor.MANY_TO_MANY_TABLE_TEMPLATE.format(
             exists=self.get_exists_sql(safe),
-            table_name=qualified_through,
+            table_name=self.editor.get_schema_table_sql(through_table_name, many_to_many_schema),
             fields=fields_string,
             extra="",
             comment=self.editor.table_comments.get_table_comment_sql(
@@ -463,7 +508,7 @@ class TableCreation(SchemaEditorPart):
             ConfigurationError: An entry of ``Meta.constraints`` isn't a constraint.
             UnSupportedError: A constraint the dialect has no DDL for.
         """
-        qualified_table = self.editor.qualify_table_name(model._meta.db_table, model._meta.schema)
+        qualified_table = self.editor.get_storage_table_sql(model)
         table_clauses: list[str] = []
         statements: list[str] = []
         unique_column_keys: set[tuple[str, ...]] = set()
@@ -495,8 +540,8 @@ class TableCreation(SchemaEditorPart):
                     statement = self.editor.ADD_CONSTRAINT_TEMPLATE.format(
                         table=qualified_table, constraint=unique_clause
                     )
-                    if safe and self.editor.SAFE_ADD_CONSTRAINT_TEMPLATE is not None:
-                        statement = self.editor.SAFE_ADD_CONSTRAINT_TEMPLATE.format(statement=statement)
+                    if safe:
+                        statement = self.editor.get_safe_add_constraint_sql(statement)
                     statements.append(statement.removesuffix(";"))
                     continue
                 unique_column_keys.add(column_key)
@@ -531,7 +576,7 @@ class TableCreation(SchemaEditorPart):
         return [index_sql for index_sql in dict.fromkeys(index_sqls) if index_sql]
 
     def get_required_extensions(self, models: Sequence[type[Model]]) -> list[str]:
-        """Returns every extension the models need on this connection's dialect (``RequiredExtensions``)
+        """Returns every extension the models need on this connection's dialect (``SchemaRequirements``)
         - each once, in first-use order.
 
         Args:
@@ -540,13 +585,10 @@ class TableCreation(SchemaEditorPart):
         Returns:
             The extension names.
         """
-        # Local import: the migrations package imports the schema editor.
-        from hare.migrations.autodetection.required_extensions import RequiredExtensions
-
         dialects = [self.editor.client.dialect]
         extensions: dict[str, None] = {}
         for model in models:
-            extensions.update(dict.fromkeys(sorted(RequiredExtensions.get_for_model(model, dialects))))
+            extensions.update(dict.fromkeys(sorted(SchemaRequirements.get_extensions_for_model(model, dialects))))
         return list(extensions)
 
     def get_foreign_key_constraint_clause(self, constraint: ForeignKeyConstraint) -> str:
@@ -581,8 +623,8 @@ class TableCreation(SchemaEditorPart):
             table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
             constraint=self.get_foreign_key_constraint_clause(constraint),
         )
-        if safe and self.editor.SAFE_ADD_CONSTRAINT_TEMPLATE is not None:
-            statement = self.editor.SAFE_ADD_CONSTRAINT_TEMPLATE.format(statement=statement)
+        if safe:
+            statement = self.editor.get_safe_add_constraint_sql(statement)
         return f"{statement};"
 
     def get_composite_foreign_key_constraint(
@@ -629,9 +671,6 @@ class TableCreation(SchemaEditorPart):
             on_delete=foreign_key_field.db_on_delete,
             name=GeneratedNames.get_foreign_key_name(model._meta.db_table, (db_field,)),
         )
-
-    def get_unique_constraint_name(self, model: type[Model], field_names: list[str]) -> str:
-        return GeneratedNames.get_index_name(GeneratedNamePrefix.UNIQUE_CONSTRAINT, model, field_names)
 
     def get_composite_pk_constraint_sql(self, model: type[Model], field_names: list[str]) -> str:
         """The table-level ``PRIMARY KEY`` of a composite primary key, among the column definitions.

@@ -1,7 +1,8 @@
 # Versioned models
 
-`VersionedModel` of `hare.contrib.versioning` is an append-only versioning base: every change creates a
-new row sharing the same `id` but a higher `version`, instead of mutating a row in place.
+`VersionedModel` of `hare.contrib.versioning` provides helpers for creating a new row with the same `id`
+and the next `version`. Use `create_new_version()` for versioned edits; ordinary `save()` and queryset
+updates retain their normal behavior.
 
 ```python
 class VersionedModel(Model):
@@ -74,8 +75,9 @@ copied from the old version. An instance loaded with `.only()`/`.defer()` raises
 `IncompleteInstanceError` naming the unfetched fields, unless they are passed as overrides;
 database-computed and `auto_now` columns never need to be loaded.
 
-`create_new_version()` of a version that isn't the highest raises `IntegrityError` — the next number is
-taken.
+`create_new_version()` creates a new row with the supplied object's version plus one,
+without changing that object or looking up the highest version.
+An existing `(id, version + 1)` raises `IntegrityError` where the database enforces that key.
 
 ## <a id="soft-delete"></a>With soft delete
 
@@ -87,9 +89,8 @@ the manager hides.
 
 ## <a id="clickhouse"></a>Writing versions (ClickHouse)
 
-ClickHouse keeps nothing unique: the key `(id, version)` isn't checked, so `create_new_version()` of a
-version that isn't the highest raises nothing, and two `create_new_version()` of one version running
-at once both write — each leaves two rows of one key (see
+ClickHouse does not enforce uniqueness of `(id, version)`. Reusing an existing version number or
+calling `create_new_version()` concurrently for the same version can write duplicate keys (see
 [ClickHouse models](../dialects/clickhouse/models.md#uniqueness-and-relations)). Write the versions of one
 record from one task at a time there.
 

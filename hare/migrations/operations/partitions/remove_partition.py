@@ -19,8 +19,6 @@ class RemovePartition(PartitionOperation):
             ``DefaultPartition`` of the dialect's partitioning.
     """
 
-    backward_reads_state_left = False
-
     def describe(self) -> str:
         return f"Remove partition {self.partition.name} of {self.model_name} with its rows"
 

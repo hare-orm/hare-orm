@@ -55,7 +55,7 @@ class DeclaredUniqueness:
             if isinstance(constraint, UniqueConstraint) and constraint.fields:
                 declared.append(cls(tuple(cls.get_attribute_names(model, constraint.fields)), constraint.condition))
         for index in meta.indexes:
-            if isinstance(index, Index) and index.unique and index.fields and not index.expressions:
+            if isinstance(index, Index) and index.unique and index.fields and not index.declared_expressions:
                 declared.append(
                     cls(tuple(cls.get_attribute_names(model, index.fields)), getattr(index, "condition", None))
                 )

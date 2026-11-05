@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from hare.classes.container_traversal import ContainerTraversal
 from hare.dialects.enums import ParameterPosition
 from hare.exceptions import (
     QueryError,
@@ -24,15 +25,15 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class RawSQL(ArithmeticOperators, Plannable, Term):  # type: ignore[misc]
     """A literal SQL fragment put into the query as written (``.annotate(idp=RawSQL("id + %s", [1]))``,
     ``.filter(id__in=RawSQL('SELECT ...'))``).
 
-    A value that varies per call belongs in ``params``, never interpolated into ``sql`` - that is an
-    SQL injection hole. ``params`` are bound at the ``%s`` placeholders, left to right. A literal
+    A value that varies per call belongs in ``parameters``, never interpolated into ``sql`` - that is an
+    SQL injection hole. ``parameters`` are bound at the ``%s`` placeholders, left to right. A literal
     ``%`` is written ``%%`` (``LIKE '%%stuff%%'``).
     """
 
@@ -41,6 +42,7 @@ class RawSQL(ArithmeticOperators, Plannable, Term):  # type: ignore[misc]
         ("parameters", PlanPartType.PARAMETERS),
         # The name a query selects it under - its annotation's key.
         ("alias", PlanPartType.NONE),
+        ("expression_identity", PlanPartType.NONE),
     )
 
     def __init__(self, sql: str, parameters: Sequence[Any] = ()) -> None:
@@ -65,7 +67,7 @@ class RawSQL(ArithmeticOperators, Plannable, Term):  # type: ignore[misc]
                     "parameter, or json.dumps(...) of it for JSON"
                 )
             if isinstance(parameter, (list, tuple)):
-                Value.raise_if_nested_too_deeply(parameter, "RawSQL")
+                ContainerTraversal.check(parameter, "RawSQL")
         self.sql = sql
         self.parameters = [ValueWrapper(self.get_parameter_value(parameter)) for parameter in parameters]
 
@@ -82,10 +84,8 @@ class RawSQL(ArithmeticOperators, Plannable, Term):  # type: ignore[misc]
         """
         return list(parameter) if isinstance(parameter, tuple) else parameter
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        for parameter in self.parameters:
-            yield from parameter.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield from self.parameters
 
     def _combine(self, other: Any, connector: ArithmeticOperator, right_hand: bool) -> CombinedExpression:
         """Builds an arithmetic expression with this SQL fragment embedded as is.

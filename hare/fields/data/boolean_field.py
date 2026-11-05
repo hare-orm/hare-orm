@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 
@@ -29,8 +28,6 @@ class BooleanField(Field[TBool]):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-
-    native_write_check = NativeWriteCheck.NOTHING
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
         # Imported here: the modules import each other.

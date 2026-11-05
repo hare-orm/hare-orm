@@ -120,7 +120,7 @@ class ExclusionConstraint:
     using: ExclusionConstraintUsing = ExclusionConstraintUsing.GIST
     condition: Q | RawSQLTerm | None = None
     include: tuple[str, ...] = ()        # дополнительные колонки INCLUDE в индексе ограничения
-    deferrable: bool = False             # проверяется при фиксации транзакции (или после SET CONSTRAINTS ... DEFERRED)
+    deferrable: bool = False             # допускает SET CONSTRAINTS ... DEFERRED
     initially_deferred: bool = False     # требует deferrable=True
 ```
 
@@ -148,8 +148,10 @@ class Loan(Model):
 `(Lower("code"), "=")`, — которое пишется SQL PostgreSQL и переименовывается вместе с полями, которые оно
 читает, или `RawSQLTerm`, записываемый как есть.
 
-Отложенное (`deferrable`) ограничение исключения позволяет транзакции пройти через состояние с
-пересечением — например, поменять местами две выдачи, — если к моменту фиксации пересечений не осталось.
+Проверку ограничения исключения с `deferrable=True` можно отложить через `SET CONSTRAINTS ... DEFERRED`
+или задать отложенной с начала транзакции через `initially_deferred=True`. После этого транзакция может
+пройти через состояние с пересечением — например, поменять местами две выдачи, — если к моменту
+фиксации пересечений не осталось.
 
 У индекса GiST нет своего класса операторов для обычной скалярной колонки (ключа `book` выше, числа,
 текста, даты, uuid и т. п.) — его даёт расширение `btree_gist`. Ограничению `ExclusionConstraint` с

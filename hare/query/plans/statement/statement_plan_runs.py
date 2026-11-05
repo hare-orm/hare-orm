@@ -9,7 +9,6 @@ from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 from hare.query.statements.building.query_annotations import QueryAnnotations
 
 if TYPE_CHECKING:
@@ -47,7 +46,7 @@ class StatementPlanRuns:
             True when this query runs on the plan - the caller then builds nothing.
         """
         if plan is None:
-            plan = StatementPlans.find(plan_key)
+            plan = StatementPlans.find(query.model, plan_key)
         if plan is None or not query._runs_compiled_statement:
             return False
         parameters = StatementPlanRuns.get_plan_parameters(query, plan, current_values, paginate)
@@ -55,7 +54,7 @@ class StatementPlanRuns:
             return False
         if query._call_signature_record is not None:
             # Kept under the key of the queryset's calls too, as a plan built now is.
-            StatementPlanRuns.record_call_signature_plan(query, plan, query._get_plan_value_description(plan))
+            StatementPlanRuns.record_call_signature_plan(query, plan, query._get_plan_value_description())
         return StatementPlanRuns.run_on_plan(query, plan, parameters)
 
     @staticmethod
@@ -94,7 +93,6 @@ class StatementPlanRuns:
         Returns:
             True - the query runs on the plan.
         """
-        query.query = plan.query_builder
         query._compiled_statement = (plan.sql, parameters)  # type: ignore[assignment]
         query._annotation_output_fields = dict(plan.annotation_output_fields)
         query._statement_plan = plan
@@ -177,7 +175,7 @@ class StatementPlanRuns:
         description_value_sources, repeated_values = value_sources
         # A query with a plan that didn't run on it - built to be shown or built into another
         # query, or with a value the plan can't bind - keeps that plan.
-        existing_plan = StatementPlans.find(plan_key)
+        existing_plan = StatementPlans.find(query.model, plan_key)
         if existing_plan is not None:
             query._statement_plan = existing_plan
             StatementPlanRuns.record_call_signature_plan(query, existing_plan, description)
@@ -194,8 +192,12 @@ class StatementPlanRuns:
             binds_ctes,
             result_reading,
             tuple(scope_sources),
+            sql_context=query._connection.sql_context,
         )
-        StatementPlans.record(plan_key, plan)
+        if plan.sql is None:
+            query._statement_plan = None
+            return
+        StatementPlans.record(query.model, plan_key, plan)
         StatementPlanRuns.record_call_signature_plan(query, plan, description)
 
     @staticmethod
@@ -274,7 +276,6 @@ class StatementPlanRuns:
             True when the query runs on the plan; False when it is built - the plan it builds is then
             kept under the key too.
         """
-        CallsBeforeSetup.raise_if_invalid(query)
         query._call_signature_record = None
         type_structure, type_values = query._get_call_signature_type_part()
         if type_structure is None:

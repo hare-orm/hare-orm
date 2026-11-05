@@ -29,22 +29,16 @@ class SqliteNumberRenderers:
         Args:
             renderers: The renderers.
         """
-        renderers.register(functions.Statistic, cls.render_statistic)
+        renderers.register_name(functions.Statistic, cls.get_statistic_name)
         renderers.register_name(analytics.Statistic, cls.get_statistic_name)
         renderers.register(functions.RandomNumber, cls.render_random_number)
         renderers.register(functions.GreatestLeast, cls.render_greatest_least)
         renderers.register(term_functions.Mod, cls.render_mod)
-        renderers.register(term_functions.FloatMod, cls.render_float_mod)
-        renderers.register(functions.MathFunction, cls.render_math_function)
+        renderers.register(term_functions.FloatMod, term_functions.Function.get_function_sql)
+        renderers.register_name(functions.MathFunction, cls.get_math_function_name)
 
     @staticmethod
-    def render_statistic(function: functions.Statistic, sql_context: SqlContext) -> str:
-        return function.get_statistic_sql(
-            sql_context.note_connection_function(SQLITE_STATISTICS_FUNCTION_NAMES[function.name]), sql_context
-        )
-
-    @staticmethod
-    def get_statistic_name(function: analytics.Statistic, sql_context: SqlContext) -> str:
+    def get_statistic_name(function: analytics.Statistic | functions.Statistic, sql_context: SqlContext) -> str:
         return sql_context.note_connection_function(SQLITE_STATISTICS_FUNCTION_NAMES[str(function.name)])
 
     @staticmethod
@@ -80,12 +74,6 @@ class SqliteNumberRenderers:
         return f"(({left_sql})%({right_sql}))"
 
     @staticmethod
-    def render_float_mod(function: term_functions.FloatMod, sql_context: SqlContext) -> str:
-        """SQLite's floating-point ``MOD()``."""
-        return term_functions.Function.get_function_sql(function, sql_context)
-
-    @staticmethod
-    def render_math_function(function: functions.MathFunction, sql_context: SqlContext) -> str:
-        args_sql = [function.get_arg_sql(arg, sql_context) for arg in function.args]
-        name = sql_context.note_connection_function(f"{SQLITE_MATH_FUNCTION_PREFIX}{function.name.lower()}")
-        return f"{name}({','.join(args_sql)})"
+    def get_math_function_name(function: functions.MathFunction, sql_context: SqlContext) -> str:
+        """Register and return the connection function used for this numeric operation."""
+        return sql_context.note_connection_function(f"{SQLITE_MATH_FUNCTION_PREFIX}{function.name.lower()}")

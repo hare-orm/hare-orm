@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import datetime
 import logging
 import sqlite3
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import closing
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import aiosqlite
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
 from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
 from hare.dialects.base.client.driver_statement_log_filter import DriverStatementLogFilter
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.sqlite.client.constants import SQLITE_ATTACH_DATABASE_SQL
@@ -31,6 +31,7 @@ from hare.dialects.sqlite.drivers.constants import (
     SQLITE_FTS5_COMPILE_OPTION_SQL,
     SQLITE_LAST_STATEMENT_CHANGES_SQL,
     SQLITE_OPEN_FAILED_MESSAGE,
+    SQLITE_SETUP_RELEASE_FAILED,
 )
 from hare.dialects.sqlite.functions.comparison.sqlite_cast import SqliteCast
 from hare.dialects.sqlite.functions.comparison.sqlite_greatest_least import SqliteGreatestLeast
@@ -44,7 +45,6 @@ from hare.dialects.sqlite.functions.json.sqlite_json_path import SqliteJsonPath
 from hare.dialects.sqlite.functions.sqlite_math_functions import SqliteMathFunctions
 from hare.dialects.sqlite.functions.statistics.sqlite_statistics import SqliteStatistics
 from hare.dialects.sqlite.functions.text.sqlite_text_functions import SqliteTextFunctions
-from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqliteParameterAdapters
 from hare.dialects.sqlite.search.sqlite_full_text_query import SqliteFullTextQuery
 from hare.dialects.sqlite.server_versions import (
     SQLITE_STRICT_SERVER_VERSION,
@@ -119,16 +119,6 @@ class AiosqliteClient(SqliteClient):
         closed_connection_message=AIOSQLITE_NO_ACTIVE_CONNECTION_MESSAGE,
     )
 
-    @staticmethod
-    def install_parameter_adapters() -> None:
-        """Registers the text SQLite stores for Python values it has no native type for -
-        process-wide in ``sqlite3``, so raw queries, arithmetic and annotations, where the field a
-        value belongs to isn't known, get it too."""
-        sqlite3.register_adapter(Decimal, SqliteParameterAdapters.adapt_decimal)
-        sqlite3.register_adapter(datetime.date, lambda value: value.isoformat())
-        sqlite3.register_adapter(datetime.datetime, SqliteParameterAdapters.adapt_datetime)
-        sqlite3.register_adapter(datetime.time, SqliteParameterAdapters.adapt_time)
-
     async def swap_busy_timeout(self, connection: aiosqlite.Connection, milliseconds: int) -> int:
         async with connection.execute(SQLITE_BUSY_TIMEOUT_SQL) as cursor:
             row = await cursor.fetchone()
@@ -180,11 +170,15 @@ class AiosqliteClient(SqliteClient):
                 ) from error
             try:
                 await self._set_up_connection(opened_connection)
-            except BaseException:
+            except BaseException as error:
                 # A connection whose setup failed - a PRAGMA, an extension that didn't load - isn't
                 # kept open.
-                await opened_connection.close()
-                self._connection = None
+                try:
+                    await ResourceCompletion.wait(opened_connection.close())
+                except BaseException as release_error:
+                    raise BaseExceptionGroup(SQLITE_SETUP_RELEASE_FAILED, [error, release_error]) from None
+                finally:
+                    self._connection = None
                 raise
             self.pool_statistics.add_connect(time.perf_counter() - start_time)
             self.log.debug(
@@ -239,11 +233,12 @@ class AiosqliteClient(SqliteClient):
 
         return AiosqliteTransactionClient(self)
 
-    @SqliteClient.translate_exceptions
+    @SqliteClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[list[Any]]) -> None:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
+            values = [self.parameter_adapters.bind(row) for row in values]
             if self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
                 values = [self.get_values_by_number(row) for row in values]  # type: ignore[misc]
             # This code is only ever called in AUTOCOMMIT mode
@@ -322,7 +317,7 @@ class AiosqliteClient(SqliteClient):
             )
         return rows, len(rows), inserted_id, description
 
-    @SqliteClient.translate_exceptions
+    @SqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute(
         self,
         query: str,
@@ -330,10 +325,12 @@ class AiosqliteClient(SqliteClient):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
     ) -> StatementResult:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
+            values = self.parameter_adapters.bind(values)
             if values and self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
                 values = self.get_values_by_number(values)  # type: ignore[assignment]
             # One worker-thread hop for execute + fetch + row count, like execute_fetchall(). Rows
@@ -349,49 +346,21 @@ class AiosqliteClient(SqliteClient):
             )
             return StatementResult(row_count, rows, inserted_id, description)
 
-    @staticmethod
-    def _fetch_described_rows(
-        raw_connection: sqlite3.Connection, query: str, values: list[Any] | None
-    ) -> tuple[tuple[str, ...], list[sqlite3.Row], int]:
-        """``_fetch_rows_and_row_count()`` with the statement's column names first.
-
-        Args:
-            raw_connection: The underlying sqlite3 connection.
-            query: The SQL statement.
-            values: Its positional parameters.
-
-        Returns:
-            The column names, the fetched rows and the affected-row count.
-        """
-        total_changes_before = raw_connection.total_changes
-        cursor = raw_connection.execute(query, values or [])
-        try:
-            columns = tuple(column[0] for column in cursor.description or ())
-            rows = cursor.fetchall()
-            row_count = cursor.rowcount
-        finally:
-            cursor.close()
-        if row_count < 0:
-            # See _fetch_rows_and_row_count() - a WITH-prefixed write reports -1.
-            if raw_connection.total_changes != total_changes_before:
-                row_count = raw_connection.execute(SQLITE_LAST_STATEMENT_CHANGES_SQL).fetchone()[0]
-            else:
-                row_count = len(rows)
-        return columns, rows, row_count
-
-    @SqliteClient.translate_exceptions
+    @SqliteClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query: str, values: list[Any] | None = None) -> DescribedResult:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
+            values = self.parameter_adapters.bind(values)
             if values and self.binds_parameters_by_number and SQLITE_FIRST_NUMBERED_PLACEHOLDER in query:
                 values = self.get_values_by_number(values)  # type: ignore[assignment]
-            columns, rows, row_count = await self._run_on_worker_thread(
-                connection, self._fetch_described_rows, query, values
+            rows, row_count, _, description = await self._run_on_worker_thread(
+                connection, self._fetch_rows_and_row_count, query, values, None
             )
+            columns = tuple(column[0] for column in description or ())
             return DescribedResult(columns=columns, rows=tuple(tuple(row) for row in rows), row_count=row_count)
 
-    @SqliteClient.translate_exceptions
+    @SqliteClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
@@ -408,7 +377,3 @@ class AiosqliteClient(SqliteClient):
         """
         for statement in statements:
             raw_connection.execute(statement).close()
-
-
-# sqlite3 adapts parameters process-wide - raw queries and expressions too, where the field isn't known.
-AiosqliteClient.install_parameter_adapters()

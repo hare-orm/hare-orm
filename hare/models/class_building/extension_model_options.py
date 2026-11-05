@@ -8,7 +8,8 @@ class ExtensionModelOptions:
     itself - a model declaring an option neither knows is refused."""
 
     #: The names of the options.
-    names: ClassVar[set[str]] = set()
+    # Schema defaults can be declared without importing the optional Pydantic package.
+    names: ClassVar[set[str]] = {"pydantic"}
 
     @classmethod
     def allow(cls, *names: str) -> None:

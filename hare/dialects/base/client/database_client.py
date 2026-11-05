@@ -3,31 +3,27 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
-import contextvars
 import datetime
 import decimal
 import logging
-import time
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from functools import partial, wraps
+from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.log import db_client_logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connection_ping import ConnectionPing
 from hare.dialects.base.client.constants import (
     DISCARDED_CLIENT_MESSAGE,
     PING_TIMEOUT_SECONDS,
-    UNENCODABLE_SURROGATE_MESSAGE,
     UNENCODABLE_SURROGATE_REASON,
 )
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
-from hare.dialects.base.constants import (
-    COMMAND_TIMEOUT_METHOD_NAMES,
-    OBSERVED_METHOD_NAMES,
-    QUERY_EXECUTING_METHOD_NAMES,
-)
+from hare.dialects.base.client.schema_cache_invalidation import SchemaCacheInvalidation
+from hare.dialects.base.client.statement_execution import StatementExecution
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.features import Features
 from hare.dialects.base.results.described_result import DescribedResult
@@ -37,38 +33,30 @@ from hare.dialects.base.transactions.contexts.top_level_transaction_context impo
 from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import (
-    DatabaseError,
     DBConnectionError,
     OperationalError,
-    TransactionManagementError,
     TransactionRetryError,
     UnSupportedError,
-    ValidationError,
 )
-from hare.instrumentation.declarations import PoolStatus, QueryCall
+from hare.instrumentation.declarations import PoolStatus
 from hare.instrumentation.enums import PoolRole
-from hare.instrumentation.observers.observers import Observers
 from hare.instrumentation.pools.pool_registry import PoolRegistry
-from hare.instrumentation.queries.query_tags import QueryTags
 from hare.sql import Query
-from hare.sql.terms.parameters.query_parameters import QueryParameters
 from hare.transactions.transaction_options import TransactionOptions
 
 if TYPE_CHECKING:
+    from hare.core.config.connection_config import ConnectionConfig
     from hare.core.connections.connection_handler import ConnectionHandler
     from hare.dialects.base.client.declarations import ShellCommand
     from hare.dialects.base.client.password_provider import PasswordProvider
+    from hare.dialects.base.client.statement_recovery import StatementRecovery
     from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.dialects.base.connection.driver import Driver
     from hare.models import Model
+    from hare.sql.builder.tables.table import Table
+    from hare.sql.sql_context import SqlContext
 from hare.dialects.base.client.connection_wrapper import ConnectionWrapper
 from hare.dialects.base.client.pool.pool_connection_wrapper import PoolConnectionWrapper
-
-#: Set while a read-only query runs - a connection lost during it may be retried on a fresh
-#: connection. A write never sets it.
-retryable_read_query_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "retryable_read_query_active", default=False
-)
 
 
 class DatabaseClient(abc.ABC):
@@ -90,6 +78,7 @@ class DatabaseClient(abc.ABC):
     #: Set once the connection is closed and dropped (``close_all(discard=True)``) - it opens no pool
     #: again for a task still holding it.
     discarded: bool = False
+
     #: The client of the same connection in the context a repeated ``Hare.init()`` set up - a query that
     #: took this client before it was discarded runs there.
     replaced_by: DatabaseClient | None = None
@@ -118,6 +107,7 @@ class DatabaseClient(abc.ABC):
     #: How many times a read that lost its connection is retried on a fresh one - set by the
     #: clients that retry; none by default.
     read_retry_max_retries: int = 0
+    read_retry_backoff_base_seconds: float = 0.0
     #: The tenant schema settings - set by __init__; a transaction client takes its connection's.
     tenant_schema_template: str | None = None
     tenant_schema: str | None = None
@@ -128,6 +118,8 @@ class DatabaseClient(abc.ABC):
     pool_role: PoolRole = PoolRole.MAIN
     #: The connection handler that made the client - the pools of a context are its handler's.
     connection_handler: ConnectionHandler | None = None
+    #: Original construction settings, before driver normalization or runtime authentication.
+    connection_config: ConnectionConfig | None = None
     dialect: Dialect
     features: Features = Features()
     #: Whether the client cancels an over-running statement itself, without a statement of the
@@ -165,117 +157,29 @@ class DatabaseClient(abc.ABC):
     #: Whether the connection goes through a pooler sharing server connections by transaction.
     transaction_pooling: bool = False
 
+    @property
+    def parameter_binding_key(self) -> object | None:
+        """Client-local conversion configuration included in statement plan keys."""
+        return None
+
+    @property
+    def sql_context(self) -> SqlContext:
+        """Render statements with the capabilities and placement of this connection."""
+        return self.query_class.SQL_CONTEXT.copy(features=self.features)
+
+    @property
+    def sql_context_key(self) -> object:
+        """Additional connection settings that change compiled SQL, beyond feature flags."""
+        return ()
+
     @classmethod
-    def translate_exceptions(cls, function: Callable[..., Any]) -> Callable[..., Any]:
-        """Wraps a client method: appends the query tags to its SQL, runs it inside the query
-        wrappers, raises the driver's exceptions as hare's (``translate_driver_error()``) and
-        reports the query to the observers. The dialect's hooks are read once, here - ``cls`` is the
-        dialect's client class the decorator is taken from.
+    def translate_exceptions(cls, form: StatementForm) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Apply the statement lifecycle for an explicitly declared driver call shape.
 
-        Args:
-            function: The method.
-
-        Returns:
-            The wrapped method.
+        SQL calls carry query/values, bulk loads carry table/columns, and control calls
+        carry no SQL. Names only label observer events; they do not select behavior.
         """
-        method_name = function.__name__
-        is_query_executing = method_name in QUERY_EXECUTING_METHOD_NAMES
-        is_observed = method_name in OBSERVED_METHOD_NAMES
-        is_command_timeout_bounded = method_name in COMMAND_TIMEOUT_METHOD_NAMES
-        runs_statement_options = cls.runs_statement_options
-        run_renewing_refused_password = cls.run_renewing_refused_password
-        translate_driver_error = cls.translate_driver_error
-        rejected_character = cls.rejected_sql_character
-        checks_aborted_transactions = cls.checks_aborted_transactions
-
-        def get_translating_method(wrapped_method: Callable[..., Any] | None) -> Callable[..., Any]:
-            # wrapped_method: the method the query wrappers run, its SQL tagged already - None
-            # for that method itself.
-            tags_sql = wrapped_method is not None
-            runs_query_wrappers = is_observed and wrapped_method is not None
-
-            async def bound_by_command_timeout(client: Any, *args: Any, **kwargs: Any) -> Any:
-                return await client._run_with_command_timeout(function, *args, **kwargs)
-
-            async def translating_method(self: Any, *args: Any, **kwargs: Any) -> Any:
-                if is_query_executing and not (tags_sql and QueryTags.current.get()):
-                    sql = args[0] if args else kwargs.get("query")
-                    parameters = args[1] if len(args) > 1 else kwargs.get("values")
-                else:
-                    args, kwargs, sql, parameters = DatabaseClient.get_tagged_query_arguments(
-                        args, kwargs, method_name, self
-                    )
-                if runs_query_wrappers and Observers.query_wrappers:
-                    call = QueryCall(method_name, cast("str", sql), parameters, self.connection_alias, self.dialect)
-                    return await Observers.run_wrapped(
-                        call, partial(cast("Callable[..., Any]", wrapped_method), self, *args, **kwargs)
-                    )
-                if rejected_character is not None and sql is not None and rejected_character in sql:
-                    # Refused before it is sent, so an open transaction isn't aborted by it.
-                    self.raise_rejected_sql_character(sql)
-                start = time.perf_counter()
-                exception: Exception | None = None
-                # False for the read retry, which records each of its attempts itself.
-                record_here = True
-                is_transaction_client = self.is_transaction_client
-                try:
-                    # A stale reference to a finished transaction or savepoint must not run a query -
-                    # its connection may already serve another transaction.
-                    if is_query_executing and is_transaction_client:
-                        self._check_statement_allowed()
-                        if checks_aborted_transactions and self._is_transaction_aborted():
-                            raise TransactionManagementError(self.aborted_transaction_message)
-                    if not runs_statement_options:
-                        return await function(self, *args, **kwargs)
-                    method: Callable[..., Any] = (
-                        bound_by_command_timeout
-                        if is_command_timeout_bounded and self.command_timeout is not None
-                        else function
-                    )
-                    if self.password_provider is not None and not is_transaction_client:
-                        method = partial(cast("Callable[..., Any]", run_renewing_refused_password), method)
-                    # Only a client outside a transaction retries a read: a transaction's pinned
-                    # connection is dead, and the read would run outside its isolation.
-                    if (
-                        is_query_executing
-                        and self.read_retry_max_retries
-                        and not is_transaction_client
-                        and retryable_read_query_active.get()
-                    ):
-                        record_here = False
-                        return await self._execute_read_query_with_retry(
-                            method, *args, sql=sql, parameters=parameters, **kwargs
-                        )
-                    return await method(self, *args, **kwargs)
-                except BaseException as driver_error:
-                    if DatabaseClient.is_unencodable_surrogate_error(driver_error):
-                        # A driver encoding a value - its own error names no rule, and holds the text:
-                        # raised once the driver's is no longer handled, so it isn't the context either.
-                        exception = ValidationError(UNENCODABLE_SURROGATE_MESSAGE)
-                    else:
-                        error = translate_driver_error(self, driver_error, sql, parameters, args, is_query_executing)
-                        if error is driver_error:
-                            if isinstance(error, Exception):
-                                exception = error
-                            raise
-                        hidden_values = QueryParameters.get_hidden_values_of(parameters)
-                        if not (isinstance(error, DatabaseError) and (hidden_values or error.hides_driver_error)):
-                            if isinstance(error, Exception):
-                                exception = error
-                            raise error from driver_error
-                        # The driver's error may hold a sensitive field's value - in its message, its
-                        # attributes (a detail of the server) or its repr: raised once the driver's is no
-                        # longer handled, so it isn't the context either.
-                        error.drop_values(hidden_values)
-                        exception = error
-                finally:
-                    if is_observed and record_here:
-                        Observers.record_query(sql, parameters, start, exception, self.connection_alias)
-                raise exception
-
-            return translating_method
-
-        return wraps(function)(get_translating_method(get_translating_method(None)))
+        return partial(StatementExecution.decorate, cls, form)
 
     def get_result_read_error(self, error: Exception) -> Exception | None:
         """The hare exception of an error a driver raises reading a value of a result after the
@@ -348,50 +252,12 @@ class DatabaseClient(abc.ABC):
         """
         raise NotImplementedError
 
-    @staticmethod
-    def get_tagged_query_arguments(
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        method_name: str,
-        client: Any,
-    ) -> tuple[tuple[Any, ...], dict[str, Any], str | None, Any]:
-        """Reads the SQL and its parameters off the arguments of a client method the dialect's
-        exception-translating decorator wraps, and appends the active query tags
-        (``QueryTags``) to the SQL. A bulk load's SQL is the dialect's statement of it
-        (``QueryClauses.get_bulk_load_statement_sql()``); a method running no query - commit(),
-        rollback() - has none.
-
-        Args:
-            args: The method's positional arguments - the SQL first, its parameters second.
-            kwargs: Its keyword arguments - ``query`` and ``values``.
-            method_name: The method.
-            client: The client the method is called on - its dialect names a bulk load.
-
-        Returns:
-            The arguments with the tagged SQL, the SQL, and its parameters - None for no query.
-        """
-        if method_name == "copy":
-            table = args[0] if args else kwargs["table"]
-            columns = args[1] if len(args) > 1 else kwargs["columns"]
-            bulk_load_sql = client.dialect.clauses.get_bulk_load_statement_sql(table, columns)
-            return args, kwargs, QueryTags.append(bulk_load_sql), None
-        if method_name not in QUERY_EXECUTING_METHOD_NAMES:
-            return args, kwargs, None, None
-        sql = args[0] if args else kwargs.get("query")
-        parameters = args[1] if len(args) > 1 else kwargs.get("values")
-        if sql is not None:
-            tagged_sql = QueryTags.append(sql, client.dialect)
-            if tagged_sql is not sql:
-                if args:
-                    args = (tagged_sql, *args[1:])
-                else:
-                    kwargs = {**kwargs, "query": tagged_sql}
-                sql = tagged_sql
-        return args, kwargs, sql, parameters
-
     def __init__(self, connection_alias: str, **kwargs: Any) -> None:
+        from hare.core.config.connection_config import ConnectionConfig
+
         self.log = db_client_logger
         self.connection_alias = connection_alias
+        self.connection_config = ConnectionConfig(engine=getattr(self, "driver_name", None), credentials=dict(kwargs))
         #: The schema name template of the tenants' schemas (``tenant_{tenant}``) - None when the
         #: connection has no schema per tenant.
         self.tenant_schema_template: str | None = None
@@ -405,6 +271,9 @@ class DatabaseClient(abc.ABC):
         self.tenant_clients: dict[str, DatabaseClient] = {}
         #: What the client's pool has done - kept across reconnects, which replace the pool.
         self.pool_statistics: Any = self.create_pool_statistics()
+        from hare.instrumentation.pools.pool_metrics_recorder import PoolMetricsRecorder
+
+        PoolMetricsRecorder.attach(self)
         if DatabaseClient.quiets_driver_loggers:
             self.quiet_driver_loggers()
 
@@ -523,8 +392,9 @@ class DatabaseClient(abc.ABC):
         # Local import: the connections import the dialects.
         from hare.core.connections.connections import Connections
 
-        client = Connections.current().create_independent(
-            self.connection_alias, {**settings, **tenant_client_settings}
+        connections = self.connection_handler if self.connection_handler is not None else Connections.current()
+        client = connections.create_independent(
+            self.connection_alias, {**settings, **tenant_client_settings}, config=self.connection_config
         )
         client.tenant_schema_template = self.tenant_schema_template
         client.tenant_schema = tenant_schema
@@ -571,11 +441,10 @@ class DatabaseClient(abc.ABC):
         raise UnSupportedError(f"The {self.dialect} dialect has no schema per tenant")
 
     async def close_tenant_clients(self) -> None:
-        """Closes the clients of the tenant schemas."""
+        """Close every tenant client, including after a sibling failure or caller cancellation."""
         tenant_clients = list(self.tenant_clients.values())
         self.tenant_clients.clear()
-        for tenant_client in tenant_clients:
-            await tenant_client.close()
+        await ResourceCompletion.wait_all(*(tenant_client.close() for tenant_client in tenant_clients))
 
     def abandon_connections(self) -> None:
         """Drops the connections opened on an event loop that is closed - they can't be closed through
@@ -699,6 +568,9 @@ class DatabaseClient(abc.ABC):
     async def get_shell_command(self) -> ShellCommand | None:
         """The interactive client of the database this connection opens (``hare dbshell``) - None
         for a dialect that names none.
+
+        Called before this client opens a connection. Build the command from its settings;
+        fetch any external credentials needed by the command lazily within this hook.
 
         Returns:
             The command.
@@ -839,15 +711,23 @@ class DatabaseClient(abc.ABC):
         (a cascade, a many-to-many ``add()``, a ``bulk_create()`` in batches) run in.
 
         On a database without transactions (``Features.supports_transactions`` False) the block's
-        statements run one by one, each applied at once (``NonTransactionalContext``).
+        statements run one by one, each applied at once (``NonTransactionalContext``). Explicit
+        transaction restrictions are refused: they cannot be enforced by such a block.
 
         Args:
             options: How the transaction runs - read-only, statement timeout, isolation level.
 
         Returns:
             The context.
+
+        Raises:
+            UnSupportedError: Transaction options are requested on a database without transactions.
         """
         if not self.features.supports_transactions:
+            if options != TransactionOptions.DEFAULT:
+                raise UnSupportedError(
+                    f"{self.connection_alias!r} is a {self.dialect} database, which has no transactions"
+                )
             return NonTransactionalContext(self)
         return self._begin_transaction(options)
 
@@ -940,6 +820,8 @@ class DatabaseClient(abc.ABC):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
+        recovery: StatementRecovery | None = None,
     ) -> StatementResult:
         """Executes one SQL statement.
 
@@ -952,6 +834,10 @@ class DatabaseClient(abc.ABC):
             rows_by_position: The caller reads the rows by position alone, their column names from
                 ``StatementResult.column_names`` - a driver whose rows read by name cost more may
                 then give plain tuples (``Features.supports_positional_rows``).
+            retry_read: Explicit permission to retry this invocation on connection loss outside
+                a transaction. The caller guarantees it has no write effects; raw SQL defaults
+                to False. Returning rows alone does not make a statement safe to retry.
+            recovery: An explicit dialect failure action prepared by the ORM compiler.
 
         Returns:
             The affected or returned row count, and the rows.
@@ -972,38 +858,60 @@ class DatabaseClient(abc.ABC):
         """
         raise NotImplementedError()
 
-    async def execute_dicts(self, query: str, values: list[Any] | None = None) -> list[dict[str, Any]]:
+    async def execute_dicts(
+        self, query: str, values: list[Any] | None = None, *, retry_read: bool = False
+    ) -> list[dict[str, Any]]:
         """Executes a statement that returns rows, and returns them as dicts.
 
         Args:
             query: The SQL string, pre-parametrized for the target DB dialect.
             values: A sequence of positional DB parameters.
+            retry_read: Permit retry of an explicitly safe read, as in ``execute()``. False by
+                default; returning rows alone doesn't make user SQL safe to repeat.
 
         Returns:
             The rows.
         """
-        return list(map(self.row_to_dict, (await self.execute(query, values, returns_rows=True)).rows))
+        return list(
+            map(self.row_to_dict, (await self.execute(query, values, returns_rows=True, retry_read=retry_read)).rows)
+        )
 
-    async def execute_script(self, query: str) -> None:
+    async def execute_script(self, query: str, *, recovery: StatementRecovery | None = None) -> None:
         """
         Executes a RAW SQL script with multiple statements, and returns nothing.
 
         Args:
             query: The SQL string, which will be passed on verbatim.
                 Semicolons is supported here.
+            recovery: Failure metadata from an ORM compiler; absent for ordinary raw scripts.
         """
         raise NotImplementedError()
 
-    async def execute_built_script(self, query: str) -> None:
+    async def invalidate_schema_cache(self) -> None:
+        """Discard driver metadata after schema work, including a partially executed raw script.
+
+        Drivers without schema-dependent metadata need no action. This hook neither repeats the
+        completed statement nor inspects its SQL; schema executors call it at an explicit boundary.
+        """
+
+    def get_write_recovery(self, table: Table) -> StatementRecovery | None:
+        """Compile dialect failure metadata from a write target; transactional dialects need none."""
+        return None
+
+    async def execute_built_script(self, query: str, *, recovery: StatementRecovery | None = None) -> None:
         """Executes a script hare built - its schema statements - as the connection runs them;
         ``execute_script()`` by default. A script the user wrote goes to ``execute_script()``.
 
         Args:
             query: The script.
+            recovery: An explicit action for failures of this prepared target.
         """
-        await self.execute_script(query)
+        if recovery is None:
+            await self.execute_script(query)
+        else:
+            await self.execute_script(query, recovery=recovery)
 
-    async def stream_batches(
+    def stream_batches(
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0
     ) -> AsyncGenerator[list[Any]]:
         """Runs ``query`` on a server-side cursor, yielding the raw rows a batch at a time as they
@@ -1015,26 +923,7 @@ class DatabaseClient(abc.ABC):
             values: The bound values.
             chunk_size: How many rows a batch holds - the driver's own default when 0.
         """
-        query = QueryTags.append(query, self.dialect)
-        start = time.perf_counter()
-        error: Exception | None = None
-        if Observers.query_wrappers:
-            call = QueryCall("stream", query, values, self.connection_alias, self.dialect)
-            batches = Observers.stream_wrapped(call, lambda: self._driver_stream_batches(query, values, chunk_size))
-        else:
-            batches = self._driver_stream_batches(query, values, chunk_size)
-        try:
-            async for batch in batches:
-                yield batch
-        except Exception as raised_error:
-            error = raised_error
-            raise
-        finally:
-            try:
-                if (close_batches := getattr(batches, "aclose", None)) is not None:
-                    await close_batches()
-            finally:
-                Observers.record_query(query, values, start, error, self.connection_alias)
+        return StatementExecution.stream(self, query, values, chunk_size)
 
     async def stream(self, query: str, values: list[Any] | None = None, chunk_size: int = 0) -> AsyncGenerator[Any]:
         """``stream_batches()`` a row at a time - reading a row after the stream's transaction ended
@@ -1122,13 +1011,16 @@ class DatabaseClient(abc.ABC):
             model: The model.
         """
 
-    async def execute_many(self, query: str, values: list[list[Any]]) -> None:
+    async def execute_many(
+        self, query: str, values: list[list[Any]], *, recovery: StatementRecovery | None = None
+    ) -> None:
         """
         Executes one statement once per parameter row, and returns no data.
 
         Args:
             query: The SQL string, pre-parametrized for the target DB dialect.
             values: A sequence of positional DB parameters.
+            recovery: Failure metadata shared by executions of the same prepared statement.
         """
         raise NotImplementedError()
 
@@ -1201,7 +1093,8 @@ class DatabaseClient(abc.ABC):
         schema = self.get_schema_sql(safe)
         self.log.debug("Creating schema: %s", schema)
         if schema:
-            await self.execute_built_script(schema)
+            async with SchemaCacheInvalidation.run(self):
+                await self.execute_built_script(schema)
 
     async def ping(self, timeout: float = PING_TIMEOUT_SECONDS) -> bool:
         """Runs ``SELECT 1`` and reports whether the connection is usable. Only

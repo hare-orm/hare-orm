@@ -79,19 +79,3 @@ class GeneratedKeys:
                 except ValidationError as error:
                     raise ValidationError(f"{key_field_name}: the key {key} of the series - {error}") from error
         return list(keys)
-
-    @staticmethod
-    def take_back(model: type[Model], objs: Sequence[Model]) -> None:
-        """Takes the keys of a failed write back from the objs ``assign()`` gave them - each is left
-        without its key, as before the write; the series never hands the keys out again.
-
-        Args:
-            model: The model.
-            objs: The objs given a key.
-        """
-        key_field_name = model._meta.generated_pk_field_name
-        if key_field_name is None:
-            return
-        for instance in objs:
-            setattr(instance, key_field_name, None)
-            object.__setattr__(instance, "_custom_generated_pk", False)

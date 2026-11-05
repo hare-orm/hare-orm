@@ -9,5 +9,8 @@ from hare.sql.terms.functions.function import Function
 class Coalesce(Function):
     """``COALESCE(...)`` - the first of its arguments that isn't NULL."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, term: Any, *default_values: Any, **kwargs: Any) -> None:
         super().__init__("COALESCE", term, *default_values, **kwargs)

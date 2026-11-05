@@ -15,10 +15,11 @@ from hare.gis.constants import (
     SPATIAL_LOOKUP_REQUIRED_FEATURE,
 )
 from hare.gis.enums import SpatialFunctionType, SpatialRelation
+from hare.gis.geometry_arguments import GeometryArguments
+from hare.gis.spatial_distances import SpatialDistances
 from hare.gis.terms.geometry_value import GeometryValue
 from hare.gis.terms.spatial_function_term import SpatialFunctionTerm
 from hare.gis.terms.spatial_relation_term import SpatialRelationTerm
-from hare.numbers.finite_numbers import FiniteNumbers
 from hare.query.filters.lookups.lookups import Lookups
 from hare.sql.enums import Equality
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
@@ -60,6 +61,8 @@ class SpatialFieldLookups:
         if field.geography:
             # A geography has an = operator and no <> - the database would compare its text.
             lookups["not"] = dataclasses.replace(lookups["not"], operator=Lookups.not_equal_by_equality)
+            lookups["in"] = generic["in"]
+            lookups["not_in"] = dataclasses.replace(generic["not_in"], operator=Lookups.not_in_by_equality)
         # A geography is measured on the ellipsoid - a connection needs more for it.
         required_feature = GEOGRAPHY_REQUIRED_FEATURE if field.geography else SPATIAL_LOOKUP_REQUIRED_FEATURE
         encoder: Callable[..., Any]
@@ -100,8 +103,7 @@ class SpatialFieldLookups:
             The term - transformed to the field's SRID when the geometry has another.
         """
         geometry_field: GeometryField = field  # type: ignore[assignment]
-        geometry = geometry_field.get_parsed_geometry(value)
-        return GeometryValue(geometry, geometry_field.srid, geometry_field.geography)
+        return GeometryArguments.get_value(value, geometry_field)
 
     @staticmethod
     def encode_geometry(value: Any, obj: Model, field: Field[Any], dialect: Dialect) -> Term:
@@ -133,12 +135,9 @@ class SpatialFieldLookups:
             ValidationError: ``value`` isn't such a pair.
         """
         geometry, distance = SpatialFieldLookups.get_pair(value, field, "distance")
-        # An int a float can't hold is no distance either - float() would raise OverflowError on it.
-        if not FiniteNumbers.is_finite_number(distance) or distance < 0:
-            raise ValidationError(
-                f"{field.model_field_name}: a distance is a finite number of zero or more, got {distance!r}"
-            )
-        return SpatialFieldLookups.get_geometry_value(geometry, field), ValueWrapper(float(distance))
+        return SpatialFieldLookups.get_geometry_value(geometry, field), ValueWrapper(
+            SpatialDistances.get_value(distance, field.model_field_name)
+        )
 
     @staticmethod
     def encode_geometry_with_pattern(

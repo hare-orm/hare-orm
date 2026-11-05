@@ -56,7 +56,7 @@ async def test_lightweight_updates_are_turned_on_and_off_in_place(clickhouse_lig
     connection = Ledger._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -78,7 +78,7 @@ async def test_lightweight_updates_are_turned_on_and_off_in_place(clickhouse_lig
         uuid, enabled = await get_table()
         assert not enabled
         for lightweight_updates in (True, False):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterModelOptions(

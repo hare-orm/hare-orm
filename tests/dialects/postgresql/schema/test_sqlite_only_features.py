@@ -11,6 +11,7 @@ import pytest_asyncio
 from hare import fields
 from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.isolated_contexts import hare_test_context
+from hare.dialects.base.search.enums import TextSearchOperation
 from hare.dialects.sqlite.indexes import FullTextIndex
 from hare.exceptions import UnSupportedError
 from hare.migrations.operations import AddIndex, CreateModel, RemoveIndex
@@ -70,8 +71,8 @@ async def test_search_stays_postgresql_text_search(postgres_db):
 @pytest.mark.asyncio
 async def test_sqlite_only_search_arguments_are_refused_before_sql(postgres_db):
     connection = postgres_db.get_connection()
-    assert not connection.features.supports_full_text_index
-    with pytest.raises(UnSupportedError, match="supports_full_text_index"):
+    assert TextSearchOperation.RANK_FIELD_WEIGHTS not in connection.features.text_search_operations
+    with pytest.raises(UnSupportedError, match="rank_field_weights"):
         await SqliteFeatureDocument.objects.annotate(rank=SearchRank("title", "hare", weights={"title": 2.0}))
 
 
@@ -80,7 +81,7 @@ async def test_a_full_text_index_is_refused_before_sql(postgres_db):
     recorder = RecordingEditor(postgres_db.get_connection())
     state = State()
     with pytest.raises(UnSupportedError, match="supports_full_text_index"):
-        await apply_operations(
+        state = await apply_operations(
             APP_LABEL,
             state,
             CreateModel(
@@ -92,7 +93,7 @@ async def test_a_full_text_index_is_refused_before_sql(postgres_db):
         )
     assert not any("pg_full_text_indexed" in statement for statement in recorder.statements)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         APP_LABEL,
         state,
         CreateModel(
@@ -104,7 +105,7 @@ async def test_a_full_text_index_is_refused_before_sql(postgres_db):
     )
     recorder.statements.clear()
     with pytest.raises(UnSupportedError, match="supports_full_text_index"):
-        await apply_operations(
+        state = await apply_operations(
             APP_LABEL, state, AddIndex("Plain", FullTextIndex(fields=("title",))), schema_editor=recorder.editor
         )
     assert recorder.statements == []

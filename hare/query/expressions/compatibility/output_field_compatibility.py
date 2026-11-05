@@ -16,12 +16,10 @@ from hare.query.expressions.compatibility.constants import (
     RESULT_VALUE_TYPE_LITERAL_TYPES,
 )
 from hare.query.expressions.compatibility.result_branch import ResultBranch
-from hare.query.expressions.expression import Expression
 from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.value import Value
-from hare.sql.terms.term import Term
 
 
 class OutputFieldCompatibility:
@@ -41,11 +39,7 @@ class OutputFieldCompatibility:
         Returns:
             False when the field's type can't represent the value.
         """
-        if isinstance(value, Value):
-            value = value.value
-        return OutputFieldCompatibility.is_branch_compatible(
-            output_field, ResultBranch(value, value_field, is_literal=not isinstance(value, (Expression, Term)))
-        )
+        return OutputFieldCompatibility.is_branch_compatible(output_field, ResultBranch.of(value, value_field))
 
     @staticmethod
     def is_branch_compatible(output_field: Field[Any], branch: ResultBranch) -> bool:

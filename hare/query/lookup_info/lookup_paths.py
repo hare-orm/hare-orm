@@ -5,8 +5,8 @@ without building a query is ``LookupInfoBuilder``'s.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, FieldError, QueryError
@@ -17,7 +17,6 @@ from hare.fields.relations.fields.relational_field import RelationalField
 from hare.query.expressions.expression_result import TableCriterionTuple
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_path import LookupPath
-from hare.query.lookup_info.value_paths import ValuePaths
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.query.scopes.scope_join_conditions import ScopeJoinConditions
 from hare.sql import Table
@@ -30,6 +29,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.dialect import Dialect
     from hare.models import Model
     from hare.query.expressions import Q
+    from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 
 
 class LookupPaths:
@@ -233,7 +233,7 @@ class LookupPaths:
             last_field_name = model._meta.primary_key_attribute
         last_field = model._meta.fields_map.get(last_field_name)
         if last_field is None:
-            raise FieldError(f"{lookup_expression} not resolvable")
+            raise FieldError(f"Unknown field {lookup_expression!r}: {model.__name__} has no field {last_field_name!r}")
         return [*lookup_path.relations, last_field]
 
     @staticmethod
@@ -248,6 +248,7 @@ class LookupPaths:
         dialect: Dialect,
         connection: DatabaseClient | None,
         through_only: bool = False,
+        value_wrapper_references: RecordedValueReferences | None = None,
     ) -> list[TableCriterionTuple]:
         """The JOINs of one relation hop scoped like the related model's own queryset: a through
         model's default scope and the visibility of the rows it points at, the related model's
@@ -259,14 +260,15 @@ class LookupPaths:
             related_field: The relation crossed.
             related_field_name: The relation's name on the model of ``table``.
             visibility: Which rows the default scopes let the query see.
-            extra_condition: A ``Select(relation, extra_condition=...)`` condition of the hop - a
-                query with one keeps no plan.
+            extra_condition: A ``Select(relation, extra_condition=...)`` condition of the hop.
             filter_call_generation: As in ``get_joins_for_related_field()``.
             dialect: The dialect the query compiles for.
             connection: The connection the query runs on, None when compiling for none.
             through_only: The JOIN of a many-to-many relation's through table alone, under the through
                 model's default scope - the related model's own scope can't be read without its
                 table.
+            value_wrapper_references: An existing recorder for the extra condition; otherwise
+                the active statement recorder receives its references.
 
         Returns:
             The joins, the related table last.
@@ -303,6 +305,7 @@ class LookupPaths:
             extra_condition,
             dialect=dialect,
             connection=connection,
+            value_wrapper_references=value_wrapper_references,
         )
         ScopeJoinConditions.fold_extra_condition_into_through_join(
             joins,
@@ -312,115 +315,6 @@ class LookupPaths:
             connection=connection,
         )
         return joins
-
-    @staticmethod
-    def get_nested_field(
-        model: type[Model],
-        table: Table,
-        field: str,
-        *,
-        visibility: RowVisibility = RowVisibility.DEFAULT,
-        select_related_extra_conditions: Mapping[str, Q] | None = None,
-        dialect: Dialect,
-        connection: DatabaseClient | None,
-    ) -> tuple[Term, list[TableCriterionTuple], Field[Any] | None]:
-        """
-        Resolves a nested field string like events__participants__name and
-        returns the hare.sql term, required joins and the Field that can be used for
-        converting the value.
-
-        Args:
-            model: The model to resolve ``field`` against.
-            table: The table ``model`` is aliased to in the query being built.
-            field: The dotted nested field path.
-            visibility: Which rows the default scopes let the query see.
-            select_related_extra_conditions: The originating queryset's own
-                ``_select_related_extra_conditions``, keyed by dotted relation path - folded into
-                the matching JOIN the same way ``RelationFilters.get_nested_filter()`` already does, so
-                ``F("relation__field")``/``Count("relation__field")``/a window function crossing
-                a relation respects a ``Select(relation, extra_condition=...)`` declared for it
-                instead of silently ignoring it.
-            dialect: The dialect the query compiles for.
-            connection: The connection the query runs on; None when compiling for no particular
-                database.
-        """
-        if (path_split := ValuePaths.get_value_path_split(model, field)) is not None:
-            field_path, path_field, path_segments = path_split
-            term, joins, __ = LookupPaths.get_nested_field(
-                model,
-                table,
-                field_path,
-                visibility=visibility,
-                select_related_extra_conditions=select_related_extra_conditions,
-                dialect=dialect,
-                connection=connection,
-            )
-            term, output_field = ValuePaths.get_value_path_term(term, path_field, path_segments, field, dialect)
-            LookupPaths.mark_sensitive_column(term, path_field)
-            return term, joins, output_field
-        joins = []
-        fields = LookupPaths.expand_expression(model, field)
-        path: str | None = None
-
-        for iter_field in fields[:-1]:
-            related_field = cast("RelationalField[Model]", iter_field)
-            path = iter_field.model_field_name if path is None else f"{path}__{iter_field.model_field_name}"
-            new_joins = LookupPaths.get_scoped_joins(
-                table,
-                related_field,
-                related_field.model_field_name,
-                visibility=visibility,
-                extra_condition=select_related_extra_conditions.get(path) if select_related_extra_conditions else None,
-                dialect=dialect,
-                connection=connection,
-            )
-            joins.extend(new_joins)
-
-            model = related_field.related_model
-            # The table the join was built against, with whatever alias it got.
-            table = new_joins[-1][0]
-
-        last_field = fields[-1]
-        if last_field.model_field_name in model._meta.fetch_fields:
-            related_field = cast("RelationalField[Model]", last_field)
-            related_field_meta = related_field.related_model._meta
-            path = last_field.model_field_name if path is None else f"{path}__{last_field.model_field_name}"
-
-            new_joins = LookupPaths.get_scoped_joins(
-                table,
-                related_field,
-                related_field.model_field_name,
-                visibility=visibility,
-                extra_condition=select_related_extra_conditions.get(path) if select_related_extra_conditions else None,
-                dialect=dialect,
-                connection=connection,
-            )
-            joins.extend(new_joins)
-            # Same reasoning as above: the table actually joined (possibly aliased) is the one
-            # the terminal field's value must be read from, not a freshly-fetched, always-
-            # unaliased meta.basetable.
-            related_table = new_joins[-1][0]
-
-            if related_field_meta.has_composite_primary_key:
-                # A composite primary key is no single column - the term is used as one value.
-                raise QueryError(
-                    f"{field!r} ends on a relation to a composite primary key - there's no single "
-                    "column to resolve. Reference the individual components instead, e.g. "
-                    f"'{field}__{related_field_meta.primary_key_attribute_names[0]}'."
-                )
-            if related_field_meta.has_primary_key:
-                term = related_table[related_field_meta.db_pk_column]
-            else:
-                # A related model without a primary key is read by its key column to this row -
-                # never NULL in a joined row, like a primary key.
-                term = related_table[cast("BackwardForeignKeyRelation[Model]", last_field).relation_source_fields[0]]
-        else:
-            term = table[last_field.source_field or last_field.model_field_name]
-            function_cast = last_field.get_function_cast(dialect)
-            if function_cast:
-                term = function_cast(last_field, term)
-        LookupPaths.mark_sensitive_column(term, last_field)
-        return term, joins, last_field
 
     @staticmethod
     def mark_sensitive_column(term: Term, field: Field[Any] | None) -> None:

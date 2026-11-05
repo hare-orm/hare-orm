@@ -10,6 +10,9 @@ from hare.sql.terms.values.literal_value import LiteralValue
 class Round(Function):
     """``ROUND(x, precision)``."""
 
+    structure_attributes = ("precision",)
+    has_repeatable_value = True
+
     def __init__(self, term: Any, precision: int, alias: str | None = None) -> None:
         if isinstance(precision, bool) or not isinstance(precision, int):
             raise QueryException(f"ROUND takes an int precision, got {precision!r}")

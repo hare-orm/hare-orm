@@ -592,9 +592,9 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
     registered the SAME live model class into every State it built for the FK target, so the
     default backward relation (e.g. "widgets") the first run's init_relations() added onto that
     live class was still there on the second run, colliding with the identical relation
-    init_relations() was about to add again. StateApps._clone_unmanaged_model() now clones a
-    fresh state-only class per State instead of reusing the live one, so this must not crash and
-    must keep detecting the same changes on every run."""
+    init_relations() was about to add again. The captured migration environment now renders
+    unmanaged declarations as state-only classes, so this must keep both that environment
+    and the live registry unchanged while detecting the same changes on every run."""
     module_path = _write_migration_with_ops(
         tmp_path,
         "fkbackwardapp",
@@ -648,6 +648,8 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
             }
         }
 
+        live_external = ctx.apps.get_model("fkbackwardapp.ExternalThing")
+        live_fields = dict(live_external._meta.fields_map)
         for _ in range(2):
             apps = StateApps()
             apps.register_model("fkbackwardapp", Widget)
@@ -656,5 +658,7 @@ async def test_autodetector_rerun_fk_to_unmanaged_model_no_related_name(
                 apps_config,
                 now=lambda: dt.datetime(2024, 1, 1, 12, 0),
             )
+            assert autodetector.environment is apps.environment
             changes = await autodetector.changes()
             assert changes == []
+            assert live_external._meta.fields_map == live_fields

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, overload
 
 from hare.exceptions import ValidationError
 from hare.fields.data.constants import INT32_MAX, INT32_MIN, INT_LOOKUP_LITERAL_CAST_SQL_TYPE
-from hare.fields.enums import NativeWriteCheck
 from hare.fields.field import Field
 from hare.fields.narrowing.integer_range_limit import IntegerRangeLimit
 from hare.fields.narrowing.narrowing_limit import NarrowingLimit
@@ -37,6 +36,8 @@ class IntField(Field[TInt]):
     COLUMN_TYPE_RANGE: ClassVar[tuple[int, int]] = (INT32_MIN, INT32_MAX)
     allows_generated = True
     generated_requires_primary_key = True
+    #: The implicit generation setting when this field is declared as a primary key.
+    generated_primary_key_default: ClassVar[bool] = True
     #: An int the driver returns is the value - to_python() only converts what is assigned.
     keeps_native_db_values = True
 
@@ -60,14 +61,12 @@ class IntField(Field[TInt]):
 
     def __init__(self, primary_key: bool | None = None, **kwargs: Any) -> None:
         if primary_key or kwargs.get("pk"):
-            kwargs["generated"] = bool(kwargs.get("generated", True))
+            kwargs["generated"] = bool(kwargs.get("generated", self.generated_primary_key_default))
         super().__init__(primary_key=primary_key, **kwargs)
         # The column type doesn't enforce the bounds on the Python side - validators do.
         bounds = self.constraints
         self.validators.append(MinValueValidator(bounds["ge"]))
         self.validators.append(MaxValueValidator(bounds["le"]))
-
-    native_write_check = NativeWriteCheck.NOTHING
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         # A plain int - the common case - needs no check.
@@ -230,10 +229,10 @@ class IntField(Field[TInt]):
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()
-        # A primary key defaults to generated=True - only an opt-out is written.
+        # Write only deviations from this field type's primary-key generation default.
         if self.pk:
-            if self.generated:
+            if self.generated == self.generated_primary_key_default:
                 kwargs.pop("generated", None)
             else:
-                kwargs["generated"] = False
+                kwargs["generated"] = self.generated
         return path, args, kwargs

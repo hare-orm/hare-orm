@@ -13,6 +13,7 @@ from hare.query.expressions.constants import (
     RECURSIVE_ROWS_START_ALIAS,
 )
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.subqueries.declarations import KeyRowsQuery
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
@@ -49,6 +50,8 @@ class RecursiveRows(KeyRowsQuery):
         QueryError: ``relation_name`` isn't a non-empty string, or ``max_depth`` isn't None or an
             int in ``0..MAX_RECURSIVE_DEPTH``.
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     #: The relation, the start rows' keys - their values bound - and the depth, bound when limited;
     #: the walk's JOINs record the default scopes they fold in like any other.

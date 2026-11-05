@@ -24,8 +24,6 @@ from tests.fields.models_encrypted import (
     SensitiveGeneratedRecord,
 )
 
-REQUIRES = ("encryption",)
-
 SECRET_KEY = "test-field-encryption-secret"
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[3]
 # Pinned: a generated schema's name (and every $ref built from it) must stay stable.

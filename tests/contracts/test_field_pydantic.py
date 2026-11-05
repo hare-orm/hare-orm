@@ -8,8 +8,6 @@ from hare.contrib.pydantic import pydantic_model_creator
 from tests.contracts.field_samples import FIELD_SAMPLES
 from tests.contracts.sample_database import SampleDatabase
 
-REQUIRES = ("pydantic",)
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(

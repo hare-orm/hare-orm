@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping, Sequence
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from collections.abc import AsyncGenerator, Generator, Iterable, Mapping
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.core.hare import Hare
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
+from hare.core.constants import INITIALIZATION_RELEASE_FAILED
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
+from hare.transactions.atomic.atomic import Atomic
 
 if TYPE_CHECKING:
     from hare.core.config import HareConfig
@@ -19,39 +22,39 @@ class ApplicationLifecycle:
 
     Args:
         config: The Hare configuration, as for ``Hare.init(config=...)``.
+        context: An initialized context to borrow; None creates a separate application context.
         transactions: True for a transaction per unit of work - a request, a task - on the
-            default connection, the connection aliases for one on each of them, False for none.
+            automatically selected connection, aliases for one on each of them, False for none.
+            Selection tries the only configured connection, the common connection of registered
+            models, then the alias "default"; ambiguous configurations require explicit aliases.
+            An iterable's order is captured once when the lifecycle is constructed.
         transactions_option: The name the application gives ``transactions``, for its error
             messages.
 
     Raises:
-        ConfigurationError: ``transactions`` is neither a bool nor a sequence of names.
+        ConfigurationError: ``transactions`` is neither a bool nor an iterable of names.
     """
 
-    #: The context an application starting in this process uses instead of opening its own - set only by
-    #: the pytest plugin's application fixtures, for the application under test.
-    test_context: ClassVar[HareContext | None] = None
-    #: The applications running in a test's context - it stays the global fallback until the last one
-    #: stops (a web application and a task worker of one test).
-    test_context_applications: ClassVar[set[int]] = set()
+    active: ClassVar[ContextVar[ApplicationLifecycle | None]] = ContextVar("hare_application_lifecycle", default=None)
 
     def __init__(
         self,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        transactions: bool | Sequence[str] = False,
+        transactions: bool | Iterable[str] = False,
         transactions_option: str = "transactions",
+        context: HareContext | None = None,
     ) -> None:
         self.config = config
         self.transactions_option = transactions_option
         self.transaction_connection_names = self.get_transaction_connection_names(transactions, transactions_option)
         self.context: HareContext | None = None
-        #: Whether the context is one the application opened - stop() closes only such a one.
-        self.owns_context = True
+        self.provided_context = context
+        self.close_created_context = context is None
 
     @staticmethod
     def get_transaction_connection_names(
-        transactions: bool | Sequence[str], transactions_option: str = "transactions"
+        transactions: bool | Iterable[str], transactions_option: str = "transactions"
     ) -> tuple[str | None, ...]:
         """The connections a unit of work's transaction runs on.
 
@@ -60,24 +63,27 @@ class ApplicationLifecycle:
             transactions_option: The name the application gives ``transactions``, for the error message.
 
         Returns:
-            ``(None,)`` - the default connection - for True, the names for a sequence, nothing for
+            ``(None,)`` - automatic transaction connection selection - for True, the names for an iterable, nothing for
             False.
 
         Raises:
-            ConfigurationError: ``transactions`` is neither a bool nor a sequence of names - a text, whose
+            ConfigurationError: ``transactions`` is neither a bool nor an iterable of names - a text, whose
                 letters would be read as names, included.
         """
         if isinstance(transactions, bool):
             return (None,) if transactions else ()
-        if (
-            isinstance(transactions, str)
-            or not isinstance(transactions, Sequence)
-            or not all(isinstance(name, str) and name for name in transactions)
-        ):
+        if isinstance(transactions, (str, bytes)):
+            names = None
+        else:
+            try:
+                names = tuple(transactions)
+            except TypeError:
+                names = None
+        if names is None or not all(isinstance(name, str) and name for name in names):
             raise ConfigurationError(
-                f"{transactions_option} is True, False or a sequence of connection names, got {transactions!r}"
+                f"{transactions_option} is True, False or an iterable of connection names, got {transactions!r}"
             )
-        return tuple(transactions)
+        return names
 
     def check_application(self) -> None:
         """Checks what the application declares once the context is set up - nothing by default.
@@ -87,31 +93,23 @@ class ApplicationLifecycle:
         """
 
     async def start(self) -> None:
-        """Opens the Hare context as the global fallback - not as the calling task's own context,
-        so the units of work an application runs in tasks of their own see it and another task may
-        close it - and checks the transactions' connections and the application
-        (``check_application()``).
+        """Initialize the configured context or borrow the explicitly supplied one.
 
-        Under the pytest plugin's ``hare_app_db``/``hare_app_transactional_db`` the application takes the
-        test's context (``test_context``) as the global fallback instead of opening its own - its
-        configuration's databases are never opened.
+        Startup never publishes a process-global fallback. Request/task adapters enter
+        ``scope()`` around their work. A supplied context is neither initialized nor
+        closed here; its caller controls its lifetime, including test isolation.
 
         Raises:
-            ConfigurationError: A transaction names a connection the configuration lacks, the
-                application's check fails, or the context is open already.
+            ConfigurationError: The context is already started or transaction configuration is invalid.
+            BaseExceptionGroup: Initialization and context cleanup both fail.
         """
         if self.context is not None:
             raise ConfigurationError("The Hare context of the application is open already")
-        if ApplicationLifecycle.test_context is not None:
-            await self.start_in_test_context(ApplicationLifecycle.test_context)
-            return
-        self.owns_context = True
-        self.context = HareContext()
+        self.context = self.provided_context or HareContext()
         try:
-            # Current only while it is set up - a task that opens a context as its own must also
-            # be the one that leaves it.
-            with self.context:
-                await self.context.init(config=self.config, _enable_global_fallback=True)
+            with self.scope():
+                if self.close_created_context:
+                    await self.context.init(config=self.config, _enable_global_fallback=False)
                 aliases = self.context.connections.aliases()
                 for connection_alias in self.transaction_connection_names:
                     if connection_alias is not None and connection_alias not in aliases:
@@ -121,43 +119,30 @@ class ApplicationLifecycle:
                         )
                     await self.raise_if_without_transactions(connection_alias)
                 self.check_application()
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            try:
+                await self.stop()
+            except BaseException as release_error:
+                raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
             raise
 
-    async def start_in_test_context(self, context: HareContext) -> None:
-        """Takes a test's context as the application's - the global fallback, which the tasks and threads
-        without a context of their own see (a test client's requests), as a context the application
-        opened is - and checks the transactions' connections and the application.
-
-        Args:
-            context: The test's context.
-
-        Raises:
-            ConfigurationError: A transaction names a connection the test's context lacks, the
-                application's check fails, or another context is the global fallback.
-        """
-        HareContext.set_global(context)
-        self.context = context
-        self.owns_context = False
-        ApplicationLifecycle.test_context_applications.add(id(self))
-        # Current while it is checked - the test has it open already, so it isn't entered again.
+    @contextmanager
+    def scope(self) -> Generator[HareContext]:
+        """Activate this application's context for one request, task or lifespan callback."""
+        context = self.get_context()
         token = HareContext.current_context.set(context)
+        application_token = self.active.set(self)
         try:
-            aliases = context.connections.aliases()
-            for connection_alias in self.transaction_connection_names:
-                if connection_alias is not None and connection_alias not in aliases:
-                    raise ConfigurationError(
-                        f"{self.transactions_option} names the connection {connection_alias!r}, the test's "
-                        f"are: {aliases}"
-                    )
-                await self.raise_if_without_transactions(connection_alias)
-            self.check_application()
-        except BaseException:
-            await self.stop()
-            raise
+            yield context
         finally:
+            self.active.reset(application_token)
             HareContext.current_context.reset(token)
+
+    def get_context(self) -> HareContext:
+        """Return the started context for adapters with separate begin/end hooks."""
+        if self.context is None:
+            raise ConfigurationError("The Hare context of the application has not been started")
+        return self.context
 
     async def raise_if_without_transactions(self, connection_alias: str | None) -> None:
         """Refuses a connection the transactions are asked of that runs none - its features say so
@@ -165,14 +150,14 @@ class ApplicationLifecycle:
         left to the first request.
 
         Args:
-            connection_alias: The connection, None for the only one.
+            connection_alias: The connection, None for the transaction's automatic selection.
 
         Raises:
             ConfigurationError: The connection runs no transactions.
+            QueryError: Automatic selection is ambiguous.
         """
-        connections = cast("HareContext", self.context).connections
-        client = connections.get(connection_alias) if connection_alias is not None else connections.get_single_client()
-        if client is None or client.features.supports_transactions:
+        client = Atomic.get_connection(connection_alias)
+        if client.features.supports_transactions:
             return
         # A connection learns some of its features once it is open.
         if not await client.ping() or client.features.supports_transactions:
@@ -183,24 +168,15 @@ class ApplicationLifecycle:
         )
 
     async def stop(self) -> None:
-        """Closes the connections - waiting for the background observers still running -
-        and the Hare context. Does nothing when it isn't open; a test's context is only given back -
-        the test closes it."""
+        """Release this application's context once; a supplied context remains open."""
         context, self.context = self.context, None
-        if context is None:
+        if context is None or not self.close_created_context:
             return
-        if not self.owns_context:
-            ApplicationLifecycle.test_context_applications.discard(id(self))
-            if not ApplicationLifecycle.test_context_applications:
-                HareContext.clear_global_if(context)
-            return
+        token = HareContext.current_context.set(context)
         try:
-            # Current while it closes - the calling task may have a context of its own, which
-            # stays open.
-            with context:
-                await Hare.close_connections()
-        finally:
             await context.close_connections()
+        finally:
+            HareContext.current_context.reset(token)
 
     @asynccontextmanager
     async def running(self) -> AsyncGenerator[None]:
@@ -208,9 +184,17 @@ class ApplicationLifecycle:
 
         Raises:
             ConfigurationError: See ``start()``.
+            BaseExceptionGroup: Both application work and context cleanup fail.
         """
         await self.start()
         try:
-            yield
-        finally:
+            with self.scope():
+                yield
+        except BaseException as error:
+            try:
+                await self.stop()
+            except BaseException as release_error:
+                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
+            raise
+        else:
             await self.stop()

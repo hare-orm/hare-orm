@@ -14,6 +14,7 @@ import pytest
 import hare.cli.hare_cli as cli_module
 from hare.cli.commands import database_shell_commands as database_shell
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
+from hare.dialects.sqlite.drivers.aiosqlite.client.aiosqlite_client import AiosqliteClient
 from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
 from tests.utils.driver_classes import DriverClasses
 
@@ -77,6 +78,11 @@ async def test_dbshell_runs_the_client_of_the_connection(tmp_path, monkeypatch, 
     db_file = (tmp_path / "shell.sqlite3").as_posix()
     config = write_project(tmp_path, monkeypatch, f"sqlite+aiosqlite:///{db_file.lstrip('/')}")
     started_programs.exit_code = 3
+
+    async def refuse_connection(client, with_db):
+        raise AssertionError("dbshell must prepare the external command without opening an ORM connection")
+
+    monkeypatch.setattr(AiosqliteClient, "create_connection", refuse_connection)
 
     result = await run_cli(["-c", config, "dbshell", "--connection", "other"])
 
@@ -157,7 +163,7 @@ async def test_psql_takes_the_password_from_the_environment(client_class):
         "orders",
     )
     assert "secret" not in command.arguments
-    assert command.environment == {"PGPASSWORD": "secret", "PGAPPNAME": "api", "PGOPTIONS": "-c search_path=app"}
+    assert command.environment == {"PGPASSWORD": "secret", "PGAPPNAME": "api", "PGOPTIONS": '-c search_path="app"'}
 
 
 async def get_rotated_password() -> str:

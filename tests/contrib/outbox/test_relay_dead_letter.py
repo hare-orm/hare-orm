@@ -134,18 +134,31 @@ async def test_a_dead_letter_holds_back_its_ordering_key_until_retried(db_outbox
 
 
 @pytest.mark.asyncio
-async def test_retry_and_cleanup_of_dead_letters(db_outbox):
+@pytest.mark.parametrize("retry_during_cleanup", [False, True])
+async def test_retry_and_cleanup_of_dead_letters(db_outbox, monkeypatch, retry_during_cleanup):
     old = await DemoOutboxEvent.enqueue("widget.updated", {})
     recent = await DemoOutboxEvent.enqueue("widget.updated", {})
     await DemoOutboxEvent.objects.filter(id=old.id).update(dead_lettered_at=Timezone.now() - timedelta(days=40))
     await DemoOutboxEvent.objects.filter(id=recent.id).update(dead_lettered_at=Timezone.now())
     relay = OutboxRelay(DemoOutboxEvent, always_fails)
 
-    assert await relay.cleanup_dead_lettered(timedelta(days=30), batch_size=1) == 1
+    if retry_during_cleanup:
+        queryset_type = type(relay.store.get_topic_queryset())
+        delete = queryset_type.delete
+
+        async def retry_before_deletion(queryset, *args, **kwargs):
+            assert await relay.retry_dead_lettered(ids=[old.id]) == 1
+            return await delete(queryset, *args, **kwargs)
+
+        monkeypatch.setattr(queryset_type, "delete", retry_before_deletion)
+    assert await relay.cleanup_dead_lettered(timedelta(days=30), batch_size=1) == (0 if retry_during_cleanup else 1)
     assert await relay.retry_dead_lettered(ids=[recent.id]) == 1
     await recent.refresh_from_db()
     assert (recent.dead_lettered_at, recent.attempts) == (None, 0)
-    assert not await DemoOutboxEvent.objects.filter(id=old.id).exists()
+    assert await DemoOutboxEvent.objects.filter(id=old.id).exists() is retry_during_cleanup
+    if retry_during_cleanup:
+        await old.refresh_from_db()
+        assert old.dead_lettered_at is None
 
 
 @pytest.mark.asyncio

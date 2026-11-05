@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class InProcessWakeup(OutboxWakeup):
@@ -12,6 +16,6 @@ class InProcessWakeup(OutboxWakeup):
     async def signal(self, topics: frozenset[str]) -> None:
         self.dispatch(topics)
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         # The signals come from this process - nothing to listen to.
         await asyncio.Event().wait()

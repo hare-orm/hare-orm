@@ -17,4 +17,8 @@ class TsQueryFunction(Function):
     def __init__(self, name: str, value: Term, config_term: Term | None = None) -> None:
         args = (config_term, value) if config_term is not None else (value,)
         super().__init__(name, *args)
-        self.config_term = config_term
+
+    @property
+    def config_term(self) -> Term | None:
+        """The configuration argument, including after the function's terms are rewritten."""
+        return self.args[0] if len(self.args) == 2 else None

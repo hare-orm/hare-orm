@@ -9,15 +9,19 @@ from hare.transactions.constants import EXPORTED_MODULES
 
 if TYPE_CHECKING:
     from hare.transactions.atomic.atomic import Atomic
+    from hare.transactions.distributed.distributed_recovery import DistributedRecovery
     from hare.transactions.distributed.distributed_transactions import DistributedTransactions
-    from hare.transactions.enums import IsolationLevel, TransactionEventType
+    from hare.transactions.enums import IsolationLevel, TransactionEventType, TransactionOutcome, TransactionPhase
     from hare.transactions.transactions import Transactions
 
 __all__ = [
     "Atomic",
     "DistributedTransactions",
+    "DistributedRecovery",
     "IsolationLevel",
     "TransactionEventType",
+    "TransactionOutcome",
+    "TransactionPhase",
     "Transactions",
 ]
 

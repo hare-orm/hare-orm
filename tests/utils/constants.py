@@ -43,6 +43,7 @@ PACKAGE_REQUIREMENTS = {
     "hare.dialects.clickhouse.drivers.clickhouse_connect.client": ("clickhouse-connect",),
     "hare.dialects.clickhouse.drivers.clickhouse_driver.client": ("clickhouse-driver",),
     "hare.contrib.pydantic": ("pydantic",),
+    "hare.contrib.pydantic_field_aliases": ("pydantic",),
     "hare.contrib.request_query": ("request-query",),
     "hare.dialects.postgresql.request_query": ("request-query",),
     "hare.dialects.sqlite.request_query": ("request-query",),

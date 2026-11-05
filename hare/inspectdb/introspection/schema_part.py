@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
 from hare.inspectdb.introspection.enums import SchemaPartType
 
 
@@ -27,6 +26,10 @@ class SchemaPart:
     name: str
     definition: Any
     value: Any = field(default=None, compare=False)
+    #: Canonical callable signatures used to decide whether a name-based operation is unambiguous.
+    operation_signatures: tuple[str, ...] | None = field(default=None, compare=False, kw_only=True)
+    #: Physical properties for which the reconstructed declaration provides no operation.
+    unrepresented_definition: Any = field(default=None, compare=False, kw_only=True)
 
     @property
     def key(self) -> tuple[SchemaPartType, str, str]:
@@ -59,45 +62,22 @@ class SchemaPart:
         Returns:
             Plain values, lists and dicts.
         """
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        if getattr(value, "migration_import_path", None):
+            return DeclarationValues.get(value)
+        deconstruct = getattr(value, "deconstruct", None)
+        if callable(deconstruct):
+            path, args, kwargs = deconstruct()
+            return [path, cls.get_definition(args), cls.get_definition(kwargs)]
         if dataclasses.is_dataclass(value) and not isinstance(value, type) and not hasattr(value, "deconstruct"):
-            return {item.name: cls.get_definition(getattr(value, item.name)) for item in dataclasses.fields(value)}
+            return {
+                item.name: cls.get_definition(getattr(value, item.name))
+                for item in dataclasses.fields(value)
+                if item.compare
+            }
         if isinstance(value, dict):
             return {str(key): cls.get_definition(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [cls.get_definition(item) for item in value]
-        return ComparableValues.get(value)
-
-    def with_texts_replaced(self, replace: Callable[[str], str]) -> SchemaPart:
-        """The part with every text of its name and definition passed through ``replace``.
-
-        Args:
-            replace: Gives a text another way - the names of a shadow schema made the real ones.
-
-        Returns:
-            The part.
-        """
-        return dataclasses.replace(
-            self,
-            table=replace(self.table),
-            name=replace(self.name),
-            definition=self.replace_texts(self.definition, replace),
-        )
-
-    @classmethod
-    def replace_texts(cls, definition: Any, replace: Callable[[str], str]) -> Any:
-        """A definition with each of its texts passed through ``replace``.
-
-        Args:
-            definition: Plain values, lists and dicts.
-            replace: Gives a text another way.
-
-        Returns:
-            The definition.
-        """
-        if isinstance(definition, str):
-            return replace(definition)
-        if isinstance(definition, dict):
-            return {replace(key): cls.replace_texts(item, replace) for key, item in definition.items()}
-        if isinstance(definition, list):
-            return [cls.replace_texts(item, replace) for item in definition]
-        return definition
+        return DeclarationValues.get(value)

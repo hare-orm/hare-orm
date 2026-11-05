@@ -7,6 +7,7 @@ from hare.query.expressions.constants import UNBINDABLE_VALUE_ORIGIN
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -32,6 +33,8 @@ class Exists(Expression):
                 has_open_ticket=Exists(Ticket.objects.filter(report_id=OuterReference("id"), status="open"))
             ).filter(has_open_ticket=True)
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     # The result is decoded as a bool - a database may return 0/1.
     populate_field_object = True

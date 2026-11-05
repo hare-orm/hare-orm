@@ -207,7 +207,7 @@ class RelationFieldSchemas:
         # Level 0 is the root model itself, so the Nth stack entry (0-indexed) is level N -
         # reject once level reaches the configured max_recursion, so max_recursion=1 permits
         # exactly one level of nested submodels.
-        for level, (_, _, parent_max_recursion) in enumerate(stack):
+        for level, (_, parent_max_recursion) in enumerate(stack):
             if level >= parent_max_recursion:
                 return None
         creator = PydanticModelCreator(
@@ -241,7 +241,7 @@ class RelationFieldSchemas:
         """
 
         if related_model:
-            new_stack = creator._stack + ((creator._model_class, field_name, creator.meta.max_recursion),)
+            new_stack = creator._stack + ((creator._model_class, creator.meta.max_recursion),)
 
             prefix_length = len(field_name) + 1
 
@@ -276,8 +276,5 @@ class RelationFieldSchemas:
             )
         else:
             submodel = None
-
-        if submodel is None:
-            creator.meta.exclude += (field_name,)
 
         return submodel

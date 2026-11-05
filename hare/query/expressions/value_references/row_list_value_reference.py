@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.fields.field import Field
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 
@@ -21,7 +22,7 @@ class RowListValueReference:
     many rows; the row count is part of the plan key.
     """
 
-    container: Tuple
+    container: Tuple | tuple[tuple[ParameterSlot, ...], ...]
     fields: tuple[Field[Any], ...]
     #: The fields of an instance in the list holding its key, in key order.
     key_names: tuple[str, ...] = ()
@@ -41,7 +42,10 @@ class RowListValueReference:
             The parameters, or None for rows of another count or shape, a None in a row, or a value
             converting to a term.
         """
-        row_terms = self.container.values
+        if isinstance(self.container, tuple):
+            row_terms: tuple[tuple[Term | ParameterSlot, ...], ...] = self.container
+        else:
+            row_terms = tuple(tuple(cast("Tuple", row).values) for row in self.container.values)
         if self.instance_class is not None and isinstance(value, set):
             value = list(value)
         if not isinstance(value, (list, tuple)) or len(value) != len(row_terms):
@@ -57,11 +61,11 @@ class RowListValueReference:
                 row = tuple(getattr(row, key_name) for key_name in self.key_names)
             if not isinstance(row, tuple) or len(row) != len(fields):
                 return None
-            for component, field, component_term in zip(row, fields, row_term.values, strict=True):
+            for component, field, component_term in zip(row, fields, row_term, strict=True):
                 if component is None or isinstance(component, expression_class | Term):
                     return None
                 lookup_value = types.get_lookup_value(field, component, model)
                 if isinstance(lookup_value, Term):
                     return None
-                parameter_values.append((id(component_term), lookup_value, False))
+                parameter_values.append((component_term, lookup_value, False))
         return parameter_values

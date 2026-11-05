@@ -17,11 +17,62 @@ import pytest_asyncio
 
 from hare import fields, prefetch_related_objects
 from hare.models import Model
+from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 OWNER_MODULE_NAME = "tests._cross_app_m2m_owner_models"
 TARGET_MODULE_NAME = "tests._cross_app_m2m_target_models"
 ROUTED_MODULE_NAME = "tests._routed_m2m_models"
+
+
+@pytest.mark.asyncio
+async def test_cross_connection_queries_share_dependency_loading(cross_app_m2m, monkeypatch):
+    from hare.query.functions import Count
+
+    _context, Group, Book = cross_app_m2m
+    group = await Group.objects.create(name="Library")
+    books = [await Book.objects.create(name=name) for name in ("A", "B", "C", "Unlinked")]
+    await group.targets.add(*books[:3])
+    reads = []
+    read_keys = LinkedKeys.read_linked_keys
+
+    async def tracked_read(relation):
+        keys = await read_keys(relation)
+        reads.append(keys)
+        return keys
+
+    monkeypatch.setattr(LinkedKeys, "read_linked_keys", tracked_read)
+    rows = group.targets.order_by("id")
+    expected = [book.id for book in books[:3]]
+    assert type(rows) is Book._meta.manager.queryset_class
+
+    checks = (
+        (rows.values_list("id", flat=True), expected),
+        (rows.values_list("id", flat=True)[1:3], expected[1:3]),
+        (rows.count(), len(expected)),
+        (rows.values("id").distinct()[1:3].count(), len(expected[1:3])),
+        (rows.exists(), bool(expected)),
+        (rows.aggregate(total=Count("id")), {"total": len(expected)}),
+    )
+    for query, result in checks:
+        before = len(reads)
+        assert await query == result
+        assert len(reads) == before + 1
+
+    before = len(reads)
+    assert [book.id async for book in rows.iterator(chunk_size=1)] == expected
+    assert len(reads) == before + 1
+    before = len(reads)
+    assert (await rows.first()).id == expected[0]
+    assert (await rows.last()).id == expected[-1]
+    assert len(reads) == before + 2
+
+    await group.targets.remove(books[1])
+    assert await rows.values_list("id", flat=True) == [expected[0], expected[2]]
+    before = len(reads)
+    await rows.update(name="Linked")
+    assert len(reads) == before + 1
+    assert await Book.objects.order_by("id").values_list("name", flat=True) == ["Linked", "B", "Linked", "Unlinked"]
 
 
 @pytest_asyncio.fixture

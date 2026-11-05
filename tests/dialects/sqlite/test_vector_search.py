@@ -157,6 +157,7 @@ def test_load_sqlite_vec_is_checked():
 
 @pytest.mark.sqlite_only
 @requires_sqlite_vec
+@pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_distances_order_the_nearest_first(vector_db):
     first, second, third = await create_entries()

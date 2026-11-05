@@ -13,10 +13,10 @@ from hare.exceptions import QueryError
 from hare.query.expressions import Value
 from hare.query.relation_loading.prefetching.prefetcher import Prefetcher
 from hare.query.rows.model_rows.model_rows import ModelRows
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 from hare.query.statements.select.combined.combined_branches import CombinedBranches
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql import Order
+from hare.sql.terms.field import Field as SqlField
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -62,7 +62,7 @@ class CombinedModelRows:
 
     def get_branch_aliases(self, branch: SelectQuery[Any] | CombinedQuery) -> list[str]:
         """The aliases of a built branch's columns, in output order."""
-        return [select.alias or select.name for select in branch.query._selects]
+        return [select.alias or cast("SqlField", select).name for select in branch.query._selects]
 
     def get_default_orderings(self) -> list[tuple[str, Order]]:
         """The ordering of unordered rows ``first()``/``last()`` and ``iterator()`` take - the
@@ -152,9 +152,7 @@ class CombinedModelRows:
         column its field or annotation name (twice), its column name and the field its value
         decodes through."""
         meta = self.model._meta
-        field_names_by_column = {
-            column_name: field_name for field_name, column_name in meta.fields_db_projection.items()
-        }
+        field_names_by_column = meta.fields_db_projection_reverse
         output_columns: list[tuple[str, str, str, Field[Any] | None]] = []
         for column_name in self.selects:
             field_name = field_names_by_column.get(column_name, column_name)
@@ -171,13 +169,11 @@ class CombinedModelRows:
             annotation_fields=self.custom_field_output_fields,
         )
 
-    def read_rows(self, model_rows: ModelRows, connection: DatabaseClient, result: StatementResult) -> list[Model]:
-        """The instance of each row - in one ``rust.native.rows`` call where the rows are read by
-        position.
+    def read_rows(self, model_rows: ModelRows, result: StatementResult) -> list[Model]:
+        """Reads each row through the layout of the model named by its model columns.
 
         Args:
             model_rows: How the rows are read into instances.
-            connection: The connection the rows were read on.
             result: The rows, at least one, with their column names.
 
         Returns:
@@ -185,15 +181,6 @@ class CombinedModelRows:
         """
         column_names = result.column_names
         rows = result.rows
-        if HydrateAccelerator.module is not None and connection.features.supports_positional_rows:
-            return HydrateAccelerator.run_or_fall_back(
-                lambda: model_rows.read_combined_with_accelerator(
-                    rows, column_names, self.models, self.app_column, self.model_column
-                ),
-                lambda: list(
-                    model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column)
-                ),
-            )
         return list(model_rows.read_combined(rows, column_names, self.models, self.app_column, self.model_column))
 
     async def read(self, query: CombinedQuery, sql: str, parameters: list[Any]) -> list[Any]:
@@ -202,24 +189,23 @@ class CombinedModelRows:
         model, on the connection the rows were read from."""
         connection = query._connection
         by_position = connection.features.supports_positional_rows
-        result = await connection.execute(sql, parameters, returns_rows=True, rows_by_position=by_position)
+        result = await connection.execute(
+            sql, parameters, returns_rows=True, rows_by_position=by_position, retry_read=query.is_read_only
+        )
         if not result.rows:
             return []
         model_rows = self._get_model_rows(connection)
         instances: list[Model] = []
-        if HydrateAccelerator.module is not None and by_position:
-            instances = self.read_rows(model_rows, connection, result)
-        else:
-            reader = model_rows.read_combined(
-                result.rows,
-                result.column_names,
-                self.models,
-                self.app_column,
-                self.model_column,
-            )
-            while chunk := list(itertools.islice(reader, CHUNK_SIZE)):
-                instances.extend(chunk)
-                await asyncio.sleep(0)
+        reader = model_rows.read_combined(
+            result.rows,
+            result.column_names,
+            self.models,
+            self.app_column,
+            self.model_column,
+        )
+        while chunk := list(itertools.islice(reader, CHUNK_SIZE)):
+            instances.extend(chunk)
+            await asyncio.sleep(0)
         if instances and self.prefetched_relations:
             instances_by_model: dict[type[Model], list[Model]] = {}
             for instance in instances:
@@ -231,7 +217,7 @@ class CombinedModelRows:
         return cast("list[Any]", instances)
 
     async def stream_batches(
-        self, query: CombinedQuery, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
+        self, connection: DatabaseClient, sql: str, parameters: list[Any], chunk_size: int
     ) -> AsyncIterator[list[Any]]:
         """Streams the instances off a server-side cursor, a batch of rows at a time.
 
@@ -246,5 +232,8 @@ class CombinedModelRows:
         model_rows = self._get_model_rows(connection)
         async with contextlib.aclosing(connection.stream_batches(sql, parameters, chunk_size=chunk_size)) as batches:
             async for batch in batches:
+                if not batch:
+                    yield []
+                    continue
                 # A batch of the driver's rows, read by name too.
-                yield self.read_rows(model_rows, connection, StatementResult(len(batch), batch))
+                yield self.read_rows(model_rows, StatementResult(len(batch), batch))

@@ -5,18 +5,13 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from hare.exceptions import FieldError, IncompleteInstanceError, IntegrityError, QueryError, StaleObjectError
 from hare.fields.relations.fields.relational_field import RelationalField
-from hare.instrumentation.change_events import ChangeEvents
-from hare.instrumentation.enums import RowOperation
 from hare.models.constants import PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE
-from hare.models.instances.dirty_fields import DirtyFields
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.write.instance_writer import InstanceWriter
-from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.rules.constants import SAVE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
-from hare.models.write.rules.written_instances import WrittenInstances
-from hare.models.write.write_steps import WriteSteps
+from hare.models.write.write_finalizer import WriteFinalizer
 from hare.query.queryset.arguments.collection_arguments import CollectionArguments
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
@@ -24,6 +19,7 @@ from hare.query.scopes.row_visibility import RowVisibility
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models.model import Model
+    from hare.models.write.declarations import WriteOutcome
 
 
 class InstanceSaving:
@@ -68,7 +64,7 @@ class InstanceSaving:
                 setattr(obj, field_name, await awaitable_default())
 
     @staticmethod
-    async def execute_forced_insert(obj: Model, writer: InstanceWriter) -> None:
+    async def execute_forced_insert(obj: Model, writer: InstanceWriter) -> WriteOutcome:
         """INSERTs this obj for ``save(force_create=True)``, sending an already-set
         DB-generated pk as it is instead of letting the database generate a new one.
 
@@ -80,7 +76,7 @@ class InstanceSaving:
         if obj._meta.generated_pk_field_name is not None and obj.pk is not None:
             object.__setattr__(obj, "_custom_generated_pk", True)
         try:
-            await writer.execute_insert(obj)
+            return await writer.execute_insert(obj)
         finally:
             object.__setattr__(obj, "_custom_generated_pk", custom_generated_pk)
 
@@ -209,18 +205,10 @@ class InstanceSaving:
         # of laundering every OTHER unsaved in-memory change on this instance as clean too.
         partial_update_fields: list[str] | None = None
 
-        # Captured before the write: a rollback reverts the row, not _saved_in_db, the pk or the
-        # dirty baseline of the instance.
-        was_insert = False
-        pre_write_pk = obj.pk
+        before = WriteFinalizer.remember_persistence(obj, connection)
         pre_write_saved_in_db = obj._saved_in_db
-        pre_write_custom_generated_pk = obj._custom_generated_pk
-        pre_write_dirty_snapshot = (
-            dict(obj._dirty_snapshot) if obj._meta.track_dirty_fields and obj._dirty_snapshot is not None else None
-        )
-
-        # Decided before a pk default below fills the pk in - an unset pk means an INSERT.
-        pk_is_unset = pre_write_pk is None
+        # Decided before a default fills the key: an unset key means an INSERT.
+        pk_is_unset = obj.pk is None
         # A pk the database generates has no default to fill in.
         if not force_update and pk_is_unset and obj._meta.generated_pk_field_name is None:
             await InstanceSaving.set_unset_pk_default(obj)
@@ -228,101 +216,34 @@ class InstanceSaving:
         # An INSERT unless an UPDATE is forced or the instance has a row to update: loaded from or
         # saved to the database, or given update_fields, and with a primary key.
         if force_create:
-            await InstanceSaving.execute_forced_insert(obj, writer)
-            was_insert = True
+            outcome = await InstanceSaving.execute_forced_insert(obj, writer)
         elif not force_update and (pk_is_unset or not (obj._saved_in_db or update_fields)):
-            await writer.execute_insert(obj)
-            was_insert = True
+            outcome = await writer.execute_insert(obj)
         else:
             optimistic_lock_field = obj._meta.optimistic_lock_field
             old_version = getattr(obj, optimistic_lock_field) if optimistic_lock_field else None
-            rows = await writer.execute_update(obj, update_fields)
+            outcome = await writer.execute_update(obj, update_fields)
             # A database reporting no count of the rows a write changed tells no missing row.
-            if rows == 0 or (rows is None and connection.features.reports_written_row_count):
+            if outcome.row_count == 0 or not outcome.performed:
                 await InstanceSaving.check_update_matched(
                     obj,
                     connection,
-                    rows,
+                    outcome.row_count,
                     old_version,
                     never_inserts=not force_update and not pre_write_saved_in_db,
                 )
             if update_fields is not None:
                 partial_update_fields = list(update_fields)
 
-        await InstanceSaving.record_written(
-            obj,
+        await WriteFinalizer.saved(
+            before,
             connection,
-            was_insert,
-            partial_update_fields,
-            None
+            outcome,
+            updated_fields=None
             if partial_update_fields is None
             else writer.get_update_rules(partial_update_fields, WriteType.UPDATE).get_updated_names(),
-            pk_before=pre_write_pk,
-            saved_in_db_before=pre_write_saved_in_db,
-            custom_generated_pk_before=pre_write_custom_generated_pk,
-            dirty_snapshot_before=pre_write_dirty_snapshot,
+            reported_fields=partial_update_fields,
         )
-
-    @staticmethod
-    async def record_written(
-        obj: Model,
-        connection: DatabaseClient,
-        was_insert: bool,
-        partial_update_fields: list[str] | None,
-        updated_field_names: list[str] | None,
-        *,
-        pk_before: Any,
-        saved_in_db_before: bool,
-        custom_generated_pk_before: bool,
-        dirty_snapshot_before: dict[str, Any] | None,
-    ) -> None:
-        """Brings an obj in step with the row a save() just wrote and reports the write. A rollback
-        reverts the row, so what the obj held before is registered to be put back with it.
-
-        Args:
-            obj: The model obj.
-            connection: The connection the row was written on.
-            was_insert: Whether the row was inserted.
-            partial_update_fields: The fields a partial UPDATE was asked to write, None for a whole write.
-            updated_field_names: Every field the partial UPDATE wrote - the stamps, blind indexes and
-                version too; None for a whole write.
-            pk_before: The primary key before the write.
-            saved_in_db_before: Whether the obj counted as saved before the write.
-            custom_generated_pk_before: Whether the obj carried a caller's value for a generated
-                primary key before the write.
-            dirty_snapshot_before: The dirty baseline before the write.
-        """
-        meta = obj._meta
-        # Outside a transaction a write can't be rolled back - nothing to register.
-        if connection.is_transaction_client:
-            if was_insert:
-                RollbackRestores.register_rollback_restore(obj, connection, "_saved_in_db", saved_in_db_before)
-                if meta.has_primary_key:
-                    RollbackRestores.register_rollback_restore(obj, connection, "pk", pk_before)
-            if meta.track_dirty_fields:
-                RollbackRestores.register_rollback_restore(obj, connection, "_dirty_snapshot", dirty_snapshot_before)
-
-        WrittenInstances.mark_saved((obj,), connection)
-        if was_insert and not custom_generated_pk_before:
-            # The pk the database just generated was assigned through Model.__setattr__ while the
-            # obj still counted as unsaved - it isn't a caller-supplied value.
-            object.__setattr__(obj, "_custom_generated_pk", False)
-        if meta.track_dirty_fields:
-            # After a partial UPDATE only the written fields are clean - the other unsaved changes
-            # of the obj stay dirty.
-            if updated_field_names is not None:
-                DirtyFields.sync_dirty_snapshot_fields(obj, updated_field_names)
-            else:
-                DirtyFields.snapshot_dirty_fields(obj)
-        # Asked first - the report is a coroutine, made only for a listener.
-        if ChangeEvents.is_observed(obj.__class__):
-            await WriteSteps.report(
-                connection,
-                obj.__class__,
-                RowOperation.INSERT if was_insert else RowOperation.UPDATE,
-                instances=[obj],
-                fields=None if was_insert else partial_update_fields,
-            )
 
     @staticmethod
     async def raise_for_unmatched_update(

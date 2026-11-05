@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.query.expressions.subqueries.outer_scope import OuterScope
+from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.hashable_values import HashableValues
 from hare.query.plans.description.plan_context import PlanContext
 from hare.query.plans.description.plan_description import PlanDescription
@@ -17,6 +18,8 @@ from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.time import Timezone
 
 if TYPE_CHECKING:
+    from hare.fields.relations.fields.relational_field import RelationalField
+    from hare.models import Model
     from hare.query.expressions.conditions.q import Q
     from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
     from hare.query.statements.awaitable_query import AwaitableQuery
@@ -91,7 +94,7 @@ class StatementPlanDescriptions:
                     name not in query._distinct_on and not query._annotation_renders_as_expression(name)
                 ):
                     continue
-                annotation_description = annotation.get_plan_description(PlanContext.EMPTY)
+                annotation_description = annotation.get_plan_description(PlanContext(model=query.model))
                 if annotation_description is not None and annotation_description.values:
                     return False
         # An unused .alias() is left out of the built query, so the values it holds would no
@@ -100,7 +103,7 @@ class StatementPlanDescriptions:
             annotation = annotations[name]
             if not isinstance(annotation, Plannable):
                 return False
-            annotation_description = annotation.get_plan_description(PlanContext.EMPTY)
+            annotation_description = annotation.get_plan_description(PlanContext(model=query.model))
             if annotation_description is None or annotation_description.values:
                 return False
         return True
@@ -215,19 +218,44 @@ class StatementPlanDescriptions:
             The relations' paths and the conditions' structures, and their values - None when a
             condition keeps no plan.
         """
-        extra_conditions = query._select_related_extra_conditions
-        if not extra_conditions:
-            return PlanDescription.EMPTY
-        description = StatementPlanDescriptions.get_conditions_plan_description(
-            extra_conditions.values(), PlanContext.EMPTY
+        description = StatementPlanDescriptions.get_join_conditions_plan_description(
+            query.model, query._select_related_extra_conditions.items()
         )
         if description is None:
             return None
         return PlanDescription(
-            (tuple(extra_conditions), description.structure),
+            description.structure,
             description.values,
             PlanParts.get_optional_origins(description, []) if PlanOrigins.records else None,
         )
+
+    @staticmethod
+    def get_join_conditions_plan_description(
+        model: type[Model], paths_and_conditions: Iterable[tuple[str, Q]]
+    ) -> PlanDescription | None:
+        """Describe each JOIN condition against its related model, retaining the supplied order.
+
+        Field paths in an extra condition start at the joined model, as they do when
+        building its SQL. Values and recorded origins follow the same JOIN order.
+        """
+        paths = []
+        structures = []
+        values: list[Any] = []
+        origins: list[Any] | None = [] if PlanOrigins.records else None
+        for path, condition in paths_and_conditions:
+            relation = cast("RelationalField[Any]", LookupPaths.expand_expression(model, path)[-1])
+            related_model = relation.related_model
+            description = condition.get_plan_description(PlanContext(model=related_model))
+            if description is None:
+                return None
+            paths.append(path)
+            structures.append(description.structure)
+            values.extend(description.values)
+            if origins is not None:
+                origins = PlanParts.get_origins(description, origins)
+        if not paths:
+            return PlanDescription.EMPTY
+        return PlanDescription((tuple(paths), tuple(structures)), values, origins)
 
     @staticmethod
     def get_cursor_plan_description(query: AwaitableQuery[Any]) -> PlanDescription:

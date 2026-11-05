@@ -35,7 +35,8 @@ if TYPE_CHECKING:
 class ClickhouseSpatialRenderers:
     """How ClickHouse writes the spatial terms - with its functions of points and areas (polygons and
     multipolygons), chosen by the geometries' types: a point in an area (``pointInPolygon``, its
-    border counting as in it), relations and measures of areas (``polygons*``, ``polygonArea*``), the
+    border classification following ClickHouse's function), relations and measures of areas
+    (``polygons*``, ``polygonArea*``), the
     distance of points (``L2Distance``; ``geoDistance`` in meters on the WGS 84 ellipsoid for a
     geography). A geography is measured on a sphere of WGS 84's mean radius. What ClickHouse has no
     function of is refused."""

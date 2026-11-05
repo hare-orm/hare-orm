@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from hare.sql.enums import JsonValueType
 from hare.sql.functions.text.collate import Collate
@@ -10,6 +10,9 @@ from hare.sql.terms.functions.function import Function
 class JsonValue(Function):
     """A value of a JSON value a database builds, with the type its database writes it by. A naive
     timestamp (``is_aware=False``) is written as its wall clock."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ("is_aware", "value_type")
+    has_repeatable_value = True
 
     requires_dialect_renderer = True
 

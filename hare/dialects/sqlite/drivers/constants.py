@@ -10,10 +10,16 @@ SQLITE_FIRST_NUMBERED_PLACEHOLDER = "?1"
 
 #: The text of a DBConnectionError of a database file SQLite can't open.
 SQLITE_OPEN_FAILED_MESSAGE = "Can't open the SQLite database {filename}. Exception: {error}"
+SQLITE_SETUP_RELEASE_FAILED = "SQLite connection setup and resource release failed"
 
 #: How many rows stream() reads off a SQLite cursor per hop to the worker thread when no
 #: chunk_size is given.
 SQLITE_STREAM_BATCH_SIZE = 1000
+
+#: A local savepoint around executemany: its individual statements must fail as one call.
+SQLITE_EXECUTE_MANY_SAVEPOINT_SQL = 'SAVEPOINT "hare execute many"'
+SQLITE_EXECUTE_MANY_ROLLBACK_SQL = 'ROLLBACK TO SAVEPOINT "hare execute many"'
+SQLITE_EXECUTE_MANY_RELEASE_SQL = 'RELEASE SAVEPOINT "hare execute many"'
 
 #: Whether the library was built with the FTS5 full-text search module.
 SQLITE_FTS5_COMPILE_OPTION_SQL = "SELECT sqlite_compileoption_used('ENABLE_FTS5')"

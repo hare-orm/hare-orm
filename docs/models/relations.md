@@ -72,9 +72,9 @@ either strategy again.
 class OnDelete(StrEnum):
     CASCADE = "CASCADE"
     RESTRICT = "RESTRICT"
-    SET_NULL = "SET_NULL"     # requires null=True
-    SET_DEFAULT = "SET_DEFAULT"  # requires db_default (or default, with db_constraint=False) — see below
-    NO_ACTION = "NO_ACTION"
+    SET_NULL = "SET NULL"     # requires null=True
+    SET_DEFAULT = "SET DEFAULT"  # requires db_default (or default, with db_constraint=False) — see below
+    NO_ACTION = "NO ACTION"
     PROTECT = "PROTECT"       # enforced in Python; the DDL gets a deferrable NO ACTION backstop
 ```
 
@@ -94,8 +94,8 @@ it back off.
 A delete that `RESTRICT` or `NO_ACTION` refuses raises `IntegrityError` on every database. Its message is
 the database's own where the database enforces the constraint — PostgreSQL names the constraint and the
 table, SQLite says only `FOREIGN KEY constraint failed` — and hare's
-(`Cannot delete P because C.p has on_delete=RESTRICT and live rows point at it`) where hare checks it
-itself: a relation of `db_constraint=False`, and every relation on ClickHouse.
+(`Cannot delete P because C.p has on_delete=RESTRICT and rows point at it (including soft-deleted rows)`)
+where hare checks it itself: a relation of `db_constraint=False`, and every relation on ClickHouse.
 
 Shortcuts `CASCADE`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `NO_ACTION`, `PROTECT` are all importable
 directly from `hare.fields`.
@@ -177,8 +177,7 @@ class Review(Model):
 - No separate index is created when an index the model already declares starts with the key column(s), in
   any order: a plain `Meta.indexes` entry (`Index(fields=...)`, unique or not), an unconditional
   `UniqueConstraint`, or the composite primary key. A partial, expression or non-btree index doesn't
-  count — except an unnamed one over exactly the key column(s): it gets the same generated name as the
-  relation's own index, so the relation's index is left out. Give one of them a `name=` to get both.
+  count. Its generated name includes its declaration, so it can coexist with the relation's index.
 - A relation to a [composite primary key](#targeting-a-composite-primary-key) gets one index over all of
   its key columns.
 - `db_constraint=False` keeps the index — hare's own cascade looks rows up by the column.
@@ -261,7 +260,7 @@ Indexes the key columns of the automatic through table that its `UNIQUE` index d
 ### <a id="on-delete-row"></a>`on_delete`
 
 `CASCADE`/`RESTRICT`/`NO_ACTION`/`PROTECT`/`SET_NULL` are valid here. `SET_DEFAULT` isn't — through-table
-columns are always `NOT NULL` with no default, so there's nothing for it to fall back to — it raises
+columns have no default, so there's nothing for it to fall back to — it raises
 `ConfigurationError`. With a `Model` as `through`, the field's `on_delete` is propagated onto the through
 model's own FK fields (when they left theirs at `CASCADE`), and `SET_DEFAULT` is accepted only if both of
 those FK fields satisfy the [`SET_DEFAULT` rule](#set-default-needs-db-default).
@@ -285,6 +284,10 @@ the connection of the model declaring it, and no query joins the two connections
   field of `Tag` (`tags__name=...`) or a query of it (`tags__in=Tag.objects.filter(...)`), and
   `Tag.objects.filter(books=...)`, raise `QueryError`.
 - `prefetch_related("tags")` queries each connection apart.
+
+Linked keys are loaded once within one execution, including all pages of an iterator.
+An empty query skips this read; another nonempty part of the same operation still loads the keys.
+Repeated or concurrent executions obtain independent inputs.
 
 ### <a id="a-model-as-through"></a>A `Model` as `through`
 
@@ -325,12 +328,19 @@ has to be given in `through_defaults`: `add()` raises `ValidationError` before i
 does. A through model whose key the database hands out from a series before the rows are written
 (ClickHouse) takes the keys of the new rows from it, as `create()` does.
 
+Python defaults, including callable and async defaults, also populate an encrypted field's blind
+index. Sensitive defaults and keys remain hidden in logged parameters, including the SELECTs
+that check a relation's visibility and tenant before writing it.
+
 When the through model has [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.md),
 `add()` fills it with the value of the through model's `Tenancy.scope()` unless `through_defaults` gives
 it — under a scope of several values `through_defaults` has to; a `through_defaults` tenant outside that
 scope raises `QueryError`.
 
 ### <a id="relation-operations"></a>Operations on the relation
+
+The multi-command operations below are atomic only on a database that supports transactions.
+On a database without transactions, commands run sequentially without a shared rollback guarantee.
 
 A `ManyToManyField` reads and writes its links through these methods of the relation:
 
@@ -416,8 +426,9 @@ left untouched, extra fields included. `clear=True` clears the whole relation fi
 `clear()` and `set()` only ever remove links to members the related model's default scope shows: a link
 to a soft-deleted row, to another tenant's row (`Meta.tenant_field`) or to a row a custom `Meta.manager`
 hides stays in place. `clear(all_tenants=True)` removes the links to every tenant's rows, with no tenant
-scope needed (see [Multi-tenancy](../soft-delete-versions-tenants/multi-tenancy.md)). `remove()` names
-its rows, so it also drops a link to a soft-deleted or `Meta.manager`-hidden one (another tenant's row is
+scope needed (see [Multi-tenancy](../soft-delete-versions-tenants/multi-tenancy.md)). `remove(instance)` names
+its row directly, so it also drops a link to a soft-deleted or `Meta.manager`-hidden one (another
+tenant's row is
 still rejected).
 
 `add()` checks against the database that the owner isn't soft-deleted and that every added row is shown
@@ -647,6 +658,12 @@ adds; `clear=True` clears first. A `kwargs` value pointing the foreign key at an
 raises `QueryError` in `create()`, `get_or_create()` and `update_or_create()`, as an object pointing it
 there does in `bulk_create()`.
 
+Relation writes invalidate prefetched members when they execute. In particular, constructing a
+`bulk_create()` query does not invalidate the relation before the query is awaited. Transaction
+rollback invalidates the members again through the client that performed the write; rebinding a
+connection alias does not move this callback to another transaction. A rolled-back reassignment
+restores foreign keys before the related objects that were loaded before the transaction.
+
 ```python
 class Book(Model):
     author: fields.ForeignKeyRelation["Author"] = fields.ForeignKeyField("models.Author", related_name="books")
@@ -668,12 +685,12 @@ ForeignKeyRelation = ForeignKeyFieldInstance[TModel]
 
 `book.author` gives the loaded `Author` once the relation is loaded (`select_related()`,
 `prefetch_related()`, `prefetch_related_objects()`, `lazy=`, or an assignment), and an awaitable query
-otherwise — `await book.author` works either way for a related row that exists. A relation with no
-related row (a `NULL` foreign key, a reverse `OneToOneField` nobody points at, or one a
-`Select(extra_condition=...)` didn't match) reads differently depending on whether it was loaded: never
-loaded, it gives the falsy `NoneAwaitable` (importable from `hare.models`), and `await book.author`
-returns `None`; loaded, it is a plain `None` — test it with `book.author is None` (or look at
-`book.author_id`), and don't `await` it.
+otherwise — `await book.author` works either way for a related row that exists. An unloaded relation
+returns an awaitable that may return `None` when no related row exists. When an empty key is already
+known (for example, a `NULL` foreign key), this is the falsy `NoneAwaitable` (importable from
+`hare.models`). A reverse `OneToOneField` with a nonempty key needs a query to determine whether its
+row exists. A loaded empty relation is plain `None`, including a row excluded by
+`Select(extra_condition=...)`: test `book.author is None` and do not `await` that value.
 
 Filtering or assigning by an instance reads its referenced field(s) (`to_field`, the primary key by
 default); an instance loaded with `.only()`/`.defer()` without them raises `QueryError` — as do its

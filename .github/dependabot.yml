@@ -11,7 +11,7 @@ updates:
       python-dependencies:
         patterns: ["*"]
 
-  # The native extension: the PostgreSQL driver, the row readers/writers and the field codecs.
+  # The native extension: the PostgreSQL driver, value helpers and SQLite functions.
   - package-ecosystem: cargo
     directories:
       - /rust/native

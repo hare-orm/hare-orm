@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast, overloa
 
 from hare.classes.class_path import ClassPath
 from hare.core.caching.cache import Cache
+from hare.core.extensions.declarations import ExtensionContribution, LookupRegistration, TransformRegistration
 from hare.core.registries import Registries
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError, DatabaseError, UnSupportedError, ValidationError
+from hare.fields.bound_field import BoundField
 from hare.fields.constants import (
     DB_DEFAULT_NOT_SET,
     SCHEMA_TEXT_NULL_BYTE_MESSAGE,
@@ -22,11 +24,11 @@ from hare.fields.constants import (
     UNWRITTEN_FIELD_CONSTRUCTOR_PARAMETERS,
 )
 from hare.fields.db_default_not_set import DbDefaultNotSet
-from hare.fields.enums import NativeWriteCheck, RelationType, ValueComputation
+from hare.fields.declaration_snapshot import DeclarationSnapshot
+from hare.fields.enums import RelationType, ValueComputation
 from hare.fields.json_values import JsonValues
 from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.fields.registrations.registered_transform import RegisteredTransform
-from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.fields.validators.validator import Validator
 from hare.query.enums import LookupValueShape
 from hare.sql.enums import DateTruncSource
@@ -36,10 +38,10 @@ from hare.warnings import RedundantDbDefaultWarning
 if TYPE_CHECKING:
     from typing import Self
 
+    from hare.core.caching.cache_bucket import CacheBucket
     from hare.ddl.schema_objects.enum_type import EnumType
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
-    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.fields.narrowing.narrowing_limit import NarrowingLimit
     from hare.models import Model
     from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -101,16 +103,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Whether a value the driver already returns as ``field_type`` is read as it is, without
         ``from_db_value()``. A class defining ``to_python()`` or ``from_db_value()`` reads every
         value through them unless it declares this itself.
-
-    .. attribute:: native_write_check
-        :annotation: NativeWriteCheck | None = None
-
-        Declared by a field class whose own ``to_db_value`` adds checks to
-        ``Field.to_db_value``: what those checks do for a value that is already exactly
-        ``field_type``. The Rust write accelerator runs that check itself and keeps the field on
-        its fast path; any other value goes through the class's real ``to_db_value``. Read only
-        from the class that defines the ``to_db_value`` in use - a subclass overriding
-        ``to_db_value`` again leaves the fast path until it declares its own.
 
     .. attribute:: allows_generated
         :annotation: bool = False
@@ -187,6 +179,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
     """
 
     field_type: type[Any] = None  # type: ignore[assignment]
+    #: Additional public input representations, distinct from the type returned when reading.
+    accepted_value_types: ClassVar[tuple[Any, ...]] = ()
+    _binding: BoundField | None = None
     indexable: bool = True
     has_db_field: bool = True
     is_orderable: ClassVar[bool] = True
@@ -197,7 +192,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
     #: The constructor parameters of the field's class a migration doesn't write, besides the ones no
     #: field's migration writes.
     unwritten_constructor_parameters: ClassVar[frozenset[str]] = frozenset()
-    native_write_check: ClassVar[NativeWriteCheck | None] = None
     allows_generated: bool = False
     generated_requires_primary_key: bool = False
     requires_enum_type: EnumType | None = None
@@ -246,9 +240,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
     #: (field class,) -> its constructor's parameters other than ``self``, with their defaults
     #: (``_get_constructor_parameters()``).
     constructor_parameters: ClassVar[Cache[tuple[tuple[str, Any], ...]]] = Cache(Cache.max_size_from_env())
-    #: The field's lookups by suffix, with the generation of ``FieldLookups.built_lookups`` they
-    #: were built in - never copied with the field.
-    built_lookups: tuple[int, dict[str, FieldLookup]] | None = None
 
     @classmethod
     def register_lookup(
@@ -270,7 +261,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         before any SQL is built.
 
         Args:
-            lookup_name: The suffix without the double underscore (``"within_km"``).
+            lookup_name: The suffix without the double underscore (``"dwithin"``).
             lookup: ``(field) -> FieldLookup`` - omitted to use this as a decorator.
             value_shape: Whether the value is one value, a list or a two-item range.
             value_type: The type of the value (of each item); None means the field's own type.
@@ -292,15 +283,22 @@ class Field(Generic[TValue], metaclass=FieldMeta):
                 return lookup_function
 
             return decorator
-        if "registered_lookups" not in cls.__dict__:
-            cls.registered_lookups = {}
-        cls.registered_lookups[lookup_name] = RegisteredLookup(
-            builder=lookup,
-            value_shape=value_shape,
-            value_type=value_type,
-            required_extension=required_extension,
+        Registries.register(
+            ExtensionContribution(
+                lookups=(
+                    LookupRegistration(
+                        cls,
+                        lookup_name,
+                        RegisteredLookup(
+                            builder=lookup,
+                            value_shape=value_shape,
+                            value_type=value_type,
+                            required_extension=required_extension,
+                        ),
+                    ),
+                )
+            )
         )
-        Registries.changed()
         return None
 
     # The types of a field read off a model class and off an instance, for type checkers.
@@ -321,7 +319,13 @@ class Field(Generic[TValue], metaclass=FieldMeta):
 
         def __get__(self, obj: object, owner: type[object]) -> Field[TValue] | TValue: ...
 
+        @overload
         def __set__(self, obj: Model, value: TValue) -> None: ...
+
+        @overload
+        def __set__(self, obj: object, value: Field[TValue] | None) -> None: ...
+
+        def __set__(self, obj: object, value: Field[TValue] | TValue | None) -> None: ...
 
     def _raise_if_texts_mistyped(self, *, source_field: Any, description: Any) -> None:
         """Refuses a column name or a description that isn't a text - both are written into the schema.
@@ -395,12 +399,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         self._default_is_coroutine = self._is_async_default(default)
         #: Whether the static ``default`` already has the form ``to_python`` gives
         #: it - None until the first instance construction checks it.
-        self.static_default_is_normalized: bool | None = None
+        self.static_default_is_normalized = None
         #: ``get_assign_normalized_types()``, cached by the first callable default normalized.
-        self.assign_normalized_types: frozenset[type] | None = None
-        #: ``(validators, their count, the native checks of them)`` - the checks ``validate()`` makes
-        #: of a value of exactly ``field_type``, worked out by its first such value.
-        self.value_checks: tuple[list[Any], int, Any] | None = None
+        self.assign_normalized_types = None
         self.db_default = db_default
         if self.has_db_default() and callable(self.db_default):
             raise ConfigurationError(
@@ -430,22 +431,122 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         self.validators: list[Validator | Callable[[Any], None]] = validators or []
         self.sensitive = sensitive
         # Bound by the model class that declares the field.
-        self.model: type[Model] = None  # type: ignore[assignment]
-        self.reference: Field[Any] | None = None
+        self.model = None  # type: ignore[assignment]
+        self.reference = None
 
     def __getstate__(self) -> dict[str, Any]:
-        state = self.__dict__.copy()
-        state.pop("built_lookups", None)
+        """Retain instance and inherited slot values without sharing runtime caches."""
+        state = object.__getstate__(self)
+        if isinstance(state, tuple):
+            attributes, slots = state
+            state = {**(attributes or {}), **slots}
+        else:
+            state = dict(cast("dict[str, Any] | None", state) or {})
+        state.pop("cache_buckets", None)
+        if self._binding is not None:
+            state["_binding"] = self._binding.copy_runtime()
         # Worked out again by the copy's first value - the native checks can't be copied.
-        state["value_checks"] = None
         return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore declarations and slots without invoking the field constructor."""
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
 
     def __copy__(self) -> Field[TValue]:
         cls = self.__class__
         result = cls.__new__(cls)
-        result.__dict__.update(self.__getstate__())
+        result.__setstate__(self.__getstate__())
         result.validators = list(self.validators)
         return result
+
+    def get_declaration_values(self) -> dict[str, Any]:
+        """Describe values retained by an independent, unbound declaration.
+
+        Custom fields can exclude runtime attributes here. Field subclasses and
+        mutable literal values are preserved; model references and derived
+        conversion caches belong to a later binding, not this snapshot.
+        """
+        declaration = self._binding.declaration if self._binding is not None else None
+        values = (declaration or self).__getstate__()
+        values["_binding"] = None
+        return values
+
+    def get_binding(self) -> BoundField:
+        """Return this field's conversion state, allocating it only when first used."""
+        if self._binding is None:
+            self._binding = BoundField()
+        return self._binding
+
+    def bind_to_model(self, model: type[Model], name: str) -> None:
+        """Publish an independent declaration and fresh conversion state for one model field."""
+        declaration = self.snapshot()
+        self._binding = BoundField(
+            model,
+            name,
+            self.source_field or name if self.has_db_field else None,
+            self.reference,
+            declaration,
+            self._binding.relation if self._binding is not None else None,
+        )
+
+    @property
+    def model(self) -> type[Model]:
+        return cast("type[Model]", self._binding.model if self._binding is not None else None)
+
+    @model.setter
+    def model(self, value: type[Model]) -> None:
+        self.get_binding().model = value
+
+    @property
+    def model_field_name(self) -> str:
+        return self._binding.name if self._binding is not None else ""
+
+    @model_field_name.setter
+    def model_field_name(self, value: str) -> None:
+        self.get_binding().name = value
+
+    @property
+    def reference(self) -> Field[Any] | None:
+        return self._binding.reference if self._binding is not None else None
+
+    @reference.setter
+    def reference(self, value: Field[Any] | None) -> None:
+        self.get_binding().reference = value
+
+    @property
+    def cache_buckets(self) -> dict[int, CacheBucket[Any]]:
+        return self.get_binding().cache_buckets
+
+    @cache_buckets.setter
+    def cache_buckets(self, value: dict[int, CacheBucket[Any]]) -> None:
+        self.get_binding().cache_buckets = value
+
+    @property
+    def static_default_is_normalized(self) -> bool | None:
+        return self.get_binding().static_default_is_normalized
+
+    @static_default_is_normalized.setter
+    def static_default_is_normalized(self, value: bool | None) -> None:
+        self.get_binding().static_default_is_normalized = value
+
+    @property
+    def assign_normalized_types(self) -> frozenset[type] | None:
+        return self.get_binding().assign_normalized_types
+
+    @assign_normalized_types.setter
+    def assign_normalized_types(self, value: frozenset[type] | None) -> None:
+        self.get_binding().assign_normalized_types = value
+
+    def snapshot(self, *, memo: dict[int, Any] | None = None) -> Self:
+        """Return an independent declaration without invoking constructors or defaults.
+
+        Nested fields use the same protocol. Callbacks retain their identity;
+        mutable literal defaults and declaration containers are copied. Override
+        this method for extra external handles, retaining the supplied memo when
+        copying nested declarations.
+        """
+        return cast("Self", DeclarationSnapshot.field(self, memo))
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         """The value written into the column for a Python value - converted to ``field_type`` and validated.
@@ -600,22 +701,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             raise validation_error
         return value
 
-    def get_read_codec_specification(
-        self, types: TypeRegistry, zone_name: str | None
-    ) -> tuple[str, dict[str, Any]] | None:
-        """The ``rust.native.rows`` codec reading a column of this field, for a field that reads its
-        values in a way of its own the codec repeats exactly - a container of other fields' values.
-
-        Args:
-            types: The dialect's type registry.
-            zone_name: The configured zone under ``use_timezone``, else None.
-
-        Returns:
-            The read codec type and its options; None leaves the column to the codec of the field's
-            type, or to ``from_db_value()``.
-        """
-        return None
-
     def from_db_value(self, value: Any) -> Any:
         """The field's Python value of a value read from the database - ``to_python()``, unless
         the field stores its value differently from how it holds it (an encrypted token, JSON
@@ -669,22 +754,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             return value
         return self.to_python(value)
 
-    @classmethod
-    def get_native_write_check(cls) -> NativeWriteCheck | None:
-        """The check the ``to_db_value`` in use adds for a value that is exactly ``field_type`` -
-        ``native_write_check`` of the class that defines that ``to_db_value``.
-
-        Returns:
-            The check; None when ``to_db_value`` is ``Field``'s own, or its class declares no
-            ``native_write_check`` (its conversion is unknown to the write accelerator).
-        """
-        for klass in cls.__mro__:
-            if "to_db_value" in klass.__dict__:
-                if klass is Field:
-                    return None
-                return cast("NativeWriteCheck | None", klass.__dict__.get("native_write_check"))
-        return None
-
     def validate(self, value: Any) -> None:
         """Runs the field's validators on a value - ``None`` passes on a nullable field.
 
@@ -696,14 +765,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         """
         if self.null and value is None:
             return
-        if type(value) is self.field_type:
-            validators = self.validators
-            value_checks = self.value_checks
-            if value_checks is None or value_checks[0] is not validators or value_checks[1] != len(validators):
-                value_checks = self.value_checks = (validators, len(validators), self._get_native_value_checks())
-            if value_checks[2] is not None:
-                value_checks[2].check(value, self.model_field_name)
-                return
         for validator in self.validators:
             validation_error = None
             try:
@@ -732,17 +793,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         field_type = self.field_type
         if set(map(type, values)) != {field_type}:
             return None
-        # validate()'s own cache of the native checks, read without its per-value call.
-        validators = self.validators
-        value_checks = self.value_checks
-        if value_checks is None or value_checks[0] is not validators or value_checks[1] != len(validators):
-            value_checks = self.value_checks = (validators, len(validators), self._get_native_value_checks())
         try:
-            if value_checks[2] is not None:
-                value_checks[2].check_values(values, self.model_field_name)
-            else:
-                for value in values:
-                    self.validate(value)
+            for value in values:
+                self.validate(value)
         except ValidationError:
             return None
         return values
@@ -782,32 +835,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         if type(self).to_lookup_value is Field.to_lookup_value:
             return self.to_db_values(values, instance)
         return [self.to_lookup_value(value, instance) for value in values]
-
-    def _get_native_value_checks(self) -> Any:
-        """The ``rust.native.rows.ValueChecks`` making the validators' checks of a value of exactly
-        ``field_type`` in one call.
-
-        Returns:
-            The checks; None when a validator checks another way, or its message hides a sensitive
-            value.
-        """
-        if self.sensitive or not self.validators:
-            return None
-        # Imported here: hare.query imports the fields package.
-        from hare.query.rows.enums import InlineCheckType
-        from hare.query.rows.native.field_codecs import FieldCodecs
-        from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-
-        value_checks_class = getattr(HydrateAccelerator.module, "ValueChecks", None)
-        checks = FieldCodecs.get_inline_checks(self)
-        # A codec checks the digits of a value already quantized - validate() gets any value.
-        if (
-            value_checks_class is None
-            or checks is None
-            or any(check_type is InlineCheckType.MAX_DIGITS for check_type, _ in checks)
-        ):
-            return None
-        return value_checks_class(self.model_field_name, checks)
 
     def has_db_default(self) -> bool:
         """Whether the field declares a ``db_default``."""
@@ -888,7 +915,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             field of the value it reads; None when the segment reads nothing inside the value.
         """
         for klass in type(self).__mro__:
-            registered_transform = klass.__dict__.get("registered_transforms", {}).get(segment)
+            registered_transform = Field.get_class_transforms(klass).get(segment)
             if registered_transform is not None:
                 return registered_transform.get_transform(self)
         return None
@@ -910,10 +937,29 @@ class Field(Generic[TValue], metaclass=FieldMeta):
                 segment reads, and the field of the value it reads.
             required_extension: The database extension the transform needs.
         """
-        if "registered_transforms" not in cls.__dict__:
-            cls.registered_transforms = {}
-        cls.registered_transforms[segment] = RegisteredTransform(get_transform, required_extension)
-        Registries.changed()
+        Registries.register(
+            ExtensionContribution(
+                transforms=(
+                    TransformRegistration(cls, segment, RegisteredTransform(get_transform, required_extension)),
+                )
+            )
+        )
+
+    @staticmethod
+    def get_class_lookups(field_class: type) -> dict[str, RegisteredLookup]:
+        """Read direct class declarations and extensions from the current registry generation."""
+        return {
+            **field_class.__dict__.get("registered_lookups", {}),
+            **Registries.current().lookups.get(field_class, {}),
+        }
+
+    @staticmethod
+    def get_class_transforms(field_class: type) -> dict[str, RegisteredTransform]:
+        """Read registrations for one MRO entry, without inheriting another entry twice."""
+        return {
+            **field_class.__dict__.get("registered_transforms", {}),
+            **Registries.current().transforms.get(field_class, {}),
+        }
 
     def get_lookup_value_description(self, lookup: str) -> tuple[LookupValueShape, Any] | None:
         """What the filter value of a lookup on this field is, where the field's own lookups take
@@ -936,7 +982,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Returns:
             The types - none by default.
         """
-        return ()
+        return self.accepted_value_types
 
     def get_lookup_value_alternatives(self, lookup: str) -> tuple[Any, ...]:
         """The types a lookup's filter value may be instead, whole - besides the value, list or range
@@ -962,9 +1008,9 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         return ()
 
     def get_generated_from_field_names(self) -> tuple[str, ...]:
-        """The model's other fields a generated column is computed from, where the field names them (a
-        ``TSVectorField``'s ``source_fields``) - a migration refuses to remove one while this field
-        reads it, and a rename renames it here.
+        """The model's other fields a generated column reads: structured ``GeneratedField`` or
+        ``TSVectorField`` expressions, or the latter's ``source_fields``. A migration refuses to remove one
+        while this field reads it, and a rename renames it here.
 
         Returns:
             The field names, none by default.
@@ -1252,10 +1298,6 @@ class Field(Generic[TValue], metaclass=FieldMeta):
             kwargs["db_index"] = self.index
         if self.description is not None:
             kwargs["description"] = self.description
-        if getattr(self, "db_constraint", True) is False:
-            kwargs["db_constraint"] = False
-        if hasattr(self, "to_field") and getattr(self, "to_field") is not None:
-            kwargs["to_field"] = getattr(self, "to_field")
         if self.has_db_default():
             kwargs["db_default"] = self.db_default
         return kwargs
@@ -1283,8 +1325,7 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         return class_kwargs
 
     def _get_constructor_argument_value(self, name: str) -> Any:
-        """The value of one of the field's own constructor arguments - a related model by its label,
-        a through model as it was declared.
+        """The value of one of the field's constructor arguments.
 
         Args:
             name: The argument.
@@ -1292,14 +1333,4 @@ class Field(Generic[TValue], metaclass=FieldMeta):
         Returns:
             The value.
         """
-        value = getattr(self, name)
-        if name == "model_name" and value is not None and not isinstance(value, str) and hasattr(value, "_meta"):
-            return f"{value._meta.app}.{value.__name__}"
-        if name == "through" and getattr(self, "through_model", None) is not None:
-            # The declared through model, not the resolved table name, is written - a replay must
-            # see a through model again.
-            through_model = self.through_model  # type: ignore[attr-defined]
-            if isinstance(through_model, (str, SwappableModelReference)):
-                return through_model
-            return f"{through_model._meta.app}.{through_model.__name__}"
-        return value
+        return getattr(self, name)

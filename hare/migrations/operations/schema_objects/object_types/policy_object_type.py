@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.migrations.operations.schema_objects.object_types.schema_object_type import SchemaObjectType
@@ -20,10 +19,6 @@ class PolicyObjectType(SchemaObjectType):
     plural_noun: ClassVar[str] = "row level security policies"
     feature: ClassVar[str | None] = "supports_row_level_security"
     reaches_other_tables: ClassVar[bool] = True
-
-    @classmethod
-    def renamed(cls, schema_object: Any, new_name: str) -> Any:
-        return dataclasses.replace(schema_object, name=new_name)
 
     @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:

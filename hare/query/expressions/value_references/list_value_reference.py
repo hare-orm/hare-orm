@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.tuple import Tuple
 
@@ -16,12 +17,13 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ListValueReference:
-    """A plan value reference of ``__in``/``__not_in``: the ``Tuple`` of the values, the field and the
+    """A plan value reference of ``__in``/``__not_in``: the parameter slots, the field and the
     encoder converting the list. A plan hit runs the encoder on the new list - its length is part of
-    the plan key.
+    the plan key. Preparation holds the source SQL ``Tuple``; publication replaces it with
+    a tuple of immutable ``ParameterSlot`` objects.
     """
 
-    container: Tuple
+    container: Tuple | tuple[ParameterSlot, ...]
     field: Field[Any]
     value_encoder: Callable[..., list[Any]]
 
@@ -39,17 +41,15 @@ class ListValueReference:
         """
         if not isinstance(value, (list, tuple, set)):
             return None
+        targets = self.container if isinstance(self.container, tuple) else self.container.values
         # A None in the list is an IS NULL test the plan's text holds - only the other values bind.
         encoded_values = [
             encoded_value
             for encoded_value in self.value_encoder(value, model, self.field, dialect)
             if encoded_value is not None
         ]
-        if len(encoded_values) != len(self.container.values):
+        if len(encoded_values) != len(targets):
             return None
         if any(isinstance(encoded_value, Term) for encoded_value in encoded_values):
             return None
-        return [
-            (id(old_wrapper), encoded_value, True)
-            for old_wrapper, encoded_value in zip(self.container.values, encoded_values, strict=True)
-        ]
+        return [(target, encoded_value, True) for target, encoded_value in zip(targets, encoded_values, strict=True)]

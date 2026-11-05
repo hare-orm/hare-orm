@@ -12,6 +12,7 @@ import pytest
 
 from hare import Connections, fields
 from hare.contrib.test import requires_features
+from hare.core.connections.connection_handler import ConnectionHandler
 from hare.ddl import (
     DatabaseFunction,
     DatabaseSequence,
@@ -26,6 +27,7 @@ from hare.ddl import (
     RowLevelSecurity,
     View,
 )
+from hare.dialects.postgresql.schema.schema_objects.postgresql_function_arguments import PostgresqlFunctionArguments
 from hare.exceptions import ConfigurationError, UnSupportedError
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.rename_questions import RenameQuestions
@@ -60,11 +62,13 @@ from hare.migrations.operations import (
     RenameSequence,
     RenameView,
 )
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.state.state import State
 from hare.migrations.writer import MigrationWriter
 from hare.models.enums import ModelOption
 from hare.query.expressions import Q
 from hare.query.queryset import ModelQuery
+from tests.utils.fake_client import FakeClient
 
 TABLE = "schema_migration_invoice"
 READER_ROLE = "hare_schema_object_reader"
@@ -165,8 +169,8 @@ def get_types(operations: list[Any]) -> list[str]:
         (lambda: DatabaseSequence("s", increment=0), "increment can't be 0"),
         (lambda: DatabaseSequence("s", increment=True), "increment must be an integer"),
         (lambda: DatabaseSequence("s", start=2**63), "start must be within"),
-        (lambda: DatabaseSequence("s", cache=0), "cache must be within 1.."),
-        (lambda: DatabaseSequence("s", cache=10**7), "cache must be within 1.."),
+        (lambda: DatabaseSequence("s", cache=0), "cache must be positive"),
+        (lambda: DatabaseSequence("s", cache=2**63), "cache must be within"),
         (lambda: DatabaseSequence("s", minimum=5, maximum=5), "must be below maximum"),
         (lambda: DatabaseSequence("s", start=1, minimum=5), "must be within minimum..maximum"),
         (lambda: DatabaseSequence("s", owned_by=""), "owned_by must be a field name"),
@@ -204,6 +208,14 @@ def test_a_declaration_takes_lists_and_strings_for_its_enums():
     assert grant.name is None
     assert Policy("p", roles=["reader"], using=Q(paid=True)).roles == ("reader",)
     assert DatabaseFunction("f", returns="int", body=RawSQLTerm("x"), arguments=["a int"]).arguments == ("a int",)
+
+
+@pytest.mark.database_independent
+def test_sequence_cache_accepts_positive_64_bit_values():
+    for count in (10**7, 2**63 - 1):
+        sequence = DatabaseSequence("s", cache=count)
+        assert sequence.cache == count
+        assert sequence.deconstruct()[2]["cache"] == count
 
 
 @pytest.mark.parametrize(
@@ -396,7 +408,101 @@ def test_a_policy_reading_a_changed_column_is_dropped_before_the_change_and_crea
 
 
 @pytest.mark.database_independent
-def test_a_view_reading_a_materialized_view_is_created_after_it():
+@pytest.mark.parametrize(
+    "argument,identity",
+    [
+        ("amount numeric(10, 2) = 3.14", "amount numeric(10, 2)"),
+        ('"argument DEFAULT" text DEFAULT $$x DEFAULT = y$$', '"argument DEFAULT" text'),
+        ('value "schema"."DEFAULT" DEFAULT NULL', 'value "schema"."DEFAULT"'),
+        ("INOUT value text DEFAULT 'DEFAULT = , )'", "INOUT value text"),
+        ("value text -- DEFAULT ignored\n DEFAULT 'value'", "value text -- DEFAULT ignored\n"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_function_defaults_only_appear_in_create_declarations(argument, identity):
+    function = DatabaseFunction("read_value", "text", RawSQLTerm("SELECT 'value'"), arguments=(argument,))
+    state = get_state(functions=[function])
+    model = state.apps.get_model("models.Invoice")
+    client = FakeClient("postgresql")
+    editor = client.dialect.schema_editor_class(client, collect_sql=True)
+    assert PostgresqlFunctionArguments.get_identity(function.arguments) == (identity,)
+    assert argument in editor.database_functions.get_function_create_sqls(model, function)[0]
+    await editor.database_functions.drop_database_function(model, function)
+    assert f"({identity})" in editor.collected_sql[-1]
+    grant = Grant(
+        privileges=(Privilege.EXECUTE,), roles=("reader",), on=GrantTarget.FUNCTION, object_name=function.name
+    )
+    assert f"({identity})" in editor.grants.get_grant_sqls(model, grant)[0]
+    renamed = DatabaseFunction("renamed_value", function.returns, function.body, arguments=function.arguments)
+    await editor.database_functions.rename_database_function(model, function, renamed)
+    assert f"({identity})" in editor.collected_sql[-1]
+    await editor.database_functions.get_schema_move_plan(model, function, None, "library").execute(editor)
+    assert f"({identity})" in editor.collected_sql[-1]
+    for new_argument in (identity, identity + " DEFAULT 'changed'"):
+        changed = DatabaseFunction(function.name, function.returns, function.body, arguments=(new_argument,))
+        editor.collected_sql.clear()
+        await editor.database_functions.alter_database_function(model, function, changed)
+        assert len(editor.collected_sql) == 2
+        assert "DROP FUNCTION" in editor.collected_sql[0]
+        assert f"({identity})" in editor.collected_sql[0]
+        assert "CREATE FUNCTION" in editor.collected_sql[1]
+        assert new_argument in editor.collected_sql[1]
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dialect,part_name,compiler,operation",
+    [
+        ("postgresql", "views", "get_view_create_sqls", "alter_view"),
+        ("postgresql", "materialized_views", "get_materialized_view_create_sqls", "alter_materialized_view"),
+        ("postgresql", "database_functions", "get_function_create_sqls", "alter_database_function"),
+        ("clickhouse", "materialized_views", "get_materialized_view_create_sqls", "alter_materialized_view"),
+    ],
+)
+async def test_replacement_compiles_before_removing_the_existing_object(
+    monkeypatch, dialect, part_name, compiler, operation
+):
+    model = get_state().apps.get_model("models.Invoice")
+    client = FakeClient(dialect)
+    editor = client.dialect.schema_editor_class(client, collect_sql=True)
+    part = getattr(editor, part_name)
+    if part_name == "database_functions":
+        old = DatabaseFunction("read_value", "text", RawSQLTerm("SELECT 'old'"), arguments=("text",))
+        new = DatabaseFunction("read_value", "text", RawSQLTerm("SELECT 'new'"), arguments=("integer",))
+    else:
+        declaration = View if part_name == "views" else MaterializedView
+        old = declaration("totals", query=RawSQLTerm("SELECT 1"))
+        new = declaration("totals", query=RawSQLTerm("SELECT 2"))
+    failure = ConfigurationError("replacement cannot be compiled")
+
+    def refuse(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(type(part), compiler, refuse)
+    with pytest.raises(ConfigurationError) as raised:
+        await getattr(part, operation)(model, old, new)
+    assert raised.value is failure
+    assert editor.collected_sql == []
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+async def test_sequence_owner_is_checked_before_changing_sequence_parameters():
+    model = get_state().apps.get_model("models.Invoice")
+    client = FakeClient("postgresql")
+    editor = client.dialect.schema_editor_class(client, collect_sql=True)
+    with pytest.raises(ConfigurationError, match="missing"):
+        await editor.sequences.alter_sequence(
+            model, DatabaseSequence("book_number"), DatabaseSequence("book_number", increment=10, owned_by="missing")
+        )
+    assert editor.collected_sql == []
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("queryset_dependency", [False, True])
+@pytest.mark.parametrize("dialect", ["postgresql", "clickhouse"])
+def test_a_view_reading_a_materialized_view_is_created_after_it(queryset_dependency, dialect):
     """A view reading a materialized view was created before it - views come before materialized views -
     and failed; drift's shadow then read it against the real database's materialized view."""
     from hare.ddl.schema_objects.view_creation_order import ViewCreationOrder
@@ -409,6 +515,19 @@ def test_a_view_reading_a_materialized_view_is_created_after_it():
         query=RawSQLTerm("SELECT total FROM schema_migration_totals_mv"),
         read_columns=[("schema_migration_totals_mv", "total")],
     )
+    if queryset_dependency:
+        connections = ConnectionHandler()
+        connections._init_config({"models": "sqlite+aiosqlite://:memory:"})
+        state = State(default_connections={"models": "models"}, environment=MigrationEnvironment(connections))
+        CreateModel(
+            "Totals",
+            fields=[("id", fields.IntField(primary_key=True)), ("total", fields.IntField())],
+            options={"table": totals.name, "managed": False},
+        ).state_forward("models", state)
+        over_totals = View(
+            over_totals.name,
+            query=state.apps.get_model("models.Totals").objects.values("total").using(FakeClient("postgresql")),
+        )
     operations = OperationGenerator(
         get_state(), get_state(views=[over_totals], materialized_views=[totals])
     ).generate()
@@ -417,6 +536,18 @@ def test_a_view_reading_a_materialized_view_is_created_after_it():
     plain = View("schema_migration_plain", query=RawSQLTerm(f"SELECT id FROM {TABLE}"))
     ordered = ViewCreationOrder.get_ordered([plain, over_totals, totals], lambda view: view)
     assert ordered == [plain, totals, over_totals]
+    model = get_state(views=[over_totals], materialized_views=[totals]).apps.get_model("models.Invoice")
+    client = FakeClient(dialect)
+    editor = client.dialect.schema_editor_class(client)
+    drops = editor.get_model_view_drop_sqls(model)
+    assert len(drops) == 2
+    assert over_totals.name in drops[0]
+    assert totals.name in drops[1]
+    assert [step.sql for step in editor.get_delete_model_plan(model).steps[:2]] == drops
+    if dialect == "postgresql":
+        rebuild_drops = editor.table_rebuild.get_table_dependent_drop_sqls(model)
+        assert over_totals.name in rebuild_drops[0]
+        assert totals.name in rebuild_drops[1]
 
 
 @pytest.mark.database_independent
@@ -992,9 +1123,10 @@ async def test_a_rebuilt_table_gets_its_objects_back(db_simple):
         await catalog.connection.execute_script(
             f"INSERT INTO {TABLE} (id, tenant_id, amount, paid) VALUES (1, 1, 5, true)"
         )
-        await get_editor().table_rebuild.remake_table(
+        editor = get_editor()
+        await editor.table_rebuild.get_rebuild_plan(
             state.apps.get_model("models.Invoice"), state.apps.get_model("models.Invoice")
-        )
+        ).execute(editor)
         assert await catalog.get_views() == [VIEW.name]
         assert await catalog.get_materialized_views() == [MATERIALIZED_VIEW.name]
         assert await catalog.get_sequences() == ["schema_migration_number 2 100"]
@@ -1071,11 +1203,6 @@ async def test_postgresql_refuses_what_it_cant_do_before_any_sql(db_simple):
     with pytest.raises(ConfigurationError, match="names 'missing', which is no column field"):
         await make_migration(
             "0004_sequence", AddSequence("Invoice", DatabaseSequence("schema_migration_s", owned_by="missing"))
-        ).apply(state.clone(), schema_editor=editor, collect_sql=True)
-    with pytest.raises(ConfigurationError, match="the body can't hold"):
-        await make_migration(
-            "0005_function",
-            AddFunction("Invoice", DatabaseFunction("f", returns="int", body=RawSQLTerm("SELECT $hare_function$"))),
         ).apply(state.clone(), schema_editor=editor, collect_sql=True)
 
 

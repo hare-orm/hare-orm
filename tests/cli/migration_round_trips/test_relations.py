@@ -10,6 +10,7 @@ import textwrap
 import pytest
 
 from hare.exceptions import IntegrityError
+from hare.migrations import operations as ops
 from tests.utils.database_under_test import DatabaseUnderTest
 
 
@@ -266,7 +267,10 @@ async def test_renamed_model_with_a_related_name_relation_applies_and_rolls_back
 
     project.write_models(template.format(name="Writer", relation=relation, meta=meta))
     await project.cli_ok("makemigrations", "--rename", "app.Author=Writer")
-    assert 'ops.RenameModel(old_name="Author", new_name="Writer")' in project.read_latest_migration()
+    assert any(
+        isinstance(operation, ops.RenameModel) and (operation.old_name, operation.new_name) == ("Author", "Writer")
+        for operation in project.get_latest_migration().operations
+    )
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     renamed_table = "writers" if meta else "writer"
@@ -313,16 +317,28 @@ async def test_model_replaced_by_one_reusing_its_related_name(project_factory) -
         author = fields.ForeignKeyField("app.Author", related_name="shelves")
     """)
     await project.cli_ok("makemigrations")
-    migration_source = project.read_latest_migration()
+    operations = project.get_latest_migration().operations
     await project.cli_ok("migrate")
     await project.assert_in_sync()
 
     # Review still references Book until its relation is repointed - only Book's conflicting
     # relation goes first; nothing references Shelf, so it's deleted before Cabinet is created.
-    assert migration_source.index('ops.RemoveField(model_name="Book", name="author")') < migration_source.index(
-        'name="Novel"'
+    removed_relation = next(
+        operation
+        for operation in operations
+        if isinstance(operation, ops.RemoveField) and (operation.model_name, operation.name) == ("Book", "author")
     )
-    assert migration_source.index('ops.DeleteModel(name="Shelf")') < migration_source.index('name="Cabinet"')
+    created_novel = next(
+        operation for operation in operations if isinstance(operation, ops.CreateModel) and operation.name == "Novel"
+    )
+    removed_shelf = next(
+        operation for operation in operations if isinstance(operation, ops.DeleteModel) and operation.name == "Shelf"
+    )
+    created_cabinet = next(
+        operation for operation in operations if isinstance(operation, ops.CreateModel) and operation.name == "Cabinet"
+    )
+    assert operations.index(removed_relation) < operations.index(created_novel)
+    assert operations.index(removed_shelf) < operations.index(created_cabinet)
     await project.cli_ok("migrate", "app", project.migration_files()[0])
     assert await project.query("SELECT id FROM author") == [{"id": 1}]
 
@@ -351,7 +367,7 @@ async def test_one_to_one_primary_key_is_renamed_and_moved_to_another_column(pro
 
     project.write_models(template.format(key_name="user", source_field=""))
     await project.cli_ok("makemigrations")
-    assert "ops.RenameField(" in project.read_latest_migration()
+    assert any(isinstance(operation, ops.RenameField) for operation in project.get_latest_migration().operations)
     await project.cli_ok("migrate")
     await project.assert_in_sync()
 

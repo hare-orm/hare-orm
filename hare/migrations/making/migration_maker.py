@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from hare.core.connections.connections import Connections
 from hare.core.constants import DEFAULT_CONNECTION_NAME, DEFAULT_LARGE_TABLE_ROWS
 from hare.exceptions import ConfigurationError
 from hare.migrations.autodetection.migration_autodetector import MigrationAutodetector
 from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.exceptions import MigrationAutodetectorError
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder.noop_recorder import NoopRecorder
 from hare.migrations.making.migration_changes import MigrationChanges
@@ -26,16 +26,16 @@ if TYPE_CHECKING:
 
 
 class MigrationMaker:
-    """Builds the migrations of ``makemigrations()`` and ``squashmigrations()`` for the models of a
-    set-up context.
+    """Builds the migrations of ``makemigrations()`` for the models of a set-up context.
 
     Args:
         apps: The context's models.
         apps_config: Every configured app, its migrations package resolved.
         large_table_rows: The rows from which a table counts as large for the migration safety
             check of the new migrations.
-        rename_questions: The answers whether a removed field, model or app's model is renamed or
-            moved - none renamed without them.
+        rename_questions: Answers for candidate renames and moves. Unambiguous field matches
+            by column identity or relation signature need no answer.
+        definitions: Shared migration declarations, or None to read their modules.
     """
 
     def __init__(
@@ -45,10 +45,12 @@ class MigrationMaker:
         *,
         large_table_rows: int = DEFAULT_LARGE_TABLE_ROWS,
         rename_questions: RenameQuestions | None = None,
+        definitions: MigrationDefinitions | None = None,
     ) -> None:
         self.apps = apps
         self.apps_config = apps_config
         self.rename_questions = rename_questions
+        self.definitions = definitions
         self.safety_checker = MigrationSafetyChecker(large_table_rows=large_table_rows)
 
     async def make(
@@ -74,6 +76,7 @@ class MigrationMaker:
             self.apps_config,
             target_app_labels=target_app_labels,
             rename_questions=self.rename_questions,
+            definitions=self.definitions,
         )
         changes = MigrationChanges()
         if empty:
@@ -116,9 +119,11 @@ class MigrationMaker:
             migration.atomic = writer.atomic
             connection_alias = self.apps_config[writer.app_label].get("default_connection") or DEFAULT_CONNECTION_NAME
             risks.extend(
-                await self.safety_checker.check(migration, state, dialect=Connections.get(connection_alias).dialect)
+                await self.safety_checker.check(
+                    migration, state, client=state.environment.connections.get(connection_alias), read_catalog=False
+                )
             )
-            await migration.apply(state, dry_run=True, schema_editor=None)
+            state = await migration.apply(state, dry_run=True, schema_editor=None)
         return risks
 
     @staticmethod
@@ -187,7 +192,7 @@ class MigrationMaker:
         Raises:
             ConfigurationError: A target app has more than one leaf migration.
         """
-        loader = MigrationLoader(self.apps_config, NoopRecorder())
+        loader = MigrationLoader(self.apps_config, NoopRecorder(), definitions=self.definitions)
         await loader.build_graph()
         for app_label in target_app_labels:
             try:
@@ -218,7 +223,17 @@ class MigrationMaker:
                 raise ConfigurationError(f"Nothing to merge for app {label!r}: migration history has a single head")
             leaf_keys = autodetector.leaf_nodes(label)
             try:
-                await MigrationMaker.apply_branches_together(graph, leaf_keys)
+                await MigrationMaker.apply_branches_together(
+                    graph,
+                    leaf_keys,
+                    State(
+                        environment=autodetector.environment,
+                        default_connections={
+                            label: config.get("default_connection", DEFAULT_CONNECTION_NAME)
+                            for label, config in self.apps_config.items()
+                        },
+                    ),
+                )
             except Exception as error:
                 raise ConfigurationError(
                     f"Can't merge migration history for app {label!r}: applying both forked "
@@ -242,7 +257,7 @@ class MigrationMaker:
         return writers
 
     @staticmethod
-    async def apply_branches_together(graph: MigrationGraph, leaf_keys: list[MigrationKey]) -> None:
+    async def apply_branches_together(graph: MigrationGraph, leaf_keys: list[MigrationKey], state: State) -> None:
         """Replays every migration of the forked branches against one state, as ``migrate`` will
         once the merge migration joins them - a conflict (the same field renamed or altered
         differently on each branch) raises here, before the merge migration is written.
@@ -250,19 +265,12 @@ class MigrationMaker:
         Args:
             graph: The migration graph.
             leaf_keys: The heads of the branches.
+            state: The initial state and application environment; left unchanged.
         """
-        combined_plan: list[MigrationKey] = []
-        seen: set[MigrationKey] = set()
-        for leaf_key in leaf_keys:
-            for key in graph.forwards_plan(leaf_key):
-                if key not in seen:
-                    seen.add(key)
-                    combined_plan.append(key)
-        state = State()
-        for key in combined_plan:
+        for key in graph.forwards_plan_for_all(leaf_keys):
             migration = graph.nodes[key]
             if isinstance(migration, Migration):
-                await migration.apply(state, dry_run=True, schema_editor=None)
+                state = await migration.apply(state, dry_run=True, schema_editor=None)
 
     @staticmethod
     def rename_writers(writers: list[MigrationWriter], name: str) -> None:

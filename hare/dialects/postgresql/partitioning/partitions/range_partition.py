@@ -63,7 +63,7 @@ class RangePartition(Partition):
             ConfigurationError: A column after a ``RangeBound`` member has another value.
         """
         for position, value in enumerate(values):
-            if isinstance(value, RangeBound) and any(following != value for following in values[position + 1 :]):
+            if isinstance(value, RangeBound) and any(following is not value for following in values[position + 1 :]):
                 raise ConfigurationError(
                     f"RangePartition {name!r}: {attribute} {values!r} - every column after {value} must be {value} too"
                 )
@@ -80,7 +80,7 @@ class RangePartition(Partition):
             The key.
         """
         return tuple(
-            (0,) if value == RangeBound.MINVALUE else (2,) if value == RangeBound.MAXVALUE else (1, value)
+            (0,) if value is RangeBound.MINVALUE else (2,) if value is RangeBound.MAXVALUE else (1, value)
             for value in values
         )
 

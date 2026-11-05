@@ -31,22 +31,21 @@ class ConnectionRouter:
         return bool(self._routers)
 
     def init_routers(self, routers: Sequence[Callable[[], object]]) -> None:
-        """Instantiates every configured router class.
+        """Constructs every configured router through its zero-argument factory.
 
         Args:
-            routers: Router classes, each constructible without arguments.
+            routers: Router classes or other zero-argument factories.
 
         Raises:
-            ConfigurationError: A router class can't be instantiated without arguments.
+            ConfigurationError: A factory raises TypeError when called without arguments.
         """
         router_instances = []
-        for router_class in routers:
+        for router_factory in routers:
             try:
-                router_instances.append(router_class())
+                router_instances.append(router_factory())
             except TypeError as error:
                 raise ConfigurationError(
-                    f"Can't instantiate router {router_class!r} - a router class must take no constructor "
-                    f"arguments: {error}"
+                    f"Can't instantiate router {router_factory!r} - a router factory must accept no arguments: {error}"
                 ) from error
         self._routers = router_instances
         if router_instances:
@@ -61,7 +60,7 @@ class ConnectionRouter:
                 pass
             else:
                 chosen_connection = method(model)
-                if chosen_connection:
+                if chosen_connection is not None:
                     return chosen_connection
         return None
 
@@ -83,7 +82,7 @@ class ConnectionRouter:
         if not self._routers:
             return None
         written = WrittenConnections.current.get()
-        reads_primary = PrimaryReads.active.get()
+        reads_primary = PrimaryReads.is_active()
         if written is not None or reads_primary:
             write_connection = self._route_connection(model, "db_for_write")
             if write_connection is None and model._meta.default_connection is not None:

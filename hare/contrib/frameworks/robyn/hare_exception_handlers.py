@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any
 
 import orjson
@@ -111,18 +110,18 @@ class HareExceptionHandlers:
         }
 
     @staticmethod
-    def get_json_response(status: HTTPStatus, content: Any) -> Response:
+    def get_json_response(status: int, content: Any) -> Response:
         """A JSON answer.
 
         Args:
-            status: The status.
+            status: The numeric status, including an ``HTTPStatus`` member.
             content: The body.
 
         Returns:
             The answer.
         """
         return Response(
-            status_code=status.value,
+            status_code=status,
             headers=Headers({"Content-Type": JSON_CONTENT_TYPE}),
             description=orjson.dumps(content).decode(),
         )

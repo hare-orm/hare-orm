@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from hare.classes.value_descriptions import ValueDescriptions
+from hare.dialects.base.search.enums import TextSearchOperation
 from hare.dialects.base.search.text_search import TextSearch
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.dialects.postgresql.search.constants import (
@@ -45,6 +46,7 @@ class PostgresqlTextSearch(TextSearch):
     and its kin), ``TS_RANK``/``TS_RANK_CD`` and ``TS_HEADLINE``."""
 
     def get_query_result(self, query: SearchQuery, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_query(query, expression_context)
         value_result = SearchArguments.get_result(query, "value", expression_context, treat_str_as_field=False)
         joins = value_result.joins
         config_term = None
@@ -68,6 +70,7 @@ class PostgresqlTextSearch(TextSearch):
         return ExpressionResult(term=term, joins=ExpressionResult.dedup_joins(left.joins, right.joins))
 
     def get_vector_result(self, vector: SearchVector, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_vector(vector, expression_context)
         expression_results = [
             SearchArguments.get_result(vector, "expressions", expression_context, treat_str_as_field=True, index=index)
             for index in range(len(vector.expressions))
@@ -127,6 +130,9 @@ class PostgresqlTextSearch(TextSearch):
     def get_combined_vector_result(
         self, vector: CombinedSearchVector, expression_context: ExpressionContext
     ) -> ExpressionResult:
+        self.require_operation(
+            expression_context, TextSearchOperation.VECTOR_CONCATENATION, "SearchVector + SearchVector"
+        )
         left = vector.left.get_result(expression_context)
         right = vector.right.get_result(expression_context)
         # Each side is already a NULL-safe TO_TSVECTOR(...) - SearchVector guards its own sources with
@@ -158,6 +164,7 @@ class PostgresqlTextSearch(TextSearch):
         return isinstance(effective_field, TSVectorField)
 
     def get_rank_result(self, rank: SearchRank, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_rank(rank, expression_context)
         self.raise_if_rank_arguments_refused(rank)
         vector_expression: VectorInput
         if isinstance(rank.vector, (Expression, Term)):
@@ -235,6 +242,7 @@ class PostgresqlTextSearch(TextSearch):
             )
 
     def get_headline_result(self, headline: SearchHeadline, expression_context: ExpressionContext) -> ExpressionResult:
+        self.check_headline(headline, expression_context)
         expression_result = SearchArguments.get_result(
             headline, "expression", expression_context, treat_str_as_field=True
         )

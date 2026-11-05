@@ -19,8 +19,6 @@ class AddPartition(PartitionOperation):
             of the dialect's partitioning.
     """
 
-    backward_reads_state_reached = False
-
     def describe(self) -> str:
         return f"Add partition {self.partition.name} to {self.model_name}"
 

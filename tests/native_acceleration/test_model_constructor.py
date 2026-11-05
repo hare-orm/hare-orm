@@ -1,141 +1,110 @@
-"""The native constructor sets an instance up exactly as ``Model.__init__`` does - the same attributes
-and values, the same errors - and leaves every other shape of arguments to it."""
-
-from __future__ import annotations
+"""Construction preserves values, defaults, relation consistency and field overrides."""
 
 import datetime
-import inspect
 from decimal import Decimal
-from typing import Any
 
 import pytest
 
-from hare.exceptions import ValidationError
-from hare.fields.database_default import DatabaseDefault
-from hare.models import Model
+from hare.exceptions import FieldError, QueryError, ValidationError
 from hare.query.expressions import F
 from tests.shared_models import testmodels, testmodels_postgres
 
-REQUIRES = ("native",)
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"intnum": 1}, {"intnum": 1, "intnum_null": None}),
+        ({"intnum": 1, "intnum_null": None}, {"intnum": 1, "intnum_null": None}),
+        ({"id": 5, "intnum": 1}, {"id": 5, "intnum": 1}),
+        ({"id": None, "intnum": 1}, {"id": None, "intnum": 1}),
+        ({"pk": 5, "intnum": 1}, {"id": 5, "intnum": 1}),
+        ({"intnum": lambda: 3}, {"intnum": 3}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_constructor_assigns_scalar_values(db, kwargs, expected):
+    obj = testmodels.IntFields(**kwargs)
+    assert not obj._saved_in_db
+    for name, value in expected.items():
+        assert getattr(obj, name) == value
+        assert type(getattr(obj, name)) is type(value)
 
 
-def construct(model: type[Model], kwargs: dict[str, Any], *, native: bool) -> Model | Exception:
-    meta = model._meta
-    if native:
-        meta.instance_constructor = None
-        assert meta.get_instance_constructor(), f"{model.__name__} has no native constructor"
-    else:
-        meta.instance_constructor = False
-    try:
-        return model(**kwargs)
-    except Exception as error:  # noqa: BLE001 - the error is what is compared.
-        return error
-    finally:
-        meta.instance_constructor = None
-
-
-def assert_same(model: type[Model], kwargs: dict[str, Any]) -> None:
-    native = construct(model, kwargs, native=True)
-    reference = construct(model, kwargs, native=False)
-    if isinstance(reference, Exception):
-        assert type(native) is type(reference)
-        assert str(native) == str(reference)
-        return
-    assert not isinstance(native, Exception), native
-    assert native.__dict__.keys() == reference.__dict__.keys()
-    fields_map = model._meta.fields_map
-    for name, reference_value in reference.__dict__.items():
-        native_value = native.__dict__[name]
-        if isinstance(reference_value, Model):
-            assert native_value is reference_value
-        elif isinstance(reference_value, DatabaseDefault):
-            assert type(native_value) is DatabaseDefault
-            assert repr(native_value) == repr(reference_value)
-        elif name in fields_map and callable(fields_map[name].default) and name not in kwargs:
-            # A callable default gives every instance a value of its own.
-            assert type(native_value) is type(reference_value), name
-        else:
-            assert native_value == reference_value, name
-            assert type(native_value) is type(reference_value), name
-
-
-def get_models() -> list[type[Model]]:
-    return [
-        model
-        for model in vars(testmodels).values()
-        if inspect.isclass(model)
-        and issubclass(model, Model)
-        and model is not Model
-        and not model._meta.abstract
-        and model._meta.app == "models"
-    ]
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"intnum": "7"}, ValidationError),
+        ({"intnum": "seven"}, ValidationError),
+        ({"intnum": True}, ValidationError),
+        ({"intnum": None}, QueryError),
+        ({"missing": 1}, FieldError),
+    ],
+)
+@pytest.mark.asyncio
+async def test_constructor_refuses_invalid_scalar_arguments(db, kwargs, error):
+    with pytest.raises(error):
+        testmodels.IntFields(**kwargs)
 
 
 @pytest.mark.asyncio
-async def test_every_test_model_without_arguments(db):
-    for model in get_models():
-        if model._meta.get_instance_constructor():
-            assert_same(model, {})
+async def test_constructor_preserves_expressions_and_typed_values(db):
+    expression = F("intnum") + 1
+    assert testmodels.IntFields(intnum=expression).intnum is expression
+    assert testmodels.CharFields(char="plain", char_null=None).char == "plain"
+    with pytest.raises(ValidationError):
+        testmodels.CharFields(char=123)
+    moment = datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.UTC)
+    assert testmodels.DatetimeFields(datetime=moment).datetime == moment
+    assert testmodels.DatetimeFields(datetime="2024-03-01T12:30:00+02:00").datetime == datetime.datetime(
+        2024, 3, 1, 12, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2))
+    )
+    assert testmodels.JSONFields(data={"a": [1, 2]}).data == {"a": [1, 2]}
+    first_json, second_json = testmodels.JSONFields(), testmodels.JSONFields()
+    first_json.data_default["a"] = 2
+    assert second_json.data_default == {"a": 1}
+    first, second = testmodels.UUIDFields(), testmodels.UUIDFields()
+    assert first.pk != second.pk
+    assert not first._saved_in_db and not second._saved_in_db
 
 
 @pytest.mark.postgresql_models
 @pytest.mark.asyncio
-async def test_plain_values(db):
-    moment = datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.UTC)
-    cases: list[tuple[type[Model], dict[str, Any]]] = [
-        (testmodels.IntFields, {"intnum": 1}),
-        (testmodels.IntFields, {"intnum": 1, "intnum_null": None}),
-        (testmodels.IntFields, {"intnum": "7"}),
-        (testmodels.IntFields, {"intnum": "seven"}),
-        (testmodels.IntFields, {"intnum": None}),
-        (testmodels.IntFields, {"intnum": True}),
-        (testmodels.IntFields, {"id": 5, "intnum": 1}),
-        (testmodels.IntFields, {"id": None, "intnum": 1}),
-        (testmodels.IntFields, {"pk": 5, "intnum": 1}),
-        (testmodels.IntFields, {"intnum": F("intnum") + 1}),
-        (testmodels.IntFields, {"intnum": lambda: 3}),
-        (testmodels.IntFields, {"missing": 1}),
-        (testmodels.CharFields, {"char": "plain", "char_null": None}),
-        (testmodels.CharFields, {"char": 123}),
-        (testmodels_postgres.DecimalFields, {"decimal": Decimal("1.23456"), "decimal_nodec": 7}),
-        (testmodels_postgres.DecimalFields, {"decimal": "bad", "decimal_nodec": 7}),
-        (testmodels.DatetimeFields, {"datetime": moment}),
-        (testmodels.DatetimeFields, {"datetime": moment.replace(tzinfo=None), "datetime_null": None}),
-        (testmodels.DatetimeFields, {"datetime": "2024-03-01T12:30:00+02:00"}),
-        (testmodels.JSONFields, {"data": {"a": [1, 2]}}),
-        (testmodels.UUIDFields, {}),
-    ]
-    for model, kwargs in cases:
-        assert_same(model, kwargs)
+async def test_constructor_converts_decimal_exchange_values(db):
+    obj = testmodels_postgres.DecimalFields(decimal=Decimal("1.23456"), decimal_nodec=7)
+    assert obj.decimal == Decimal("1.2346")
+    assert obj.decimal_nodec == Decimal(7)
+    assert type(obj.decimal_nodec) is Decimal
+    with pytest.raises(ValidationError):
+        testmodels_postgres.DecimalFields(decimal="bad", decimal_nodec=7)
 
 
 @pytest.mark.asyncio
-async def test_relations(db):
+async def test_constructor_assigns_relations_and_checks_their_keys(db):
     tournament = await testmodels.Tournament.objects.create(name="cup")
     reporter = await testmodels.Reporter.objects.create(name="ann")
-    unsaved_tournament = testmodels.Tournament(name="draft")
-    cases: list[dict[str, Any]] = [
-        {"name": "final", "tournament": tournament},
-        {"name": "final", "tournament": tournament, "reporter": reporter},
-        {"name": "final", "tournament": tournament, "reporter": None},
-        {"name": "final", "tournament_id": tournament.pk},
-        {"name": "final", "tournament": tournament, "tournament_id": tournament.pk},
-        {"name": "final", "tournament": tournament, "tournament_id": tournament.pk + 1},
-        {"name": "final", "tournament": None},
-        {"name": "final", "tournament": unsaved_tournament},
-        {"name": "final", "tournament": reporter},
-        {"name": "final", "tournament": tournament, "participants": []},
-    ]
-    for kwargs in cases:
-        assert_same(testmodels.Event, kwargs)
+    for extra in ({}, {"reporter": reporter}, {"reporter": None}, {"tournament_id": tournament.pk}):
+        event = testmodels.Event(name="final", tournament=tournament, **extra)
+        assert event.tournament is tournament
+        assert event.tournament_id == tournament.pk
+        if "reporter" in extra:
+            assert event.reporter is extra["reporter"]
+    event = testmodels.Event(name="final", tournament_id=tournament.pk)
+    assert event.tournament_id == tournament.pk
+    for kwargs, error in (
+        ({"tournament": tournament, "tournament_id": tournament.pk + 1}, QueryError),
+        ({"tournament": None}, QueryError),
+        ({"tournament": testmodels.Tournament(name="draft")}, QueryError),
+        ({"tournament": reporter}, ValidationError),
+        ({"tournament": tournament, "participants": []}, QueryError),
+    ):
+        with pytest.raises(error):
+            testmodels.Event(name="final", **kwargs)
 
 
 @pytest.mark.asyncio
 async def test_a_patched_to_python_is_used(db, monkeypatch):
     calls = []
     original_to_python = testmodels.CharFields._meta.fields_map["char"].__class__.to_python
-    testmodels.CharFields._meta.instance_constructor = None
-    testmodels.CharFields._meta.get_instance_constructor()
 
     def counting_to_python(self, value):
         calls.append(value)

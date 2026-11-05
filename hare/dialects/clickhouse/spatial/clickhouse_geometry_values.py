@@ -25,8 +25,8 @@ class ClickhouseGeometryValues:
     them, with no SRID (a value read takes the field's). A polygon's rings are stored in the
     orientation ClickHouse's functions read - the outer ring clockwise, the holes counter-clockwise -
     so a polygon given the other way round reads back with its rings reversed. A geometry type is never
-    ``Nullable``: as a container's, a NULL line or area is written as an empty one, read back empty; a
-    point, which has no empty value, holds no NULL. An area a function computes (an intersection) is read
+    ``Nullable``: ``null=True`` declarations and ``None`` values are refused. An area a function computes
+    (an intersection) is read
     as a polygon or a multipolygon, as it has one or several."""
 
     @staticmethod

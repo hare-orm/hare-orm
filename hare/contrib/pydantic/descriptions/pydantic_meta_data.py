@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
+from copy import deepcopy
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict
@@ -9,9 +12,9 @@ if TYPE_CHECKING:
     from typing import Self
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class PydanticMetaData:
-    """The options of a model's Pydantic schemas - what its ``PydanticMeta`` declares, filled in by the defaults."""
+    """The options of a model's Pydantic schemas - what its ``Meta.pydantic`` declares, filled in by the defaults."""
 
     #: If not empty, only fields this property contains will be in the pydantic model
     include: tuple[str, ...] = ()
@@ -23,10 +26,10 @@ class PydanticMetaData:
     computed: tuple[str, ...] = dataclasses.field(default_factory=tuple)
 
     #: Values read from the row by name, with their types - a query's annotation, an attribute set on the row
-    extra_fields: dict[str, Any] = dataclasses.field(default_factory=dict)
+    extra_fields: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     #: Values of related rows, flattened: a name to the path of the related field
-    related_values: dict[str, str] = dataclasses.field(default_factory=dict)
+    related_values: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     #: Use backward relations without annotations - not recommended, it can be huge data
     #: without control
@@ -47,15 +50,33 @@ class PydanticMetaData:
     sort_alphabetically: bool = False
 
     #: Allows user to specify custom config for generated model
-    model_config: ConfigDict | None = None
+    model_config: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        """Detach input collections before this description is shared by schema builders.
+
+        Type annotations and callbacks keep their identity. Pydantic configuration
+        values are copied, including nested JSON-schema options, without freezing
+        their contents into types Pydantic does not accept.
+        """
+        for name in ("include", "exclude", "computed"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        for name in ("extra_fields", "related_values"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+        if self.model_config is not None:
+            object.__setattr__(self, "model_config", MappingProxyType(deepcopy(dict(self.model_config))))
 
     @staticmethod
     def _read_meta_fields(source: Any, fallback: PydanticMetaData) -> dict[str, Any]:
-        """Read the 8 shared Meta fields from *source*, falling back to *fallback*'s own value
-        for any attribute *source* doesn't define."""
+        """Read declared options from a mapping or an object, retaining unspecified defaults."""
 
         def get(attribute_name: str) -> Any:
-            return getattr(source, attribute_name, getattr(fallback, attribute_name))
+            default = getattr(fallback, attribute_name)
+            return (
+                source.get(attribute_name, default)
+                if isinstance(source, Mapping)
+                else getattr(source, attribute_name, default)
+            )
 
         return {
             "include": tuple(get("include")),
@@ -68,17 +89,16 @@ class PydanticMetaData:
             "allow_cycles": bool(get("allow_cycles")),
             "exclude_raw_fields": bool(get("exclude_raw_fields")),
             "sort_alphabetically": bool(get("sort_alphabetically")),
+            "model_config": get("model_config"),
         }
 
     @classmethod
-    def from_pydantic_meta(cls, old_pydantic_meta: Any) -> Self:
+    def from_options(cls, options: Any) -> Self:
         default_meta = cls()
-        model_config = getattr(old_pydantic_meta, "model_config", default_meta.model_config)
-        return cls(**cls._read_meta_fields(old_pydantic_meta, default_meta), model_config=model_config)
+        return cls(**cls._read_meta_fields(options, default_meta))
 
-    def construct_pydantic_meta(self, meta_override: type) -> PydanticMetaData:
-        model_config = getattr(meta_override, "model_config", self.model_config)
-        return PydanticMetaData(**self._read_meta_fields(meta_override, self), model_config=model_config)
+    def with_overrides(self, meta_override: Any) -> PydanticMetaData:
+        return PydanticMetaData(**self._read_meta_fields(meta_override, self))
 
     def selects(self, name: str) -> bool:
         """Whether ``include``/``exclude`` put the field ``name`` into the schema.
@@ -147,7 +167,7 @@ class PydanticMetaData:
         exclude = tuple(exclude) + self.exclude
         computed = tuple(computed) + self.computed
 
-        _model_config = ConfigDict()
+        _model_config: dict[str, Any] = {}
         if self.model_config:
             _model_config.update(self.model_config)
         if model_config:

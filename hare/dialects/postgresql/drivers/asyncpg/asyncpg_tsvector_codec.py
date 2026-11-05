@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Callable
+from operator import itemgetter
 from typing import Any, ClassVar
 
 from hare.dialects.postgresql.drivers.asyncpg.constants import (
@@ -92,7 +93,7 @@ class AsyncpgTsvectorCodec:
         """
         if len(positions) <= 1:
             return [position | weight << TSVECTOR_WEIGHT_SHIFT for position, weight in positions]
-        ordered = sorted(positions, key=lambda position_and_weight: position_and_weight[0])
+        ordered = sorted(positions, key=itemgetter(0))
         unique = [list(ordered[0])]
         for position, weight in ordered[1:]:
             if position != unique[-1][0]:

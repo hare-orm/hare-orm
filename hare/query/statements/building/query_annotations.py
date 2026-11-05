@@ -104,6 +104,8 @@ class QueryAnnotations:
             # A named JOIN not selected is read through its paths - resolved for its JOINs alone.
             resolves_joins_only = isinstance(annotation, NamedJoin) and not should_select
             earlier_info = results_by_annotation_id.get(id(annotation))
+            if earlier_info is None and not resolves_joins_only:
+                earlier_info = query._annotation_expression_results.get((key, query._effective_basetable()))
             # A Subquery is a Term and an Expression: its inner query is built while this query's
             # context is active, or its OuterReference finds nothing.
             if earlier_info is not None:
@@ -142,6 +144,15 @@ class QueryAnnotations:
                 )
             if not resolves_joins_only:
                 results_by_annotation_id[id(annotation)] = info
+                query._annotation_expression_results[(key, query._effective_basetable())] = ExpressionResult(
+                    term=info.term,
+                    joins=info.joins,
+                    output_field=annotation.get_value_field(info)
+                    if isinstance(annotation, Expression)
+                    else info.output_field,
+                    aggregate_filter=info.aggregate_filter,
+                    aggregate_orderings=info.aggregate_orderings,
+                )
 
             for join in info.joins:
                 QueryJoins.join_table(query, join)
@@ -151,7 +162,7 @@ class QueryAnnotations:
                     select_term = Value.get_typed_term(
                         select_term, annotation.value, ParameterPosition.SELECTED_VALUE, query.dialect
                     )
-                query.query._select_other(select_term.as_(key))  # type:ignore[arg-type]
+                query.query._select_other(select_term.as_(key))
             has_aggregate = has_aggregate or info.term.contains_aggregate
             # The result's field is kept on this build, not on the annotation expression queries
             # share - only for functions whose result has their argument's type
@@ -169,34 +180,43 @@ class QueryAnnotations:
     def get_annotation_expression_term(
         query: AwaitableQuery[Any], field_name: str, annotations: dict[str, Any], table: Table
     ) -> Term:
-        """Resolves an annotation to its full SQL expression, for a clause that cannot reference its SELECT alias.
+        """The bound SQL expression for a clause that cannot reference its SELECT alias."""
+        return QueryAnnotations.get_annotation_expression_result(query, field_name, annotations, table).term
 
-        Args:
-            query: The query.
-            field_name: The annotation name.
-            annotations: The annotations the expression may reference.
-            table: The table the expression is resolved against.
+    @staticmethod
+    def get_annotation_expression_result(
+        query: AwaitableQuery[Any], field_name: str, annotations: dict[str, Any], table: Table
+    ) -> ExpressionResult:
+        """Bind an annotation once per name and source table for this statement build.
 
-        Returns:
-            The annotation's expression term.
+        The result keeps its value field and required joins with the SQL term.
+        Parameter references are recorded separately from SELECT references because
+        clauses can repeat an expression without repeating its selected alias.
         """
+        cache_key = (field_name, table)
+        if (result := query._annotation_expression_results.get(cache_key)) is not None:
+            return result
         annotation = annotations[field_name]
         if isinstance(annotation, Term) and not isinstance(annotation, Expression):
-            return annotation
-        cache_key = (field_name, table)
-        if (term := query._annotation_expression_terms.get(cache_key)) is not None:
-            return term
-        # The expression's values are recorded apart from the query's own - the plan binds them
-        # last (QueryAnnotations.get_expression_term_value_references()). Resolved for a second table, the name records
-        # more references than its values, and the query keeps no plan.
-        value_wrapper_references = query._expression_term_references.setdefault(field_name, [])
-        term = annotation.get_result(
-            QueryAnnotations.get_annotation_expression_context(
-                query, field_name, annotations, table, value_wrapper_references
+            result = ExpressionResult(term=annotation)
+        else:
+            value_wrapper_references = query._expression_term_references.setdefault(field_name, [])
+            built = annotation.get_result(
+                QueryAnnotations.get_annotation_expression_context(
+                    query, field_name, annotations, table, value_wrapper_references
+                )
             )
-        ).term
-        query._annotation_expression_terms[cache_key] = term
-        return term
+            result = ExpressionResult(
+                term=built.term,
+                joins=built.joins,
+                output_field=annotation.get_value_field(built),
+                aggregate_filter=built.aggregate_filter,
+                aggregate_orderings=built.aggregate_orderings,
+            )
+        for join in result.joins:
+            QueryJoins.join_table(query, join)
+        query._annotation_expression_results[cache_key] = result
+        return result
 
     @staticmethod
     def get_annotation_expression_context(
@@ -226,6 +246,7 @@ class QueryAnnotations:
             annotations=annotations,
             annotation_names_in_progress={field_name},
             visibility=query._visibility,
+            select_related_extra_conditions=query._select_related_extra_conditions,
             value_wrapper_references=value_wrapper_references,
         )
 
@@ -291,14 +312,8 @@ class QueryAnnotations:
         Returns:
             The field, None for an annotation that is a SQL term or has no field.
         """
-        annotation = annotations[field_name]
-        if not isinstance(annotation, Expression):
-            return None
-        result = annotation.get_result(
-            QueryAnnotations.get_annotation_expression_context(query, field_name, annotations, table)
-        )
-        value_field = annotation.get_value_field(result)
-        return value_field if isinstance(value_field, ModelField) else None
+        result = QueryAnnotations.get_annotation_expression_result(query, field_name, annotations, table)
+        return result.output_field if isinstance(result.output_field, ModelField) else None
 
     @staticmethod
     def get_annotation_select_alias(query: AwaitableQuery[Any], field_name: str) -> str | None:

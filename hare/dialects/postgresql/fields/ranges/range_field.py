@@ -4,12 +4,10 @@ from collections.abc import Callable, Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from hare.dialects.postgresql.enums import RangeBoundType
 from hare.dialects.postgresql.fields.constants import (
     RANGE_BOUND_PATH_FUNCTIONS,
     RANGE_FLAG_PATH_FUNCTIONS,
     RANGE_MAPPING_KEYS,
-    RANGE_READING_METHOD_NAMES,
     RANGE_VALUE_LOOKUPS,
 )
 from hare.exceptions import ValidationError
@@ -20,7 +18,6 @@ from hare.query.enums import Lookup, LookupValueShape
 from hare.query.expressions.compatibility.constants import RANGE_VALUE_TYPE
 
 if TYPE_CHECKING:
-    from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models import Model
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.sql.terms.term import Term
@@ -109,37 +106,6 @@ class RangeField(Field[Range[Any]]):
     #: The distance between two neighbouring values of a discrete range (int/date) - Postgres
     #: stores such a range canonically as ``[lower, upper)``. None for a continuous range.
     DISCRETE_STEP: Any = None
-
-    #: The bounds ``rust.native.rows`` reads a range of this class with - None leaves every value to
-    #: ``from_db_value()``.
-    NATIVE_BOUND_TYPE: ClassVar[RangeBoundType | None] = None
-
-    def get_read_codec_specification(
-        self, types: TypeRegistry, zone_name: str | None
-    ) -> tuple[str, dict[str, Any]] | None:
-        # The codec repeats the reading of the class declaring NATIVE_BOUND_TYPE - a subclass
-        # reading otherwise keeps its own.
-        bound_type = type(self).NATIVE_BOUND_TYPE
-        if bound_type is None:
-            return None
-        declaring_class = next(klass for klass in type(self).__mro__ if "NATIVE_BOUND_TYPE" in klass.__dict__)
-        for method_name in RANGE_READING_METHOD_NAMES:
-            if getattr(type(self), method_name, None) is not getattr(declaring_class, method_name, None):
-                return None
-        # Imported here: the rows package imports the fields package.
-        from hare.query.rows.enums import ReadCodecType
-        from hare.query.rows.native.field_codecs import FieldCodecs
-
-        zone, zone_is_utc = FieldCodecs.get_zone(zone_name)
-        return ReadCodecType.RANGE, {
-            "bound": bound_type,
-            "step": self.DISCRETE_STEP,
-            "range_type": Range,
-            "use_timezone": zone_name is not None,
-            "zone": zone,
-            "zone_is_utc": zone_is_utc,
-            "fallback": self.from_db_value,
-        }
 
     def canonicalize(self, value: Range[Any]) -> Range[Any]:
         """Coerces both bounds and rewrites ``value`` the way Postgres stores it: a discrete range
@@ -343,9 +309,8 @@ class RangeField(Field[Range[Any]]):
             return value
         if isinstance(value, str):
             return self.parse_range_text(value)
-        # A plain (lower, upper) 2-tuple - the same convenience form to_db_value accepts, but
-        # reachable here too: construction (Model(...)/create(...)) runs every field through
-        # from_db_value directly, never through to_db_value first.
+        # Accept the (lower, upper) convenience form here too, alongside values decoded by a driver.
+        # Model construction normalizes input separately through to_python().
         if isinstance(value, tuple):
             lower, upper = value
             return Range(lower=lower, upper=upper)

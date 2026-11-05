@@ -50,7 +50,7 @@ schema editor, the SQL renderer and the introspector all ask it:
 | `get_parameter_cast_type(value, position)`, `get_field_parameter_cast_type(field)`, `get_row_key_cast_type(field)`, `get_json_object_value_cast_type(value, value_type)`, `get_cast_parameter_sql(sql, value)` | The type a bound value is cast to where nothing around it gives the parameter a type — see [`get_parameter_cast_type()`](#get-parameter-cast-type) |
 | `get_bindable_number(value)` | How a number standing for a JSON number is bound. |
 | `single_parameter_in_list_min_length` | The length from which an `__in`/`__not_in` list binds as one parameter. |
-| `get_default_rows_source_sql(row_count)`, `get_column_arrays_rows_source_sql(column_types, first_index)` | The sources a multi-row `INSERT` reads rows of defaults, or of one array per column, from — None for a statement per row and `VALUES`. |
+| `get_default_rows_source_sql(row_count)`, `get_column_arrays_rows_source_sql(column_cast_types, first_parameter_index, *, column_values_sql=None)` | The sources a multi-row `INSERT` reads rows of defaults, or of one array per column, from — None for a statement per row and `VALUES`. The optional expressions render already-bound arrays inline; otherwise the source uses parameter placeholders. |
 | `get_copy_column_type(field)` | The type a bulk load (`copy()`) is told a field's column has — the type the table declares by default. |
 | `supports_copy_column_type(column_type)` | Whether the bulk load loads a column of that type. |
 
@@ -86,17 +86,11 @@ def build_types(self):
     return types
 ```
 
-| `TypeMapping` member | Meaning |
-|---|---|
-| `column_type` | The column type, or a `(field) -> str`. Without, the field's own `SQL_TYPE`. |
-| `generated_sql` | The DDL of a database-generated primary key column. |
-| `function_cast` | A `(field, term) -> term` wrapped around the column wherever it is compared, ordered or copied. |
-| `to_db`, `to_lookup`, `to_python` | Replace the field's `to_db_value()`, `to_lookup_value()` and `from_db_value()` — each value binds and reads through the query's connection. |
-| `to_db_refuses_only` | `to_db` only refuses a value — one the field's `native_write_check` leaves to it — and writes any other as the field does: the write accelerator writes every other value itself. |
-| `json_term` | The text a column's value is written into a JSON object as, for a value stored in a form JSON can't hold (a UUID stored as 16 bytes). |
-| `extension` | The database extension the column type needs (`postgis` for PostgreSQL's spatial types) — created wherever a field of the class is used, and added to migrations as `CreateExtension`. |
-| `naive_datetime_is_utc` | `to_python` is the field's own `from_db_value()`, with a naive datetime from the driver read as a UTC instant. |
-| `inserted_by_select` | An INSERT writing the column writes its rows as a `SELECT` of them, not as `VALUES` — for a value written as an expression the dialect's `VALUES` doesn't read; or a `(field) -> bool` deciding it per field. |
+The complete [TypeMapping reference](../custom-fields.md#per-dialect-storage) describes column types,
+converters, ordering, NULL support and extensions.
+
+Driver-specific normalization belongs to `to_python`. For example, a dialect whose driver returns
+UTC instants as naive datetimes attaches UTC before calling the field's `from_db_value()`.
 
 `Features` describe how values behave: `divides_integers_exactly` (`/` of integers gives a fraction too),
 `computes_integer_statistics_exactly` (the average of integers is an exact decimal),
@@ -120,8 +114,9 @@ own registrations stay on it.
 
 ## <a id="functions-and-lookups"></a>5. Expressions and lookups: `TermRenderers`, `FilterOperators`
 
-Every expression renders standard SQL by default. `build_renderers()` returns the `TermRenderers` that
-replace what the database writes differently, found through the term's class hierarchy:
+Ordinary functions render the standard SQL call form by default. Terms with `requires_dialect_renderer`
+need a registered implementation. `build_renderers()` returns the `TermRenderers` that replace what the
+database writes differently, found through the term's class hierarchy:
 
 ```python
 def build_renderers(self):
@@ -135,7 +130,9 @@ def render_length(length, sql_context):
     return f"lengthUTF8({length.get_arg_sql(length.args[0], sql_context)})"
 ```
 
-hare's own dialects build theirs on `CheckedTermRenderers` (`hare.dialects.base.renderers`): its
+For a standard function call, `register_name()` can supply just a different name. It does not replace a
+required dialect renderer. Hare's dialects build on `CheckedTermRenderers`
+(`hare.dialects.base.renderers`): its
 `add_dialect_renderers()` registers the dialect's renderers, grouped by theme into classes of one
 `register(renderers)` each — `<Dialect>JsonRenderers`, `<Dialect>TemporalRenderers`,
 `<Dialect>NumberRenderers`, `<Dialect>TextRenderers`, and those of spatial terms, vectors and full-text
@@ -188,11 +185,10 @@ A value list too long to bind one parameter per value is the dialect's to shorte
 (`hare.dialects.base.parameters.large_in_list`) and map `Lookups.is_in`/`not_in`/`row_is_in`/
 `row_not_in` to its methods of the same names in `build_filter_operators()`. The base class holds the
 algorithm once — when the short form applies, how `NULL`s in the list are compared apart, how `not_in` is
-negated, the row-value form for a composite key; the dialect gives only the container the values are
-bound into as **one** parameter: `get_membership_criterion(field, values, non_null_values, element_type)`
-(PostgreSQL's `= ANY($1::type[])`, SQLite's `IN (SELECT value FROM json_each(?))`) and
-`get_row_container(value_rows, element_types)` for value rows. Returning `None` keeps the plain
-`IN (...)` list.
+negated, the row-value form for a composite key. Scalar lists use one container parameter through
+`get_membership_criterion(term, values, non_null_values, element_type)` (PostgreSQL's `= ANY($1::type[])`,
+SQLite's `IN (SELECT value FROM json_each(?))`). `get_row_container(value_rows, element_types)` supplies
+the row form: PostgreSQL binds one array per column. Returning `None` keeps the plain `IN (...)` list.
 
 A renderer changes how a term's SQL is written, never what a query's plan is keyed by — the dialect is
 part of every plan key. An expression class of the dialect's own (PostgreSQL's array, trigram and spatial
@@ -200,9 +196,10 @@ functions) declares how its attributes meet the plan in `plan_parts` and resolve
 `ExpressionArguments.get_result()`, as any [custom
 expression](../custom-functions-and-expressions.md#writing-a-custom-expression) does.
 
-The package declaring such expressions registers them for its dialect when it is imported —
-`DialectExpressions.register(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`),
-a subclass of a registered class registered with it. A query on another database refuses each of them
+The package attaches immutable dialect restrictions while defining its expressions with
+`DialectExpressions.declare(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`).
+Subclasses inherit those restrictions. Runtime additions use `DialectExpressions.register(...)` to
+publish a new registry snapshot. A query on another database refuses each of them
 with `UnSupportedError` before any SQL is built: `Function.get_result()` checks it for every function,
 and an expression with a `get_result()` of its own calls
 `DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)` first.
@@ -237,6 +234,12 @@ for every clause databases write differently; the base `QueryClauses` writes ISO
 | `get_select_all_except_sql(quoted_columns)` | The head of a query selecting every column of its source but some — the derived table a query of correlated subqueries runs in, where the database runs them that way; `UnSupportedError` by default. |
 | `get_values_source_sql(row_sqls, column_names, alias_sql, *, matches_no_row)` | A subquery of rows given as values — the source of a `MERGE`. |
 
+`get_update_from_values_sql(write=..., with_sql=..., values_sql=..., sql_context=...)` receives an
+`UpdateFromValues` declaration. Assignments contain unquoted column names and either `ValuesColumn`
+positions or expression terms; matches pair names with positions, and the filter remains a term.
+The dialect chooses qualification and its row source before rendering. It must not split printed
+identifiers or replace table prefixes in SQL: literals and `RawSQLTerm` remain unchanged.
+
 The query class only binds statements to the dialect:
 
 ```python
@@ -247,14 +250,17 @@ ColstoreQuery = DeclaredSubclass.make(
 
 ### <a id="queryset-methods"></a>`QuerySet` methods of the dialect
 
-A database's own query modifiers become `QuerySet` methods without hare knowing them. Register them in
-`install()` with a function that gets the query's builder and the call's arguments and returns the
-builder — Colstore's `random_share()`:
+A dialect declares its QuerySet methods in `get_contribution()`, published with the dialect.
+The function receives the query builder and call arguments and returns the builder:
 
 ```python
-def install(self):
-    super().install()
-    QuerySetExtensions.register("random_share", self.name, self.apply_random_share)
+from hare.core.extensions import ExtensionContribution, MethodRegistration
+from hare.query.queryset.extensions.query_set_extension import QuerySetExtension
+
+def get_contribution(self):
+    return ExtensionContribution(methods=(
+        MethodRegistration("random_share", type(self), QuerySetExtension(self.apply_random_share)),
+    ))
 
 def apply_random_share(self, builder, percent):
     return builder.where(LiteralValue(f"abs(random()) % 100 < {int(percent)}"))
@@ -264,8 +270,9 @@ def apply_random_share(self, builder, percent):
 applies it when it is built for its connection; on a connection of another dialect it raises
 `UnSupportedError`. A package can register a method for a dialect it doesn't define.
 
-`QuerySetExtensions.register(name, dialect_class, apply)` (from `hare.query.queryset.extensions`) is
-usually called in the dialect's `install()` with `type(self)` — every object of the dialect's class
+`QuerySetExtensions.register(name, dialect_class, apply)` (from `hare.query.queryset.extensions`)
+can be used outside extension factories. A factory returns
+`MethodRegistration(name, type(self), QuerySetExtension(apply, ...))`; every object of the dialect's class
 takes the method. `apply(builder, *args, **kwargs)` returns the query builder
 with the call applied. A call is recorded on the queryset (before `Hare.init()` too) and carried into
 `values()`, `count()` and the other queries built from it; when the query is built for its connection,
@@ -277,14 +284,23 @@ argument that can't be part of a key (a list, a dict) keeps the query from keepi
 that describes itself to a plan — a `Q`, an expression — is part of the key by its structure, its values
 bound like a filter's.
 
-`register()` takes four more keyword arguments, for a method that needs more than the builder:
+`register()` accepts additional keyword arguments that describe the SQL effect and result:
 
 | Argument | Meaning |
 |---|---|
 | `reads_query=True` | `apply(builder, extension_query, *args, **kwargs)` gets the query too — a `QuerySetExtensionQuery`: its `model`, `connection`, `dialect`, `table`, whether it `is_write` or `is_summary`, and `get_condition(q)`, `get_expression(name_or_expression)` and `join(builder, joins)`, which resolve a condition or a field as the query's own filters are, their values recorded into its plan. |
 | `takes_condition=True` | The method takes `filter()`'s arguments — `Q` objects and filters — recorded as one `Q` that `apply` gets (ClickHouse's `prewhere()`). Every dialect registering the name declares it alike, or `register()` raises `ConfigurationError`. |
 | `changes_rows=True` | A call changes which rows the query returns beyond its conditions (ClickHouse's `limit_by()`): `count()` and `exists()` count the rows of the query as a derived table. |
-| `run_query=` | `await run_query(extension_query, *args, **kwargs)` runs a rows query with the call in place of its plain run and returns what the query returns (ClickHouse's `with_totals()` reads the rows and the totals row of its one statement). |
+| `transform_result=` | `transform_result(result, *args, **kwargs)` receives a `QuerySetExtensionResult` after ordinary execution. Its `result` is already materialized; values queries also expose `statement_result` and `read_row()` for additional driver rows such as totals. The handler does not execute SQL. |
+| `phase=` | `ExtensionPhase.ROW_SOURCE` (default) applies before derived-table wrapping; `ExtensionPhase.STATEMENT` applies to the final statement, as ClickHouse settings do. |
+| `refuses_writes=True` | Rejects UPDATE and DELETE with this call before selecting their rows. |
+
+Implementations and their `changes_rows` effects are bound to the actual connection. A method registered
+for another dialect cannot change the current query's summary strategy. At most one result handler
+is allowed per query; combining handlers raises `QueryError` before SQL execution. Result handlers
+shape the complete awaited result. `iterator()` and `stream()` yield the ordinary decoded rows and
+do not apply whole-result transformations to individual pages or batches.
+
 
 `QueryBuilder.set_dialect_clause(name, value)` keeps what a call sets for the dialect's `QueryClauses` to
 write — in `get_main_table_suffix_sql()`, `get_prewhere_sql()`, `get_group_by_modifier_sql()` (what
@@ -292,3 +308,49 @@ follows `GROUP BY`, ClickHouse's ` WITH TOTALS`), `get_limit_by_sql()` and `get_
 asked of a query only when it has such clauses. `hare stubs` and the mypy
 plugin declare the methods of the dialects of a project's connections, with the parameters of `apply`
 after the builder (and the query).
+
+### <a id="query-source-bindings"></a>Query source bindings
+
+A query builder used as a source has an identity independent of its printed alias.
+`from_(subquery)` and `join(subquery)` allocate automatic aliases on local copies;
+they never change the supplied subquery. Column and star references use the binding in
+the current `SqlContext`. Reusing a subquery in another parent therefore cannot change
+the SQL of the first parent. Explicit `as_(...)` creates a separate occurrence for a self-join.
+
+Correlation analysis visits immediate query scopes. Tables declared by a nested or sibling
+query do not become sources of its parent. Source comparison includes schema information,
+so equal printed table names in different schemas are not interchangeable.
+
+`SqlContext.features` optionally supplies connection capabilities; without it,
+`effective_features` uses the dialect. Ordinary statement execution and statement-plan
+recording pass the selected connection's features. SELECT, ORDER BY, GROUP BY, UPDATE and
+DELETE correlation capabilities are checked independently, before rendering the statement.
+
+### <a id="structural-sql-expressions"></a>Structural SQL expressions
+
+`NodeStructure` compares and rewrites SQL expressions without rendering them. A concrete node
+class opts in with `structure_attributes`, listing its semantic inputs; declarations from its
+base classes are included. Aliases are presentation metadata. Mark literal payload attributes
+with `literal_attributes` so a value containing an expression object is never rewritten as SQL.
+Dictionary values and sequence elements can be expression children; dictionary keys remain labels.
+Unknown subclasses are opaque until they declare their inputs explicitly. Set
+`has_repeatable_value=False` for volatile expressions: two separate calls must not be merged.
+
+`rebuild_structure(attributes)` creates a copy. Override it when changing an input requires
+recomputing derived metadata, as with the depth of a compound condition. Traversal is iterative,
+rejects ancestor cycles and preserves unchanged nodes. Sources and nested queries are scope
+boundaries; an enclosing expression rewrite does not enter a nested query body.
+
+`Term.replace_table()` uses that same traversal with the table-replacement contract. Undeclared
+subclasses retain their nearest declared base's inputs (for example, a custom function's arguments);
+extra attributes remain opaque. Specialized `replace_table()` overrides keep their boundaries.
+Mutable builders (`immutable=False`) are updated in place; unchanged references may keep identity.
+Ancestor hashes are invalidated even when a child changed in place. This does not make an undeclared
+subclass transparent to structural identity or the default `NodeStructure.rewrite()`.
+
+Derived queries use `DerivedProjection` to associate structural identities with column names,
+output types. The enclosing query chooses its output aliases explicitly. Window filters and
+ordering can request hidden columns without
+changing the visible result. GROUP BY uses the same structural identities. Aggregate statements
+build independent inner and outer query states; parameter occurrences point to their declared
+sources instead of replaying earlier construction steps.

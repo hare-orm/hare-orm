@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from pydantic.fields import FieldInfo
+
+from hare.contrib.request_query.enums import ParameterDefault
 
 if TYPE_CHECKING:
     from hare.contrib.request_query.request_query import RequestQuery
@@ -12,6 +15,11 @@ if TYPE_CHECKING:
 class RequestQueryParameters:
     """The parameters of a request query class: added or replaced in one order with the validation
     rebuilt, and their values on a request query - what its options read the request from."""
+
+    @staticmethod
+    def get_missing_default() -> ParameterDefault:
+        """Defer a request default to Pydantic, including factories needing validated data."""
+        return ParameterDefault.MISSING
 
     @staticmethod
     def add_parameter_fields(
@@ -32,13 +40,12 @@ class RequestQueryParameters:
             parameter for option in query_class.get_request_options() for parameter in option.get_parameters()
         }
         merged_fields = {**query_class.__pydantic_fields__, **fields}
-        query_class.__pydantic_fields__.clear()
-        query_class.__pydantic_fields__.update(
-            {name: field for name, field in merged_fields.items() if name not in option_parameters}
-        )
-        query_class.__pydantic_fields__.update(
-            {name: field for name, field in merged_fields.items() if name in option_parameters}
-        )
+        ordered_fields = {
+            **{name: field for name, field in merged_fields.items() if name not in option_parameters},
+            **{name: field for name, field in merged_fields.items() if name in option_parameters},
+        }
+        # Only unpublished classes are rebuilt. Published generations stay intact.
+        query_class.__pydantic_fields__ = {name: copy(field) for name, field in ordered_fields.items()}
         query_class.model_rebuild(force=True, raise_errors=raise_errors)
 
     @staticmethod

@@ -59,7 +59,11 @@ declarations of the factory it subclasses. A model's `Meta.tenant_field` gets th
 ## <a id="batches"></a>Batches
 
 `create_batch()` inserts the objects with one `bulk_create()` when none of them makes a related object or
-acts once created (`SubFactory`, `RelatedFactory`, `ManyToMany`) and the database gives back the primary
-keys it generates in insert order (`RETURNING`, PostgreSQL), else creates them one by one — every object
-it returns has its primary key. `build_batch()` builds unsaved objects the same way as `build()`. A built
+acts once created (`SubFactory`, `RelatedFactory`, `ManyToMany`). If the database generates the primary
+key, it must return those keys in insert order (`RETURNING`, PostgreSQL); otherwise objects are created
+one by one. This decision follows the model's generated-key declaration, even if a key value was supplied.
+UUID, client-assigned and composite keys without a generated component need no `RETURNING`.
+The capability check and bulk insertion use the same client selected for writing through the router.
+Returned objects have their keys when the model has a primary key.
+`build_batch()` builds unsaved objects the same way as `build()`. A built
 object gets no `RelatedFactory`/`ManyToMany` — it isn't saved.

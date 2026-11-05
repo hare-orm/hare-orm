@@ -209,7 +209,7 @@ class Partitioning(abc.ABC):
         for entry in meta.indexes:
             if isinstance(entry, Index) and entry.unique:
                 described = f"the unique index {entry.name or entry.fields!r}"
-                unique_column_sets.append((described, set(meta.get_column_names(entry.field_names))))
+                unique_column_sets.append((described, set(meta.get_column_names(entry.fields))))
         for described, column_set in unique_column_sets:
             if not key_columns <= column_set:
                 missing = ", ".join(sorted(key_columns - column_set))

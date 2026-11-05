@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from copy import copy
 from typing import TYPE_CHECKING, Any, cast
 
+from hare.exceptions import ConfigurationError
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.inspectdb.constants import FACTORY_MODEL_MODULE_NAME
+from hare.inspectdb.exceptions import ManyToManyThroughTableSkippedError
 from hare.inspectdb.generation.declarations import ModelGenerationOptions
 from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
 from hare.models import Model
@@ -14,8 +15,6 @@ if TYPE_CHECKING:
     from hare.inspectdb.generation.inspected_model import InspectedModel
     from hare.inspectdb.introspection.table_info import TableInfo
     from hare.migrations.state.model_state import ModelState
-from hare.exceptions import ConfigurationError
-from hare.inspectdb.exceptions import ManyToManyThroughTableSkippedError
 
 
 class ModelFactory:
@@ -41,14 +40,14 @@ class ModelFactory:
             foreign_key_target_overrides: Per-target-table override of the whole ``"<app_label>.
                 <TargetClass>"`` reference, keyed by the target's raw table name - for pointing an
                 FK at an already-registered model.
-            skip_many_to_many_through_tables: Whether a table shaped exactly like a ManyToManyField through
-                table is refused (the default) instead of built.
+            skip_many_to_many_through_tables: Whether a table with a possible ManyToManyField through-table
+                shape is refused (the default). This single-table check has no target-table metadata.
 
         Returns:
             The new model class, not yet registered anywhere.
 
         Raises:
-            ManyToManyThroughTableSkippedError: The table is a ManyToManyField through table and
+            ManyToManyThroughTableSkippedError: The table has a possible ManyToManyField through-table shape and
                 ``skip_many_to_many_through_tables`` is True.
             ConfigurationError: No model can be declared for the table.
         """
@@ -75,7 +74,7 @@ class ModelFactory:
         # Only a model with a state reaches here - a skipped through table has none.
         state = cast("ModelState", inspected.state)
         attributes: dict[str, Any] = {"__module__": FACTORY_MODEL_MODULE_NAME, "__qualname__": inspected.class_name}
-        attributes.update({name: copy(field) for name, field in state.fields.items()})
+        attributes.update(state.fields)
         if isinstance(state.pk_field_name, tuple):
             attributes["pk"] = CompositePrimaryKey(
                 *state.pk_field_name, without_overlaps=state.options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)

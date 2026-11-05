@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.migrations.operations.hare_operation import HareOperation
@@ -27,8 +28,6 @@ class SeparateDatabaseAndState(HareOperation):
         state_operations: The operations applied to the migration state.
     """
 
-    backward_reads_state_left = False
-
     def __init__(
         self, database_operations: list[Operation] | None = None, state_operations: list[Operation] | None = None
     ) -> None:
@@ -36,6 +35,13 @@ class SeparateDatabaseAndState(HareOperation):
         self.state_operations = list(state_operations or [])
         self.reversible = all(operation.reversible for operation in self.database_operations)
         self.reduces_to_sql = all(operation.reduces_to_sql for operation in self.database_operations)
+
+    def snapshot(self) -> SeparateDatabaseAndState:
+        """Copy both branches through each child's declaration snapshot protocol."""
+        result = copy(self)
+        result.state_operations = [operation.snapshot() for operation in self.state_operations]
+        result.database_operations = [operation.snapshot() for operation in self.database_operations]
+        return result
 
     def describe(self) -> str:
         return "Custom state/database change combination"
@@ -50,12 +56,12 @@ class SeparateDatabaseAndState(HareOperation):
         )
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
-        kwargs: dict[str, Any] = {}
-        if self.database_operations:
-            kwargs["database_operations"] = self.database_operations
-        if self.state_operations:
-            kwargs["state_operations"] = self.state_operations
-        return f"hare.migrations.operations.{type(self).__name__}", [], kwargs
+        path, args, kwargs = super().deconstruct()
+        if not self.database_operations:
+            kwargs.pop("database_operations", None)
+        if not self.state_operations:
+            kwargs.pop("state_operations", None)
+        return path, args, kwargs
 
     def state_forward(self, app_label: str, state: State) -> None:
         for operation in self.state_operations:
@@ -68,13 +74,11 @@ class SeparateDatabaseAndState(HareOperation):
         new_state: State,
         state_editor: BaseSchemaEditor | None = None,
     ) -> None:
-        from_state = old_state
-        for operation in self.database_operations:
-            to_state = from_state.clone()
-            operation.state_forward(app_label, to_state)
-            if not operation.touches_swapped_model(app_label, from_state, to_state):
-                await operation.database_forward(app_label, from_state, to_state, state_editor)
-            from_state = to_state
+        from hare.migrations.migration import Migration
+
+        migration = Migration("separate_database", app_label, operations=self.database_operations)
+        migration.atomic = False
+        await migration.apply(old_state, schema_editor=state_editor)
 
     async def database_backward(
         self,
@@ -83,15 +87,8 @@ class SeparateDatabaseAndState(HareOperation):
         new_state: State,
         state_editor: BaseSchemaEditor | None = None,
     ) -> None:
-        # The states the database operations went through forwards, from the state before this
-        # operation (``new_state`` when going backwards).
-        states = [new_state]
-        for operation in self.database_operations:
-            next_state = states[-1].clone()
-            operation.state_forward(app_label, next_state)
-            states.append(next_state)
-        for index in range(len(self.database_operations) - 1, -1, -1):
-            operation = self.database_operations[index]
-            before_state, after_state = states[index], states[index + 1]
-            if not operation.touches_swapped_model(app_label, before_state, after_state):
-                await operation.database_backward(app_label, after_state, before_state, state_editor)
+        from hare.migrations.migration import Migration
+
+        migration = Migration("separate_database", app_label, operations=self.database_operations)
+        migration.atomic = False
+        await migration.unapply(new_state, schema_editor=state_editor)

@@ -82,7 +82,7 @@ class TwoPhaseCommit(abc.ABC):
     @abc.abstractmethod
     def get_decisions_table_sql(self, table: str) -> str:
         """Returns the statement creating the decision log table unless it exists: ``xid`` text
-        primary key, ``coordinator_alias`` and ``participant_aliases`` (comma-joined) text,
+        primary key, ``coordinator_alias`` and ``participant_aliases`` (a JSON array) text,
         ``created_at`` defaulting to the current time, and a nullable ``resolved_at``.
 
         Args:
@@ -96,7 +96,7 @@ class TwoPhaseCommit(abc.ABC):
     @abc.abstractmethod
     def get_decision_insert_sql(self, table: str) -> str:
         """Returns the statement recording a decision to commit: the xid, the coordinator alias and
-        the comma-joined participant aliases, bound in that order.
+        the JSON array of participant aliases, bound in that order.
 
         Args:
             table: The decision log table - in the connection's shared schema
@@ -121,18 +121,29 @@ class TwoPhaseCommit(abc.ABC):
 
     @abc.abstractmethod
     def get_pending_decisions_sql(self, table: str, with_age_limit: bool) -> str:
-        """Returns the query listing the unresolved decisions: columns ``xid`` and
-        ``participant_aliases``.
+        """Returns every pending decision: columns ``xid`` and ``participant_aliases``.
+
+        Young decisions must remain in the result: they protect their prepared participants
+        from being mistaken for transactions with no commit decision.
 
         Args:
             table: The decision log table - in the connection's shared schema
                 (``DatabaseClient.get_shared_table_name()``).
-            with_age_limit: Whether only decisions recorded more than a number of seconds ago,
-                bound as the one parameter, are listed.
+            with_age_limit: Include an ``is_stale`` boolean column indicating whether the
+                decision was recorded more than the bound number of seconds ago. This marks
+                eligibility for recovery without filtering out younger decisions.
 
         Returns:
             The query.
         """
+
+    def is_prepare_conflict(self, error: BaseException) -> bool:
+        """Whether PREPARE was refused because another transaction already owns its identifier.
+
+        Cleanup must not finish that other transaction. An unknown outcome still requires
+        checking for a prepared transaction left by the interrupted operation.
+        """
+        return False
 
     @abc.abstractmethod
     def get_prepare_failure(self, error: OperationalError, connection_alias: str) -> ConfigurationError | None:

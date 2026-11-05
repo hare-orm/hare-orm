@@ -1,4 +1,4 @@
-"""The text format codec writes what the field's own ``to_db_value`` writes - the same normalized
+"""Bound text writers preserve what the field's own ``to_db_value`` writes - the same normalized
 string, or the same error with the same message - for EmailField, URLField, SlugField and a
 PhoneField without ``phonenumbers``, on a grid of valid, invalid and borderline values, on SQLite and
 PostgreSQL."""
@@ -12,11 +12,7 @@ import pytest
 from hare import fields
 from hare.fields.data.text.phone_field import PhoneField
 from hare.fields.validators import MinLengthValidator
-from hare.query.rows.enums import ReadCodecType, WriteCodecType
-from hare.query.rows.native.field_codecs import FieldCodecs
-from tests.native_acceleration.test_field_codecs import CONNECTIONS, assert_writes_match, make_field, native_rows
-
-REQUIRES = ("native",)
+from tests.native_acceleration.test_field_codecs import CONNECTIONS, assert_writes_match, make_field
 
 pytestmark = pytest.mark.database_independent
 
@@ -182,13 +178,6 @@ PHONE_VALUES: list[Any] = [
 ]
 
 
-def assert_text_format_codec(field: Any) -> None:
-    """The field is written by the text format codec on every connection."""
-    for _connection_name, types, _native_types in CONNECTIONS:
-        codec_type, _options = FieldCodecs.get_write_specification(field, types, None)
-        assert codec_type is WriteCodecType.TEXT_FORMAT
-
-
 @pytest.mark.parametrize(
     "field",
     [
@@ -200,7 +189,6 @@ def assert_text_format_codec(field: Any) -> None:
     ids=["plain", "null", "lowercase", "short"],
 )
 def test_email_writes_match(field):
-    assert_text_format_codec(field)
     assert_writes_match(field, EMAIL_VALUES)
 
 
@@ -215,7 +203,6 @@ def test_email_writes_match(field):
     ids=["plain", "null", "schemes", "short"],
 )
 def test_url_writes_match(field):
-    assert_text_format_codec(field)
     assert_writes_match(field, URL_VALUES)
 
 
@@ -229,14 +216,11 @@ def test_url_writes_match(field):
     ids=["plain", "unicode", "validators"],
 )
 def test_slug_writes_match(field):
-    assert_text_format_codec(field)
     assert_writes_match(field, SLUG_VALUES)
 
 
 def test_a_validator_with_a_message_is_checked_by_the_field():
     field = make_field(fields.SlugField(validators=[MinLengthValidator(3, message="too short")]), "slug")
-    _codec_type, options = FieldCodecs.get_write_specification(field, CONNECTIONS[0][1], None)
-    assert options["validate"] == field.validate
     assert_writes_match(field, SLUG_VALUES)
 
 
@@ -245,16 +229,12 @@ def test_phone_without_phonenumbers_writes_match(monkeypatch, null):
     monkeypatch.setattr(PhoneField, "phonenumbers", None)
     monkeypatch.setattr(PhoneField, "phonenumbers_looked_up", True)
     field = make_field(fields.PhoneField(null=null), "phone")
-    assert_text_format_codec(field)
     assert_writes_match(field, PHONE_VALUES)
 
 
 @pytest.mark.requires("phone")
 def test_phone_with_phonenumbers_is_written_by_the_field():
     field = make_field(fields.PhoneField(region="US"), "phone")
-    for _connection_name, types, _native_types in CONNECTIONS:
-        codec_type, _options = FieldCodecs.get_write_specification(field, types, None)
-        assert codec_type is WriteCodecType.CALL
     assert_writes_match(field, [*PHONE_VALUES, "(650) 253-0000", "+44 20 7946 0958"])
 
 
@@ -264,13 +244,7 @@ def test_a_subclass_converting_otherwise_is_written_by_the_field():
             return super().get_normalized_address(address.strip())
 
     field = make_field(TrimmedEmailField(), "email")
-    codec_type, _options = FieldCodecs.get_write_specification(field, CONNECTIONS[0][1], None)
-    assert codec_type is WriteCodecType.CALL
     assert_writes_match(field, [" a@Example.com "])
-
-
-def refuse_fallback(value: Any, instance: Any) -> Any:
-    raise AssertionError(f"{value!r} was left to the field")
 
 
 @pytest.mark.parametrize(
@@ -286,25 +260,17 @@ def refuse_fallback(value: Any, instance: Any) -> Any:
     ],
     ids=["email", "lowercase", "url", "slug"],
 )
-def test_a_valid_value_is_written_by_the_codec_itself(field, values):
+def test_text_values_have_expected_normalization(field, values):
     field = make_field(field, "value")
-    codec_type, options = FieldCodecs.get_write_specification(field, CONNECTIONS[0][1], None)
-    codec = native_rows.FieldCodec(
-        "value", ReadCodecType.AS_IS, {}, codec_type, {**options, "fallback": refuse_fallback}
-    )
+    writer = CONNECTIONS[0][1].get_db_writer(field)
     for value, written in values.items():
-        assert codec.write(value, None) == written
-        if value == written:
-            assert codec.write(value, None) is value
+        assert writer(value, None) == written
 
 
-def test_an_e164_number_is_written_by_the_codec_itself(monkeypatch):
+def test_e164_number_preserves_its_value(monkeypatch):
     monkeypatch.setattr(PhoneField, "phonenumbers", None)
     monkeypatch.setattr(PhoneField, "phonenumbers_looked_up", True)
     field = make_field(fields.PhoneField(), "phone")
-    codec_type, options = FieldCodecs.get_write_specification(field, CONNECTIONS[0][1], None)
-    codec = native_rows.FieldCodec(
-        "phone", ReadCodecType.AS_IS, {}, codec_type, {**options, "fallback": refuse_fallback}
-    )
+    writer = CONNECTIONS[0][1].get_db_writer(field)
     number = "+16502530000"
-    assert codec.write(number, None) is number
+    assert writer(number, None) is number

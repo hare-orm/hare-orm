@@ -77,8 +77,8 @@ class PlanKeyForm(StrEnum):
     PRESENCE = "presence"
     #: A method or function giving what is written into the SQL text - the key holds what it returns.
     METHOD = "method"
-    #: The connection - the key holds its dialect and alias; built into another query, the alias it
-    #: is pinned to alone (the dialect is that query's).
+    #: The connection's alias, feature, parameter-binding and SQL-context keys. A standalone query
+    #: also records its dialect; a nested query uses the enclosing query's dialect.
     CONNECTION = "connection"
     #: A part described by a method or function (``PlanDescription``) - the key holds its structure,
     #: its values are bound; None keeps no plan.

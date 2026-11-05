@@ -4,9 +4,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from hare.core.config import HareConfig
-from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
-from hare.migrations.loading.migrations_modules import MigrationsModules
+from hare.migrations.api.migration_session import MigrationSession
 from hare.migrations.making.migration_squasher import MigrationSquasher
 from hare.migrations.making.squashed_migration import SquashedMigration
 
@@ -41,11 +40,10 @@ async def squashmigrations(
         UnknownMigrationError: No migration or more than one has a given name.
     """
     typed_config = HareConfig.load(config)
-    config_dict = typed_config.to_dict()
-    if app_label not in config_dict["apps"]:
+    if app_label not in typed_config.apps:
         raise ConfigurationError(f"Unknown app label: {app_label}")
-    config_dict["apps"] = MigrationsModules.get_apps_with_packages(config_dict["apps"])
-    async with HareContext() as context:
-        await context.init(config_dict, connect=False)
-        squasher = MigrationSquasher(config_dict["apps"])
+    async with MigrationSession(typed_config, [app_label], create_packages=True) as session:
+        squasher = MigrationSquasher(
+            session.configured_apps, definitions=session.get_definitions(), environment=session.environment
+        )
         return await squasher.squash(app_label, end_name, start_name=start_name, squashed_name=squashed_name)

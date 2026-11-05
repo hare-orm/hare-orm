@@ -93,11 +93,11 @@ def get_editor(client, *, collect_sql: bool):
 
 
 @pytest.mark.asyncio
-async def test_sqlmigrate_shows_what_migrate_runs_and_migrate_reads_no_catalog(client) -> None:
+async def test_sqlmigrate_shows_ddl_and_runtime_only_reads_required_connection_settings(client) -> None:
     state = State()
     for migration in MIGRATIONS:
         collecting_editor = get_editor(client, collect_sql=True)
-        await migration.apply(state.clone(), schema_editor=collecting_editor, collect_sql=True)
+        await migration.apply(state, schema_editor=collecting_editor, collect_sql=True)
         shown_sql = [statement for statement in collecting_editor.collected_sql if not statement.startswith("--")]
 
         recording_client = RecordingClient(client) if not isinstance(client, FakeClient) else None
@@ -111,7 +111,7 @@ async def test_sqlmigrate_shows_what_migrate_runs_and_migrate_reads_no_catalog(c
 
         editor.run_sql = recorded_run_sql
         executed_before = len(client.executed) if isinstance(client, FakeClient) else 0
-        await migration.apply(state, schema_editor=editor)
+        state = await migration.apply(state, schema_editor=editor)
 
         assert run_sql == shown_sql, migration.name
         if isinstance(client, FakeClient):
@@ -127,4 +127,8 @@ async def test_sqlmigrate_shows_what_migrate_runs_and_migrate_reads_no_catalog(c
                 if statement.lstrip().upper().startswith("SELECT")
                 or (statement.lstrip().upper().startswith("PRAGMA") and "=" not in statement)
             ]
-            assert catalog_reads == [], migration.name
+            # Rebuild needs the previous connection setting so it can restore it; it
+            # does not inspect table definitions or guess schema from a catalog.
+            assert catalog_reads == (["PRAGMA legacy_alter_table"] * 3 if migration.name == "0002_changes" else []), (
+                migration.name
+            )

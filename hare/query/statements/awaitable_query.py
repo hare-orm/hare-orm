@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from collections.abc import (
     Coroutine,
-    Sequence,
+    Generator,
 )
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar, cast
 
-from hare.core.routing.written_connections import WrittenConnections
-from hare.dialects.base.client.database_client import DatabaseClient, retryable_read_query_active
+from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.exceptions import (
     ConfigurationError,
     QueryError,
 )
-from hare.fields.field import Field as ModelField
+from hare.query.execution.bound_query import BoundQuery
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions import (
     Q,
 )
@@ -30,18 +30,15 @@ from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.queryset.extensions.enums import ExtensionPhase
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
-from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
 from hare.query.queryset.pending_calls.pending_filter_calls import PendingFilterCalls
-from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
+from hare.query.scopes.row_scope_binding import RowScopeBinding
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.statements.building.query_joins import QueryJoins
-from hare.sql import Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
-from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -49,7 +46,7 @@ if TYPE_CHECKING:
 TModel = TypeVar("TModel", bound="Model")
 
 
-class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
+class AwaitableQuery(BoundQuery[TModel], Generic[TModel], abstract=True):
     """The base of the queries a queryset runs: built into SQL, kept as a plan, awaited for the result."""
 
     #: Whether this type of query only reads - a read is retried on a lost connection, a write
@@ -74,66 +71,6 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
     #: table instead of rejected - True for .values()/.values_list() (ValuesQuery).
     window_filter_wrapping_supported: ClassVar[bool] = False
 
-    __slots__ = (
-        "query",
-        "_joined_tables",
-        "_joined_tables_set",
-        # One resolved term per annotation name and table for the current build, so a GROUP BY
-        # and an ORDER BY of the same unselected annotation share one term - see
-        # QueryAnnotations.get_annotation_expression_term().
-        "_annotation_expression_terms",
-        # The value references recorded while each annotation name was resolved again for one of
-        # those clauses - see QueryAnnotations.get_expression_term_value_references().
-        "_expression_term_references",
-        # The ORDER BY term of each annotation the query orders by, for a distinct by fields that must
-        # repeat it - the SELECT alias of a selected one, whose expression's parameters would
-        # differ from the alias's.
-        "_annotation_ordering_terms",
-        # Populated fresh by QueryAnnotations.get_annotate() on every _make_query() call, read back by
-        # ValuesOutput.get_selected_value_field() - see both for why this lives here instead
-        # of on the (possibly shared/reused-across-queries) annotation expression object itself.
-        "_annotation_output_fields",
-        # Set by QueryConditions.get_filters() (via QueryAnnotations.get_annotate()), read back by
-        # QueryGrouping.apply_auto_group_by() once the caller's own select list is fully finalized - see
-        # that method's own docstring
-        # for why the two can't just be one step.
-        "_has_aggregate",
-        # Set by QueryConditions.get_filters(): the filters (and keyset cursor) reading a window function, which
-        # ValuesQuery applies to the built query wrapped as a derived table.
-        "_window_filter_criterion",
-        # Set on the copy a query makes of itself to run once - see _get_execution_query().
-        "_is_execution_query",
-        # The SQL text and parameters a plan hit of a running query left - see StatementPlanRuns.run_on_plan().
-        "_compiled_statement",
-        # The plan the last build found for this query, or recorded - None for a query that keeps
-        # no plan.
-        "_statement_plan",
-        # The arguments of StatementPlanRuns.record_plan() for a query whose dialect QuerySet method calls
-        # are applied after the build - recorded once they are (see _make_query()).
-        "_deferred_plan_record",
-        # The list the build records its value references into, None when it records none - the
-        # conditions of the dialect's QuerySet method calls, applied after the build, record into it
-        # too.
-        "_extension_value_wrapper_references",
-        # Set when the build applied the calls of the dialect's QuerySet methods itself - to the
-        # query reading the rows, before wrapping it in a derived table.
-        "_extension_calls_built_in",
-        # Set by _make_query_to_run(): the query is built to be run by itself, not shown or
-        # embedded in another one.
-        "_runs_compiled_statement",
-        # The calls the queryset this query runs was made with, when it was made by simple calls
-        # alone (QuerySet._call_signature) - None otherwise - and the values of their filters.
-        "_call_signature",
-        "_call_values",
-        # The key of the plan of the calls, the keys of its values and how many values the query
-        # class binds after them, set when no plan was kept under the key yet - the plan this run
-        # builds is kept under it too.
-        "_call_signature_record",
-        # The object this query, made again for each description or build of a query it is built
-        # into, stands for - unset otherwise (PlanOrigins).
-        "_plan_origin",
-    )
-
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         # The description of the statement of each declaration of the class's plan slots.
@@ -141,9 +78,6 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
 
     #: The statement being built.
     query: QueryBuilder
-
-    #: What ``query`` holds before a build - one builder no query ever changes.
-    EMPTY_QUERY: ClassVar[QueryBuilder] = QueryBuilder()
 
     def _apply_connection(self, connection: DatabaseClient | None) -> None:
         """Binds this query to the connection it runs on - the statement being built starts
@@ -155,32 +89,19 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         super()._apply_connection(connection)
         if connection is not None and hasattr(self, "query"):
             self.query = connection.query_class.get_empty_builder()
+            self._bound_extensions = None
+            self._extension_result = None
 
     def __init__(self, model: type[TModel]) -> None:
         super().__init__(model)
         self._init_build_state()
 
-    def _init_build_state(self) -> None:
-        """Sets what a build of the query fills in."""
-        self._joined_tables: list[Table] = []
-        self._joined_tables_set: set[Table] = set()
-        self._annotation_expression_terms: dict[tuple[str, Table], Term] = {}
-        self._expression_term_references: dict[str, RecordedValueReferences] = {}
-        self._annotation_ordering_terms: dict[str, Term] = {}
-        self.query = self.EMPTY_QUERY
-        self._annotation_output_fields: dict[str, ModelField[Any] | None] = {}
-        self._has_aggregate: bool = False
-        self._window_filter_criterion: Criterion | None = None
-        self._is_execution_query: bool = False
-        self._compiled_statement: tuple[str, list[Any]] | None = None
-        self._statement_plan: StatementPlan | None = None
-        self._deferred_plan_record: dict[str, Any] | None = None
-        self._extension_value_wrapper_references: RecordedValueReferences | None = None
-        self._extension_calls_built_in: bool = False
-        self._runs_compiled_statement: bool = False
-        self._call_signature: tuple[Any, ...] | None = None
-        self._call_values: tuple[Any, ...] = ()
-        self._call_signature_record: tuple[tuple[Any, ...], Sequence[str], int] | None = None
+    def __await__(self) -> Generator[Any, None, Any]:
+        return QueryExecution.run(self).__await__()
+
+    async def _execute_bound(self) -> Any:
+        """Execute after dependencies have supplied the values needed to build this statement."""
+        raise NotImplementedError
 
     def _get_single_or_list_result(self, rows: list[Any]) -> Any:
         """The fetched rows as returned - reversed back for a ``.before_cursor()`` query, or the
@@ -280,8 +201,13 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
     def _get_statements(self, parameters_inline: bool) -> list[tuple[str, list[Any]]]:
         self._make_query()
         if parameters_inline:
-            return [(self.query.get_sql(), [])]
-        sql, values = self.query.get_parameterized_sql()
+            return [
+                (
+                    self.query.get_sql(self._connection.sql_context),
+                    [],
+                )
+            ]
+        sql, values = self.query.get_parameterized_sql(self._connection.sql_context)
         return [(sql, values)]
 
     def _get_read_columns(self) -> set[tuple[str, str]]:
@@ -297,12 +223,18 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         Raises:
             QueryError: An expression is nested deeper than the query can be built.
         """
+        scope_token = None
+        if RowScopeBinding.current.get() is None:
+            scope_token = RowScopeBinding.current.set(RowScopeBinding())
         try:
             self._make_query_steps(**kwargs)
         except RecursionError:
             # Built and written level by level - an expression nested hundreds of levels deep
             # (F("n") + 1 + 1 ...) is deeper than Python's stack.
             raise QueryError(EXPRESSIONS_NESTED_TOO_DEEPLY_MESSAGE) from None
+        finally:
+            if scope_token is not None:
+                RowScopeBinding.current.reset(scope_token)
 
     def _make_query_steps(self, **kwargs: Any) -> None:
         """The build of ``_make_query()``.
@@ -310,7 +242,8 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         Args:
             kwargs: Passed on to ``_build_query()``.
         """
-        CallsBeforeSetup.raise_if_invalid(self)
+        QuerySetExtensions.bind(self)
+        self._extension_result = None
         self._compiled_statement = None
         self._statement_plan = None
         self._deferred_plan_record = None
@@ -332,8 +265,11 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         if self._compiled_statement is not None:
             QuerySetExtensions.check(self)
             return
-        if not self._extension_calls_built_in:
-            QuerySetExtensions.apply(self, self._extension_value_wrapper_references)
+        QuerySetExtensions.apply(
+            self,
+            self._extension_value_wrapper_references,
+            phase=ExtensionPhase.STATEMENT if self._extension_calls_built_in else None,
+        )
         deferred_plan_record = self._deferred_plan_record
         if deferred_plan_record is not None:
             self._deferred_plan_record = None
@@ -349,7 +285,11 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
             UnSupportedError: The connection's dialect has no implementation of a called method.
         """
         if self._extension_calls:
-            QuerySetExtensions.apply(self, self._extension_value_wrapper_references)
+            QuerySetExtensions.apply(
+                self,
+                self._extension_value_wrapper_references,
+                phase=ExtensionPhase.ROW_SOURCE,
+            )
             self._extension_calls_built_in = True
 
     def reads_rows_in_derived_table(self) -> bool:
@@ -367,6 +307,8 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         ``_make_query()``. A query of a queryset made by simple calls alone runs on the plan kept
         under the key of the calls, built not even in part.
         """
+        QuerySetExtensions.bind(self)
+        self._extension_result = None
         self._runs_compiled_statement = True
         if self._call_signature is not None and StatementPlanRuns.run_on_call_signature_plan(self):
             return
@@ -397,7 +339,7 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         compiled_statement = self._compiled_statement
         if compiled_statement is not None:
             return compiled_statement
-        return self.query.get_parameterized_sql()
+        return self.query.get_parameterized_sql(self._connection.sql_context)
 
     #: Whether a plan's statement takes the LIMIT and OFFSET of the query running on it.
     plan_binds_slice: ClassVar[bool] = False
@@ -437,7 +379,7 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
                 and StatementPlanRuns.find_plan(
                     self,
                     description.structure,
-                    self._get_plan_values(description, plan),
+                    self._get_plan_values(description),
                     paginate=self.plan_binds_slice,
                     plan=plan,
                 )
@@ -538,7 +480,9 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         # A plan kept under the key is the answer to whether the query keeps one - except inside a
         # correlated subquery, where that also depends on the enclosing query.
         plan = (
-            StatementPlans.find(description.structure) if OuterScope.current_expression_context.get() is None else None
+            StatementPlans.find(self.model, description.structure)
+            if OuterScope.current_expression_context.get() is None
+            else None
         )
         if plan is None and not StatementPlanDescriptions.query_state_is_plannable(self):
             return None, None
@@ -548,20 +492,17 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         """The key the plan of ``description`` is kept under."""
         return description.structure
 
-    def _get_plan_values(self, description: PlanDescription, plan: StatementPlan) -> list[Any]:
-        """This query's values ``plan`` binds, in the order its description lists them."""
+    def _get_plan_values(self, description: PlanDescription) -> list[Any]:
+        """This query's values, in the order its description lists them."""
         return description.values
 
     def _get_origins_description(self) -> PlanDescription | None:
         """This query's description with the origin of each value, made before the build."""
         return PlanOrigins.describe(lambda: self._get_plan()[0])
 
-    def _get_plan_value_description(self, plan: StatementPlan) -> PlanDescription | None:
+    def _get_plan_value_description(self) -> PlanDescription | None:
         """The values of this query the plan it runs on binds, each with its origin - in the order
         ``_get_plan_values()`` lists them.
-
-        Args:
-            plan: The plan.
 
         Returns:
             The description.
@@ -622,30 +563,12 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
         visibility = self._visibility = self._visibility.get_for_active_tenant()
         ambient_filters = RowScopes.of(self.model).get_filters(visibility, uses_default_scope=self._uses_default_scope)
         ambient_q_objects = [Q(**{field_name: value}) for field_name, value in ambient_filters]
-        if ambient_q_objects or self._ambient_q_count:
-            for ambient_q in ambient_q_objects:
-                # Made again by each copy of the query - its values come from the query.
-                ambient_q._plan_origin = self
-            self._q_objects = [*ambient_q_objects, *self._q_objects[self._ambient_q_count :]]
-            self._ambient_q_count = len(ambient_q_objects)
-
-    def _get_execution_query(self, for_write: bool = False) -> Self:
-        """A copy of this query bound to the connection it runs on for one execution - a queryset
-        run again later, or by several tasks at once, compiles into its own copy each time.
-
-        Args:
-            for_write: Whether the connection is chosen for a write.
-
-        Returns:
-            The copy, or this query itself when it already is one.
-        """
-        execution_query = self if self._is_execution_query else self.__copy__()
-        execution_query._is_execution_query = True  # type: ignore[attr-defined]
-        if execution_query._connection is None:
-            execution_query._apply_connection(execution_query.get_connection(for_write=for_write))  # type: ignore[unreachable]
-        if for_write and WrittenConnections.is_recording:
-            WrittenConnections.record(execution_query._connection.connection_alias)
-        return execution_query  # type: ignore[return-value]
+        provider_condition = RowScopeBinding.get_condition(self._row_scope_provider, self.model, visibility)
+        if provider_condition is not None:
+            ambient_q_objects.append(copy(provider_condition))
+        for ambient_q in ambient_q_objects:
+            ambient_q._plan_origin = self
+        self._ambient_conditions = tuple(ambient_q_objects)
 
     def _make_subquery(self, **kwargs: Any) -> None:
         """Builds ``self.query`` to be embedded in an enclosing query; a ``.none()`` queryset
@@ -681,11 +604,8 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
                 "(autocommit), giving no real protection while looking like it does"
             )
 
-    async def _execute_with_retry_context(self, coro: Coroutine[Any, Any, Any]) -> Any:
-        """Awaits the query's execution - for a read-only query with the connection-loss retry context
-        active, so only reads are retried. Rejects a ``select_for_update()`` query run outside a
-        transaction.
-        """
+    async def _execute_reading(self, coro: Coroutine[Any, Any, Any]) -> Any:
+        """Enforce row-lock scope and translate errors raised while decoding a result."""
         if self._select_for_update:
             try:
                 self._raise_if_row_lock_outside_transaction()
@@ -694,13 +614,7 @@ class AwaitableQuery(QuerySpecification[TModel], Generic[TModel], abstract=True)
                 raise
         connection = self._connection
         try:
-            if not type(self).is_read_only or not connection.read_retry_max_retries:
-                return await coro
-            token = retryable_read_query_active.set(True)
-            try:
-                return await coro
-            finally:
-                retryable_read_query_active.reset(token)
+            return await coro
         except Exception as error:
             # A driver decoding the rows as they are read raises outside the statement's own call.
             read_error = connection.get_result_read_error(error)

@@ -33,7 +33,7 @@ class FieldTransforms:
             The extension, None when the segment needs none or isn't registered.
         """
         for klass in type(field).__mro__:
-            registered_transform = klass.__dict__.get("registered_transforms", {}).get(segment)
+            registered_transform = Field.get_class_transforms(klass).get(segment)
             if registered_transform is not None:
                 return registered_transform.required_extension
         return None

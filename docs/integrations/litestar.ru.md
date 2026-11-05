@@ -32,7 +32,8 @@ class HarePlugin:
         self,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         health_routes: HealthRoutes | None = None,
     ) -> None: ...
 ```
@@ -41,8 +42,8 @@ class HarePlugin:
 
 - **`HareContext`.** Открывается вместе с приложением и закрывается вместе с ним — первым среди
   обработчиков жизненного цикла, поэтому собственные обработчики приложения (брокер сообщений, доставщик
-  исходящих событий) уже получают базу и останавливаются до её закрытия. Контекст — глобальный запасной,
-  поэтому его видит каждый запрос. При остановке `Hare.close_connections()` ещё и дожидается фоновых
+  исходящих событий) уже получают базу и останавливаются до её закрытия. Middleware активирует контекст
+  приложения для каждого запроса. При остановке `HareContext.close_connections()` ещё и дожидается фоновых
   наблюдателей, которые ещё работают.
 - **Запросы из параметров проверяются при запуске.** `RequestQuery.check_declarations()` выполняется, как
   только модели настроены: ошибочный [запрос из параметров](request-queries.ru.md) не даёт приложению
@@ -226,7 +227,7 @@ async def change_book(book_id: int, data: DTOData[Book]) -> Book:
 class BookDTO(HareDTO[Book]):
     config = DTOConfig(exclude={"author.books"})
     extra_fields = {"reviews_count": int, "is_new": bool}  # читаются со строки по имени, с типом
-    computed = ("title_length", "author.initials")          # свойства и методы, тип — из аннотации возврата
+    computed = ("title_length", "author.initials")          # синхронные свойства и методы
     related_values = {"author_name": "author.name"}         # поле связанной строки, в плоском виде
 
 
@@ -243,8 +244,10 @@ async def list_books() -> list[Book]:
 - `extra_fields` — аннотация запроса или атрибут, который обработчик (или `api_getter` запроса из
   параметров) положил на строку после чтения, с типом: его строит запрос, поэтому из модели DTO его не
   узнать. Строка без него — запрос его не посчитал — отвечает `null`.
-- `computed` — свойство или метод модели, тип — из аннотации возврата. Поле, которое запрос не выбрал
-  (`only()`, `fields=` запроса из параметров), прочитанное внутри него, даёт `null`; любой другой
+- `computed` — синхронное свойство или метод модели, тип — из аннотации возврата. Функция чтения свойства
+  или метод получает только строку как `self` и допускает вызов без дополнительных аргументов.
+  Асинхронные значения вычислите в обработчике и передайте через `extra_fields`. Поле, которое запрос
+  не выбрал (`only()`, `fields=` запроса из параметров), прочитанное внутри него, даёт `null`; любой другой
   `AttributeError` внутри него завершает запрос ошибкой (500), а не отвечает `null`. Это касается и такого
   поля, прочитанного другим свойством, которое он читает: свойство, упавшее с `AttributeError`, Python
   считает отсутствующим, поэтому выбирайте поля, нужные свойствам, которые он читает.
@@ -290,14 +293,24 @@ app = Litestar(route_handlers, plugins=[HarePlugin(HARE_CONFIG, health_routes=He
 ## <a id="tests"></a>Тесты
 
 С pytest-плагином hare тестируемое приложение работает на тестовых базах и берёт контекст теста.
-`AsyncTestClient` запускает его в потоке портала anyio — в своём цикле событий: под
-`hare_app_transactional_db` его записи фиксируются, а таблицы очищаются после теста, на любом драйвере; под
-`hare_app_db` они откатываются вместе с записями теста на драйверах `postgresql` и SQLite, а
+`AsyncTestClient` запускает его в потоке портала anyio — в своём цикле событий: с
+`hare_context=hare_app_transactional_db` его записи фиксируются, а таблицы очищаются после теста, на любом
+драйвере; с
+`hare_context=hare_app_db` они откатываются вместе с записями теста на драйверах `postgresql` и SQLite, а
 `postgresql+asyncpg` от них отказывается, — см. [Тесты приложения](../testing/setup.ru.md#application-tests).
 
 ```python
 @pytest.mark.asyncio
 async def test_create_reader(hare_app_transactional_db):
+    app = Litestar(
+        route_handlers,
+        plugins=[HarePlugin(HARE_CONFIG, hare_context=hare_app_transactional_db)],
+    )
     async with AsyncTestClient(app=app) as client:
         assert (await client.post("/readers", json={"name": "ann"})).status_code == 201
 ```
+
+Явно переданный `hare_context` остаётся под управлением вызывающего кода: интеграция не инициализирует
+и не закрывает его. Без этого аргумента приложение создаёт и закрывает отдельный контекст.
+Запуск приложения не задаёт глобальный запасной контекст. В тестах передавайте фикстуру явно:
+`hare_context=hare_app_db` или `hare_context=hare_app_transactional_db`.

@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-from copy import copy
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.core.apps.relation_linking import RelationLinking
-from hare.ddl.indexes.index import Index
+from hare.ddl.schema_requirements import SchemaRequirements
+from hare.dialects.base.dialect import Dialect
 from hare.fields.composite_primary_key import CompositePrimaryKey
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.migrations.state.constants import TRACKED_MODEL_STATE_ATTRIBUTES
-from hare.migrations.state.state_apps import StateApps
-from hare.migrations.state.state_change_journal import StateChangeJournal
-from hare.migrations.state.tracked_dict import TrackedDict
 from hare.models import Model
 from hare.models.enums import ModelOption
+
+if TYPE_CHECKING:
+    from hare.migrations.operations.fields.field_like import FieldLike
 
 
 @dataclass
@@ -35,18 +36,26 @@ class ModelState:
     pk_field_name: str | tuple[str, ...]
     fields: dict[str, Field[Any]]
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in TRACKED_MODEL_STATE_ATTRIBUTES:
-            if isinstance(value, TrackedDict) and value.owner is None:
-                value.owner = self
-            elif not isinstance(value, TrackedDict) or value.owner is not self:
-                value = TrackedDict(value, owner=self)
-        # Set up once the last field is - a change of a model state built already is recorded.
-        if "fields" in self.__dict__:
-            journal = StateChangeJournal.recording.get()
-            if journal is not None:
-                journal.record_change(self, None)
-        object.__setattr__(self, name, value)
+    def get_required_extensions(self, dialects: Iterable[Dialect]) -> set[str]:
+        """Read extension requirements from declarations without rendering historical models.
+
+        The DDL layer collects requirements for both live models and migration state;
+        this adapter supplies state options without coupling schema creation to the
+        migration autodetector.
+        """
+        primary_key_attribute = self.options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
+        return SchemaRequirements.get_extensions(
+            dialects,
+            declared_extensions=self.options.get(ModelOption.EXTENSIONS, ()),
+            fields_by_name=self.fields,
+            indexes=self.options.get(ModelOption.INDEXES, ()),
+            constraints=self.options.get(ModelOption.CONSTRAINTS, ()),
+            primary_key_without_overlaps=(
+                primary_key_attribute
+                if self.options.get(ModelOption.PK_WITHOUT_OVERLAPS) and isinstance(primary_key_attribute, tuple)
+                else None
+            ),
+        )
 
     def clone(self) -> ModelState:
         """A copy of the state - its options and fields copied."""
@@ -56,11 +65,21 @@ class ModelState:
             table=self.table,
             abstract=self.abstract,
             description=self.description,
-            options=TrackedDict(self.options),
+            options=deepcopy(dict(self.options)),
             bases=self.bases,
             pk_field_name=self.pk_field_name,
-            fields=TrackedDict({name: copy(field) for name, field in self.fields.items()}),
+            fields=self.snapshot_fields(self.fields),
         )
+
+    @staticmethod
+    def snapshot_fields(fields: dict[str, Field[Any]]) -> dict[str, Field[Any]]:
+        """Publish named declarations without references to rendered model bindings."""
+        result = {}
+        for name, field in fields.items():
+            declaration = field.snapshot()
+            declaration.model_field_name = name
+            result[name] = declaration
+        return result
 
     def get_option_list(self, key: ModelOption) -> list[Any]:
         """Returns a list-valued model option as a fresh list (``options`` stores it as a tuple)."""
@@ -101,35 +120,40 @@ class ModelState:
             return field.source_field or f"{field_name}{FOREIGN_KEY_COLUMN_SUFFIX}"
         return field.source_field or field_name
 
-    def render(self, apps: StateApps, *, deepcopy_fields: bool = True) -> type[Model]:
-        """The model class of the state, registered in the state's apps.
-
-        Args:
-            apps: The apps of the state.
-            deepcopy_fields: Whether the fields are copied first - the state keeps its own.
+    def render(self) -> type[Model]:
+        """Build the model class; the caller registers it in the state's apps.
 
         Returns:
             The model.
         """
-        meta_class = type("Meta", (), self.options)
+        return self.build_model(self.name, self.bases, self.fields, self.options)
 
-        if deepcopy_fields:
-            attributes: dict[str, Any] = {name: copy(field) for name, field in self.fields.items()}
-        else:
-            attributes = dict(self.fields)
+    @staticmethod
+    def build_model(
+        name: str, bases: tuple[type, ...], fields: Mapping[str, FieldLike], options: dict[str, Any]
+    ) -> type[Model]:
+        """Build a historical model from declarations without registering it in an app.
+
+        Publication snapshots fields before binding them. Historical markers disable
+        source comments and restore composite primary keys from the stored options.
+        """
+        meta_class = type("Meta", (), options)
+
+        # Model publication snapshots these declarations before binding them.
+        attributes: dict[str, Any] = dict(fields)
         attributes["Meta"] = meta_class
         attributes["_no_comments"] = True
         attributes["__migration_state__"] = True
 
         # A composite primary key's fields don't carry primary_key=True - its marker is put back, or
         # the metaclass would add an "id".
-        primary_key_attribute = self.options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
+        primary_key_attribute = options.get(ModelOption.PRIMARY_KEY_ATTRIBUTE)
         if isinstance(primary_key_attribute, tuple):
             attributes["__migration_composite_pk__"] = CompositePrimaryKey(
-                *primary_key_attribute, without_overlaps=self.options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)
+                *primary_key_attribute, without_overlaps=options.get(ModelOption.PK_WITHOUT_OVERLAPS, False)
             )
 
-        model = type(self.name, self.bases, attributes)
+        model = type(name, bases, attributes)
         return cast("type[Model]", model)
 
     @staticmethod
@@ -178,7 +202,7 @@ class ModelState:
         options = {
             **cls.get_table_options(model),
             **(cls.get_schema_object_options(model) if with_schema_objects else {}),
-            **cls.get_index_options(model, fields),
+            **cls.get_index_options(model),
             **cls.get_row_options(model, declared_pk_field_name),
         }
         return cls(
@@ -222,7 +246,8 @@ class ModelState:
             model: The model class.
 
         Returns:
-            Copies of the fields by name.
+            Unbound copies by name, preserving effective relation DDL settings
+            without carrying the rendered model's target/key bindings.
         """
         fields: dict[str, Field[Any]] = {}
         for name, field in model._meta.fields_map.items():
@@ -232,11 +257,25 @@ class ModelState:
                 continue
             if getattr(field, "reference", None) is not None:
                 continue
-            state_field = copy(field)
-            if isinstance(state_field, ForeignKeyFieldInstance) and len(state_field.db_column_names) == 1:
-                # Relation initialization repoints source_field at the shadow attribute name -
-                # the state records the real column so a rendered model maps to it again.
-                state_field.source_field = state_field.db_column_names[0]
+            state_field = field.snapshot()
+            state_field.model_field_name = name
+            if isinstance(field, ForeignKeyFieldInstance):
+                relation = cast(ForeignKeyFieldInstance[Any], state_field)
+                # Record the effective schema, including M2M delete rules and indexes
+                # covered by another declaration, without retaining the model binding.
+                relation.on_delete = field.on_delete
+                relation.index = field.index
+                relation.to_field = field.to_field
+                if len(field.db_column_names) == 1:
+                    relation.source_field = field.db_column_names[0]
+            elif isinstance(field, ManyToManyFieldInstance):
+                many_to_many = cast(ManyToManyFieldInstance[Any], state_field)
+                many_to_many.on_delete = field.on_delete
+                if field.through_model is None and field.through:
+                    # Freeze an automatic table's name as migration DDL; declared
+                    # through-model references and composite key prefixes stay intact.
+                    many_to_many.declared_through = field.through
+                    many_to_many.through = field.through
             fields[name] = state_field
         return fields
 
@@ -305,13 +344,12 @@ class ModelState:
             options[ModelOption.ROW_LEVEL_SECURITY] = meta.row_level_security
         return options
 
-    @classmethod
-    def get_index_options(cls, model: type[Model], fields: dict[str, Field[Any]]) -> dict[str, Any]:
+    @staticmethod
+    def get_index_options(model: type[Model]) -> dict[str, Any]:
         """The options listing a model's indexes and the extensions it declares (``Meta.extensions``).
 
         Args:
             model: The model class.
-            fields: The fields of the model's state.
 
         Returns:
             The options that are set.
@@ -319,14 +357,6 @@ class ModelState:
         meta = model._meta
         options: dict[str, Any] = {}
         if meta.indexes:
-            # A migration operation's model has no relations bound - its foreign keys have no columns yet; its
-            # indexes are resolved once the state renders the models (StateRendering).
-            resolves_expressions = not getattr(model, "__migration_state__", False)
-            for index in meta.indexes:
-                if resolves_expressions and isinstance(index, Index) and index.expressions:
-                    # State diffing only sees ModelState snapshots, with no model class to resolve
-                    # an index's expressions against - resolved here, while the model exists.
-                    index.get_expressions(model)
             options[ModelOption.INDEXES] = meta.indexes
         if meta.extensions:
             options[ModelOption.EXTENSIONS] = tuple(sorted(meta.extensions))

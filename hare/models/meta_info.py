@@ -4,7 +4,6 @@ import inspect
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
-from hare.core.caching.cache import Cache
 from hare.core.caching.caches import Caches
 from hare.core.connections.connections import Connections
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
@@ -36,11 +35,11 @@ from hare.models.class_building.schema_object_declarations import SchemaObjectDe
 from hare.models.constants import META_ORDERING_ALIAS_PREFIX, MISSING_DEFAULT_CONNECTION_MESSAGE
 from hare.models.enums import ModelOption
 from hare.models.tenancy.tenant_row_level_security import TenantRowLevelSecurity
+from hare.query.expressions.ordering import Ordering
 from hare.query.lookup_info.lookup_info import LookupInfo
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.lookup_info.ordering_info import OrderingInfo
 from hare.query.managers.manager import Manager
-from hare.query.queryset import QuerySet
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.sql import Order, Query, Table
 from hare.sql.builder.queries.query_builder import QueryBuilder
@@ -102,7 +101,6 @@ class MetaInfo:
         "get_latest_by",
         "setattr_hooks",
         "next_setattr",
-        "instance_constructor",
         "hidden_backward_relations",
         "indexes",
         "many_to_many_fields",
@@ -121,13 +119,6 @@ class MetaInfo:
         "sensitive_fields",
         "blind_index_fields",
         "plan_cache_buckets",
-        "lookup_paths",
-        "concrete_field_paths",
-        "lookup_infos",
-        "ordering_infos",
-        "lookups_by_path",
-        "hydration_layouts",
-        "model_cache_values",
         "soft_delete_field",
         "soft_delete_hard_cascade",
         "swappable",
@@ -357,9 +348,7 @@ class MetaInfo:
         #: The ``__setattr__`` Model.__setattr__ stores a plain attribute with - set with
         #: ``setattr_hooks``.
         self.next_setattr: Callable[[Any, str, Any], None] = object.__setattr__
-        #: The ``rust.native.rows.ModelConstructor`` setting up new instances; False when
-        #: ``Model.__init__`` does it alone; None until worked out.
-        self.instance_constructor: Any = None
+        #: The single-column primary key is supplied outside database generation.
         self.default_custom_generated_pk: bool = False
         self._model: type[Model] = None  # type: ignore[assignment]
         self.table_description: str = getattr(meta, ModelOption.TABLE_DESCRIPTION, "")
@@ -368,23 +357,10 @@ class MetaInfo:
         self.table_options: tuple[TableOptions, ...] = SchemaObjectDeclarations.get_declared_table_options(meta)
         self.pk: Field[Any] = None  # type: ignore[assignment]
         self.db_pk_column: str = ""
-        #: id(cache) -> this model's bucket of that Cache (the statement plans, the decode
+        #: Cache.bucket_id -> this model's bucket of that Cache (the statement plans, the decode
         #: plans, the descriptions of its filter keys) - held here so the entries live exactly as
         #: long as the model class.
         self.plan_cache_buckets: dict[int, Any] = {}
-        #: The model's plain buckets of the caches read on every query (``Cache.model_attribute``),
-        #: None while the model has none: its parsed lookup paths, the field paths a path reads,
-        #: the descriptions of its filter keys, ordering names and field paths' lookups, and its
-        #: row layouts by (driver's native Python types, dialect).
-        self.lookup_paths: dict[Any, Any] | None = None
-        self.concrete_field_paths: dict[Any, Any] | None = None
-        self.lookup_infos: dict[Any, Any] | None = None
-        self.ordering_infos: dict[Any, Any] | None = None
-        self.lookups_by_path: dict[Any, Any] | None = None
-        self.hydration_layouts: dict[Any, Any] | None = None
-        #: id(cache) -> this model's value of that ModelCache - held here so the value lives
-        #: exactly as long as the model class.
-        self.model_cache_values: dict[int, Any] = {}
         self.db_default_db_columns: tuple[str, ...] = ()
 
     def get_table_options(self, dialect: Dialect) -> TableOptions | None:
@@ -549,7 +525,7 @@ class MetaInfo:
         entries: list[tuple[str, ...]] = []
         for index in self.indexes:
             if isinstance(index, Index):
-                if type(index) is not Index or not index.fields or index.expressions or index.opclasses:
+                if type(index) is not Index or not index.fields or index.declared_expressions or index.opclasses:
                     continue
                 if not index.name and not index.unique and self.is_relation_field_names(index.fields):
                     continue
@@ -577,8 +553,7 @@ class MetaInfo:
         return len(field_names) == 1 and isinstance(self.fields_map.get(field_names[0]), ForeignKeyFieldInstance)
 
     def is_indexed_by_leading_columns(self, relation_field_name: str, key_names: list[tuple[str, ...]]) -> bool:
-        """Whether a declared index already serves a relation's lookups, or would take the name of
-        its own index.
+        """Whether a declared index already serves a relation's lookups.
 
         Args:
             relation_field_name: The relation field's name, which stands for all of its key columns.
@@ -586,24 +561,12 @@ class MetaInfo:
 
         Returns:
             True when an entry of ``get_leading_index_entries()`` starts with all key columns in
-            any order, or an unnamed index of another type (partial, GIN, ...) spans exactly the
-            key columns in order - it gets the same generated name.
+            any order.
         """
-        if any(
+        return any(
             self.leads_with_key_columns(entry_names, relation_field_name, key_names)
             for entry_names in self.get_leading_index_entries()
-        ):
-            return True
-        for index in self.indexes:
-            if not isinstance(index, Index) or type(index) is Index or index.name or index.unique:
-                continue
-            entry_names = tuple(index.fields or ())
-            if entry_names == (relation_field_name,) or (
-                len(entry_names) == len(key_names)
-                and all(entry_name in names for entry_name, names in zip(entry_names, key_names, strict=True))
-            ):
-                return True
-        return False
+        )
 
     @staticmethod
     def leads_with_key_columns(
@@ -643,9 +606,8 @@ class MetaInfo:
         """
         if name in self.fields_map:
             raise ConfigurationError(f"Field {name} already present in meta")
-        value.model = self._model
+        value.bind_to_model(self._model, name)
         self.fields_map[name] = value
-        value.model_field_name = name
 
         if value.has_db_field:
             self.fields_db_projection[name] = value.source_field or name
@@ -678,8 +640,7 @@ class MetaInfo:
             key: The forward field's ``"app.Model.field"``; re-registering a key replaces it.
             value: The backward relation.
         """
-        value.model = self._model
-        value.model_field_name = key
+        value.bind_to_model(self._model, key)
         self.hidden_backward_relations[key] = value
         LookupInfoBuilder.forget_descriptions()
         Caches.forget_model_caches((self._model,))
@@ -865,14 +826,10 @@ class MetaInfo:
         Returns:
             The description.
         """
-        lookup_infos: dict[str, LookupInfo] | None = self.lookup_infos
-        if lookup_infos is None:
-            lookup_infos = LookupInfoBuilder.lookup_infos.get_model_bucket(self._model)
+        lookup_infos = LookupInfoBuilder.lookup_infos.get_model_bucket(self._model)
         lookup_info = lookup_infos.get(key)
         if lookup_info is None:
-            lookup_info = Cache.set_bounded(
-                lookup_infos, key, LookupInfoBuilder.get_lookup_info(self._model, key, label=label)
-            )
+            lookup_info = lookup_infos.store(key, LookupInfoBuilder.get_lookup_info(self._model, key, label=label))
         return lookup_info
 
     def get_lookups(self, path: str, dialect: Dialect | None = None) -> dict[str, LookupInfo]:
@@ -894,15 +851,11 @@ class MetaInfo:
         self._check_bound()
         if dialect is None:
             dialect = self._model.get_connection().dialect
-        lookups_by_path = self.lookups_by_path
-        if lookups_by_path is None:
-            lookups_by_path = LookupInfoBuilder.lookups_by_path.get_model_bucket(self._model)
+        lookups_by_path = LookupInfoBuilder.lookups_by_path.get_model_bucket(self._model)
         cache_key = (path, dialect)
         lookups = lookups_by_path.get(cache_key)
         if lookups is None:
-            lookups = Cache.set_bounded(
-                lookups_by_path, cache_key, LookupInfoBuilder.get_lookups(self._model, path, dialect)
-            )
+            lookups = lookups_by_path.store(cache_key, LookupInfoBuilder.get_lookups(self._model, path, dialect))
         return dict(lookups)
 
     def get_ordering_info(self, name: str) -> OrderingInfo:
@@ -921,14 +874,10 @@ class MetaInfo:
             ConfigurationError: The model isn't bound yet (``is_bound``).
         """
         self._check_bound()
-        ordering_infos: dict[str, OrderingInfo] | None = self.ordering_infos
-        if ordering_infos is None:
-            ordering_infos = LookupInfoBuilder.ordering_infos.get_model_bucket(self._model)
+        ordering_infos = LookupInfoBuilder.ordering_infos.get_model_bucket(self._model)
         ordering_info = ordering_infos.get(name)
         if ordering_info is None:
-            ordering_info = Cache.set_bounded(
-                ordering_infos, name, LookupInfoBuilder.get_ordering_info(self._model, name)
-            )
+            ordering_info = ordering_infos.store(name, LookupInfoBuilder.get_ordering_info(self._model, name))
         return ordering_info
 
     def finalise_model(self) -> None:
@@ -963,7 +912,6 @@ class MetaInfo:
         ModelDefinitionChecks.validate_identifiers(self)
         self.change_capture_needs = ChangeCapturing.build_needs(self)
         self.setattr_hooks = None
-        self.instance_constructor = None
 
     def get_setattr_hooks(self) -> frozenset[str]:
         """The attribute names ``Model.__setattr__`` does more than store, worked out once.
@@ -991,29 +939,10 @@ class MetaInfo:
             self.setattr_hooks = frozenset(hooks)
         return self.setattr_hooks
 
-    def get_instance_constructor(self) -> Any:
-        """The constructor of the model's new instances, built once.
-
-        Returns:
-            The ``rust.native.rows.ModelConstructor``; False when ``Model.__init__`` sets instances
-            up alone.
-        """
-        if self.instance_constructor is None:
-            # Imported here: the module imports the Model module, which imports this one.
-            from hare.models.class_building.instance_constructors import InstanceConstructors
-
-            constructor = InstanceConstructors.build(self._model)
-            if constructor is None:
-                # Not known yet - worked out again on the next instance.
-                return False
-            self.instance_constructor = constructor
-        return self.instance_constructor
-
     def finalise_fields(self) -> None:
         """Computes what is derived from the model's fields once they are all known: the columns, the
         field sets by type, and whether ``Meta.ordering`` names only fields the model has."""
         self.setattr_hooks = None
-        self.instance_constructor = None
         self.db_fields = tuple(dict.fromkeys(self.fields_db_projection.values()))
         self.fields = set(self.fields_map.keys())
         self.fields_db_projection_reverse = {value: key for key, value in self.fields_db_projection.items()}
@@ -1088,9 +1017,7 @@ class MetaInfo:
         Returns:
             The layout.
         """
-        layouts: dict[tuple[frozenset[type], Dialect], HydrationLayout] | None = self.hydration_layouts
-        if layouts is None:
-            layouts = HydrationLayout.layouts.get_model_bucket(self._model)
+        layouts = HydrationLayout.layouts.get_model_bucket(self._model)
         key = (connection.native_python_types, connection.dialect)
         layout = layouts.get(key)
         if layout is None:
@@ -1108,10 +1035,10 @@ class MetaInfo:
         Returns:
             The entries; empty without the option.
         """
-        indexes = getattr(meta, ModelOption.INDEXES.value, ())
+        indexes = getattr(meta, ModelOption.INDEXES.value, ()) or ()
         if indexes and isinstance(indexes, (list, tuple)) and isinstance(indexes[0], str):
             indexes = (indexes,)
-        return indexes
+        return tuple(indexes)
 
     @staticmethod
     def _get_latest_by_fields(meta: type[Model.Meta] | None) -> tuple[str, ...]:
@@ -1138,7 +1065,7 @@ class MetaInfo:
         """
         orderings: list[tuple[str, Order]] = []
         for ordering in getattr(meta, ModelOption.ORDERING, ()):
-            target, order = QuerySet._get_ordering_string(ordering)
+            target, order = Ordering.get_parts(ordering)
             if not isinstance(target, str):
                 alias = f"{META_ORDERING_ALIAS_PREFIX}{len(self.ordering_expressions)}"
                 self.ordering_expressions[alias] = target

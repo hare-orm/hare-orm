@@ -5,12 +5,13 @@ import pytest
 
 from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
 from hare.instrumentation.pools.duration_records import DurationRecords
+from hare.instrumentation.pools.sample_window import SampleWindow
 
 pytestmark = pytest.mark.database_independent
 
 
 def get_statistics_classes():
-    classes = [lambda capacity: PoolStatistics()]
+    classes = [PoolStatistics]
     try:
         from rust.native import pool
     except ImportError:
@@ -49,3 +50,25 @@ def test_the_statistics_of_every_driver_count_alike(make_statistics):
     assert (cursor, waits, skipped) == (1, [pytest.approx(0.25)], 0)
     assert statistics.get_waits_since(cursor) == (1, [], 0)
     assert statistics.get_connects_since(0) == (0, [], 0)
+
+
+@pytest.mark.parametrize("make_statistics", get_statistics_classes())
+def test_completed_events_are_not_limited_by_sample_capacity(make_statistics):
+    statistics = make_statistics(2)
+    first = []
+    statistics.set_recorder(lambda event, value: first.append((event, value)))
+    for _ in range(100):
+        statistics.add_wait(0.25)
+        statistics.add_connect(0.5)
+    statistics.add_timeout()
+    statistics.add_connect_failure()
+    assert first == [("wait", 0.25), ("connect", 0.5)] * 100 + [("timeout", 1), ("connect_failure", 1)]
+    window = SampleWindow.from_records(0, statistics.get_waits_since(0))
+    assert (window.observations, window.missed, window.values) == (100, 98, (0.25, 0.25))
+    assert not window.complete
+    # Reading samples does not consume another reader's observations or any completed event.
+    assert SampleWindow.from_records(0, statistics.get_waits_since(0)) == window
+    assert SampleWindow.from_records(100, statistics.get_waits_since(100)).observations == 0
+    statistics.set_recorder(None)
+    statistics.add_timeout()
+    assert len(first) == 202

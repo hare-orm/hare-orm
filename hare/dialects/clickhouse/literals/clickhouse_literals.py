@@ -62,9 +62,6 @@ class ClickhouseLiterals(SqlLiterals):
     def get_array_literal_sql(self, element_sqls: Sequence[str]) -> str:
         return f"[{','.join(element_sqls)}]"
 
-    def get_boolean_literal_sql(self, value: bool) -> str:
-        return "true" if value else "false"
-
     def get_literal_writers(self) -> dict[type, Callable[[Any], str]]:
         return {
             **super().get_literal_writers(),

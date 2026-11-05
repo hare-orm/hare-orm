@@ -16,8 +16,7 @@ class Count(Aggregate):
 
     database_function = functions.Count
 
-    #: Shared, long-lived instance - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     COUNT_OUTPUT_FIELD = BigIntField()
 
     value_field = COUNT_OUTPUT_FIELD

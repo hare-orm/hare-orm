@@ -16,6 +16,7 @@ from hare.exceptions import (
     DatabaseError,
     DBConnectionError,
 )
+from hare.migrations.api.migration_request_parser import MigrationRequestParser
 
 
 class CommandContext:
@@ -106,8 +107,8 @@ class CommandContext:
     def group_apps_by_connection(
         apps_config: dict[str, dict[str, Any]],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        apps_by_connection: dict[str, dict[str, dict[str, Any]]] = {}
-        for label, app_config in apps_config.items():
-            connection_alias = app_config.get("default_connection", DEFAULT_CONNECTION_NAME)
-            apps_by_connection.setdefault(connection_alias, {})[label] = app_config
-        return apps_by_connection
+        return MigrationRequestParser.group_selected_apps_by_connection(
+            configured_apps=apps_config,
+            selected_apps=tuple(apps_config),
+            default_connection_name=DEFAULT_CONNECTION_NAME,
+        )

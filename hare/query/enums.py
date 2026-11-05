@@ -72,18 +72,6 @@ class Connector(StrEnum):
     OR = "OR"
 
 
-class RecordedBuildStep(StrEnum):
-    """A step of an ``aggregate()`` build that records value references - kept with its plan, so
-    a later query lists the values the steps bind."""
-
-    #: ``QueryConditions.get_filters()``: the annotations it resolved, the filters, the keyset boundary.
-    FILTERS = "filters"
-    #: ``QueryCtes.apply_with_ctes()``: the values of the CTE bodies.
-    CTES = "ctes"
-    #: The metrics resolved over a ``.group_by()`` queryset's grouped rows: their keys.
-    METRICS = "metrics"
-
-
 class RowShape(StrEnum):
     """What a row of ``.values()``/``.values_list()`` is."""
 

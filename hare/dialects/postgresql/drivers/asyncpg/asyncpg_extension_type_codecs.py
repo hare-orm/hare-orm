@@ -7,7 +7,6 @@ from hare.dialects.postgresql.drivers.asyncpg.asyncpg_tsvector_codec import Asyn
 from hare.dialects.postgresql.drivers.asyncpg.constants import (
     ASYNCPG_EXTENSION_TYPE_NAMES,
     ASYNCPG_EXTENSION_TYPES_SQL,
-    EXTENSION_STATEMENT_WORD,
     LTREE_BINARY_VERSION,
 )
 
@@ -34,25 +33,16 @@ class AsyncpgExtensionTypeCodecs:
         """Decodes an ``ltree`` value, after its version byte."""
         return value[1:].decode()
 
-    @staticmethod
-    def changes_extensions(sql: str) -> bool:
-        """Whether a script may create or drop an extension - its types are then looked up again.
-
-        Args:
-            sql: The script.
-
-        Returns:
-            True when the script names an extension.
-        """
-        return EXTENSION_STATEMENT_WORD in sql.upper()
-
     @classmethod
-    async def install(cls, connection: asyncpg.Connection) -> None:
+    async def install(cls, connection: asyncpg.Connection) -> frozenset[int]:
         """Registers the codecs on a connection - ``tsvector`` always, an extension's types when the
         database has them.
 
         Args:
             connection: The connection.
+
+        Returns:
+            The OIDs of installed extension types, for retiring obsolete registrations.
         """
         await connection.set_type_codec(
             "tsvector",
@@ -65,9 +55,11 @@ class AsyncpgExtensionTypeCodecs:
             "ltree": (cls.encode_ltree, cls.decode_ltree),
             "hstore": (AsyncpgHstoreCodec.encode, AsyncpgHstoreCodec.get_decoder()),
         }
-        for type_name, schema in await connection.fetch(
+        installed_oids = set()
+        for type_name, schema, oid in await connection.fetch(
             ASYNCPG_EXTENSION_TYPES_SQL, list(ASYNCPG_EXTENSION_TYPE_NAMES)
         ):
+            installed_oids.add(oid)
             if type_name == "citext":
                 # citext's binary form is text's - asyncpg's own text codec reads it.
                 await connection.set_builtin_type_codec(type_name, schema=schema, codec_name="text")
@@ -76,3 +68,4 @@ class AsyncpgExtensionTypeCodecs:
             await connection.set_type_codec(
                 type_name, schema=schema, encoder=encoder, decoder=decoder, format="binary"
             )
+        return frozenset(installed_oids)

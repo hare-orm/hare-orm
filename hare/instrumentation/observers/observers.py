@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextvars
 import inspect
-import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
 from contextlib import contextmanager
@@ -14,7 +13,7 @@ from hare.core.log import db_client_logger, logger
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
 from hare.instrumentation.declarations import QueryExecuted, TransactionEvent
 from hare.instrumentation.observers.observer import Observer, ObserverCallback
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
+from hare.instrumentation.observers.observer_dispatcher import ObserverDispatcher
 from hare.instrumentation.observers.observer_set import ObserverSet
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 
@@ -32,7 +31,7 @@ class Observers:
     """The observers of what the ORM does - one registry for every event:
 
     - ``QueryExecuted`` - every statement sent to the database;
-    - ``TransactionEvent`` - every real, top-level begin, commit and rollback;
+    - ``TransactionEvent`` - every real, top-level begin, commit, rollback and unknown outcome;
     - ``RowsChanged`` - the rows a committed write changed (see ``ChangeEvents``).
 
     ::
@@ -45,7 +44,7 @@ class Observers:
     the current context of the running code (``observing()`` - the block and the tasks it starts).
 
     A query or transaction event reaches a plain function right away, in the task that ran the
-    query - keep it quick; an ``async def`` runs in the background (``ObserverDispatch``), never
+    query - keep it quick; an ``async def`` runs in the background (``ObserverDispatcher``), never
     delaying the query. ``RowsChanged`` reaches every observer once the write's transaction
     commits, in the task that committed it, an ``async def`` awaited. An observer that raises is
     logged and never affects the query, the write or the other observers. Without observers an
@@ -188,21 +187,6 @@ class Observers:
         return observers
 
     @classmethod
-    def sees_query_parameters(cls) -> bool:
-        """Whether anything is given the bound parameters of a query: a query wrapper, an observer,
-        or the client log at DEBUG, which logs each statement with its parameters.
-
-        Returns:
-            True when something is.
-        """
-        return bool(
-            cls.query_wrappers
-            or ObserverSet.total_count
-            or cls.context_observers.get()
-            or db_client_logger.isEnabledFor(logging.DEBUG)
-        )
-
-    @classmethod
     def is_observed(cls, event_type: type, model: type[Model] | None = None) -> bool:
         """Whether an observer gets events of ``event_type`` - of ``model``, when given.
 
@@ -243,19 +227,32 @@ class Observers:
         Args:
             event: The event.
         """
-        if ObserverDispatch.inside_observer.get():
+        if ObserverDispatcher.inside_observer.get():
             return
-        background_observers: list[Observer] = []
-        for observer in cls.get_observers(event):
-            if observer.is_async:
-                background_observers.append(observer)
-                continue
-            try:
-                observer.callback(event)
-            except Exception:
-                logger.exception("Observer %r raised on %r", observer.callback, event)
-        if background_observers:
-            ObserverDispatch.schedule(background_observers, event)
+        deliveries: list[tuple[Observer, Awaitable[None]]] = []
+        token = ObserverDispatcher.inside_observer.set(True)
+        try:
+            for observer in cls.get_observers(event):
+                try:
+                    result = observer.callback(event)
+                    if inspect.isawaitable(result):
+                        deliveries.append((observer, result))
+                except Exception:
+                    logger.exception("Observer %r raised on %r", observer.callback, event)
+            if deliveries:
+                try:
+                    cls.get_dispatcher().schedule(deliveries, event)
+                except BaseException:
+                    ObserverDispatcher.dispose(deliveries)
+                    raise
+        finally:
+            ObserverDispatcher.inside_observer.reset(token)
+
+    @classmethod
+    def get_dispatcher(cls) -> ObserverDispatcher:
+        """The current context's delivery queue, or the process scope when no context is active."""
+        scope = cls.get_hare_context_observers()
+        return (cls.process_observers if scope is None else scope).get_dispatcher()
 
     @classmethod
     async def deliver(cls, event: Any) -> None:
@@ -278,7 +275,7 @@ class Observers:
         sql: str | None,
         parameters: list[Any] | None,
         start_time: float,
-        error: Exception | None,
+        error: BaseException | None,
         connection_alias: str,
     ) -> None:
         """Reports a finished query-executing call: logs it at DEBUG when slow, and gives its
@@ -307,7 +304,7 @@ class Observers:
         """Reports a real, top-level begin, commit or rollback.
 
         Args:
-            event_type: Begin, commit or rollback.
+            event_type: Begin, commit, rollback or an unknown transaction outcome.
             connection_alias: The connection.
             duration_ms: 0.0 for a begin, the time since the begin otherwise.
             error: The error a rollback was caused by.
@@ -358,14 +355,14 @@ class Observers:
     @staticmethod
     async def wait_for_pending(timeout_seconds: float | None = None) -> None:
         """Waits for the ``async def`` observers still running - see
-        ``ObserverDispatch.wait_for_pending()``.
+        ``ObserverDispatcher.wait_for_pending()``.
 
         Args:
             timeout_seconds: The wait bound, None to wait as long as they run.
 
         Raises:
-            ValueError: ``timeout_seconds`` is not a positive number.
             Exception: What one background observer raised since the last call.
             ExceptionGroup: What two or more raised.
         """
-        await ObserverDispatch.wait_for_pending(timeout_seconds)
+        scope = Observers.get_hare_context_observers()
+        await (Observers.process_observers if scope is None else scope).wait_for_pending(timeout_seconds)

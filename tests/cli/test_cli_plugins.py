@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import contextlib
 import importlib.metadata
-import io
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from hare.cli import hare_cli as cli_module
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from hare.core.config import HareConfig
+from tests.utils.cli_commands import CliCommands
+from tests.utils.project_sources import ProjectSources
 
 PLUGIN_MODULE_SOURCE = textwrap.dedent(
     """
@@ -23,11 +22,17 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
         help = "Say hello to the configured apps."
 
         def add_arguments(self, parser):
+            if hasattr(self, "parser"):
+                raise RuntimeError("arguments were declared twice")
+            self.parser = parser
+            parser.description = "Greet the configured applications."
+            parser.set_defaults(greeting_prefix="hello")
             parser.add_argument("--who", default="world")
 
         async def run(self, ctx, args):
+            assert self.parser.prog.endswith(" greet")
             config = CommandContext.load_config(ctx)
-            print(f"hello {args.who} from {sorted(config.apps)}")
+            print(f"{args.greeting_prefix} {args.who} from {sorted(config.apps)}")
             return 3
 
 
@@ -66,13 +71,14 @@ PLUGIN_MODULE_SOURCE = textwrap.dedent(
 
 
 def _write_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_commands: list[str] | None) -> str:
-    (tmp_path / "cli_plugin_commands.py").write_text(PLUGIN_MODULE_SOURCE, encoding="utf-8")
-    (tmp_path / "cli_plugin_models.py").write_text("", encoding="utf-8")
+    sources = ProjectSources(tmp_path)
+    sources.write_module("cli_plugin_commands", PLUGIN_MODULE_SOURCE)
+    sources.write_module("cli_plugin_models", "")
     cli_section = f', "cli": {{"commands": {cli_commands!r}}}' if cli_commands is not None else ""
-    (tmp_path / "cli_plugin_settings.py").write_text(
+    sources.write_module(
+        "cli_plugin_settings",
         'HARE_ORM = {"connections": {"default": "sqlite+aiosqlite://:memory:"}, '
         f'"apps": {{"models": {{"models": ["cli_plugin_models"]}}}}{cli_section}}}\n',
-        encoding="utf-8",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -86,21 +92,13 @@ def _use_entry_points(monkeypatch: pytest.MonkeyPatch, values: dict[str, str]) -
     monkeypatch.setattr(CLICommandRegistry, "get_entry_points", staticmethod(lambda: entry_points))
 
 
-async def _run_cli(args: list[str]) -> SimpleNamespace:
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-        exit_code = await cli_module.HareCLI.run_cli_async(args)
-    return SimpleNamespace(exit_code=exit_code, stdout=stdout.getvalue(), stderr=stderr.getvalue())
-
-
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_config_listed_command_runs_with_its_arguments_and_exit_code(tmp_path, monkeypatch):
     _use_entry_points(monkeypatch, {})
     config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:GreetCommand"])
 
-    result = await _run_cli(["-c", config, "greet", "--who", "team"])
+    result = await CliCommands.run(["-c", config, "greet", "--who", "team"], project=tmp_path)
 
     assert result.exit_code == 3
     assert result.stdout.strip() == "hello team from ['models']"
@@ -113,7 +111,7 @@ async def test_entry_point_command_runs_without_any_config(tmp_path, monkeypatch
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"
@@ -125,7 +123,7 @@ async def test_help_lists_plugin_commands_next_to_built_in_ones(tmp_path, monkey
     config = _write_project(tmp_path, monkeypatch, ["cli_plugin_commands:GreetCommand"])
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["-c", config, "--help"])
+    result = await CliCommands.run(["-c", config, "--help"], project=tmp_path)
 
     assert result.exit_code == 0
     for text in ("greet", "Say hello to the configured apps.", "export", "migrate"):
@@ -138,7 +136,7 @@ async def test_plugin_error_is_reported_like_a_built_in_command_error(tmp_path, 
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"explode": "cli_plugin_commands:FailingCommand"})
 
-    result = await _run_cli(["explode"])
+    result = await CliCommands.run(["explode"], project=tmp_path)
 
     assert result.exit_code == 1
     assert "it went wrong" in result.stderr
@@ -168,7 +166,7 @@ async def test_name_conflicts_are_warned_about_and_the_later_command_skipped(tmp
         },
     )
 
-    result = await _run_cli(["-c", config, "greet"])
+    result = await CliCommands.run(["-c", config, "greet"], project=tmp_path)
 
     assert result.exit_code == 3
     assert "skipping CLI command 'heads'" in result.stderr
@@ -191,7 +189,7 @@ async def test_unloadable_entry_point_is_skipped_and_the_cli_keeps_working(
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"bad": entry_point_value, "export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"
@@ -209,7 +207,7 @@ async def test_malformed_config_reference_is_skipped_with_a_warning(tmp_path, mo
     _use_entry_points(monkeypatch, {})
     config = _write_project(tmp_path, monkeypatch, [reference])
 
-    result = await _run_cli(["-c", config, "--help"])
+    result = await CliCommands.run(["-c", config, "--help"], project=tmp_path)
 
     assert result.exit_code == 0
     assert f"skipping CLI command from config cli.commands entry {reference!r}" in result.stderr
@@ -222,8 +220,8 @@ async def test_command_whose_arguments_fail_to_declare_is_not_half_registered(tm
     _write_project(tmp_path, monkeypatch, None)
     _use_entry_points(monkeypatch, {"broken-args": "cli_plugin_commands:BrokenArgumentsCommand"})
 
-    help_result = await _run_cli(["--help"])
-    run_result = await _run_cli(["broken-args"])
+    help_result = await CliCommands.run(["--help"], project=tmp_path)
+    run_result = await CliCommands.run(["broken-args"], project=tmp_path)
 
     assert "skipping CLI command 'broken-args'" in help_result.stderr
     assert "cannot declare arguments" in help_result.stderr
@@ -240,7 +238,7 @@ async def test_missing_config_does_not_hide_installed_plugin_commands(tmp_path, 
     monkeypatch.syspath_prepend(str(tmp_path))
     _use_entry_points(monkeypatch, {"export": "cli_plugin_commands:ExportCommand"})
 
-    result = await _run_cli(["export"])
+    result = await CliCommands.run(["export"], project=tmp_path)
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "exported"

@@ -31,23 +31,20 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 class SqliteJsonFilterGuards(JsonFilterGuards):
     """The SQLite terms of the JSON ``__filter`` lookup, over ``json_extract()``/``json_type()``."""
 
+    def __init__(self, membership: SqliteLargeInList | None = None) -> None:
+        self.membership = membership or SqliteLargeInList()
+
     @staticmethod
     def get_type_guard(field_term: Term, key_parts: list[str | int], type_names: tuple[str, ...]) -> Criterion:
         """The value at the path is of one of the ``json_type()`` names."""
         type_term = SqliteJsonTypeCriterion(field_term, key_parts)
-        guard: Criterion | None = None
-        for type_name in type_names:
-            type_matches = type_term == ValueWrapper(type_name, allow_parametrize=False)
-            guard = type_matches if guard is None else guard | type_matches
-        assert guard is not None  # nosec B101
-        return guard
+        return Criterion.any(type_term == ValueWrapper(type_name, allow_parametrize=False) for type_name in type_names)
 
-    @classmethod
     def type_guarded_term(
-        cls, field_term: Term, key_parts: list[str | int], json_type: str, sql_cast_type: str | None
+        self, field_term: Term, key_parts: list[str | int], json_type: str, sql_cast_type: str | None
     ) -> Term:
         text_term = JsonFilterParser.get_field_path(field_term, key_parts)
-        guard = cls.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES[json_type])
+        guard = self.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES[json_type])
         if sql_cast_type in {"timestamp", "timestamptz"}:
             mode = "instant" if sql_cast_type == "timestamptz" else "wall"
             datetime_term = SqliteConnectionFunction(
@@ -56,13 +53,12 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
             return Case().when(guard, datetime_term)
         return Case().when(guard, text_term)
 
-    @classmethod
     def create_criterion(
-        cls, key_parts: list[str | int], field_term: Term, operator_: Callable[..., Any], value: Any
+        self, key_parts: list[str | int], field_term: Term, operator_: Callable[..., Any], value: Any
     ) -> Criterion:
-        if operator_ in cls.DATE_PART_OPERATORS and not cls.is_container_value(operator_, value):
+        if operator_ in self.DATE_PART_OPERATORS and not self.is_container_value(operator_, value):
             date_part = cast("partial[Criterion]", operator_).args[0]
-            guard = cls.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES["string"])
+            guard = self.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES["string"])
             part_term = SqliteConnectionFunction(
                 SQLITE_JSON_DATETIME_FUNCTION_NAME,
                 JsonFilterParser.get_field_path(field_term, key_parts),
@@ -71,10 +67,9 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
             return Case().when(guard, part_term) == DatePartLookups.get_part_value(date_part, value)
         return super().create_criterion(key_parts, field_term, operator_, value)
 
-    @classmethod
-    def prepare_value(cls, value: Any, sql_type: str) -> Any:
+    def prepare_value(self, value: Any, sql_type: str) -> Any:
         if isinstance(value, (list, tuple, set)):
-            return [cls.prepare_value(item, sql_type) for item in value]
+            return [self.prepare_value(item, sql_type) for item in value]
         if isinstance(value, datetime.date) and sql_type in {"timestamp", "timestamptz"}:
             return SqliteJsonDatetime.normalize_value(value, "instant" if sql_type == "timestamptz" else "wall")
         if isinstance(value, Decimal):
@@ -83,39 +78,33 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
             return SqliteJsonPath.get_sqlite_number(value)
         return value
 
-    @classmethod
-    def get_container_term(cls, field_term: Term, key_parts: list[str | int]) -> Term:
-        guard = cls.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES["container"])
+    def get_container_term(self, field_term: Term, key_parts: list[str | int]) -> Term:
+        guard = self.get_type_guard(field_term, key_parts, SQLITE_JSON_TYPE_NAMES["container"])
         # json_extract() gives an object or an array as its minified JSON text.
         return Case().when(guard, JsonFilterParser.get_field_path(field_term, key_parts))
 
-    @classmethod
-    def get_container_value(cls, value: Any) -> Any:
+    def get_container_value(self, value: Any) -> Any:
         return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
-    @classmethod
-    def get_container_in_list(cls, container_term: Term, values: list[Any]) -> Criterion:
-        return SqliteLargeInList.is_in(container_term, [cls.get_container_value(item) for item in values])
+    def get_container_in_list(self, container_term: Term, values: list[Any]) -> Criterion:
+        return self.membership.is_in(container_term, [self.get_container_value(item) for item in values])
 
-    @classmethod
-    def get_scalar_in_list(cls, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
-        return SqliteLargeInList.is_in(guarded_term, values)
+    def get_scalar_in_list(self, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
+        return self.membership.is_in(guarded_term, values)
 
-    @classmethod
-    def get_scalar_not_in_list(cls, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
-        return SqliteLargeInList.not_in(guarded_term, values)
+    def get_scalar_not_in_list(self, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
+        return self.membership.not_in(guarded_term, values)
 
-    @classmethod
     def key_existence_criterion(
-        cls, field_term: Term, key_parts: list[str | int], operator_: Any, value: Any
+        self, field_term: Term, key_parts: list[str | int], operator_: Any, value: Any
     ) -> Criterion:
         # A key of an object at the path - json_type() of the key's path is NULL where there's none. The
         # path is built from the bound key in SQL (the key as a JSON string), so a plan holds no key.
         document = JsonFilterParser.get_field_path(field_term, key_parts, as_text=False) if key_parts else field_term
         if operator_ is JsonLookups.has_key:
-            keys = [cls.get_key(value)]
+            keys = [self.get_key(value)]
         else:
-            keys = cls.get_key_list("has_keys" if operator_ is JsonLookups.has_keys else "has_any_keys", value)
+            keys = self.get_key_list("has_keys" if operator_ is JsonLookups.has_keys else "has_any_keys", value)
         key_path_format = ValueWrapper(SQLITE_JSON_KEY_PATH_FORMAT, allow_parametrize=False)
         tests = [
             Function(
@@ -127,5 +116,5 @@ class SqliteJsonFilterGuards(JsonFilterGuards):
             # No key to have: a document has every key of none, and any of none it hasn't.
             if operator_ is JsonLookups.has_keys:
                 return field_term.notnull()
-            return SqliteLargeInList.is_in(field_term, [])
+            return self.membership.is_in(field_term, [])
         return Criterion.all(tests) if operator_ is JsonLookups.has_keys else Criterion.any(tests)

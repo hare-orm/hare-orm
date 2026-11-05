@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.matrix.matrix_catalog import MatrixCatalog
+
 #: Where the prepared SQLite versions are kept.
 SQLITE_VERSIONS_DIRECTORY = Path(__file__).parent
 
@@ -12,26 +14,7 @@ SQLITE_DOWNLOAD_ROOT = "https://www.sqlite.org"
 #: starts at (STRICT 3.37, ``->>`` 3.38, ``unhex()`` 3.41), Ubuntu 22.04's own (3.37.2, the 3.37 of
 #: the matrix) and the newest - with their files on sqlite.org.
 SQLITE_RELEASES: dict[str, dict[str, str]] = {
-    "3.35.5": {
-        "windows_dll": "2021/sqlite-dll-win64-x64-3350500.zip",
-        "amalgamation": "2021/sqlite-amalgamation-3350500.zip",
-    },
-    "3.37.2": {
-        "windows_dll": "2022/sqlite-dll-win64-x64-3370200.zip",
-        "amalgamation": "2022/sqlite-amalgamation-3370200.zip",
-    },
-    "3.38.0": {
-        "windows_dll": "2022/sqlite-dll-win64-x64-3380000.zip",
-        "amalgamation": "2022/sqlite-amalgamation-3380000.zip",
-    },
-    "3.41.0": {
-        "windows_dll": "2023/sqlite-dll-win64-x64-3410000.zip",
-        "amalgamation": "2023/sqlite-amalgamation-3410000.zip",
-    },
-    "3.53.4": {
-        "windows_dll": "2026/sqlite-dll-win-x64-3530400.zip",
-        "amalgamation": "2026/sqlite-amalgamation-3530400.zip",
-    },
+    version: dict(release) for version, release in MatrixCatalog.get("sqlite_releases").items()
 }
 
 #: The compile options of a built ``libsqlite3`` - what the official Windows DLL and the CPython

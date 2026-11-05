@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.core.caching.model_cache import ModelCache
 from hare.exceptions import QueryError
 from hare.query.scopes.tenants.all_tenants import AllTenants
@@ -11,7 +12,6 @@ from hare.query.scopes.tenants.tenant_values import TenantValues
 
 if TYPE_CHECKING:
     from hare.core.apps.declarations import ModelReference
-    from hare.core.hare_context import HareContext
     from hare.models import Model
 
 
@@ -36,19 +36,15 @@ class ModelTenants:
     __slots__ = ("scopes", "schema_tenants", "policy_tenants")
 
     #: Connection results depend on every registered model, including models added after the scope.
-    schema_tenant_cache: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True
-    )
-    policy_tenant_cache: ClassVar[Cache[Any]] = Cache(
-        holds_sql=False, keyed_by_model=False, depends_on_other_models=True
-    )
+    schema_tenant_cache: ClassVar[Cache[Any]] = Cache(holds_sql=False, depends_on_other_models=True)
+    policy_tenant_cache: ClassVar[Cache[dict[str, Any]]] = Cache(holds_sql=False, depends_on_other_models=True)
 
     def __init__(self, scopes: Mapping[ModelReference, Any]) -> None:
         self.scopes: dict[type[Model], Any] = {}
         #: The tenant schema by context and connection alias; an alias alone doesn't identify a registry.
-        self.schema_tenants: dict[tuple[HareContext | None, str], Any] | None = None
+        self.schema_tenants: CacheBucket[Any] | None = None
         #: Each ``TenantCondition`` table's tenants, by context and connection alias.
-        self.policy_tenants: dict[tuple[HareContext | None, str], dict[str, Any]] | None = None
+        self.policy_tenants: CacheBucket[dict[str, Any]] | None = None
         for reference, scope in scopes.items():
             model = ModelTenants.get_model(reference)
             meta = getattr(model, "_meta", None)

@@ -3,7 +3,6 @@
 import pytest
 
 from hare.contrib.outbox import OutboxRelay
-from hare.contrib.outbox.relay.constants import MAX_BATCH_SIZE
 from hare.exceptions import ConfigurationError
 from tests.contrib.outbox.models import DemoOutboxEvent
 
@@ -18,7 +17,7 @@ async def deliver(event: DemoOutboxEvent) -> None:
     "options",
     [
         {"batch_size": 0},
-        {"batch_size": MAX_BATCH_SIZE + 1},
+        {"batch_size": -1},
         {"batch_size": 1.5},
         {"batch_size": True},
         {"batch_size": "10"},
@@ -33,7 +32,7 @@ def test_invalid_options_raise_configuration_error(options):
     "options",
     [
         {"batch_size": 1},
-        {"batch_size": MAX_BATCH_SIZE},
+        {"batch_size": 10_001},
         {"name": "relay-1"},
     ],
 )

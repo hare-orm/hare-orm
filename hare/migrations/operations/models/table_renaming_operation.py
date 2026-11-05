@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
@@ -40,27 +43,36 @@ class TableRenamingOperation(HareOperation):
         new_model = new_state.apps.get_model(f"{app_label}.{name_in_new_state}")
         old_table = old_model._meta.db_table
         new_table = new_model._meta.db_table
+        steps: list[SchemaStep] = []
         if old_table != new_table:
             # A dictionary reads the table by its name, and the server renames no table one reads.
-            await state_editor.dictionaries.drop_model_dictionaries(old_model)
-            await state_editor.rename_table(new_model, old_table, new_table)
+            steps.extend(SchemaStatement(sql) for sql in state_editor.dictionaries.get_model_drop_sqls(old_model))
+            steps.extend(state_editor.get_table_rename_plan(new_model, old_table, new_table).steps)
             for dictionary in new_model._meta.dictionaries:
-                await state_editor.dictionaries.create_dictionary(new_model, dictionary)
-            await state_editor.generated_index_names.rename_generated_index_names(old_model, new_model)
-        await self._rename_auto_many_to_many_through_tables(
-            app_label, old_state, new_state, state_editor, name_in_old_state, name_in_new_state
+                steps.extend(
+                    SchemaStatement(sql)
+                    for sql in state_editor.dictionaries.get_dictionary_create_sqls(new_model, dictionary)
+                )
+            steps.extend(
+                state_editor.generated_index_names.get_generated_index_names_change_plan(old_model, new_model).steps
+            )
+        steps.extend(
+            self.get_auto_many_to_many_rename_plan(
+                app_label, old_state, new_state, state_editor, name_in_old_state, name_in_new_state
+            ).steps
         )
+        await SchemaChangePlan(tuple(steps)).execute(state_editor)
 
     @staticmethod
-    async def _rename_auto_many_to_many_through_tables(
+    def get_auto_many_to_many_rename_plan(
         app_label: str,
         old_state: State,
         new_state: State,
         state_editor: BaseSchemaEditor,
         name_in_old_state: str,
         name_in_new_state: str,
-    ) -> None:
-        """Renames the automatic through table and key columns of every M2M field declared on,
+    ) -> SchemaChangePlan:
+        """Prepares renaming the automatic through table and key columns of every M2M field declared on,
         or pointing at, the renamed model.
 
         Args:
@@ -71,6 +83,7 @@ class TableRenamingOperation(HareOperation):
             name_in_old_state: The renamed model's name in ``old_state``.
             name_in_new_state: The renamed model's name in ``new_state``.
         """
+        steps: list[SchemaStep] = []
         renamed_model = new_state.apps.get_model(f"{app_label}.{name_in_new_state}")
         for (model_app_label, model_name), model_state in new_state.models.items():
             is_renamed_model = model_app_label == app_label and model_name == name_in_new_state
@@ -96,6 +109,9 @@ class TableRenamingOperation(HareOperation):
                     and old_field.backward_keys == new_field.backward_keys
                 ):
                     continue
-                await state_editor.many_to_many_through_tables.alter_many_to_many_field(
-                    new_owner_model, old_field, new_field
+                steps.extend(
+                    state_editor.many_to_many_through_tables.get_many_to_many_change_plan(
+                        new_owner_model, old_field, new_field
+                    ).steps
                 )
+        return SchemaChangePlan(tuple(steps))

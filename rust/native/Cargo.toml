@@ -15,6 +15,7 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"
 # array_to_sql/array_from_sql, which postgres-types uses internally but does not re-export.
 postgres-protocol = "0.6"
 fallible-iterator = "0.2"
+lru = { version = "0.18.5", default-features = false }
 deadpool-postgres = "0.14"
 # The pool deadpool-postgres builds on - its `Manager` trait, which `TimedManager` implements to
 # time every connect. The version deadpool-postgres uses.
@@ -25,14 +26,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
 thiserror = "2"
-bytes = "1"
+bytes = "1.10"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 uuid = "1"
 chrono = "0.4"
-# Shortest round-tripping float digits - the ones orjson writes.
-ryu = "1"
-# Integer text without the formatting machinery.
-itoa = "1"
+# Exact finite-float coefficients for NUMERIC, without a private big-integer implementation.
+num-bigint = "0.4"
 # JSON numbers kept as their text - compared as exact decimals.
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 # The MD5 and SHA digests of the text functions.

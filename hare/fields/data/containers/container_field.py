@@ -148,7 +148,9 @@ class ContainerField(Field[Any]):
         """
         return self.model_field_name or type(self).__name__
 
-    def get_db_value(self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None) -> Any:
+    def get_db_value(
+        self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str | None = None
+    ) -> Any:
         """The value bound for a column of the container.
 
         Args:
@@ -163,12 +165,13 @@ class ContainerField(Field[Any]):
             ValidationError: The value is None and the field holds no NULL - a database storing a
                 container without NULL would write an empty or a zero one in its place.
         """
+        path = self.get_path() if path is None else path
         if value is None and not self.null:
-            raise ValidationError(f"{self.get_path()}: a value is required, got None")
+            raise ValidationError(f"{path}: a value is required, got None")
         self.validate(value)
         if value is None:
             return None
-        return self.encode_value(value, instance, types, self.get_path())
+        return self.encode_value(value, instance, types, path)
 
     def get_python_value(self, value: Any, types: TypeRegistry | None) -> Any:
         """The Python value of a column of the container.
@@ -185,8 +188,9 @@ class ContainerField(Field[Any]):
         return self.decode_value(value, types)
 
     def get_dialect_db_value(self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry) -> Any:
-        """The value a dialect binds for a column of the container - through its types, unless a
-        subclass writes its values its own way (``to_db_value()``).
+        """The value a dialect binds for a column of the container - through its types.
+        Container subclasses customize ``encode_value()``; that same hook handles
+        root and nested values, with the value path and type registry passed explicitly.
 
         Args:
             value: The Python value.
@@ -196,13 +200,11 @@ class ContainerField(Field[Any]):
         Returns:
             The value to bind.
         """
-        if type(self).to_db_value is not ContainerField.to_db_value:
-            return self.to_db_value(value, instance)
         return self.get_db_value(value, instance, types)
 
     def get_dialect_python_value(self, value: Any, types: TypeRegistry) -> Any:
-        """The Python value of a column of the container a dialect reads - through its types, unless a
-        subclass reads its values its own way (``from_db_value()``).
+        """The Python value of a column of the container a dialect reads - through its types.
+        Container subclasses customize ``decode_value()`` for root and nested values.
 
         Args:
             value: The value the driver returned.
@@ -211,22 +213,7 @@ class ContainerField(Field[Any]):
         Returns:
             The Python value.
         """
-        if type(self).from_db_value is not ContainerField.from_db_value:
-            return self.from_db_value(value)
         return self.get_python_value(value, types)
-
-    def reads_values_by_types(self) -> bool:
-        """Whether the container's values are read as ``get_python_value()`` reads them - no subclass
-        reading them its own way.
-
-        Returns:
-            True when they are.
-        """
-        field_class = type(self)
-        return all(
-            getattr(field_class, name) is getattr(ContainerField, name)
-            for name in ("from_db_value", "to_python", "get_python_value")
-        )
 
     def encode_child(
         self,
@@ -257,7 +244,7 @@ class ContainerField(Field[Any]):
                 raise ValidationError(f"{path}: a value is required, got None")
             return None
         if isinstance(child_field, ContainerField):
-            return child_field.encode_value(value, instance, types, path)
+            return child_field.get_db_value(value, instance, types, path)
         validation_error = None
         try:
             if types is None:
@@ -283,7 +270,7 @@ class ContainerField(Field[Any]):
         if value is None:
             return None
         if isinstance(child_field, ContainerField):
-            return child_field.decode_value(value, types)
+            return child_field.get_python_value(value, types)
         if types is None:
             return child_field.from_db_value(value)
         return types.get_python_value(child_field, value)
@@ -313,18 +300,6 @@ class ContainerField(Field[Any]):
             message = str(error).removeprefix(f"{child_field.model_field_name}: ").removeprefix(": ")
             validation_error = self.get_validation_error(error, value, f"{path}: {message}")
         raise validation_error
-
-    @staticmethod
-    def get_child_python_type(child_field: Field[Any]) -> Any:
-        """The Python type of a held value - ``| None`` when its field holds NULL.
-
-        Args:
-            child_field: The field of the held value.
-
-        Returns:
-            The type.
-        """
-        return child_field.get_annotation()
 
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         return self.get_db_value(value, instance, None)

@@ -20,6 +20,25 @@ class MigrationGraph:
         self.node_map: dict[MigrationKey, Node] = {}
         self.nodes: dict[MigrationKey, Migration | None] = {}
 
+    def get_migration_key(self, app_label: str, name: str) -> MigrationKey:
+        """Find a migration by its full name or a unique prefix within one app.
+
+        An exact name takes precedence over longer names sharing its prefix.
+
+        Raises:
+            UnknownMigrationError: No migration matches, or the prefix is ambiguous.
+        """
+        exact_key = MigrationKey(app_label=app_label, name=name)
+        if exact_key in self.nodes:
+            return exact_key
+        matches = [key for key in self.nodes if key.app_label == app_label and key.name.startswith(name)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            names = ", ".join(key.name for key in matches)
+            raise UnknownMigrationError(f"Ambiguous migration name {name!r} for app {app_label!r}. Matches: {names}")
+        raise UnknownMigrationError(f"Cannot find migration {name!r} in app {app_label!r}")
+
     def add_node(self, key: MigrationKey, migration: Migration) -> None:
         if key in self.node_map:
             raise MigrationLoadError(f"Duplicate migration node {key}")
@@ -114,8 +133,7 @@ class MigrationGraph:
 
     def _raise_if_cyclic(self) -> None:
         """Raises on a cycle, walking from every node - a cycle can leave no leaf node to start from."""
-        for node in self.node_map.values():
-            self._iterative_dfs([node], forwards=True)
+        self._iterative_dfs(list(self.node_map.values()), forwards=True)
 
     def root_nodes(self, app_label: str | None = None) -> list[MigrationKey]:
         """Every node with no parent - the first migrations of ``app_label``, or of the whole graph.
@@ -179,14 +197,7 @@ class MigrationGraph:
         Returns:
             The migration keys.
         """
-        plan: list[MigrationKey] = []
-        seen: set[MigrationKey] = set()
-        for leaf in self.leaf_nodes():
-            for key in self.forwards_plan(leaf):
-                if key not in seen:
-                    seen.add(key)
-                    plan.append(key)
-        return plan
+        return self._iterative_dfs([self.node_map[leaf] for leaf in self.leaf_nodes()], forwards=True)
 
     def forwards_plan(self, target: MigrationKey) -> list[MigrationKey]:
         if target not in self.nodes:
@@ -210,6 +221,17 @@ class MigrationGraph:
             if target not in self.nodes:
                 raise UnknownMigrationError(UNKNOWN_MIGRATION_TARGET_MESSAGE_TEMPLATE.format(target=target))
         return self._iterative_dfs([self.node_map[target] for target in targets], forwards=False)
+
+    def forwards_plan_for_all(self, targets: list[MigrationKey]) -> list[MigrationKey]:
+        """Apply every target after its dependencies, visiting shared ancestors only once.
+
+        Targets retain the caller's order, with the same dependency ordering as
+        ``forwards_plan()``. Unknown targets are refused before traversal.
+        """
+        for target in targets:
+            if target not in self.nodes:
+                raise UnknownMigrationError(UNKNOWN_MIGRATION_TARGET_MESSAGE_TEMPLATE.format(target=target))
+        return self._iterative_dfs([self.node_map[target] for target in targets], forwards=True)
 
     @staticmethod
     def _iterative_dfs(starts: list[Node], *, forwards: bool) -> list[MigrationKey]:

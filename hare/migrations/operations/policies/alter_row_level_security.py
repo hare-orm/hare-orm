@@ -25,8 +25,6 @@ class AlterRowLevelSecurity(ModelBoundOperation):
         ConfigurationError: The setting is neither a ``RowLevelSecurity`` nor None.
     """
 
-    backward_reads_state_left = False
-
     def __init__(self, model_name: str, row_level_security: RowLevelSecurity | None) -> None:
         if row_level_security is not None and (
             not isinstance(row_level_security, str) or row_level_security not in set(RowLevelSecurity)

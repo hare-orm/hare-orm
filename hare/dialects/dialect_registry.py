@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import importlib
-import urllib.parse as urlparse
 from typing import TYPE_CHECKING, cast
 
+from hare.core.extensions.declarations import ExtensionContribution
+from hare.core.extensions.extension_loader import ExtensionLoader
+from hare.core.extensions.messages import EXTENSION_CYCLE_MESSAGE
 from hare.core.log import logger
 from hare.core.registries import Registries
 from hare.dialects.constants import BUILTIN_DIALECTS_BY_NAME, BUILTIN_DRIVER_MODULES_BY_NAME, DIALECT_ENTRY_POINT_GROUP
 from hare.exceptions import ConfigurationError
-from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 
 if TYPE_CHECKING:
     from hare.dialects.base.connection.driver import Driver
@@ -16,95 +17,29 @@ if TYPE_CHECKING:
 
 
 class DialectRegistry:
-    """Every dialect and driver hare can connect with.
+    """Lazy access to atomically published dialect and driver declarations.
 
-    Each of hare's own dialects is registered when first used - by its driver, or a lookup of its
-    name - so a connection to one database loads nothing of another. A driver is loaded when
-    it is first looked up: one of hare's own by importing just its module, any other by importing
-    every module the ``hare.dialects`` entry point group of an installed package names - each
-    registers its drivers on import - and none of hare's own drivers it doesn't use. Listing
-    every dialect or driver loads them all first, and so does a lookup of a name nothing
-    registered yet, before it fails. hare's own dialects are listed first, in their own order,
-    whichever was registered first.
+    Imports only define extension factories. A requested built-in driver loads its own module;
+    installed packages are discovered when a name is unknown or enumeration is explicit.
+    Failed factories are remembered until refresh_installed_drivers() is requested.
     """
 
-    drivers_by_name: dict[str, Driver] = {}
-    drivers_by_url_scheme: dict[str, Driver] = {}
-    dialects_by_name: dict[str, Dialect] = {}
-    #: Importing every entry point module has begun.
     loading_installed_drivers: bool = False
-    #: The entry points that failed to import, with what they raised.
+    installed_drivers_loaded: bool = False
     installed_driver_errors: list[str] = []
-    #: Loading hare's own drivers and every entry point module has begun.
     loading: bool = False
-    #: hare's own drivers and every entry point module are loaded - from then on the full list of
-    #: drivers may have been handed out.
     loaded: bool = False
+    extensions = ExtensionLoader()
 
     @classmethod
     def register_dialect(cls, dialect: Dialect) -> None:
-        """Adds a dialect.
-
-        Args:
-            dialect: The dialect.
-
-        Raises:
-            ConfigurationError: If another dialect already has the name - one of hare's own
-                included - or the dialect keeps names shorter than the ``IDENTIFIER_LENGTH_LIMIT``
-                bytes hare generates.
-        """
-        if dialect.name in BUILTIN_DIALECTS_BY_NAME and dialect.name not in cls.dialects_by_name:
-            # hare's own dialect keeps its name - registered first, so another one is refused.
-            builtin_dialect = cls.get_builtin_dialect(dialect.name)
-            if builtin_dialect is not dialect:
-                cls.register_dialect(builtin_dialect)
-        registered_dialect = cls.dialects_by_name.get(dialect.name)
-        if registered_dialect is dialect:
-            return
-        if registered_dialect is not None:
-            raise ConfigurationError(f"Another dialect named {dialect.name!r} is already registered")
-        max_identifier_length = dialect.features.max_identifier_length
-        if max_identifier_length is not None and max_identifier_length < IDENTIFIER_LENGTH_LIMIT:
-            raise ConfigurationError(
-                f"Dialect {dialect.name!r} keeps names within {max_identifier_length} bytes - hare generates "
-                f"table, column, index, constraint and alias names up to {IDENTIFIER_LENGTH_LIMIT} bytes"
-            )
-        cls.dialects_by_name[dialect.name] = dialect
-        dialect.install()
-        Registries.changed()
+        """Publish a dialect and all its field and query declarations atomically."""
+        Registries.register(ExtensionContribution(dialects=(dialect,)))
 
     @classmethod
     def register_driver(cls, driver: Driver) -> None:
-        """Adds a driver, and its dialect when that is new.
-
-        Args:
-            driver: The driver.
-
-        Raises:
-            ConfigurationError: If another driver already has the driver's name or one of its
-                DB_URL schemes, or another dialect its dialect's name.
-        """
-        for builtin_name in (driver.name, *driver.url_schemes):
-            # hare's own driver keeps its name and schemes - registered first, so another one is
-            # refused whichever was imported first.
-            if builtin_name not in cls.drivers_by_name and builtin_name not in cls.drivers_by_url_scheme:
-                cls.load_builtin_driver(builtin_name)
-        if driver.name in cls.drivers_by_name:
-            raise ConfigurationError(f"A driver named {driver.name!r} is already registered")
-        taken_schemes = [scheme for scheme in driver.url_schemes if scheme in cls.drivers_by_url_scheme]
-        if taken_schemes:
-            raise ConfigurationError(f"DB_URL schemes {taken_schemes} of driver {driver.name!r} are already taken")
-        cls.register_dialect(driver.dialect)
-        cls.drivers_by_name[driver.name] = driver
-        for scheme in driver.url_schemes:
-            cls.drivers_by_url_scheme[scheme] = driver
-            if scheme not in urlparse.uses_netloc:
-                urlparse.uses_netloc.append(scheme)
-        # A new dialect already dropped the caches above. Before the full list of drivers is
-        # loaded nothing has read it - one of hare's own drivers loaded on first use changes no
-        # cache; a driver registered after it (see get_drivers()) may.
-        if cls.loaded:
-            Registries.changed()
+        """Publish a driver together with its dialect's declarations."""
+        Registries.register(ExtensionContribution(drivers=(driver,)))
 
     @staticmethod
     def get_builtin_dialect(name: str) -> Dialect:
@@ -123,40 +58,60 @@ class DialectRegistry:
     def load_builtin_dialects(cls) -> None:
         """Registers every one of hare's own dialects not registered yet."""
         for name in BUILTIN_DIALECTS_BY_NAME:
-            if name not in cls.dialects_by_name:
+            if name not in Registries.snapshot.dialects:
                 cls.register_dialect(cls.get_builtin_dialect(name))
 
     @classmethod
     def load(cls) -> None:
-        """Registers hare's own dialects and drivers and those of installed packages, once."""
-        if cls.loading:
+        """Explicitly enumerate built-in components and installed extension factories."""
+        if cls.loaded:
             return
+        if cls.loading:
+            raise ConfigurationError(EXTENSION_CYCLE_MESSAGE.format(name="all dialects"))
         cls.loading = True
-        cls.load_builtin_dialects()
-        for module_name in BUILTIN_DRIVER_MODULES_BY_NAME.values():
-            importlib.import_module(module_name)
-        cls.load_installed_drivers()
-        cls.loaded = True
+        try:
+            cls.load_builtin_dialects()
+            for name in BUILTIN_DRIVER_MODULES_BY_NAME:
+                cls.load_builtin_driver(name)
+            cls.load_installed_drivers()
+            cls.loaded = True
+        finally:
+            cls.loading = False
 
     @classmethod
     def load_installed_drivers(cls) -> None:
-        """Imports every module the entry point group of an installed package names - each
-        registers its drivers - once. A module that fails to import is logged and skipped, and an
-        unknown scheme or engine names it."""
-        if cls.loading_installed_drivers:
+        """Discover factories once; a failed package does not hide successful packages."""
+        if cls.installed_drivers_loaded:
             return
-        cls.loading_installed_drivers = True
-        # Imported here, not with hare - importlib.metadata takes milliseconds to import, and only
-        # a name none of hare's own dialects and drivers has asks for the installed packages.
-        from importlib.metadata import entry_points
+        if cls.loading_installed_drivers:
+            raise ConfigurationError(EXTENSION_CYCLE_MESSAGE.format(name=DIALECT_ENTRY_POINT_GROUP))
+        from importlib.metadata import EntryPoint, entry_points
 
-        for entry_point in entry_points(group=DIALECT_ENTRY_POINT_GROUP):
-            try:
-                entry_point.load()
-            except Exception as error:
-                failure = f"{entry_point.name} = {entry_point.value} ({error!r})"
-                cls.installed_driver_errors.append(failure)
-                logger.warning("Skipping the %r entry point %s", DIALECT_ENTRY_POINT_GROUP, failure)
+        cls.loading_installed_drivers = True
+        try:
+            for entry_point in entry_points(group=DIALECT_ENTRY_POINT_GROUP):
+                name = f"{entry_point.name} = {entry_point.value}"
+                try:
+
+                    def load_contribution(entry: EntryPoint = entry_point) -> ExtensionContribution:
+                        return cast("ExtensionContribution", entry.load()())
+
+                    cls.extensions.load(name, load_contribution)
+                except Exception as error:
+                    failure = f"{name} ({error!r})"
+                    cls.installed_driver_errors.append(failure)
+                    logger.warning("Skipping the %r entry point %s", DIALECT_ENTRY_POINT_GROUP, failure)
+            cls.installed_drivers_loaded = True
+        finally:
+            cls.loading_installed_drivers = False
+
+    @classmethod
+    def refresh_installed_drivers(cls) -> None:
+        """Explicitly retry failed factories and discover newly installed extensions."""
+        cls.extensions.clear_failures()
+        cls.installed_driver_errors.clear()
+        cls.installed_drivers_loaded = False
+        cls.load_installed_drivers()
 
     @classmethod
     def get_installed_driver_errors_note(cls) -> str:
@@ -172,15 +127,10 @@ class DialectRegistry:
 
     @classmethod
     def load_builtin_driver(cls, name: str) -> None:
-        """Imports the module of hare's own driver named ``name`` - which registers it - when
-        there is one and nothing registered a driver of that name yet.
-
-        Args:
-            name: The driver's name or one of its DB_URL schemes.
-        """
+        """Load only the built-in module associated with a requested name or URL scheme."""
         module_name = BUILTIN_DRIVER_MODULES_BY_NAME.get(name)
         if module_name is not None:
-            importlib.import_module(module_name)
+            cls.extensions.load(module_name, lambda: importlib.import_module(module_name).extension())
 
     @classmethod
     def get_drivers(cls) -> tuple[Driver, ...]:
@@ -190,7 +140,7 @@ class DialectRegistry:
             The drivers.
         """
         cls.load()
-        return tuple(cls.drivers_by_name.values())
+        return tuple(Registries.snapshot.drivers.values())
 
     @classmethod
     def get_driver(cls, name: str) -> Driver:
@@ -206,18 +156,18 @@ class DialectRegistry:
         Raises:
             ConfigurationError: If no driver has the name.
         """
-        driver = cls.drivers_by_name.get(name) or cls.drivers_by_url_scheme.get(name)
+        driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
         if driver is None:
             cls.load_builtin_driver(name)
-            driver = cls.drivers_by_name.get(name) or cls.drivers_by_url_scheme.get(name)
+            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
         if driver is None:
             cls.load_installed_drivers()
-            driver = cls.drivers_by_name.get(name) or cls.drivers_by_url_scheme.get(name)
+            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
         if driver is None:
             cls.load()
-            driver = cls.drivers_by_name.get(name) or cls.drivers_by_url_scheme.get(name)
+            driver = Registries.snapshot.drivers.get(name) or Registries.snapshot.schemes.get(name)
         if driver is None:
-            engines = sorted({*cls.drivers_by_name, *cls.drivers_by_url_scheme})
+            engines = sorted({*Registries.snapshot.drivers, *Registries.snapshot.schemes})
             raise ConfigurationError(
                 f"Unknown database engine {name!r}: expected one of {engines}{cls.get_installed_driver_errors_note()}"
             )
@@ -235,16 +185,16 @@ class DialectRegistry:
             The driver, or None.
         """
         scheme = scheme.lower()
-        driver = cls.drivers_by_url_scheme.get(scheme)
+        driver = Registries.snapshot.schemes.get(scheme)
         if driver is None:
             cls.load_builtin_driver(scheme)
-            driver = cls.drivers_by_url_scheme.get(scheme)
+            driver = Registries.snapshot.schemes.get(scheme)
         if driver is None:
             cls.load_installed_drivers()
-            driver = cls.drivers_by_url_scheme.get(scheme)
+            driver = Registries.snapshot.schemes.get(scheme)
         if driver is None:
             cls.load()
-            driver = cls.drivers_by_url_scheme.get(scheme)
+            driver = Registries.snapshot.schemes.get(scheme)
         return driver
 
     @classmethod
@@ -255,7 +205,7 @@ class DialectRegistry:
             The schemes, sorted.
         """
         cls.load()
-        return sorted(cls.drivers_by_url_scheme)
+        return sorted(Registries.snapshot.schemes)
 
     @classmethod
     def get_driver_for_url_scheme(cls, scheme: str) -> Driver:
@@ -286,10 +236,14 @@ class DialectRegistry:
             The dialects.
         """
         cls.load()
-        builtin_dialects = [cls.dialects_by_name[name] for name in BUILTIN_DIALECTS_BY_NAME]
+        builtin_dialects = [Registries.snapshot.dialects[name] for name in BUILTIN_DIALECTS_BY_NAME]
         return (
             *builtin_dialects,
-            *(dialect for name, dialect in cls.dialects_by_name.items() if name not in BUILTIN_DIALECTS_BY_NAME),
+            *(
+                dialect
+                for name, dialect in Registries.snapshot.dialects.items()
+                if name not in BUILTIN_DIALECTS_BY_NAME
+            ),
         )
 
     @classmethod
@@ -312,10 +266,14 @@ class DialectRegistry:
         """
         cls.load_builtin_dialects()
         cls.load_installed_drivers()
-        builtin_dialects = [cls.dialects_by_name[name] for name in BUILTIN_DIALECTS_BY_NAME]
+        builtin_dialects = [Registries.snapshot.dialects[name] for name in BUILTIN_DIALECTS_BY_NAME]
         return (
             *builtin_dialects,
-            *(dialect for name, dialect in cls.dialects_by_name.items() if name not in BUILTIN_DIALECTS_BY_NAME),
+            *(
+                dialect
+                for name, dialect in Registries.snapshot.dialects.items()
+                if name not in BUILTIN_DIALECTS_BY_NAME
+            ),
         )
 
     @classmethod
@@ -334,17 +292,17 @@ class DialectRegistry:
         """
         if not isinstance(name, str):
             return name
-        dialect = cls.dialects_by_name.get(name)
+        dialect = Registries.snapshot.dialects.get(name)
         if dialect is None and name in BUILTIN_DIALECTS_BY_NAME:
             cls.register_dialect(cls.get_builtin_dialect(name))
-            dialect = cls.dialects_by_name.get(name)
+            dialect = Registries.snapshot.dialects.get(name)
         if dialect is None:
             cls.load_installed_drivers()
-            dialect = cls.dialects_by_name.get(name)
+            dialect = Registries.snapshot.dialects.get(name)
         if dialect is None:
             cls.load()
-            dialect = cls.dialects_by_name.get(name)
+            dialect = Registries.snapshot.dialects.get(name)
         if dialect is None:
-            dialect_names = sorted(str(dialect_name) for dialect_name in cls.dialects_by_name)
+            dialect_names = sorted(str(dialect_name) for dialect_name in Registries.snapshot.dialects)
             raise ConfigurationError(f"Unknown dialect {name!r}: expected one of {dialect_names}")
         return dialect

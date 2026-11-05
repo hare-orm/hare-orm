@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from hare import fields
+from hare.dialects.postgresql.fields import CidrField, HStoreField, InetField
 from hare.dialects.postgresql.fields.ranges import IntRangeField
 from hare.exceptions import ValidationError
 from hare.fields import ArrayField, Field
@@ -52,6 +53,11 @@ def get_error_chain(error: BaseException) -> list[BaseException]:
 
 
 SENSITIVE_CONVERSIONS: list[Any] = [
+    ("inet-write", lambda: named_field(InetField(sensitive=True)).to_db_value(SECRET, None)),
+    ("inet-assignment", lambda: named_field(InetField(sensitive=True)).to_python(SECRET)),
+    ("cidr-write", lambda: named_field(CidrField(sensitive=True)).to_db_value(SECRET, None)),
+    ("cidr-assignment", lambda: named_field(CidrField(sensitive=True)).to_python(SECRET)),
+    ("hstore-read", lambda: named_field(HStoreField(sensitive=True)).from_db_value(SECRET)),
     ("int", lambda: named_field(fields.IntField(sensitive=True)).to_db_value(SECRET, None)),
     ("int-read", lambda: named_field(fields.IntField(sensitive=True)).from_db_value(SECRET)),
     ("char-length", lambda: named_field(fields.CharField(max_length=4, sensitive=True)).to_db_value(SECRET, None)),

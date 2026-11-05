@@ -49,8 +49,8 @@ async def test_tsvector_generated_sql(db_tsvector):
     field = TSVectorEntry._meta.fields_map["search_vector"]
     sql = field.get_generated_sql(DialectRegistry.get_dialect("postgresql"))
     assert sql == (
-        "GENERATED ALWAYS AS (SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"title\", '')),'A')"
-        " || SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"body\", '')),'B')) STORED"
+        "GENERATED ALWAYS AS ((SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"title\",'')),'A')"
+        " || SETWEIGHT(TO_TSVECTOR('english',COALESCE(\"body\",'')),'B'))) STORED"
     )
 
 

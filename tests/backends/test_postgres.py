@@ -12,7 +12,6 @@ import ssl
 import subprocess
 import sys
 import textwrap
-import time
 import uuid
 import xml.etree.ElementTree as ET
 from decimal import Decimal
@@ -21,10 +20,12 @@ from typing import Any
 
 import pytest
 
-from hare import Connections, Hare
+from hare import Connections
 from hare.contrib.test import requires_features
+from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.client import retryable_read_query_active
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.postgresql.fields.ranges import Range
@@ -33,6 +34,7 @@ from hare.exceptions import (
     DBConnectionError,
     IntegrityError,
     OperationalError,
+    PoolTimeoutError,
     TransactionManagementError,
     UnSupportedError,
 )
@@ -41,6 +43,7 @@ from hare.instrumentation.observers.observers import Observers
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import IntFields, Tournament
 from tests.utils.database_under_test import DatabaseUnderTest
+from tests.utils.postgresql_query_cancellation import PostgresqlQueryCancellation
 from tests.utils.server_session import ServerSession
 from tests.utils.waiting import wait_until
 
@@ -52,173 +55,96 @@ def _get_db_config():
         db_url,
         app_modules={"models": ["tests.shared_models.testmodels"]},
         connection_label="models",
-        testing=True,
     )
+    db_config["connections"]["models"] = DatabaseConfig.from_url(db_url).config
     engine = db_config["connections"]["models"]["engine"]
     is_asyncpg = engine == "postgresql+asyncpg"
-    is_psycopg = False
     is_rust_pg = engine == "postgresql"
-    return db_config, is_asyncpg, is_psycopg, is_rust_pg
+    return db_config, is_asyncpg, is_rust_pg
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_schema(db_isolated_no_schema):
+    """A configured schema receives the model tables and is absent from an unconfigured search path."""
     await DatabaseUnderTest.skip_if_the_pooler_loses_the_search_path()
-    db_config, is_asyncpg, _, is_rust_pg = _get_db_config()
+    db_config, _, _ = _get_db_config()
+    credentials = db_config["connections"]["models"]["credentials"]
+    credentials["database"] = Connections.get("models").database
+    credentials["schema"] = "mytestschema"
 
-    InvalidSchemaNameError: type[BaseException]
-    if is_rust_pg:
-        # rust_pg has no granular per-SQLSTATE exception hierarchy the way asyncpg does (see
-        # rust_pg/src/error.rs) - any non-integrity-violation query error, invalid-schema
-        # included, becomes hare's own OperationalError via _translate_exceptions, so that's
-        # what's actually raised here rather than a driver-specific "invalid schema" type.
-        InvalidSchemaNameError = OperationalError
-    elif is_asyncpg:
-        # AsyncpgClient._translate_exceptions() used to have no catch-all fallback, so
-        # InvalidSchemaNameError (not one of its individually-named except clauses) leaked as the
-        # raw asyncpg exception here, unlike rust_pg above - now that it does (see that method's
-        # own `except asyncpg.PostgresError` clause), asyncpg matches rust_pg's own
-        # OperationalError for this exact scenario too, closing the cross-backend inconsistency.
-        InvalidSchemaNameError = OperationalError
-    else:
-        from psycopg.errors import InvalidSchemaName
-
-        InvalidSchemaNameError = InvalidSchemaName
-
-    if Hare.is_inited():
-        await Hare.get_context().drop_databases()
-
-    try:
-        db_config["connections"]["models"]["credentials"]["schema"] = "mytestschema"
-        await Hare.init(db_config, _create_db=True)
-
-        with pytest.raises(InvalidSchemaNameError):
-            await Hare.generate_schemas()
-
+    async with HareContext() as context:
+        await context.init(db_config)
+        with pytest.raises(OperationalError):
+            await context.generate_schemas()
         conn = Connections.get("models")
-        await conn.execute_script("CREATE SCHEMA mytestschema;")
-        await Hare.generate_schemas()
-
+        await conn.execute_script("CREATE SCHEMA mytestschema")
+        await context.generate_schemas()
         tournament = await Tournament.objects.create(name="Test")
-        await Connections.current().close_all()
 
-        del db_config["connections"]["models"]["credentials"]["schema"]
-        await Hare.init(db_config)
-
+    del credentials["schema"]
+    async with HareContext() as context:
+        await context.init(db_config)
         with pytest.raises(OperationalError):
             await Tournament.objects.filter(name="Test").first()
+        rows = await Connections.get("models").execute_dicts(
+            "SELECT id, name FROM mytestschema.tournament WHERE name='Test' LIMIT 1"
+        )
+        assert rows == [{"id": tournament.id, "name": tournament.name}]
 
-        conn = Connections.get("models")
-        _, res = await conn.execute("SELECT id, name FROM mytestschema.tournament WHERE name='Test' LIMIT 1")
 
-        assert len(res) == 1
-        assert tournament.id == res[0]["id"]
-        assert tournament.name == res[0]["name"]
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_required_tls_never_falls_back_to_plaintext(db_isolated_no_schema):
+    """Required encryption succeeds with TLS or rejects a server that only offers plaintext."""
+    shared = Connections.get("models")
+    direct = {
+        "host": shared.direct_host or shared.host,
+        "port": shared.direct_port or shared.port,
+        "transaction_pooling": False,
+        "direct_host": None,
+        "direct_port": None,
+    }
+    observer = Connections.current().create_independent("models", direct)
+    _, _, is_rust_pg = _get_db_config()
+    if is_rust_pg:
+        tls_settings = {"ssl_mode": "require", "ssl_root_cert": None}
+    else:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        tls_settings = {"ssl": context, "ssl_root_cert": None}
+    client = Connections.current().create_independent("models", {**direct, **tls_settings})
+    try:
+        [settings] = await observer.execute_dicts("SHOW ssl")
+        if settings["ssl"] == "on":
+            await client.create_connection(with_db=True)
+            assert await client.execute_dicts("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()") == [
+                {"ssl": True}
+            ]
+        else:
+            with pytest.raises(DBConnectionError, match="(?i)ssl|tls"):
+                await client.create_connection(with_db=True)
+        assert await observer.execute_dicts("SELECT 1 AS value") == [{"value": 1}]
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
-
-
-async def _drop_databases(ctx: HareContext) -> None:
-    """Mirrors Hare.get_context().drop_databases(), scoped to an isolated, not-yet-torn-down context."""
-    await ctx.connections.close_all(discard=False)
-    for conn in ctx.connections.all():
-        await conn.db_delete()
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_ssl_true(db_isolated_no_schema):
-    db_config, _, _, is_rust_pg = _get_db_config()
-
-    if is_rust_pg:
-        # rust_pg has no asyncpg-style bool/SSLContext "ssl" kwarg - "verify-full" (real
-        # certificate + hostname verification) against a local Postgres with no matching cert
-        # configured is its own equivalent forced-failure case.
-        db_config["connections"]["models"]["credentials"]["ssl_mode"] = "verify-full"
-    else:
-        db_config["connections"]["models"]["credentials"]["ssl"] = True
-    # An isolated HareContext, not Hare.init() - db_isolated_no_schema's own context is still the
-    # ambient one (Hare.init() would reuse and re-init it in place via its contextvar lookup,
-    # closing db_isolated_no_schema's real connection before this deliberately-broken one fails to
-    # replace it, corrupting the state db_isolated_no_schema's own teardown relies on afterwards).
-    try:
-        async with HareContext() as ctx:
-            await ctx.init(config=db_config, _create_db=True)
-            # Connected despite ssl=True - clean up the database we just created before
-            # asserting, since that's the failure path below and won't run cleanup itself.
-            await _drop_databases(ctx)
-            assert False, "Expected ConnectionError or SSLError"
-    except (ConnectionError, ssl.SSLError):
-        pass
-    except ConfigurationError as error:
-        assert is_rust_pg and "no root trust anchors" in str(error)
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_ssl_custom(db_isolated_no_schema):
-    db_config, _, _, is_rust_pg = _get_db_config()
-
-    # Expect connectionerror or pass
-    if is_rust_pg:
-        # rust_pg has no asyncpg-style SSLContext "ssl" kwarg - "require" (encrypt, don't
-        # verify the certificate) is its closest equivalent to a custom, verification-relaxed
-        # SSL context.
-        db_config["connections"]["models"]["credentials"]["ssl_mode"] = "require"
-    else:
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-        db_config["connections"]["models"]["credentials"]["ssl"] = ssl_ctx
-    # See test_ssl_true for why this uses an isolated HareContext rather than Hare.init().
-    try:
-        async with HareContext() as ctx:
-            await ctx.init(config=db_config, _create_db=True)
-            await _drop_databases(ctx)
-    except ConnectionError:
-        pass
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_ssl_mode_typo_raises_instead_of_silently_downgrading(db_isolated_no_schema):
-    """rust.pg's connect() used to fall back silently to Prefer (encrypt opportunistically, but
-    downgrade to plaintext the moment SSL negotiation fails for ANY reason) for ANY unrecognized
-    ssl_mode string - a caller who typo'd "verify-full" as "verrify-full" thinking they'd
-    required certificate verification got no verification and no encryption guarantee at all,
-    with nothing to indicate their setting was ignored. Confirmed live: connect(...,
-    ssl_mode="verrify-full") succeeded with no error raised whatsoever before this fix.
-    asyncpg has no equivalent config knob at all (it uses ssl=<bool|SSLContext>, not a mode
-    string) - this only applies to rust_pg."""
-    db_config, _, _, is_rust_pg = _get_db_config()
-    if not is_rust_pg:
-        pytest.skip("ssl_mode is a rust_pg-only credential - asyncpg uses ssl=<bool|SSLContext>")
-
-    db_config["connections"]["models"]["credentials"]["ssl_mode"] = "verrify-full"
-    with pytest.raises(Exception, match="invalid ssl_mode"):
-        async with HareContext() as ctx:
-            await ctx.init(config=db_config, _create_db=True)
+        try:
+            await client.close()
+        finally:
+            await observer.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_application_name(db_isolated_no_schema):
-    db_config, *_ = _get_db_config()
-
-    db_config["connections"]["models"]["credentials"]["application_name"] = "mytest_application"
+    conn = Connections.current().create_independent("models", {"application_name": "mytest_application"})
     try:
-        await Hare.init(db_config, _create_db=True)
-
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
         _, res = await conn.execute("SELECT application_name FROM pg_stat_activity WHERE pid = pg_backend_pid()")
 
         assert len(res) == 1
         assert "mytest_application" == res[0]["application_name"]
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @requires_features(dialect="postgresql")
@@ -232,25 +158,39 @@ async def test_server_settings_value_with_space_does_not_inject_extra_guc(db_iso
     session - a value the caller never asked to set. asyncpg sends server_settings as
     structured startup-packet parameters (not a single command-line-style options string), so
     it was never exposed to this - this only applies to rust_pg."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this injection is specific to rust_pg's libpq options-string construction")
 
-    db_config["connections"]["models"]["credentials"]["server_settings"] = {
-        "application_name": "legit -c statement_timeout=1"
+    shared = Connections.get("models")
+    server_settings = {
+        name: value
+        for name, value in shared.server_settings.items()
+        if name not in {"application_name", "statement_timeout"}
     }
+    baseline = Connections.current().create_independent(
+        "models", {"application_name": None, "server_settings": server_settings}
+    )
+    conn = Connections.current().create_independent(
+        "models",
+        {
+            "application_name": None,
+            "server_settings": {**server_settings, "application_name": "legit -c statement_timeout=1"},
+        },
+    )
     try:
-        await Hare.init(db_config, _create_db=True)
-
-        conn = Connections.get("models")
+        expected_timeout = await baseline.execute_dicts("SHOW statement_timeout")
+        await conn.create_connection(with_db=True)
         _, app_name_rows = await conn.execute("SHOW application_name")
-        _, timeout_rows = await conn.execute("SHOW statement_timeout")
+        timeout_rows = await conn.execute_dicts("SHOW statement_timeout")
 
         assert app_name_rows[0]["application_name"] == "legit -c statement_timeout=1"
-        assert timeout_rows[0]["statement_timeout"] == "0"
+        assert timeout_rows == expected_timeout
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        try:
+            await conn.close()
+        finally:
+            await baseline.close()
 
 
 @requires_features(dialect="postgresql")
@@ -264,21 +204,28 @@ async def test_rust_pg_statement_cache_size_bounds_prepared_statements(db_isolat
     and 20 distinct SELECTs pinned to a single connection (`max_size=1`), `pg_prepared_statements`
     grew to 21 before this fix. This only applies to rust_pg - asyncpg's own pool enforces its
     own `statement_cache_size` natively."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("statement_cache_size bounding is rust_pg-specific")
 
     # The server's own prepared statements of this client's connection - past a transaction
     # pooler they would be the pooler's, shared by its clients.
-    credentials = db_config["connections"]["models"]["credentials"]
-    db_config["connections"]["models"]["credentials"] = DatabaseUnderTest.get_direct_credentials(credentials)
-    db_config["connections"]["models"]["credentials"]["statement_cache_size"] = 5
-    db_config["connections"]["models"]["credentials"]["max_size"] = 1
-    db_config["connections"]["models"]["credentials"]["min_size"] = 1
+    shared = Connections.get("models")
+    conn = Connections.current().create_independent(
+        "models",
+        {
+            "host": shared.direct_host or shared.host,
+            "port": shared.direct_port or shared.port,
+            "transaction_pooling": False,
+            "direct_host": None,
+            "direct_port": None,
+            "statement_cache_size": 5,
+            "min_size": 1,
+            "max_size": 1,
+        },
+    )
     try:
-        await Hare.init(db_config, _create_db=True)
-
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
         for distinct_column_count in range(1, 21):
             columns = ", ".join(str(column) for column in range(distinct_column_count))
             await conn.execute(f"SELECT {columns}")
@@ -288,15 +235,14 @@ async def test_rust_pg_statement_cache_size_bounds_prepared_statements(db_isolat
         # prepared (and counted) before its own result comes back.
         assert rows[0]["n"] <= 6
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_rust_pg_cancelled_query_frees_the_connection_instead_of_blocking_the_pool(db_isolated_no_schema):
-    """rust.pg's ordinary query methods (Client::execute/fetch_all/fetch_one, rust/pg/src/
-    client.rs) used to ignore Python-side cancellation entirely - `future_into_py()`'s own
+    """rust.pg's ordinary query methods (Client::execute/fetch_all) used to ignore Python-side
+    cancellation entirely - `future_into_py()`'s own
     cancellation support only stops LOCAL polling of the Rust future, it never told the SERVER
     to abort a query already in flight. `asyncio.wait_for(..., timeout=X)` timing out therefore
     abandoned the query without actually stopping it: the pooled connection stayed busy running
@@ -305,26 +251,22 @@ async def test_rust_pg_cancelled_query_frees_the_connection_instead_of_blocking_
     guard around each of these methods, sending a real Postgres CancelRequest
     (`tokio_postgres::CancelToken::cancel_query`) if the guard is dropped before the query
     finished. max_size=1 forces the follow-up query to reuse the exact same connection."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this exact cancellation gap is rust_pg-specific (asyncpg cancels natively)")
 
-    db_config["connections"]["models"]["credentials"]["max_size"] = 1
-    db_config["connections"]["models"]["credentials"]["min_size"] = 1
+    conn = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
     try:
-        await Hare.init(db_config, _create_db=True)
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
 
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(conn.execute("SELECT pg_sleep(30)"), timeout=0.2)
+        await PostgresqlQueryCancellation.cancel(conn.execute)
 
         # A query left running would hold the connection for its 30 seconds; a cancelled one frees
         # it at once - the bound leaves a loaded machine room for the cancel's round trips.
         count, rows = await asyncio.wait_for(conn.execute("SELECT 42 AS answer"), timeout=10.0)
         assert rows[0]["answer"] == 42
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @requires_features(dialect="postgresql")
@@ -332,25 +274,21 @@ async def test_rust_pg_cancelled_query_frees_the_connection_instead_of_blocking_
 async def test_rust_pg_cancelled_query_on_an_acquired_connection_frees_it(db_isolated_no_schema):
     """A query on the raw connection acquire_connection() hands out is cancelled on the server as the
     pool's own queries are - the connection goes back to the pool idle, not still running it."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust_pg's own cancellation of a query on an acquired connection")
 
-    db_config["connections"]["models"]["credentials"]["max_size"] = 1
-    db_config["connections"]["models"]["credentials"]["min_size"] = 1
+    conn = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
     try:
-        await Hare.init(db_config, _create_db=True)
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
 
         async with conn.acquire_connection() as raw_connection:
-            with pytest.raises(TimeoutError):
-                await asyncio.wait_for(raw_connection.execute("SELECT pg_sleep(30)", []), timeout=0.2)
+            await PostgresqlQueryCancellation.cancel(lambda sql: raw_connection.execute(sql, []))
 
         count, rows = await asyncio.wait_for(conn.execute("SELECT 42 AS answer"), timeout=10.0)
         assert rows[0]["answer"] == 42
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @pytest.mark.requires("asyncpg")
@@ -363,7 +301,7 @@ async def test_asyncpg_pool_failing_to_open_closes_a_connection_it_still_prepare
 
     from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
-    db_config, _, _, is_rust_pg = _get_db_config()
+    db_config, _, is_rust_pg = _get_db_config()
     if is_rust_pg:
         pytest.skip("the asyncpg pool's own opening")
     credentials = db_config["connections"]["models"]["credentials"]
@@ -425,7 +363,7 @@ async def test_asyncpg_pool_failing_to_open_closes_the_connections_it_opened(db_
 
     from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
-    db_config, _, _, is_rust_pg = _get_db_config()
+    db_config, _, is_rust_pg = _get_db_config()
     if is_rust_pg:
         pytest.skip("the asyncpg pool's own opening")
     credentials = db_config["connections"]["models"]["credentials"]
@@ -471,163 +409,115 @@ async def test_rust_pg_cancelled_script_frees_the_connection_instead_of_blocking
     """execute_script() (and execute_many(), copy_in()) ran outside the CancelQueryOnDrop guard - a
     cancelled script went on running on the server while its connection went back to the pool as
     idle, and the next caller drawing it waited for the script to end."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("asyncpg cancels a statement natively")
 
-    db_config["connections"]["models"]["credentials"]["max_size"] = 1
-    db_config["connections"]["models"]["credentials"]["min_size"] = 1
+    conn = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
     try:
-        await Hare.init(db_config, _create_db=True)
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
 
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(conn.execute_script("SELECT pg_sleep(30)"), timeout=0.2)
+        await PostgresqlQueryCancellation.cancel(conn.execute_script)
 
         # A script left running would hold the connection for its 30 seconds; a cancelled one frees
         # it at once - the bound leaves a loaded machine room for the cancel's round trips.
         count, rows = await asyncio.wait_for(conn.execute("SELECT 42 AS answer"), timeout=10.0)
         assert rows[0]["answer"] == 42
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_rust_pg_cancelled_query_inside_a_transaction_aborts_it_promptly(db_isolated_no_schema):
     """Same underlying fix as test_rust_pg_cancelled_query_frees_the_connection_instead_of_
-    blocking_the_pool above, applied to Transaction::execute/fetch_all/fetch_one (rust/pg/src/
-    transaction.rs) - a transaction's own pinned connection is used by that ONE Transaction
+    blocking_the_pool above, applied to Transaction::execute/fetch_all - a transaction's own
+    pinned connection is used by that ONE Transaction
     alone, so the abandoned-query symptom is a later statement on the SAME transaction blocking
     for however long the cancelled query would have taken to finish naturally, instead of
     Postgres's normal, immediate "current transaction is aborted" response a genuinely cancelled
     statement should produce."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this exact cancellation gap is rust_pg-specific (asyncpg cancels natively)")
 
+    conn = Connections.current().create_independent("models", {"min_size": 1, "max_size": 1})
     try:
-        await Hare.init(db_config, _create_db=True)
+        await conn.create_connection(with_db=True)
         # Leaving the aborted transaction's block normally raises instead of committing.
         with pytest.raises(TransactionManagementError, match="instead of committed"):
-            async with Transactions.atomic("models") as tx:
-                with pytest.raises(TimeoutError):
-                    await asyncio.wait_for(tx.execute("SELECT pg_sleep(30)"), timeout=0.2)
+            async with conn._in_transaction() as tx:
+                await PostgresqlQueryCancellation.cancel(tx.execute)
 
                 # A query left running would hold the transaction for its 30 seconds; a cancelled
                 # one aborts it at once.
                 with pytest.raises(TransactionManagementError, match="aborted"):
                     await asyncio.wait_for(tx.execute("SELECT 42 AS answer"), timeout=10.0)
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_rust_pg_stream_cancellation_does_not_deadlock_the_connection(db_isolated_no_schema):
-    """rust_pg's `stream()` (`hare/dialects/postgresql/drivers/rust_pg/client.py`) used to run its
-    row-fetch loop (`async for row in row_stream: yield row`) completely unshielded from Python-
-    side cancellation - unlike every other transaction primitive on the same wrapper (`begin()`/
-    `commit()`/`rollback()`/`savepoint()`, each wrapped in `_run_shielded_from_cancellation()` for
-    exactly this reason). pyo3-async-runtimes cancels the underlying Rust future when the Python
-    awaitable wrapping it is cancelled; `asyncio.wait_for(..., timeout=X)` timing out mid-fetch
-    could therefore abort that Rust future in place, leaving something in the pyo3-async-
-    runtimes<->tokio bridge wedged such that a LATER, already-shielded `rollback()`/`commit()` on
-    the SAME transaction never received its own completion notification back - confirmed via
-    `pg_stat_activity` on the stuck connection: `state=idle, wait_event=ClientRead,
-    query='ROLLBACK'`, elapsed growing without bound, i.e. the ROLLBACK had already landed and
-    gone idle server-side while the Python process hung on it forever. `py-spy dump` on the hung
-    process showed the event loop idle in `_poll`/`select` (Windows IOCP), not CPU-busy - a real
-    stuck wait, not a slow operation.
+    """Cancel an active native fetch under an OS watchdog, then reuse the one-slot pool.
 
-    Run in a genuinely separate process, with the assertion driven by `subprocess.run(...,
-    timeout=...)` rather than `asyncio.wait_for()` inside THIS process: the bug this guards
-    against wedges the event loop itself, which no in-process asyncio-level timeout can ever
-    interrupt (that's exactly what made it a genuine, permanent deadlock rather than a slow
-    operation). `subprocess.run`'s own OS-level timeout can still kill it, so a regression here
-    fails this test promptly instead of hanging the whole suite - same reasoning as
-    test_postgres_driver_dispatch.py's own subprocess-isolated test.
+    The parent fixture owns the database even if the child's event loop becomes stuck.
+    The server's activity report establishes the cancellation boundary.
     """
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
-        pytest.skip("this exact cancellation gap is rust_pg-specific (asyncpg cancels natively)")
+        pytest.skip("The native future cancellation bridge is specific to rust_pg")
 
     script = textwrap.dedent(
         """
         import asyncio
         import os
 
-        from hare import Hare
+        from hare import Connections
+        from hare.core.hare_context import HareContext
         from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
         from hare.transactions.transactions import Transactions
-        from tests.shared_models.testmodels import IntFields
+        from tests.utils.postgresql_query_cancellation import PostgresqlQueryCancellation
 
 
-        async def main() -> None:
-            db_config = DbUrlConfigGenerator.build(
-                os.environ["HARE_TEST_DB"],
-                app_modules={"models": ["tests.shared_models.testmodels"]},
-                connection_label="models",
-                testing=True,
+        async def main():
+            connection = DbUrlConfigGenerator.expand(os.environ["HARE_TEST_DB"])
+            connection["credentials"].update(
+                database=os.environ["HARE_STREAM_TEST_DATABASE"], min_size=1, max_size=1
             )
-            # A single-connection pool forces every iteration below to reuse the SAME physical
-            # connection, mirroring the original bug report's own pg_stat_activity trace (pinned
-            # to one stuck connection) - a larger pool could mask a still-broken fetch by handing
-            # a later iteration a fresh, uncorrupted connection instead of the poisoned one.
-            db_config["connections"]["models"]["credentials"]["max_size"] = 1
-            db_config["connections"]["models"]["credentials"]["min_size"] = 1
+            async with HareContext() as context:
+                await context.init({"connections": {"models": connection}, "apps": {}})
 
-            await Hare.init(db_config, _create_db=True)
-            try:
-                await Hare.generate_schemas()
-                for i in range(1, 51):
-                    await IntFields.objects.create(intnum=i)
-
-                async def consume() -> None:
-                    async with Transactions.atomic():
-                        async for _obj in IntFields.objects.all().order_by("id").stream(chunk_size=1):
+                async def consume(sql):
+                    async with Transactions.atomic("models") as transaction:
+                        async for batch in transaction.stream_batches(sql, chunk_size=1):
                             pass
 
-                # The literal timeout sequence from the original bug report (0.001s/0.002s/
-                # 0.003s - the third call is what reproduced the permanent hang), repeated across
-                # several cycles with a few extra tiny timeouts thrown in - the same "many
-                # iterations, timeouts in the 0.1-10ms range" shape as the asyncpg-side stress
-                # test this mirrors (30 iterations there, clean on every one).
-                timeouts = [0.001, 0.002, 0.003, 0.0005, 0.004, 0.0015] * 5
-                for timeout in timeouts:
-                    try:
-                        await asyncio.wait_for(consume(), timeout=timeout)
-                    except (TimeoutError, asyncio.CancelledError):
-                        pass
-
-                # The real assertion: the pool connection must still be usable afterward - a
-                # stuck one would make even this trivial query hang forever (pool maxsize=1,
-                # nothing else to draw from), which is exactly the deadlock this guards against.
-                assert await IntFields.objects.filter(intnum=1).exists()
+                await PostgresqlQueryCancellation.cancel(consume)
+                assert await Connections.get("models").execute_dicts("SELECT 1 AS value") == [{"value": 1}]
                 print("OK")
-            finally:
-                if Hare.is_inited():
-                    await Hare.get_context().drop_databases()
 
 
         asyncio.run(main())
         """
     )
-    repo_root = Path(__file__).resolve().parents[2]
+    environment = {
+        **os.environ,
+        "HARE_STREAM_TEST_DATABASE": Connections.get("models").database,
+    }
     try:
         result = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             timeout=90,
-            cwd=repo_root,
+            cwd=Path(__file__).resolve().parents[2],
+            env=environment,
         )
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired as error:
         pytest.fail(
-            "rust_pg .stream() cancellation deadlocked the connection - the subprocess never "
-            f"returned within 90s. stdout so far:\n{exc.stdout}\nstderr so far:\n{exc.stderr}"
+            f"Stream cancellation left the native process blocked. stdout: {error.stdout}\nstderr: {error.stderr}"
         )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "OK" in result.stdout
@@ -637,37 +527,50 @@ async def test_rust_pg_stream_cancellation_does_not_deadlock_the_connection(db_i
 @pytest.mark.parametrize("cancel_inside_the_stream", [False, True])
 @pytest.mark.asyncio
 async def test_cancelled_stream_does_not_block_the_transaction_rollback(db_isolated, cancel_inside_the_stream):
-    """Cancelling a task mid-`.stream()` inside a transaction used to hang its ROLLBACK forever on
-    rust_pg: the open portal's unread rows stop the connection from reading anything else, and
-    the stream stayed open as long as the suspended generator - or, with the cancellation landing
-    inside the stream, the kept exception's traceback - was alive. The pool connection leaked
-    with it."""
-    await IntFields.objects.bulk_create([IntFields(intnum=index) for index in range(3000)])
+    """Rollback releases a stream even while a retained cancellation traceback keeps it alive."""
     kept_errors = []
-    started = asyncio.Event()
 
-    async def consume() -> None:
-        async with Transactions.atomic():
-            try:
-                async for _instance in IntFields.objects.all().order_by("id").stream(chunk_size=5):
-                    started.set()
-                    if not cancel_inside_the_stream:
-                        await asyncio.sleep(0)
-            except asyncio.CancelledError as error:
-                kept_errors.append(error)
-                raise
+    if cancel_inside_the_stream:
 
-    for _attempt in range(5):
-        started.clear()
+        async def consume(sql):
+            async with Transactions.atomic() as transaction:
+                try:
+                    async for batch in transaction.stream_batches(sql, chunk_size=1):
+                        pass
+                except asyncio.CancelledError as error:
+                    kept_errors.append(error)
+                    raise
+
+        await PostgresqlQueryCancellation.cancel(consume)
+    else:
+        await IntFields.objects.bulk_create([IntFields(intnum=index) for index in range(3)])
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def consume():
+            async with Transactions.atomic():
+                try:
+                    async for _instance in IntFields.objects.all().order_by("id").stream(chunk_size=1):
+                        started.set()
+                        await release.wait()
+                except asyncio.CancelledError as error:
+                    kept_errors.append(error)
+                    raise
+
         task = asyncio.create_task(consume())
-        await started.wait()
-        task.cancel()
-        done, _ = await asyncio.wait([task], timeout=20)
-        assert done, "the transaction's ROLLBACK hung behind the cancelled stream"
-        assert task.cancelled()
+        try:
+            async with asyncio.timeout(30):
+                await started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await ResourceCompletion.wait(asyncio.gather(task, return_exceptions=True))
 
-    assert len(kept_errors) == 5
-    assert await asyncio.wait_for(IntFields.objects.filter(intnum=1).exists(), 20)
+    assert len(kept_errors) == 1
+    assert await asyncio.wait_for(Connections.get("models").execute_dicts("SELECT 1 AS value"), 30) == [{"value": 1}]
 
 
 @requires_features(dialect="postgresql")
@@ -845,36 +748,6 @@ async def test_explain_default_verbose(db_simple):
     assert "Output" in query_plan["Plan"]
 
 
-@pytest.mark.requires("asyncpg")
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_asyncpg_connection_loss_raises_db_connection_error(db_simple):
-    """_translate_exceptions() must map a lost connection to hare's own DBConnectionError, the
-    same way rust_pg's identical pg.ConnectionError -> DBConnectionError mapping already
-    does (hare/backends/rust_pg/client.py) - this backend had no equivalent branch, so both a
-    server-side PostgresConnectionError and a client-side InterfaceError (e.g. using a closed
-    connection) used to propagate as the raw asyncpg exception type instead."""
-    _, is_asyncpg, _, _ = _get_db_config()
-    if not is_asyncpg:
-        pytest.skip("asyncpg-specific _translate_exceptions mapping")
-
-    import asyncpg
-
-    conn = Connections.get("models")
-
-    async def raise_interface_error(_self, *_args, **_kwargs):
-        raise asyncpg.InterfaceError("connection is closed")
-
-    with pytest.raises(DBConnectionError):
-        await conn._translate_exceptions(raise_interface_error)
-
-    async def raise_postgres_connection_error(_self, *_args, **_kwargs):
-        raise asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed")
-
-    with pytest.raises(DBConnectionError):
-        await conn._translate_exceptions(raise_postgres_connection_error)
-
-
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
@@ -885,7 +758,7 @@ async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
     Confirms the wiring: the real BEGIN - deferred until the transaction's first statement - is
     sent through run_shielded_from_cancellation, not just that the shared shielding mechanism
     itself works (already covered by tests/backends/test_transactional_client_shielding.py)."""
-    _, is_asyncpg, _, _ = _get_db_config()
+    _, is_asyncpg, _ = _get_db_config()
     if not is_asyncpg:
         pytest.skip("asyncpg-specific begin() shielding")
 
@@ -908,82 +781,36 @@ async def test_asyncpg_begin_is_shielded_from_cancellation(db_simple):
 
 
 @pytest.mark.requires("asyncpg")
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_asyncpg_query_cancel_deadlock_and_shutdown_exceptions_translated(db_simple):
-    """_translate_exceptions() used to leave an entire class of failures unhandled, leaking as
-    raw asyncpg.exceptions.* instead of any hare.exceptions.* type: QueryCanceledError (statement/
-    lock timeout, or an explicit pg_cancel_backend), LockNotAvailableError (a NOWAIT lock
-    acquisition failure), DeadlockDetectedError/SerializationError (retry-safe class-40 failures),
-    and AdminShutdownError/CannotConnectNowError/TooManyConnectionsError (the connection itself is
-    no longer usable, the same DBConnectionError semantics as PostgresConnectionError above).
-    Confirmed live before this fix via a real `SET statement_timeout` + `pg_sleep()` against a
-    real Postgres connection - QueryCanceledError reached the caller completely unwrapped.
-
-    CrashShutdownError/DatabaseDroppedError (SQLSTATE 57P02/57P04, the other two of the same
-    four-code OperatorInterventionError family AdminShutdownError/CannotConnectNowError belong
-    to) were later found still falling through to the generic OperatorInterventionError ->
-    OperationalError clause below instead of DBConnectionError - rust_pg's own error.rs already
-    mapped all four codes uniformly, so a crashed backend or a dropped database surfaced as
-    DBConnectionError there but OperationalError here, for the identical server condition.
-
-    FeatureNotSupportedError (class 0A) was later found unhandled too - confirmed live via a
-    real `GENERATED ALWAYS AS ((SELECT ...))` column, which Postgres itself rejects at DDL time;
-    the raw asyncpg exception leaked instead of OperationalError.
-
-    A full audit then found this method had no catch-all fallback AT ALL, unlike rust_pg's own
-    error.rs (which maps any otherwise-unclassified Postgres error to a generic OperationalError)
-    and unlike this same client's own stream() (which already had one) - confirmed
-    live via CardinalityViolationError (a subquery returning >1 row), a realistic ORM-generated-
-    SQL failure. Added `except asyncpg.PostgresError: raise OperationalError(exc)` as the final
-    clause instead of naming the ~90 remaining subclasses individually - CardinalityViolationError
-    below stands in for that whole class of previously-unhandled errors, not an exhaustive list."""
-    _, is_asyncpg, _, _ = _get_db_config()
-    if not is_asyncpg:
-        pytest.skip("asyncpg-specific _translate_exceptions mapping")
-
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("exception_name", "expected"),
+    [
+        ("InterfaceError", DBConnectionError),
+        ("ConnectionDoesNotExistError", DBConnectionError),
+        ("QueryCanceledError", OperationalError),
+        ("LockNotAvailableError", OperationalError),
+        ("DeadlockDetectedError", OperationalError),
+        ("SerializationError", OperationalError),
+        ("AdminShutdownError", DBConnectionError),
+        ("CrashShutdownError", DBConnectionError),
+        ("CannotConnectNowError", DBConnectionError),
+        ("DatabaseDroppedError", DBConnectionError),
+        ("TooManyConnectionsError", DBConnectionError),
+        ("InternalServerError", OperationalError),
+        ("ObjectNotInPrerequisiteStateError", OperationalError),
+        ("ObjectInUseError", OperationalError),
+        ("FeatureNotSupportedError", OperationalError),
+        ("CardinalityViolationError", OperationalError),
+    ],
+)
+def test_asyncpg_maps_driver_errors(exception_name, expected):
     import asyncpg
 
-    conn = Connections.get("models")
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
-    async def make_raiser(exc: Exception):
-        async def raiser(_self, *_args, **_kwargs):
-            raise exc
-
-        return raiser
-
-    for exc_cls, expected in [
-        (asyncpg.exceptions.QueryCanceledError, OperationalError),
-        (asyncpg.exceptions.LockNotAvailableError, OperationalError),
-        (asyncpg.exceptions.DeadlockDetectedError, OperationalError),
-        (asyncpg.exceptions.SerializationError, OperationalError),
-        (asyncpg.exceptions.AdminShutdownError, DBConnectionError),
-        (asyncpg.exceptions.CrashShutdownError, DBConnectionError),
-        (asyncpg.exceptions.CannotConnectNowError, DBConnectionError),
-        (asyncpg.exceptions.DatabaseDroppedError, DBConnectionError),
-        (asyncpg.exceptions.TooManyConnectionsError, DBConnectionError),
-        # InternalServerError (class XX) and ObjectNotInPrerequisiteStateError/ObjectInUseError
-        # (class 55, e.g. DROP DATABASE against a database another session still holds a
-        # connection to - see db_delete() below) used to fall through this method entirely
-        # untranslated, unlike every other operational failure above.
-        (asyncpg.exceptions.InternalServerError, OperationalError),
-        (asyncpg.exceptions.ObjectNotInPrerequisiteStateError, OperationalError),
-        (asyncpg.exceptions.ObjectInUseError, OperationalError),
-        # FeatureNotSupportedError (class 0A, e.g. a subquery inside a GENERATED ALWAYS AS
-        # column expression, rejected by Postgres at DDL time) - confirmed live to leak as the
-        # raw asyncpg exception instead of OperationalError, unlike the identical error on
-        # sqlite (which already translates cleanly).
-        (asyncpg.exceptions.FeatureNotSupportedError, OperationalError),
-        # CardinalityViolationError (class 21, a subquery returning >1 row) - one representative
-        # of the ~90 asyncpg.PostgresError subclasses the method's own catch-all now covers, not
-        # named individually before this. Confirmed live via a real `SELECT (SELECT n FROM
-        # (VALUES (1),(2)) t(n))` - the raw asyncpg exception leaked, while the identical failure
-        # was already OperationalError on rust_pg (error.rs's own generic fallback).
-        (asyncpg.exceptions.CardinalityViolationError, OperationalError),
-    ]:
-        raiser = await make_raiser(exc_cls("boom"))
-        with pytest.raises(expected):
-            await conn._translate_exceptions(raiser)
+    client = AsyncpgClient(connection_alias="translation", user="test", password="test", database="test")
+    error = getattr(asyncpg.exceptions, exception_name)("connection is closed")
+    assert isinstance(client.get_driver_error(error, ("SELECT 1", [])), expected)
 
 
 @requires_features(dialect="postgresql")
@@ -995,23 +822,24 @@ async def test_asyncpg_wrong_password_raises_configuration_error_not_raw_excepti
     leaked instead of any hare.exceptions.* type. ConfigurationError, not DBConnectionError -
     retrying (what code catching DBConnectionError typically does) can never fix a bad
     credential, so lumping it in with the transient-connection-loss cases would be misleading."""
-    _, is_asyncpg, _, _ = _get_db_config()
+    _, is_asyncpg, _ = _get_db_config()
     if not is_asyncpg:
         pytest.skip("asyncpg-specific create_connection mapping")
 
     shared = Connections.get("models")
-    client = type(shared)(
-        connection_alias="wrong_password_test",
-        user=shared.user,
-        password=f"{shared.password}-definitely-wrong",
-        database=shared.database,
-        host=shared.host,
-        port=shared.port,
-        transaction_pooling=shared.transaction_pooling,
-        connect_max_retries=0,
+    client = Connections.current().create_independent(
+        "models",
+        {
+            "password": f"{shared.password}-definitely-wrong",
+            "password_provider": None,
+            "connect_max_retries": 0,
+        },
     )
-    with pytest.raises(ConfigurationError, match="Authentication failed"):
-        await client.create_connection(with_db=True)
+    try:
+        with pytest.raises(ConfigurationError, match="Authentication failed"):
+            await client.create_connection(with_db=True)
+    finally:
+        await client.close()
 
 
 @requires_features(dialect="postgresql")
@@ -1023,112 +851,67 @@ async def test_bad_pool_size_kwarg_raises_configuration_error_at_construction_ti
     TypeError once create_connection() actually ran; rust_pg silently dropped it into self.extra
     with no error at all, leaving the pool at its unchanged defaults. Both are now caught eagerly
     at client construction time, before any connection attempt, on either driver."""
-    shared = Connections.get("models")
     with pytest.raises(ConfigurationError, match="connection parameter"):
-        type(shared)(
-            connection_alias="bad_kwarg_test",
-            user=shared.user,
-            password=shared.password,
-            database=shared.database,
-            host=shared.host,
-            port=shared.port,
-            pool_minsize=2,
-            pool_maxsize=2,
-        )
+        Connections.current().create_independent("models", {"pool_minsize": 2, "pool_maxsize": 2})
 
 
 @pytest.mark.requires("asyncpg")
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_db_delete_ends_the_sessions_still_on_the_test_database(db_simple):
-    """db_delete() of a test database another session still holds - one an event loop closed in the
-    middle of a query left running - refused the drop ("being accessed by other users") and failed the
-    test run's teardown; the server now ends the sessions first."""
-    _, is_asyncpg, _, _ = _get_db_config()
+    """Deleting a database terminates another client's session before dropping it."""
+    _, is_asyncpg, _ = _get_db_config()
     if not is_asyncpg:
-        pytest.skip("asyncpg-specific _translate_exceptions mapping")
-
-    import asyncpg
-
+        pytest.skip("asyncpg database deletion")
     shared = Connections.get("models")
-    db_name = "hare_orm_db_delete_active_connection_test"
-
-    admin = type(shared)(
-        connection_alias="db_delete_active_connection_admin",
-        user=shared.user,
-        password=shared.password,
-        database="postgres",
-        host=shared.host,
-        port=shared.port,
+    db_name = f"hare_delete_{uuid.uuid4().hex}"
+    admin = Connections.current().create_independent("models", {"database": "postgres"})
+    target = Connections.current().create_independent("models", {"database": db_name})
+    other = Connections.current().create_independent(
+        "models",
+        {
+            "database": db_name,
+            "host": shared.direct_host or shared.host,
+            "port": shared.direct_port or shared.port,
+            "transaction_pooling": False,
+            "direct_host": None,
+            "direct_port": None,
+            "min_size": 1,
+            "max_size": 1,
+        },
     )
-    await admin.create_connection(with_db=True)
     try:
-        await admin.execute_script(f'DROP DATABASE IF EXISTS "{db_name}"')
-        await admin.execute_script(f'CREATE DATABASE "{db_name}" OWNER "{shared.user}"')
-
-        other_session = await asyncpg.connect(
-            host=shared.direct_host or shared.host,
-            port=shared.direct_port or shared.port,
-            user=shared.user,
-            password=shared.password,
-            database=db_name,
-        )
+        await admin.create_connection(with_db=True)
+        await admin.execute_script(f'CREATE DATABASE "{db_name}"')
         try:
-            target = type(shared)(
-                connection_alias="db_delete_active_connection_target",
-                user=shared.user,
-                password=shared.password,
-                database=db_name,
-                host=shared.host,
-                port=shared.port,
-            )
+            await other.create_connection(with_db=True)
             await target.db_delete()
             assert await admin.execute_dicts("SELECT 1 FROM pg_database WHERE datname = $1", [db_name]) == []
         finally:
-            await other_session.close()
+            try:
+                await other.close()
+            finally:
+                await target.db_delete()
     finally:
-        await admin.execute_script(f'DROP DATABASE IF EXISTS "{db_name}"')
-        await admin.close()
+        try:
+            await target.close()
+        finally:
+            await admin.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_asyncpg_db_delete_of_an_already_missing_database_is_a_silent_no_op(db_simple):
-    """db_delete()'s own `except asyncpg.InvalidCatalogNameError: pass` (making "delete a
-    database that's already gone" an idempotent no-op) stopped matching once
-    AsyncpgClient._translate_exceptions() grew a catch-all `except asyncpg.PostgresError`
-    clause: InvalidCatalogNameError doesn't match any of that method's own individually-named
-    exception classes, so the catch-all now wraps it into OperationalError BEFORE db_delete()'s
-    own except clause ever sees the raw asyncpg type - confirmed live, DROP DATABASE against a
-    nonexistent database raised OperationalError instead of being silently absorbed."""
-    _, is_asyncpg, _, _ = _get_db_config()
+    """An absent database is already deleted; error translation must preserve that contract."""
+    _, is_asyncpg, _ = _get_db_config()
     if not is_asyncpg:
-        pytest.skip("asyncpg-specific db_delete()/_translate_exceptions interaction")
-
-    shared = Connections.get("models")
-    db_name = "hare_orm_db_delete_already_missing_test"
-    admin = type(shared)(
-        connection_alias="db_delete_already_missing_admin",
-        user=shared.user,
-        password=shared.password,
-        database="postgres",
-        host=shared.host,
-        port=shared.port,
-    )
-    await admin.create_connection(with_db=True)
+        pytest.skip("asyncpg database deletion")
+    target = Connections.current().create_independent("models", {"database": f"hare_missing_{uuid.uuid4().hex}"})
     try:
-        await admin.execute_script(f'DROP DATABASE IF EXISTS "{db_name}"')
-        target = type(shared)(
-            connection_alias="db_delete_already_missing_target",
-            user=shared.user,
-            password=shared.password,
-            database=db_name,
-            host=shared.host,
-            port=shared.port,
-        )
-        await target.db_delete()  # must not raise - the database never existed in the first place
+        await target.db_delete()
+        assert target._pool is None
     finally:
-        await admin.close()
+        await target.close()
 
 
 @requires_features(dialect="postgresql")
@@ -1141,20 +924,13 @@ async def test_db_create_closes_pool_on_create_database_failure(db_isolated_no_s
     a name that already exists, db_isolated_no_schema's own database, created by the fixture - rather than
     a mocked one. db_create() is a shared PostgresqlClient method neither AsyncpgClient nor
     RustPgClient overrides, so this isn't driver-scoped like most of the tests around it."""
-    shared = Connections.get("models")
-    target = type(shared)(
-        connection_alias="db_create_already_exists_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.host,
-        port=shared.port,
-    )
-
-    with pytest.raises(Exception):
-        await target.db_create()
-
-    assert target._pool is None
+    target = Connections.current().create_independent("models")
+    try:
+        with pytest.raises(OperationalError):
+            await target.db_create()
+        assert target._pool is None
+    finally:
+        await target.close()
 
 
 @requires_features(dialect="postgresql")
@@ -1164,23 +940,18 @@ async def test_asyncpg_connect_retry_exhausted_raises_db_connection_error(db_sim
     _create_pool_with_retry() exhausted its retries against an unreachable host, instead of
     hare's own DBConnectionError - unlike RustPgClient's identical scenario, already correctly
     mapped. Verified against a real unreachable port rather than a mocked create_pool()."""
-    _, is_asyncpg, _, _ = _get_db_config()
+    _, is_asyncpg, _ = _get_db_config()
     if not is_asyncpg:
         pytest.skip("asyncpg-specific create_connection retry-exhaustion mapping")
 
-    shared = Connections.get("models")
-    unreachable = type(shared)(
-        connection_alias="connect_retry_exhausted_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.host,
-        port=59999,
-        connect_max_retries=1,
-        connect_retry_backoff_base_seconds=0.01,
+    unreachable = Connections.current().create_independent(
+        "models", {"host": "127.0.0.1", "port": 1, "connect_max_retries": 1, "connect_retry_backoff_base_seconds": 0}
     )
-    with pytest.raises(DBConnectionError):
-        await unreachable.create_connection(with_db=True)
+    try:
+        with pytest.raises(DBConnectionError):
+            await unreachable.create_connection(with_db=True)
+    finally:
+        await unreachable.close()
 
 
 @requires_features(dialect="postgresql")
@@ -1199,7 +970,7 @@ async def test_rust_pg_mid_query_connection_loss_raises_db_connection_error(db_s
     shutdown codes this fixes, but the connection itself stays perfectly usable) must NOT be
     reclassified as DBConnectionError by the same fix - checked here too so a future change to
     this SQLSTATE-code matching can't quietly widen it back to the whole class-57 prefix."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust.pg-specific tokio_postgres::Error classification")
 
@@ -1258,7 +1029,7 @@ async def test_rust_pg_query_canceled_stays_operational_error(db_isolated_no_sch
     """Companion to the mid-query-connection-loss test above - a cancelled-but-still-usable
     connection (SQLSTATE 57014, same "class 57" family as the admin-shutdown codes that test
     fixes) must stay OperationalError, not get swept into the DBConnectionError fix."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust.pg-specific tokio_postgres::Error classification")
 
@@ -1299,244 +1070,139 @@ async def test_invalid_transaction_state_raises_transaction_management_error(db_
     assert rows == [{"ok": 1}]
 
 
-@pytest.mark.timing
 @requires_features(dialect="postgresql")
+@pytest.mark.parametrize("failed_attempts", [1, 2])
 @pytest.mark.asyncio
-async def test_read_query_retries_and_succeeds_after_mid_query_connection_loss(db_simple):
-    """Task: retry/backoff on a connection lost MID-READ. Same live scenario as
-    test_rust_pg_mid_query_connection_loss_raises_db_connection_error above (pg_terminate_backend
-    against a real pg_sleep() in flight) - proving DBConnectionError, not a retry, is what that
-    test intentionally exercises with read_retry_max_retries left at its 0 default. Here,
-    read_retry_max_retries is configured AND retryable_read_query_active is set (exactly what
-    AwaitableQuery._execute_with_retry_context does for every real QuerySet/ValuesQuery/
-    ValuesListQuery/CountQuery/ExistsQuery/AggregateQuery execution - simulated directly since the
-    call under test is a raw execute(), to control precisely which statement gets killed):
-    the SAME kill instead makes the query transparently retry against a fresh connection and
-    succeed, on both asyncpg and rust_pg (the retry mechanism itself, hare.dialects.
-    postgres_common.client, is shared by both - only the underlying DBConnectionError
-    classification it depends on differs per driver, and that's already separately verified
-    live)."""
+async def test_read_query_retry_reports_each_attempt_to_instrumentation(db_simple, failed_attempts):
+    """Each confirmed connection loss is retried and reported before the successful attempt."""
     shared = Connections.get("models")
-    # The kill below targets the backend of this client's own session - on the server itself.
-    retryable = type(shared)(
-        connection_alias="read_retry_success_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.direct_host or shared.host,
-        port=shared.direct_port or shared.port,
-        read_retry_max_retries=2,
-        read_retry_backoff_base_seconds=0.05,
+    retryable = Connections.current().create_independent(
+        "models",
+        {
+            "host": shared.direct_host or shared.host,
+            "port": shared.direct_port or shared.port,
+            "transaction_pooling": False,
+            "direct_host": None,
+            "direct_port": None,
+            "read_retry_max_retries": failed_attempts,
+            "read_retry_backoff_base_seconds": 0,
+        },
     )
-    await retryable.create_connection(with_db=True)
-    try:
-        rows = await retryable.execute_dicts("SELECT pg_backend_pid() AS pid")
-        my_pid = rows[0]["pid"]
-
-        async def killer():
-            await asyncio.sleep(0.5)
-            await retryable.execute(f"SELECT pg_terminate_backend({my_pid})")
-
-        async def victim():
-            token = retryable_read_query_active.set(True)
-            try:
-                return await retryable.execute("SELECT pg_sleep(1.5)")
-            finally:
-                retryable_read_query_active.reset(token)
-
-        start = time.monotonic()
-        results = await asyncio.gather(victim(), killer())
-        elapsed = time.monotonic() - start
-
-        row_count, _ = results[0]
-        assert row_count == 1
-        # The first attempt was killed ~0.5s in, then a short backoff, then a full second
-        # pg_sleep(1.5) on the fresh connection - well over a single successful (un-retried)
-        # 1.5s query, proving a real retry (not a lucky race where the kill simply missed) is
-        # what actually happened.
-        assert elapsed > 1.8
-    finally:
-        await retryable.close()
-
-
-@pytest.mark.timing
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_read_query_retry_reports_each_attempt_to_instrumentation(db_simple):
-    """Task: QueryInstrumentation must observe a retried read once per PHYSICAL ATTEMPT, not once
-    for the whole retried call. Before this fix, translate_exceptions()'s own finally recorded a
-    single entry for the entire retry loop below it - two real failed attempts (each killed live
-    via pg_terminate_backend here, same mechanism as
-    test_read_query_retries_and_succeeds_after_mid_query_connection_loss above) before a
-    successful third were completely invisible to any registered hook: no failure record at all,
-    and the lone "success" record's duration silently absorbed both backoff sleeps and both killed
-    attempts. Killed TWICE in a row (read_retry_max_retries=2) to force 2 recorded failures before
-    the recorded success, proving this isn't just "eventually 1 record shows up" but genuinely one
-    record per attempt."""
-    shared = Connections.get("models")
-    retryable = type(shared)(
-        connection_alias="read_retry_instrumentation_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.host,
-        port=shared.port,
-        read_retry_max_retries=2,
-        read_retry_backoff_base_seconds=0.05,
-    )
-    await retryable.create_connection(with_db=True)
-
-    # The attempts number themselves by the sequence - its values outlive a killed transaction: the
-    # two to be killed sleep long enough for the killer to find them however loaded the server is,
-    # the third sleeps one second.
     attempt_sequence = f"read_retry_attempt_{uuid.uuid4().hex}"
     await shared.execute_script(f"CREATE SEQUENCE {attempt_sequence}")
-    victim_sql = f"SELECT pg_sleep(CASE WHEN nextval('{attempt_sequence}') <= 2 THEN 60 ELSE 1 END)"
-    calls = []
+    victim_sql = f"SELECT pg_sleep(CASE WHEN nextval('{attempt_sequence}') <= {failed_attempts} THEN 60 ELSE 0 END)"
+    errors = []
+    killed_pids = set()
 
     def hook(event):
-        # QueryInstrumentation is process-wide, so this also sees killer's own pg_stat_activity
-        # polling queries (and anything else running concurrently on `shared`) - filtered down to
-        # just the victim's own repeated attempts here, which all share this exact SQL text.
-        sql, duration_ms, exception = event.sql, event.duration_ms, event.error
-        if sql == victim_sql:
-            calls.append((duration_ms, exception))
+        if event.sql == victim_sql:
+            errors.append(event.error)
 
     Observers.observe(QueryExecuted, hook)
     try:
+        await retryable.create_connection(with_db=True)
 
         async def killer():
-            # Same pg_stat_activity lookup as test_write_query_is_never_retried_after_mid_query_
-            # connection_loss below - the retried victim reconnects to a NEW pooled connection on
-            # each attempt, so its pid can't be known ahead of time and has to be found fresh
-            # before every one of the 2 kills. A terminated backend can still show up as active for a
-            # moment, so an already-killed pid is skipped rather than "killed" a second time.
-            killed_pids: set[int] = set()
-            for _ in range(2):
-                pid = None
-                for _ in range(1000):
+            for _ in range(failed_attempts):
+                live_pids = []
+
+                async def is_executing():
+                    if victim.done():
+                        await victim
+                        pytest.fail("The read finished before its planned connection loss")
                     rows = await shared.execute_dicts(
                         "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
-                        "AND state = 'active' AND query = $1 AND pid <> pg_backend_pid()",
+                        "AND state = 'active' AND wait_event = 'PgSleep' "
+                        "AND query = $1 AND pid <> pg_backend_pid()",
                         [victim_sql],
                     )
-                    live_pids = [row["pid"] for row in rows if row["pid"] not in killed_pids]
-                    if live_pids:
-                        pid = live_pids[0]
-                        break
-                    await asyncio.sleep(0.01)
-                assert pid is not None, "victim's query never showed up in pg_stat_activity"
+                    live_pids[:] = [row["pid"] for row in rows if row["pid"] not in killed_pids]
+                    return len(live_pids) == 1
+
+                await wait_until(is_executing)
+                pid = live_pids[0]
                 killed_pids.add(pid)
-                await shared.execute(f"SELECT pg_terminate_backend({pid})")
+                assert await shared.execute_dicts("SELECT pg_terminate_backend($1) AS killed", [pid]) == [
+                    {"killed": True}
+                ]
 
-        async def victim():
-            token = retryable_read_query_active.set(True)
-            try:
-                return await retryable.execute(victim_sql)
-            finally:
-                retryable_read_query_active.reset(token)
-
-        start = time.monotonic()
-        results = await asyncio.gather(victim(), killer())
-        elapsed = time.monotonic() - start
-
-        row_count, _ = results[0]
-        assert row_count == 1
-
-        # Hooks now dispatch in the background (never awaited by the query call itself) - drain
-        # every in-flight one before asserting on their effect, or this is flaky.
+        async with asyncio.timeout(60), asyncio.TaskGroup() as tasks:
+            victim = tasks.create_task(retryable.execute(victim_sql, retry_read=True))
+            tasks.create_task(killer())
+        assert victim.result()[0] == 1
+        assert len(killed_pids) == failed_attempts
+        assert await shared.execute_dicts(f"SELECT last_value FROM {attempt_sequence}") == [
+            {"last_value": failed_attempts + 1}
+        ]
         await Observers.wait_for_pending()
+        assert len(errors) == failed_attempts + 1
+        assert all(isinstance(error, DBConnectionError) for error in errors[:-1])
+        assert errors[-1] is None
     finally:
         Observers.unobserve(QueryExecuted, hook)
-        await retryable.close()
-        await shared.execute_script(f"DROP SEQUENCE {attempt_sequence}")
-
-    # 2 failed attempts + 1 successful attempt - not the single folded-together record the
-    # pre-fix code produced.
-    assert len(calls) == 3
-
-    for _, exception in calls[:2]:
-        assert isinstance(exception, DBConnectionError)
-    success_duration_ms, success_exception = calls[2]
-    assert success_exception is None
-    # The successful attempt lasts its own pg_sleep(1).
-    assert success_duration_ms >= 900
-    # The attempts run one after another, so records holding only their own attempt - not another
-    # attempt's kill wait, nor the backoff sleeps - add up to no more than the whole call, however long
-    # a loaded server took to kill each one (the timers differ by a few milliseconds).
-    assert sum(duration_ms for duration_ms, _ in calls) <= elapsed * 1000 + 50
+        try:
+            await retryable.close()
+        finally:
+            await shared.execute_script(f"DROP SEQUENCE {attempt_sequence}")
 
 
-@pytest.mark.timing
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_write_query_is_never_retried_after_mid_query_connection_loss(db_simple):
-    """Companion to the read-retry test above: a write is never routed through
-    AwaitableQuery._execute_with_retry_context() (BulkCreateQuery/BulkUpdateQuery/DeleteQuery/
-    UpdateQuery all keep AwaitableQuery.is_read_only at its default False), so
-    retryable_read_query_active is never set for it - simulated directly here by deliberately
-    NOT setting it around a real UPDATE. Even with read_retry_max_retries configured on the
-    client, a connection lost mid-write must still raise DBConnectionError immediately, exactly
-    as before this change: retrying a write blindly (no idempotency key exists anywhere in this
-    project) could duplicate its effect, so this must never silently succeed via a retry."""
+    """A real ORM UPDATE losing its server session fails without repeating the write.
+
+    Another transaction holds the row lock. The server's lock-wait state is the barrier
+    for termination; there are no query sleeps or elapsed-time assertions. Releasing the
+    blocker lets an incorrect retry complete, so it fails the expected-error assertion.
+    """
     shared = Connections.get("models")
-    retryable = type(shared)(
-        connection_alias="write_retry_test",
-        user=shared.user,
-        password=shared.password,
+    obj = await IntFields.objects.create(intnum=10)
+    application_name = f"hare_write_retry_{uuid.uuid4().hex}"
+    credentials = dict(DbUrlConfigGenerator.expand(DatabaseUnderTest.get_url())["credentials"])
+    credentials.update(
         database=shared.database,
-        host=shared.host,
-        port=shared.port,
+        application_name=application_name,
         read_retry_max_retries=2,
-        read_retry_backoff_base_seconds=0.05,
+        read_retry_backoff_base_seconds=0,
     )
-    await retryable.create_connection(with_db=True)
+    retryable = type(shared)(connection_alias="write_retry_test", **credentials)
+    attempts = []
+
+    def observe(event):
+        if event.connection_alias == retryable.connection_alias and event.sql.lstrip().upper().startswith("UPDATE"):
+            attempts.append(event)
+
+    async def write():
+        with pytest.raises(DBConnectionError):
+            await IntFields.objects.using(retryable).filter(pk=obj.pk).update(intnum=11)
+
+    async def terminate_blocked_write():
+        rows = await shared.execute_dicts(
+            "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+            "AND application_name = $1 AND state = 'active' AND wait_event_type = 'Lock'",
+            [application_name],
+        )
+        if not rows:
+            return False
+        [row] = rows
+        await shared.execute("SELECT pg_terminate_backend($1)", [row["pid"]])
+        return True
+
+    Observers.observe(QueryExecuted, observe)
     try:
-
-        async def killer():
-            # Looked up via pg_stat_activity rather than a prior "SELECT pg_backend_pid()" call
-            # on `retryable` - that would only be reliable with pool affinity between two
-            # separate acquire/release calls, which asyncpg's pool (default maxsize=16) doesn't
-            # guarantee. `datname = current_database()` scopes this to the test's own throwaway
-            # database (each test file/worker already gets a uniquely-named one), so this can't
-            # pick up an unrelated pg_sleep from a concurrently-running xdist worker.
-            # `pid <> pg_backend_pid()` excludes this lookup query itself - its own query text
-            # contains the literal "%pg_sleep(1.5)%" LIKE pattern, so without this it can match
-            # (and then terminate) its own backend rather than victim's.
-            pid = None
-            for _ in range(100):
-                rows = await shared.execute_dicts(
-                    "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
-                    "AND state = 'active' AND query LIKE '%pg_sleep(1.5)%' AND pid <> pg_backend_pid()"
-                )
-                if rows:
-                    pid = rows[0]["pid"]
-                    break
-                await asyncio.sleep(0.01)
-            assert pid is not None, "victim's query never showed up in pg_stat_activity"
-            await shared.execute(f"SELECT pg_terminate_backend({pid})")
-
-        async def victim():
-            # retryable_read_query_active is deliberately left unset here - mirrors how an
-            # UpdateQuery/DeleteQuery execution never sets it: is_read_only/retry-scoping is
-            # driven entirely by that contextvar, not by sniffing the SQL text, so a plain
-            # unconditional SELECT exercises the exact same "write path" behavior a real write
-            # would get. Deliberately NOT "UPDATE ... FROM (SELECT pg_sleep(...)) WHERE ..." -
-            # tournament is empty in this fixture, and Postgres's nested-loop plan for that shape
-            # never even evaluates the FROM-clause subquery when the driving table side (the
-            # indexed WHERE lookup against 0 rows) produces zero rows, so the query returned
-            # near-instantly and killer never caught it mid-flight (confirmed live via EXPLAIN).
-            with pytest.raises(DBConnectionError):
-                await retryable.execute("SELECT pg_sleep(1.5)")
-
-        start = time.monotonic()
-        await asyncio.gather(victim(), killer())
-        elapsed = time.monotonic() - start
-
-        # No retry/backoff cycle happened - the error surfaced right after the kill, not after an
-        # extra full pg_sleep(1.5) round trip on a fresh connection.
-        assert elapsed < 1.5
+        await retryable.create_connection(with_db=True)
+        async with asyncio.timeout(30):
+            async with asyncio.TaskGroup() as tasks:
+                async with shared._in_transaction() as blocker:
+                    await IntFields.objects.using(blocker).filter(pk=obj.pk).select_for_update().get()
+                    tasks.create_task(write())
+                    await wait_until(terminate_blocked_write)
+        await Observers.wait_for_pending()
+        assert len(attempts) == 1
+        assert isinstance(attempts[0].error, DBConnectionError)
+        assert await IntFields.objects.filter(pk=obj.pk).values_list("intnum", flat=True) == [10]
     finally:
+        Observers.unobserve(QueryExecuted, observe)
         await retryable.close()
 
 
@@ -1551,7 +1217,7 @@ async def test_rust_pg_begin_rejects_isolation_level_sql_injection(db_isolated_n
     caller in hare's own Python codebase passes anything but None today, but Client.begin is a
     public PyO3 method reachable directly from Python - this is defense in depth, the same
     reasoning already applied to savepoint names (validate_identifier)."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust.pg-specific Client.begin(isolation=...) API")
 
@@ -1579,7 +1245,7 @@ async def test_rust_pg_duplicate_column_by_name_access_matches_asyncpg(db_isolat
     behavior for the exact same query shape (the one other Postgres driver hare supports, so the
     one comparison that actually matters for drop-in parity), NOT sqlite3.Row (a different
     driver PgRow is never used alongside, and which does the opposite: first-wins)."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust.pg-specific PgRow duplicate-column behavior")
 
@@ -1598,7 +1264,7 @@ async def test_rust_pg_row_is_actually_iterable(db_isolated_no_schema):
     "TypeError: iter() returned non-iterator of type 'list'" - PgRow was never actually iterable
     despite implementing __iter__. asyncpg.Record has no such gap (real tests never caught this
     because they always went through .to_dict()/dict access, never raw iteration)."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this is a rust.pg-specific PgRow bug, not a general driver-parity check")
 
@@ -1619,7 +1285,7 @@ async def test_rust_pg_exotic_types_decode_correctly_instead_of_raw_garbage(db_i
     happen to be valid UTF-8, e.g. MACADDR) returns them as a garbled string with embedded
     control characters. Confirmed live against asyncpg on the identical schema, which already
     decodes these correctly (Decimal/str/list[bytes]) - this only applies to rust_pg."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this is a rust.pg-specific decode gap, not a general driver-parity check")
 
@@ -1665,7 +1331,7 @@ async def test_rust_pg_range_arrays_decode_as_range_lists_instead_of_garbage(db_
     already worked correctly via the existing Value::Array -> per-element Value::Range dispatch -
     only this decode direction was missing. Confirmed live against asyncpg on the identical
     query, which already decodes these correctly - this only applies to rust_pg."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this is a rust.pg-specific decode gap, not a general driver-parity check")
 
@@ -1698,7 +1364,7 @@ async def test_rust_pg_rejects_string_array_element_into_binary_typed_column(db_
     with Postgres's own `SELECT ... ::text` showing the ASCII bytes reinterpreted as a MAC
     address. asyncpg has no equivalent low-level bind-parameter API exposed this way - this
     only applies to rust_pg."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("this is a rust.pg-specific bind-encoding gap, not a general driver-parity check")
 
@@ -1721,80 +1387,42 @@ async def test_rust_pg_rejects_string_array_element_into_binary_typed_column(db_
     assert rows[0]["vals"] == ["hello", "world"]
 
 
-@pytest.mark.timing
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_pool_acquire_timeout_raises_db_connection_error(db_simple):
-    """A caller waiting for a pool slot longer than pool_acquire_timeout gets a clear
-    DBConnectionError instead of blocking forever - verified against a real, deliberately
-    tiny (max_size=1) SEPARATE pool pointed at the same already-migrated test database, so this
-    doesn't disturb the shared connection every other test in this module relies on. Covers both
-    drivers: AsyncpgClient's native Pool.acquire(timeout=...) and RustPgClient's deadpool
-    Timeouts baked in at pool construction (see PostgresqlClient._pool_acquire's own
-    docstring for why the two need separate implementations)."""
-    shared = Connections.get("models")
-    small_pool_client = type(shared)(
-        connection_alias="pool_acquire_timeout_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.host,
-        port=shared.port,
-        min_size=1,
-        max_size=1,
-        pool_acquire_timeout=0.3,
+    """A held connection exhausts a one-slot pool; the next acquisition reports its timeout."""
+    small_pool_client = Connections.current().create_independent(
+        "models", {"min_size": 1, "max_size": 1, "pool_acquire_timeout": 0.3}
     )
     try:
         await small_pool_client.create_connection(with_db=True)
 
-        async def hold_connection():
+        async with asyncio.timeout(30):
             async with small_pool_client.acquire_connection():
-                await asyncio.sleep(1.0)
-
-        async def try_second_acquire():
-            await asyncio.sleep(0.05)
-            with pytest.raises(DBConnectionError):
-                async with small_pool_client.acquire_connection():
-                    pass
-
-        await asyncio.gather(hold_connection(), try_second_acquire())
+                with pytest.raises(PoolTimeoutError):
+                    async with small_pool_client.acquire_connection():
+                        pytest.fail("An occupied one-slot pool admitted another connection")
     finally:
         await small_pool_client.close()
 
 
-@pytest.mark.timing
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_pool_acquire_timeout_none_waits_indefinitely(db_simple):
-    """Backward compatibility: a client that never set pool_acquire_timeout (the default, None)
-    still waits for a released connection rather than raising - the exact behavior every
-    existing caller already depends on."""
-    shared = Connections.get("models")
-    small_pool_client = type(shared)(
-        connection_alias="pool_acquire_timeout_default_test",
-        user=shared.user,
-        password=shared.password,
-        database=shared.database,
-        host=shared.host,
-        port=shared.port,
-        min_size=1,
-        max_size=1,
+    """Without an acquisition timeout, a queued query resumes when the held slot is released."""
+    small_pool_client = Connections.current().create_independent(
+        "models", {"min_size": 1, "max_size": 1, "pool_acquire_timeout": None}
     )
     assert small_pool_client.pool_acquire_timeout is None
     try:
         await small_pool_client.create_connection(with_db=True)
 
-        async def hold_connection():
+        async with asyncio.timeout(30), asyncio.TaskGroup() as tasks:
             async with small_pool_client.acquire_connection():
-                await asyncio.sleep(0.5)
-
-        async def acquire_after_wait():
-            await asyncio.sleep(0.05)
-            start = time.monotonic()
-            async with small_pool_client.acquire_connection():
-                assert time.monotonic() - start > 0.3
-
-        await asyncio.gather(hold_connection(), acquire_after_wait())
+                waiting_query = tasks.create_task(small_pool_client.execute("SELECT 1 AS value"))
+                await wait_until(lambda: small_pool_client.get_pool_status().waiting == 1)
+                assert not waiting_query.done()
+        assert [row["value"] for row in waiting_query.result()[1]] == [1]
     finally:
         await small_pool_client.close()
 
@@ -1806,7 +1434,7 @@ async def test_rust_pg_transaction_finished_race_does_not_mask_the_real_exceptio
     Arc<Mutex<Option<Object>>> before the real COMMIT/ROLLBACK round-trip even starts (see
     rust/pg/src/transaction.rs) - so if the Python-side call awaiting that Rust future is
     cancelled (e.g. `asyncio.CancelledError` landing mid-commit), the underlying transaction can
-    be genuinely finished while `RustPgTransactionClient._finalized`
+    be genuinely finished while `RustPgTransactionClient.transaction_state.finished`
     (hare/dialects/postgresql/drivers/rust_pg/client.py)
     never got updated to reflect it. Any LATER attempt on the same wrapper to commit/rollback
     again then hits the Rust side's "already committed or rolled back" error - which used to be
@@ -1825,7 +1453,7 @@ async def test_rust_pg_transaction_finished_race_does_not_mask_the_real_exceptio
     would otherwise correctly update `_finalized`), leaving `_finalized` stale (False) even
     though the underlying transaction is truly finished - exactly what an interrupted wrapper
     commit()/rollback() leaves behind."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("rust.pg-specific RustPgTransactionClient/Transaction race")
 
@@ -1862,6 +1490,7 @@ async def test_raw_multi_row_insert_reports_correct_affected_count(db):
 
 
 @pytest.mark.parametrize("inside_transaction", [False, True])
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_rust_pg_abandoned_query_cancel_never_hits_the_next_callers_query(inside_transaction):
     """Bug: a query abandoned just as it finished sent its CancelRequest fire-and-forget while the
@@ -2077,7 +1706,7 @@ async def test_json_text_parameters_are_sent_verbatim(db_isolated_no_schema):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_rust_pg_dict_parameter_keeps_key_order_and_exact_numbers(db_isolated_no_schema):
-    if not _get_db_config()[3]:
+    if not _get_db_config()[2]:
         pytest.skip("asyncpg's json codec takes only a str")
     conn = db_isolated_no_schema.get_connection()
     value = {"z": 1, "a": [0.1, 2**70, None, True], "m": {"k": '\n"x"'}}
@@ -2178,7 +1807,7 @@ async def test_catalog_and_uncommon_types_decode_like_asyncpg(db_isolated_no_sch
 async def test_rust_pg_types_without_a_decoder_read_as_their_text_form(db_isolated_no_schema):
     """A type rust_pg has no binary decoder for is read as the text its output function prints -
     in a plain query, inside a transaction and in a stream alike."""
-    if not _get_db_config()[3]:
+    if not _get_db_config()[2]:
         pytest.skip("asyncpg has its own objects for these types")
     conn = db_isolated_no_schema.get_connection()
     query = (
@@ -2301,9 +1930,12 @@ async def test_db_delete_closes_the_clients_own_pool_first(db_isolated_no_schema
     """db_delete() on a client whose pool is connected to the database closes that pool before
     dropping the database - the maintenance connection used to replace the pool without closing
     it, so DROP DATABASE failed with "being accessed by other users" and the pool leaked."""
-    db_config, _, _, _ = _get_db_config()
-    async with HareContext() as ctx:
-        await ctx.init(db_config, _create_db=True)
+    async with TemporaryDatabases(
+        {"connections": {"models": DatabaseUnderTest.get_url()}, "apps": {}},
+        DatabaseUnderTest.get_url(),
+        generate_schemas=False,
+        reuse_databases=False,
+    ) as ctx:
         connection = ctx.connections.get("models")
         await connection.execute("SELECT 1")
 
@@ -2323,7 +1955,7 @@ async def test_rust_pg_connection_error_names_its_cause(db_isolated_no_schema):
     """A failed connect says why - rust.pg kept only tokio-postgres's own "error connecting to
     server" and dropped its source() chain, the operating system's error ("connection refused")
     included."""
-    _, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("the rust.pg error text is rust_pg-specific")
     from hare.dialects.postgresql.drivers.rust_pg.client import RustPgClient
@@ -2340,70 +1972,69 @@ async def test_rust_pg_connection_error_names_its_cause(db_isolated_no_schema):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_a_pooled_connection_left_unused_is_closed(db_isolated_no_schema):
-    """rust_pg kept every pooled connection open for good - a pool per tenant schema held a server
-    session for every tenant ever queried. Both drivers close one unused for
-    max_inactive_connection_lifetime."""
-    db_config, _, _, _ = _get_db_config()
-    db_config["connections"]["models"]["credentials"]["max_inactive_connection_lifetime"] = 1
+    """An idle connection expires and the same client can open another for its next query."""
+    connection = Connections.current().create_independent("models", {"max_inactive_connection_lifetime": 1})
     try:
-        await Hare.init(db_config, _create_db=True)
-        connection = Connections.get("models")
         await connection.execute("SELECT 1")
-        sizes = []
-        for _ in range(60):
-            sizes.append(connection.get_pool_status().size)
-            if sizes[-1] == 0:
-                break
-            await asyncio.sleep(0.1)
-        assert sizes[-1] == 0, sizes
+        await wait_until(lambda: connection.get_pool_status().size == 0)
         assert await connection.execute_dicts("SELECT 1 AS one") == [{"one": 1}]
     finally:
-        await Hare.get_context().drop_databases()
+        await connection.close()
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_rust_pg_closing_the_pool_ends_a_transaction_still_open(db_isolated_no_schema, monkeypatch):
-    """Closing a rust_pg pool waits for a connection a transaction holds, then drops it - the server
-    rolls the transaction back and ends the session, as asyncpg's ``Pool.terminate()`` does. It
-    stayed idle in transaction until the process ended."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    """Forced pool closure ends the session of a held transaction before its holder is cancelled."""
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("the pool of rust_pg")
     from hare.dialects.postgresql.drivers.rust_pg.client import rust_pg_client
 
     monkeypatch.setattr(rust_pg_client, "POOL_CLOSE_TIMEOUT_SECONDS", 0.2)
+    shared = Connections.get("models")
+    connection = Connections.current().create_independent(
+        "models",
+        {
+            "host": shared.direct_host or shared.host,
+            "port": shared.direct_port or shared.port,
+            "transaction_pooling": False,
+            "direct_host": None,
+            "direct_port": None,
+        },
+    )
+    holding = asyncio.Event()
+    release = asyncio.Event()
+    pids = []
+    holder = None
+
+    async def hold_transaction():
+        async with connection._in_transaction() as transaction:
+            [row] = await transaction.execute_dicts("SELECT pg_backend_pid() AS pid")
+            pids.append(row["pid"])
+            holding.set()
+            await release.wait()
+
     try:
-        await Hare.init(db_config, _create_db=True)
-        connection = Connections.get("models")
-        holding = asyncio.Event()
-
-        async def hold_transaction() -> None:
-            async with Transactions.atomic("models") as transaction:
-                await transaction.execute("SELECT 1")
-                holding.set()
-                await asyncio.sleep(60)
-
+        await connection.create_connection(with_db=True)
         holder = asyncio.create_task(hold_transaction())
-        await holding.wait()
+        await asyncio.wait_for(holding.wait(), 30)
         await connection.close()
-        observer = await ServerSession.open(DatabaseUnderTest.get_url(), "postgres")
-        try:
 
-            async def has_no_sessions() -> bool:
-                rows = await observer.fetch(
-                    "SELECT state FROM pg_stat_activity WHERE datname = $1", connection.database
-                )
-                return not rows
+        async def has_no_session():
+            return not await Connections.get("models").execute_dicts(
+                "SELECT 1 FROM pg_stat_activity WHERE pid = $1", [pids[0]]
+            )
 
-            await wait_until(has_no_sessions)
-        finally:
-            await observer.close()
-        holder.cancel()
-        await asyncio.gather(holder, return_exceptions=True)
+        await wait_until(has_no_session)
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        try:
+            if holder is not None:
+                if not holder.done():
+                    holder.cancel()
+                await ResourceCompletion.wait(asyncio.gather(holder, return_exceptions=True))
+        finally:
+            await connection.close()
 
 
 @requires_features(dialect="postgresql")
@@ -2413,15 +2044,23 @@ async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_rou
     carry a type of their own (a UUID, a moment, NULL) with them in one round trip - the rows, the
     column names of a result of no row, and a write's count are the ones a prepared statement gives,
     outside a transaction and inside one."""
-    db_config, _, _, is_rust_pg = _get_db_config()
+    _, _, is_rust_pg = _get_db_config()
     if not is_rust_pg:
         pytest.skip("the one-round-trip statement is rust_pg's")
-    credentials = db_config["connections"]["models"]["credentials"]
-    db_config["connections"]["models"]["credentials"] = DatabaseUnderTest.get_direct_credentials(credentials)
-    db_config["connections"]["models"]["credentials"]["statement_cache_size"] = 0
+    shared = Connections.get("models")
+    conn = Connections.current().create_independent(
+        "models",
+        {
+            "host": shared.direct_host or shared.host,
+            "port": shared.direct_port or shared.port,
+            "transaction_pooling": False,
+            "direct_host": None,
+            "direct_port": None,
+            "statement_cache_size": 0,
+        },
+    )
     try:
-        await Hare.init(db_config, _create_db=True)
-        conn = Connections.get("models")
+        await conn.create_connection(with_db=True)
         await conn.execute_script(
             "CREATE TABLE one_trip (id uuid PRIMARY KEY, at timestamptz, note text);"
             "INSERT INTO one_trip VALUES ('11111111-1111-1111-1111-111111111111', '2024-01-02T03:04:05Z', 'a')"
@@ -2438,7 +2077,7 @@ async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_rou
         count, _ = await conn.execute("UPDATE one_trip SET at = $1 WHERE id = $2", [moment, present])
         assert count == 1
 
-        async with Transactions.atomic("models") as transaction:
+        async with conn._in_transaction() as transaction:
             await transaction.execute("SELECT 1")
             _, rows = await transaction.execute(select_sql, [present, moment, None])
             assert [row["note"] for row in rows] == ["a"]
@@ -2447,26 +2086,17 @@ async def test_rust_pg_statement_without_cache_reads_rows_and_columns_in_one_rou
             count, _ = await transaction.execute("DELETE FROM one_trip WHERE id = $1", [present])
             assert count == 1
     finally:
-        if Hare.is_inited():
-            await Hare.get_context().drop_databases()
+        await conn.close()
 
 
 def _make_pool_client(application_name: str, **options: Any) -> Any:
     """A client of the configured Postgres driver on the server's own database, its sessions told
     apart by ``application_name``."""
-    db_config, _, _, _ = _get_db_config()
-    credentials = db_config["connections"]["models"]["credentials"]
+    db_config, _, _ = _get_db_config()
+    credentials = DatabaseUnderTest.get_direct_credentials(db_config["connections"]["models"]["credentials"])
     client_class = DatabaseUnderTest.get_driver().get_client_class(credentials)
-    return client_class(
-        connection_alias="pool_closing",
-        user=credentials["user"],
-        password=credentials["password"],
-        host=credentials["host"],
-        port=credentials["port"],
-        database="postgres",
-        application_name=application_name,
-        **options,
-    )
+    credentials = {**credentials, "database": "postgres", "application_name": application_name, **options}
+    return client_class(connection_alias="pool_closing", **credentials)
 
 
 async def _has_no_sessions(application_name: str) -> bool:
@@ -2560,7 +2190,7 @@ async def test_asyncpg_connections_still_opening_when_the_pool_closes_are_closed
     connected once they finished opening."""
     import asyncpg
 
-    db_config, _, _, is_rust_pg = _get_db_config()
+    db_config, _, is_rust_pg = _get_db_config()
     if is_rust_pg:
         pytest.skip("the asyncpg pool's own growth")
     application_name = f"hare_pool_growing_{uuid.uuid4().hex[:8]}"

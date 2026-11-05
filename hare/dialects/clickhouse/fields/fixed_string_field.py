@@ -22,8 +22,8 @@ TStr = TypeVar("TStr", str, str | None)
 
 class FixedStringField(Field[TStr]):
     """``FixedString(length)`` - a text of at most ``length`` bytes in UTF-8, stored padded with zero
-    bytes to ``length`` and read back without them; a text ending in a zero byte of its own is refused,
-    as it would be read back without it.
+    bytes to ``length`` and read back without padding. Text containing any zero byte is refused
+    so its contents cannot be confused with padding by a driver.
 
     Args:
         length: The bytes the column holds - from 1 to ``FIXED_STRING_MAX_LENGTH``.

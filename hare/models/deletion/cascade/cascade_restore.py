@@ -78,8 +78,8 @@ class CascadeRestore:
             return
         connection = cast("DatabaseClient", self.connection)
         for schema_name, tenant in await TenantSchemaVisits.get_other_schemas(connection):
-            async with TenantSchemaVisits.visit(connection, schema_name, tenant):
-                await CascadeRestore(connection, self.deleted_at, writes_tenant_rows_only=True).run(model, pks)
+            async with TenantSchemaVisits.visit(connection, schema_name, tenant) as scope:
+                await CascadeRestore(scope.connection, self.deleted_at, writes_tenant_rows_only=True).run(model, pks)
 
     async def _collect_children(
         self,
@@ -138,7 +138,9 @@ class CascadeRestore:
             pks, lookup_connection, len(model._meta.primary_key_attribute_names)
         ):
             queryset: QuerySet[Any] = RelatedRows.include_soft_deleted(
-                RelatedRows.get_base_queryset(model).filter(pk__in=batch).using(model_connection)
+                RelatedRows.get_base_queryset(model)
+                .filter(pk__in=batch, **{soft_delete_field: self.deleted_at})
+                .using(model_connection)
             )
             if model.restore is Model.restore:
                 await UpdateQuery(queryset, {soft_delete_field: None}, WriteType.SOFT_DELETE)

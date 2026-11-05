@@ -1,27 +1,24 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
 from typing import Any, ClassVar
 
 from hare.dialects.enums import ParameterPosition
-from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
-from hare.fields.field import Field
 from hare.gis.geometries.geometry import Geometry
-from hare.query.expressions.case.case_branch_value import CaseBranchValue
+from hare.query.expressions.bound_expression import BoundExpression
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.declarations import ExpressionChild
+from hare.query.expressions.structure.enums import ArgumentRole
 from hare.query.expressions.subqueries.exists import Exists
 from hare.query.expressions.value import Value
-from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.terms.case.when_then import WhenThen
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
-from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 
 class When(Expression):
@@ -30,7 +27,8 @@ class When(Expression):
     Args:
         args: The conditions - ``Q`` objects or ``Exists(...)``.
         kwargs: Conditions as ``filter()`` takes them.
-        then: The branch's value.
+        then: The branch's expression, SQL term or Python literal. Literal support follows
+            the value field and dialect, including custom field types.
         negate: Whether the branch holds when the conditions don't.
     """
 
@@ -45,7 +43,7 @@ class When(Expression):
     def __init__(
         self,
         *args: Q | Exists,
-        then: CaseBranchValue,
+        then: Any,
         negate: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -56,6 +54,19 @@ class When(Expression):
         self.kwargs = kwargs
         #: The conditions the branch matches on - made once, the same objects for its plan and its build.
         self.conditions = self._get_q_objects()
+
+    def get_expression_children(self) -> tuple[ExpressionChild, ...]:
+        """Separate lookup keys from the branch's literal or expression result."""
+        return (
+            ExpressionChild("args", self.args),
+            ExpressionChild("kwargs", self.kwargs, ArgumentRole.FILTERS),
+            ExpressionChild("then", self.then),
+        )
+
+    def rebuild_expression(self, children: tuple[ExpressionChild, ...]) -> When:
+        """Recompute conditions from transformed inputs, retaining negation."""
+        values = {child.argument: child.value for child in children}
+        return type(self)(*values["args"], then=values["then"], negate=self.negate, **values["kwargs"])
 
     def _get_q_objects(self) -> list[Q]:
         """The conditions this branch matches on - negated as one whole, like ``~Q(...)``.
@@ -82,82 +93,33 @@ class When(Expression):
             combined_condition &= q_object
         return [~combined_condition]
 
-    @staticmethod
-    def get_value_result(
-        owner: Any,
-        attribute: str,
-        value: Any,
-        encoder: Callable[[Any], Any] | None,
-        expression_context: ExpressionContext,
-        label: str,
-        types_literal: bool = True,
-    ) -> ExpressionResult:
-        """Resolves a CASE branch value - an expression, or a bare literal bound as a parameter.
-
-        Args:
-            owner: The ``When``/``Case`` holding the value.
-            attribute: The attribute holding it.
-            value: The ``then=``/``default=`` value.
-            encoder: Converts a literal into its bound form first, when given.
-            expression_context: The context being resolved.
-            label: Names the branch in an encrypted-field error.
-            types_literal: Whether a numeric literal is cast to its own SQL type where the database
-                would infer it from the other branches.
-
-        Returns:
-            The branch term, its joins and the field its value is decoded through. A numeric
-            literal is cast to its own SQL type - a database inferring it from the other branches
-            would truncate a fraction next to an integer column.
-        """
-        dialect = expression_context.dialect
-        result = ExpressionArguments.get_result(owner, attribute, value, expression_context, encoder=encoder)
-        output_field: Field[Any] | None = None
-        if isinstance(value, Expression):
-            output_field = value.get_value_field(result)
-            EncryptedFieldBase.raise_if_encrypted(output_field, label)
-        term = result.term
-        if isinstance(term, ValueWrapper) and types_literal:
-            # A Value(...) branch is typed as a bare literal is.
-            term = Value.get_typed_term(term, term.value, ParameterPosition.CASE_BRANCH, dialect)
-        return ExpressionResult(term=term, joins=list(result.joins), output_field=output_field)
-
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        return self.get_branch_result(
-            expression_context, Value.get_literal_encoder(self.then, expression_context.dialect)
+        """Build this branch's condition and value, including the joins each needs.
+
+        A standalone branch types literals by their own field and dialect. Case binds
+        its branches separately when a common result type must be chosen first.
+        """
+        condition_result = self.get_condition_result(expression_context)
+        value_binding = BoundExpression.prepare_argument(
+            self, "then", self.then, expression_context, label="a When(then=...) branch"
+        )
+        then_result = value_binding.lower(
+            expression_context,
+            encoder=Value.get_literal_encoder(self.then, expression_context.dialect),
+            position=ParameterPosition.CASE_BRANCH,
+        )
+        return ExpressionResult(
+            term=WhenThen(condition_result.term, then_result.term),
+            joins=ExpressionResult.dedup_joins(condition_result.joins, then_result.joins),
+            output_field=then_result.output_field,
         )
 
-    def get_branch_result(
-        self,
-        expression_context: ExpressionContext,
-        then_encoder: Callable[[Any], Any] | None,
-        types_literal: bool = True,
-    ) -> ExpressionResult:
-        """Resolves this branch's condition and value.
-
-        Args:
-            expression_context: The context being resolved.
-            then_encoder: Converts a literal ``then=`` into its bound form first, when given.
-            types_literal: Whether a literal ``then=`` is typed by its own type - not one the other
-                branches type (a wall clock beside a wall clock).
-
-        Returns:
-            The condition/value pair, the joins both need and the value's field.
-        """
-        q_objects = self.conditions
-
-        # A CASE condition may read a window function - it is evaluated in SELECT/ORDER BY.
+    def get_condition_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+        """Bind only the branch condition; its value can be typed before lowering separately."""
         condition_expression_context = dataclasses.replace(expression_context, window_function_filter_allowed=True)
         modifier = QueryModifier()
-        for node in q_objects:
+        for node in self.conditions:
             modifier &= node.get_result(condition_expression_context)
-
-        joins = list(modifier.joins)
-        then_result = self.get_value_result(
-            self, "then", self.then, then_encoder, expression_context, "a When(then=...) branch", types_literal
-        )
-        then = then_result.term
-        joins.extend(then_result.joins)
-        then_output_field = then_result.output_field
 
         # Both criteria: a condition on an aggregate annotation lands in having_criterion, and a
         # CASE WHEN has one condition.
@@ -165,4 +127,4 @@ class When(Expression):
         if not condition:
             # A When with no conditions is always true - 1=1, as SQL has no portable TRUE.
             condition = BasicCriterion.always_true()
-        return ExpressionResult(term=WhenThen(condition, then), joins=joins, output_field=then_output_field)
+        return ExpressionResult(term=condition, joins=list(modifier.joins))

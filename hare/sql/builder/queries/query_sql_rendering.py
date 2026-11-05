@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import builtins
 from typing import TYPE_CHECKING, cast
 
+from hare.sql.builder.queries.pagination_sql import PaginationSql
 from hare.sql.builder.returned_value import ReturnedValue
 from hare.sql.builder.tables.cte import Cte
 from hare.sql.builder.tables.selectable import Selectable
@@ -74,7 +74,7 @@ class QuerySqlRendering:
         if dialect_clauses:
             querystring += sql_context.dialect.clauses.get_limit_by_sql(builder, sql_context)
 
-        querystring += builder._limit_offset_sql(sql_context)
+        querystring += PaginationSql.get_sql(builder._limit, builder._offset, sql_context)
 
         if builder._for_update:
             querystring += sql_context.dialect.clauses.get_row_lock_sql(builder, sql_context)
@@ -169,7 +169,9 @@ class QuerySqlRendering:
         if builder._havings:
             clauses_sql += QuerySqlRendering.having_sql(builder, sql_context)
         if builder._orderbys:
-            clauses_sql += builder._orderby_sql(sql_context, selected_aliases, grouped_sql_by_term_id)
+            clauses_sql += QuerySqlRendering.orderby_sql(
+                builder, sql_context, selected_aliases, grouped_sql_by_term_id
+            )
         return clauses_sql
 
     @staticmethod
@@ -352,8 +354,7 @@ class QuerySqlRendering:
     def group_sql(
         builder: QueryBuilder,
         sql_context: SqlContext,
-        # builtins.set - QueryBuilder.set() shadows the builtin name in this class body.
-        selected_aliases: builtins.set[str | None] | None = None,
+        selected_aliases: set[str | None] | None = None,
         grouped_sql_by_term_id: dict[int, str] | None = None,
     ) -> str:
         """Renders the GROUP BY clause. A term selected under an alias is grouped by the alias when
@@ -364,7 +365,7 @@ class QuerySqlRendering:
             sql_context: The rendering state of the statement.
             selected_aliases: The selected aliases, when the caller already has them.
             grouped_sql_by_term_id: Receives each grouped term's SQL by term id, for
-                ``_orderby_sql()``.
+                ``orderby_sql()``.
         """
         clauses = []
         if selected_aliases is None:
@@ -405,3 +406,42 @@ class QuerySqlRendering:
             f"{field.get_sql(field_context)}={value.get_sql(value_context)}" for field, value in builder._updates
         )
         return f" SET {assignments_sql}"
+
+    @staticmethod
+    def orderby_sql(
+        builder: QueryBuilder,
+        sql_context: SqlContext,
+        selected_aliases: set[str | None] | None = None,
+        grouped_sql_by_term_id: dict[int, str] | None = None,
+    ) -> str:
+        """Renders the ORDER BY clause. A term selected under an alias is ordered by the alias when
+        ``orderby_alias`` is set.
+
+        Args:
+            builder: The query builder.
+            sql_context: The rendering state of the statement.
+            selected_aliases: The selected aliases, when the caller already has them.
+            grouped_sql_by_term_id: The SQL ``QuerySqlRendering.group_sql()`` rendered - an ORDER BY of the same term
+                reuses it, so both carry the same parameters; a database matches the two textually.
+        """
+        clauses = []
+        if selected_aliases is None:
+            selected_aliases = {select_term.alias for select_term in builder._selects}
+        # A Subquery/Exists term renders its own parentheses only in subquery context.
+        term_context = sql_context.copy(subquery=True, with_alias=False)
+        grouped_sql_by_term_id = (
+            grouped_sql_by_term_id if sql_context.effective_features.matches_ordering_to_grouping_by_sql else None
+        )
+        for field, directionality in builder._orderbys:
+            if sql_context.orderby_alias and field.alias and field.alias in selected_aliases:
+                term = sql_context.quote_alias(field.alias)
+            elif grouped_sql_by_term_id and field.alias is None and id(field) in grouped_sql_by_term_id:
+                term = grouped_sql_by_term_id[id(field)]
+            else:
+                term = field.get_sql(term_context)
+
+            clauses.append(
+                sql_context.dialect.renderers.get_ordering_clause_sql(field, term, directionality, sql_context)
+            )
+
+        return f" ORDER BY {','.join(clauses)}"

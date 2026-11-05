@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import abc
 import inspect
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
+from hare.classes.class_path import ClassPath
+from hare.fields.declaration_snapshot import DeclarationSnapshot
 from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.state import State
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
     from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
+    from hare.migrations.operations.operation_rewrite import OperationRewrite
 
 
 class Operation(abc.ABC):
@@ -19,20 +22,25 @@ class Operation(abc.ABC):
     reversible = True
     reduces_to_sql = True
     atomic: bool | None = False
-    #: Whether ``database_forward()`` reads the state before the operation - ``Migration.apply()``
-    #: copies it only then.
-    reads_old_state = True
-    #: Whether ``database_backward()`` reads the state the operation is undone from (``old_state``) -
-    #: ``Migration.unapply_in_place()`` copies the state only for an operation reading both sides.
-    backward_reads_state_left = True
-    #: Whether ``database_backward()`` reads the state the operation is undone to (``new_state``).
-    backward_reads_state_reached = True
     #: Whether an operation bound to no model runs in each tenant's schema instead of the shared one
     #: on a connection with ``tenant_schema_template`` - ``RunSQL``/``RunPython(tenant_schema=True)``.
     tenant_schema = False
     #: What an operation makemigrations made needs beside its own requirements - known when it was
     #: made, never written into the migration file.
     generation_dependencies: tuple[OperationDependency, ...] = ()
+
+    def snapshot(self) -> Operation:
+        """Copy this declaration for one preparation and execution.
+
+        Mutable declaration values are independent of the migration file's
+        objects. Functions and classes retain their normal Python identity;
+        defaults and data callbacks are not called. Both instance attributes and
+        inherited slots participate. Custom operations carrying
+        external handles may override this method to copy only declaration state.
+        """
+        memo: dict[int, Any] = {}
+        DeclarationSnapshot.prepare_memo({"state": object.__getstate__(self)}, memo)
+        return deepcopy(self, memo)
 
     def describe(self) -> str:
         return self.__class__.__name__
@@ -45,7 +53,7 @@ class Operation(abc.ABC):
         whose value isn't the argument's default - read from the attribute of the same name.
 
         Returns:
-            ``(path, args, kwargs)`` - the path names the class among the operations.
+            ``(path, args, kwargs)`` - the public operation path, or the custom class's import path.
         """
         kwargs: dict[str, Any] = {}
         specification = inspect.getfullargspec(type(self).__init__)
@@ -59,7 +67,15 @@ class Operation(abc.ABC):
             if name in defaults and value == defaults[name]:
                 continue
             kwargs[name] = value
-        return f"hare.migrations.operations.{type(self).__name__}", [], kwargs
+        from hare.migrations import operations
+
+        operation_class = type(self)
+        path = (
+            f"hare.migrations.operations.{operation_class.__name__}"
+            if getattr(operations, operation_class.__name__, None) is operation_class
+            else ClassPath.get(operation_class)
+        )
+        return path, [], kwargs
 
     def get_table_model_names(self) -> tuple[str, ...]:
         """The models of the migration's own app whose table this operation changes - none for
@@ -122,50 +138,29 @@ class Operation(abc.ABC):
         )
 
     def can_move_across(self, other: Operation, app_label: str) -> bool:
-        """Whether this operation and another can swap places - neither touches a model the other
-        does.
+        """Whether declarations permit reordering, before checking prepared dependencies.
 
-        Args:
-            other: The other operation.
-            app_label: The migrations' app.
-
-        Returns:
-            Whether both name the models they touch and share none, and neither needs what the other
-            does - an enum type a field's column is of.
+        Custom and data operations are barriers by default. Schema operations may
+        opt in for disjoint model scopes; the prepared graph must additionally
+        preserve requirements evaluated against each operation's actual state.
         """
-        model_labels = self.get_referenced_model_labels(app_label)
-        other_model_labels = other.get_referenced_model_labels(app_label)
-        if model_labels is None or other_model_labels is None or model_labels & other_model_labels:
-            return False
-        empty_state = State()
-        return not (
-            set(self.get_provided_dependencies(app_label))
-            & set(other.get_required_dependencies(app_label, empty_state))
-            or set(other.get_provided_dependencies(app_label))
-            & set(self.get_required_dependencies(app_label, empty_state))
-        )
+        return False
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
-        """What this operation and a later one become when their migrations are squashed.
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
+        """Propose a replacement pair; None leaves both declarations unchanged.
 
-        Args:
-            other: The later operation.
-            app_label: The migrations' app.
-
-        Returns:
-            The operations replacing both (empty when they cancel out); True when ``other`` may
-            move across this operation unchanged; False when neither. By default ``other`` moves
-            across when the two touch no common model.
+        A proposal does not grant permission to cross another operation or prove
+        equivalent state. Those checks belong to the prepared operation graph.
         """
-        return self.can_move_across(other, app_label)
+        return None
 
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect:
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
         """What the operation does to the database's data - known before it runs.
 
         Args:
             app_label: The migration's app.
             state: The state before the operation.
-            dialect: The dialect of the database it runs on.
+            schema_editor: The configured editor used to prepare schema plans without executing them.
 
         Returns:
             Whether it can be unapplied, rewrites a table or loses data - by default only

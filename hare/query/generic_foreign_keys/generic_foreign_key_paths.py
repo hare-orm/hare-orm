@@ -38,12 +38,7 @@ class GenericForeignKeyPaths:
             The relations before the field (``""`` for the model's own), the field and the parts
             after it; None when the path names none.
         """
-        declared_names = GenericForeignKeyFieldInstance.declared_names
-        if not declared_names:
-            return None
         segments = path.split("__")
-        if not declared_names.intersection(segments):
-            return None
         current_model = model
         for index, segment in enumerate(segments):
             meta = current_model._meta
@@ -152,8 +147,6 @@ class GenericForeignKeyPaths:
             FieldError: A path goes on past a generic foreign key, or a ``Prefetch`` with a queryset
                 names one - a queryset reads one model, the branches several.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return paths
         expanded_paths: list[Any] = []
         changed = False
         for path in paths:

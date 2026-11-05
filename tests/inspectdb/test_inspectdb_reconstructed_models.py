@@ -19,8 +19,13 @@ from hare.exceptions import ConfigurationError, IntegrityError
 from hare.fields.db_defaults import SqlDefault
 from hare.fields.relations.fields import ForeignKeyFieldInstance, OneToOneFieldInstance
 from hare.inspectdb import ModelFactory, SchemaInspector
+from hare.inspectdb.generation.inspected_model_builder import InspectedModelBuilder
 from hare.inspectdb.generation.model_naming import ModelNaming
+from hare.inspectdb.introspection.column_info import ColumnInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
+from hare.inspectdb.introspection.table_info import TableInfo
+from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.models.class_building.model_definition_checks import ModelDefinitionChecks
 from tests.utils.model_source_generator import ModelSourceGenerator
@@ -332,7 +337,7 @@ async def test_expression_index_is_reconstructed(db, connection, build_mode):
     expression_class = models["ix_expression"]
     [index] = expression_class._meta.indexes
     assert type(index) is Index
-    [expression] = index.expressions
+    [expression] = index.declared_expressions
     assert isinstance(expression, RawSQLTerm)
     # Postgres canonicalizes the term text ("lower((note)::text)").
     assert expression.sql.startswith("lower(") and "note" in expression.sql
@@ -355,7 +360,7 @@ async def test_sqlite_expression_index_with_sort_order_is_reconstructed_with_it(
         ],
     )
     table_info = await DatabaseCatalog.inspect_table(connection, "ix_expression_desc")
-    assert table_info.unparsed_indexes == []
+    assert table_info.get_diagnostics(CatalogDiagnosticCode.INDEX) == []
     source = await generated_source(connection, "ix_expression_desc")
     assert "OrderedIndexKey(RawSQLTerm('lower(note)'), Order.DESC_NULLS_FIRST)" in source
     assert "TODO" not in source
@@ -379,7 +384,7 @@ async def test_composite_foreign_key_is_reconstructed(db, connection, build_mode
         ],
     )
     table_info = await DatabaseCatalog.inspect_table(connection, "ix_line")
-    assert table_info.unparsed_foreign_keys == []
+    assert table_info.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY) == []
     [composite_fk] = table_info.composite_foreign_keys
     assert (composite_fk.field_name, composite_fk.columns) == ("part", ("part_a", "part_b"))
 
@@ -612,19 +617,60 @@ async def test_generated_names_never_shadow_the_modules_imports(db, connection):
     namespace: dict[str, Any] = {"__name__": "tests.generated_shadowing_module"}
     exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - test-only, own generated code
 
-    assert namespace["Model"] is Model
-    model_class = namespace["Model_"]
+    assert namespace["Model2"] is Model
+    model_class = namespace["Model"]
+    apps = StateApps()
+    for name in ("Model", "IxShadowDoc", "IxShadowUsr"):
+        apps.register_model("models", namespace[name])
+    apps.init_relations()
     assert model_class._meta.db_table == "model"
-    assert "fields.ForeignKeyField('models.Model_'" in source
+    assert "fields2.ForeignKeyField('models.Model'" in source
     doc_fields_map = namespace["IxShadowDoc"]._meta.fields_map
-    assert doc_fields_map["fields_field"].source_field == "fields"
+    assert "fields" in doc_fields_map
     assert "after" in doc_fields_map
     usr_fields_map = namespace["IxShadowUsr"]._meta.fields_map
-    assert usr_fields_map["OnDelete_field"].source_field == "OnDelete"
+    assert "OnDelete" in usr_fields_map
     assert usr_fields_map["m_fk"].on_delete == "NO ACTION"
     await connection.execute_script("DROP TABLE ix_shadow_usr")
     await connection.execute_script("DROP TABLE model")
     await connection.execute_script("DROP TABLE ix_shadow_doc")
+
+
+@pytest.mark.database_independent
+def test_module_allocates_import_aliases_without_rebuilding_declarations(monkeypatch):
+    tables = [
+        TableInfo(
+            name,
+            columns=[
+                ColumnInfo("id", "INTEGER", False, True, False),
+                ColumnInfo("fields", "TEXT", True, False, False),
+                ColumnInfo("OnDelete", "INTEGER", True, False, False),
+            ],
+        )
+        for name in ("model", "fields")
+    ]
+    built = []
+    original = InspectedModelBuilder.build
+
+    def build(builder):
+        built.append(builder.table.name)
+        return original(builder)
+
+    monkeypatch.setattr(InspectedModelBuilder, "build", build)
+    source = SchemaInspector.render_module(tables, "sqlite")
+    assert built == ["model", "fields"]
+    namespace = {"__name__": "tests.generated_import_aliases"}
+    exec(compile(source, "<generated>", "exec"), namespace)  # noqa: S102 - generated declaration roundtrip
+    apps = StateApps()
+    for name in ("Model", "Fields"):
+        apps.register_model("models", namespace[name])
+    apps.init_relations()
+    assert namespace["Model"]._meta.db_table == "model"
+    assert namespace["Fields"]._meta.db_table == "fields"
+    assert "fields" in namespace["Model"]._meta.fields_map
+    assert "OnDelete" in namespace["Fields"]._meta.fields_map
+    assert source == SchemaInspector.render_module(tables, "sqlite")
+    assert built == ["model", "fields", "model", "fields"]
 
 
 # ---------------------------------------------------------------------------------------------

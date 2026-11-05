@@ -1,7 +1,7 @@
 """aggregate() keeps a plan whatever builds it - prior annotations the metrics or filters read, a
-grouped derived table for an aggregate annotation or .distinct(), a .group_by(): the steps of the
-build that recorded values are kept with the plan, and a later query binds its own values in that
-order. Each test compares a plan hit with the same query built in full."""
+grouped derived table for an aggregate annotation or .distinct(), a .group_by(): each parameter occurrence
+points to its declared source, and a later query binds its values without replaying the construction of
+inner and outer queries. Each test compares a plan hit with the same query built in full."""
 
 import pytest
 
@@ -22,6 +22,15 @@ async def create_tournaments() -> list[Tournament]:
 
 
 SHAPES = [
+    (
+        "annotation parameter shared by inner and outer expressions",
+        lambda value: (
+            Tournament.objects.annotate(event_count=Count("events") + value)
+            .filter(event_count__gte=value)
+            .aggregate(total=Sum("event_count") + value)
+        ),
+        (2, 5),
+    ),
     (
         "metric over an annotation holding a literal",
         lambda value: Tournament.objects.annotate(scaled=F("id") * value).aggregate(total=Sum("scaled")),

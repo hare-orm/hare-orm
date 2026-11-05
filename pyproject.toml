@@ -34,6 +34,9 @@ dependencies = [
     # used by every DatetimeField conversion, not just tests) raises
     # ZoneInfoNotFoundError there without this - Linux/macOS get theirs from the OS itself.
     "tzdata (>=2023.3); sys_platform == 'win32'",
+    "sqlparse (>=0.6,<0.7)",
+    # Scope-aware declaration rewriting and generated class stubs.
+    "libcst (>=1.9,<2)",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -57,7 +60,6 @@ classifiers = [
 [project.optional-dependencies]
 ipython = [
     "ipython>=8.18.0",
-    "nest-asyncio>=1.6.0",
 ]
 # asyncpg 0.31.0 is the first with Python 3.14.
 asyncpg = [
@@ -65,7 +67,7 @@ asyncpg = [
     "asyncpg (>=0.31.0) ; python_version >= '3.14'",
 ]
 # hare.dialects.clickhouse - ClickHouse through clickhouse-connect's asyncio HTTP client.
-# clickhouse-connect 1.10 is the first with the library functions hare reads a whole response through.
+# The per-client Transform adapter is checked against the 1.10 Native codec boundary.
 clickhouse-connect = ["clickhouse-connect[async] (>=1.10.0) ; python_version < '3.15'"]
 # hare.dialects.clickhouse - ClickHouse through clickhouse-driver, over the native TCP protocol;
 # lz4 and clickhouse-cityhash compress its blocks (the connection setting `compress`). clickhouse-driver
@@ -78,6 +80,8 @@ clickhouse-driver = [
     "lz4 (>=4.4.5) ; python_version >= '3.14'",
     "clickhouse-cityhash (>=1.0.2.5) ; python_version < '3.15'",
 ]
+# Direct Keeper sessions for migration locks and database node cleanup.
+clickhouse-keeper = ["kazoo (>=2.11.0,<3)"]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 tzlocal = ["tzlocal>=5.0"]
 # HareConfig.from_config_file() reading a .yml/.yaml file.
@@ -178,6 +182,7 @@ include = [
 ]
 
 [tool.poetry.group.dev.dependencies]
+findpython = "0.9.0"
 mypy = "*"
 bandit = "*"
 codespell = "*"
@@ -191,6 +196,7 @@ pre-commit = "^4.6.2"
 # The groups hold tools only: a package of an extra is installed by the extra, so a test environment
 # (tests/matrix/constants.py SUITE_ENVIRONMENTS) installs exactly what its tests require.
 [tool.poetry.group.test.dependencies]
+packaging = "*"
 pytest = "*"
 pytest-xdist = "*"
 pytest-asyncio = "*"
@@ -202,6 +208,8 @@ pytest-timeout = "*"
 pytest-randomly = "^5.0.0"
 pytest-repeat = "^0.9.4"
 pytest-cov = "^7.1.0"
+pygments = "*"
+pywin32 = {version = "312", markers = "sys_platform == 'win32'"}
 
 # The tests of `hare stubs` type-check queries through the stubs with it (the "stubs" environment).
 [tool.poetry.group.pyright-cli]
@@ -218,6 +226,7 @@ optional = true
 pytz = ">=2025.2"
 
 [tool.poetry.group.docs.dependencies]
+pygments = "*"
 mkdocs = "*"
 mkdocs-material = "*"
 mkdocs-static-i18n = "*"
@@ -231,6 +240,8 @@ ignore_missing_imports = true
 check_untyped_defs = true
 disallow_subclassing_any = true
 disallow_untyped_calls = true
+# sqlparse marks its package typed, but its lexer API has no annotations.
+untyped_calls_exclude = ["sqlparse.lexer"]
 disallow_any_generics = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

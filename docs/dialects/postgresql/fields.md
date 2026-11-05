@@ -1,17 +1,15 @@
 # PostgreSQL: fields
 
-Everything on this page lives in `hare.dialects.postgresql`, the PostgreSQL dialect's own package, and
-only works against a PostgreSQL connection. Declaring any of these field types on a model backed by a
-different dialect (SQLite, ClickHouse) raises `UnSupportedError` when its DDL is generated, rather than
-silently generating DDL that doesn't make sense for that database. Every field of the page but
-`ArrayField` is imported from `hare.dialects.postgresql.fields`; `ArrayField` is
-`hare.fields.ArrayField`, which runs on ClickHouse too — see
-[ClickHouse types](../clickhouse/types.md#containers):
+PostgreSQL-specific fields are imported from `hare.dialects.postgresql.fields`. Declaring one on
+another dialect raises `UnSupportedError` when its DDL is generated. This page also describes shared
+fields: `hare.fields.ArrayField` works on ClickHouse too — see
+[ClickHouse types](../clickhouse/types.md#containers) — and `hare.gis.PointField` supports PostgreSQL,
+SQLite and ClickHouse with the capabilities described in [GIS](../search-and-geodata/gis.md).
 
 ```python
 from hare.dialects.postgresql.fields import (
     CitextField, FixedCharField, HStoreField, InetField, IntervalField, IntRangeField, LtreeField,
-    NaiveDatetimeField, NaiveTimeField, NativeEnumField, PostGISField, Range, TSVectorField,
+    NaiveDatetimeField, NaiveTimeField, NativeEnumField, Range, TSVectorField,
     # ... every field of this page
 )
 from hare.fields import ArrayField
@@ -212,9 +210,11 @@ await Loan.objects.filter(status__in=[LoanStatus.LENT, "overdue"]).order_by("sta
 - **Changing the members.** New members added while the old ones keep their order become new labels in
   place (`ALTER TYPE ... ADD VALUE`) — a value added this way can't be used in the transaction that adds
   it, so write such rows in a later migration. A removed or reordered member replaces the type: the
-  columns of it (array columns too) and their defaults are converted to the new type in one statement, so
+  columns of it (array columns too) and their defaults are converted to the new type in one transaction, so
   no row may still hold a removed label — update those rows first: a migration finding one raises
   `FieldNarrowingDataLossError` naming the table and the column before it changes anything.
+  Default expressions are captured before renaming the type and restored unchanged. See
+  [enum migration operations](../../migrations/operations.md) for locks and dependency restrictions.
 - **Filters** take the generic set — equality, `__in`, `__isnull` and the comparisons, in the enum's
   order. A label outside the enum raises `ValidationError` before the query runs.
 - PostgreSQL only (`features.supports_enum_types`); on another database the field raises
@@ -312,30 +312,42 @@ await Edition.objects.filter(attributes__keys__overlap=["format", "weight"])
 
 ## <a id="tsvectorfield"></a>`TSVectorField`
 
-```python
-class TSVectorField:
-    def __init__(
-        self,
-        source_fields: Sequence[str] | str | None = None,
-        config: str | None = None,
-        weights: Sequence[str] | None = None,
-        stored: bool = True,
-        **kwargs: Any,
-    ) -> None: ...
-```
-When `stored=True` and `source_fields` are given, generates as `GENERATED ALWAYS AS (...) STORED` — kept
-in sync by PostgreSQL itself, no application code needed:
+`TSVectorField()` is an ordinary writable vector column. Supply either `expression` or the
+short `source_fields` form to declare generation by PostgreSQL.
 
 ```python
+from hare.search import SearchQuery, SearchVector
+
 class Book(Model):
     title = fields.CharField(max_length=300)
     description = fields.TextField()
-    search_vector = TSVectorField(source_fields=("title", "description"), config="english")
+    search_vector = TSVectorField(
+        expression=SearchVector("title", weight="A") + SearchVector("description", weight="B"),
+        config="english",
+    )
 ```
 
-A migration changing the type of a source field's column drops the vector's column before the change and
-adds it after — PostgreSQL refuses to change a column a generated column reads; the vectors are computed
-again.
+The field's `config` supplies the default for nested `SearchVector` expressions and string
+`__search` values. An explicit `SearchVector.config` overrides only that vector; an explicit
+`SearchQuery.config` controls its query. The input expression is never modified.
+
+For example, `SearchVector("title", config="russian") + SearchVector("description", config="english")`
+may be used without a common field `config`. Every generated vector still needs an explicit
+configuration. Searching that field requires a configured query, such as
+`SearchQuery("book", config="english") | SearchQuery("книга", config="russian")`.
+hare does not infer a query language or add an OR automatically. An unconfigured string search
+on this computed form raises `QueryError`; ordinary columns retain their existing behavior.
+
+The short form remains available:
+`TSVectorField(source_fields=("title", "description"), config="english", weights=("A", "B"))`.
+It and `expression` use the same generated-column mechanism. Do not combine `expression`
+with `source_fields` or `weights`. `stored=True` is the default for generation;
+`stored=False` in the short form leaves a writable column, while an expression requesting
+virtual generation requires the dialect's virtual-column capability.
+
+Generation dependencies and field renames follow the expression. A migration changing a source
+column's type drops its generated dependents before the change and adds them afterward, letting
+PostgreSQL recompute the vectors.
 
 ## <a id="ltreefield"></a>`LtreeField`
 
@@ -402,37 +414,11 @@ await Category.objects.annotate(section=Subpath("path", 1, 1)).values_list("sect
 
 PostgreSQL only: on another database the field raises `UnSupportedError`.
 
-## <a id="postgisfield"></a>`PostGISField`
+## <a id="spatial-fields"></a>Spatial fields
 
-```python
-class PostGISField:
-    def __init__(self, **kwargs: Any) -> None: ...
-```
-Stores a `geography(Point,4326)` — WGS84 latitude/longitude with accurate geodesy computed by the
-database. Requires the `postgis` extension; the migration autodetector adds a
-`CreateExtension("postgis")` for it wherever this field is used. The Python value is a
-**`(latitude, longitude)`** tuple. For other geometry types, SRIDs, planar columns and the spatial
-lookups and functions, see [Geographic data (GIS)](../search-and-geodata/gis.md).
-
-```python
-class Store(Model):
-    location = PostGISField()
-
-    class Meta:
-        indexes = (GistIndex(fields=("location",)),)
-```
-
-Comes with a `within_km` lookup out of the box:
-
-```python
-await Store.objects.filter(location__within_km=(55.75, 37.62, 10))  # within 10 km of a point
-```
-
-The radius is a finite number of zero or more (`int`, `float` or `Decimal`); a point is checked as a written
-value is. Anything else raises `ValidationError` before the query is sent.
-
-For distance-based ordering/filtering beyond a simple radius, annotate with `STDistance`/`STDWithin` (see
-[PostgreSQL functions](functions.md)).
+`PointField(geography=True, srid=4326)` from `hare.gis` stores `geography(Point,4326)`.
+Its value is `Point(longitude, latitude)`; geography distances are in metres.
+See [GIS](../search-and-geodata/gis.md) for fields, `__dwithin`, `Distance` and `DWithin`.
 
 ## <a id="range-fields"></a>Range fields
 

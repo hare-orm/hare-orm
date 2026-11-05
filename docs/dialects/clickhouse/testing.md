@@ -8,15 +8,16 @@ The tests of one server:
 
 ```bash
 make test_clickhouse_up      # ClickHouse 25.8 - HTTP on port 8124, the native protocol on 9124
-make test_clickhouse         # tests/dialects/clickhouse over both drivers
+make test_clickhouse         # dialect tests, contracts and selected field tests over both drivers
 ```
 
 The server is its own ClickHouse Keeper — port 9182 on the host — with `allow_experimental_transactions`
 on (`tests/docker/clickhouse`): the tests connect with `keeper_hosts=127.0.0.1:9182`, so a test database's
 key series are deleted with it, the transaction tests with `transactions=true` too, and the generated keys
 come from its series.
-`make test_clickhouse` runs `tests/dialects/clickhouse/`, whose models are its own — the shared test
-models of the rest of the suite need the unique and foreign key constraints ClickHouse doesn't keep.
+`make test_clickhouse` runs `tests/dialects/clickhouse/`, `tests/contracts/` and the ordered-value,
+IP-address text-lookup and zone tests from `tests/fields/value_types/`. These use suitable models;
+the shared models of the rest of the suite need unique and foreign-key constraints ClickHouse doesn't keep.
 
 ## <a id="cluster"></a>A cluster
 

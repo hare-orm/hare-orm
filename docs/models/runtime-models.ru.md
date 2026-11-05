@@ -53,15 +53,23 @@ class Hare:
 [`Meta.managed`](meta-options.ru.md#managed) *до* настройки связей; `None` (по умолчанию) оставляет
 собственный `Meta.managed` модели.
 
+Регистрация подготавливает независимый граф метаданных моделей и полей. При ошибке восстанавливаются
+прежний реестр, свойства отношений и атрибуты, скрывающие унаследованные отношения. Сохранённые ссылки
+на прежние метаданные остаются неизменными и после успешной регистрации. Подготовка синхронна, включая
+пользовательские hooks связывания; их побочные действия над внешними объектами в эту гарантию не входят.
+Имена автоматических промежуточных таблиц проверяются внутри подключения и схемы по правилам
+сравнения идентификаторов диалекта.
+
 ## <a id="unregistering"></a>Снятие с регистрации: `unregister_live_models()`
 
 ```python
 class Hare:
     @classmethod
-    def unregister_live_models(cls, models: Iterable[type[Model] | str]) -> None: ...
+    def unregister_live_models(cls, models: Iterable[ModelReference]) -> None: ...
 ```
 
-Модель задаётся классом или меткой `"app.Model"` (`Hare.unregister_live_models(["content.Notice"])`).
+`ModelReference` — класс модели, метка `"app.Model"` или ссылка `swappable()`
+(`Hare.unregister_live_models(["content.Notice"])`).
 Отменяет регистрацию: модель уходит из реестра, обратные связи (обратные ссылки внешних ключей и
 «один-к-одному», созданные поля «многие-ко-многим»), которые она добавила моделям, на которые указывают
 её связи, удаляются, и все кэши, построенные для неё или для этих моделей, сбрасываются. Колонки её
@@ -80,12 +88,12 @@ class Hare:
 class DatabaseCatalog:
     @staticmethod
     async def inspect_table(
-        connection: DatabaseClient, table: str, schema: str | None = None, *, verify_exists: bool = True
+        connection: DatabaseClient, table: str, schema: str | None = None
     ) -> TableInfo: ...
 
     @staticmethod
     async def inspect_tables(
-        connection: DatabaseClient, tables: list[str], schema: str | None = None, *, verify_exists: bool = True
+        connection: DatabaseClient, tables: list[str], schema: str | None = None
     ) -> list[TableInfo]: ...
 ```
 
@@ -93,8 +101,8 @@ class DatabaseCatalog:
 одному `TableInfo` на каждое имя в том же порядке — в PostgreSQL за постоянное число запросов к
 системному каталогу, сколько бы таблиц ни было. `schema` при `None` — схема подключения по умолчанию;
 база без схем её не учитывает. Несуществующая таблица даёт `TableNotFoundError`, а диалект без чтения
-схемы — `UnsupportedDialectError`. `verify_exists=False` пропускает запрос списка таблиц — для
-вызывающего, который только что сам сверил имена с таким списком.
+схемы — `UnsupportedDialectError`. Читатель каталога проверяет запрошенные таблицы напрямую,
+без предварительного запроса списка таблиц. Отсутствующая схема даёт `SchemaNotFoundError`.
 
 ## <a id="building-a-model-from-an-introspected-table"></a>Модель по прочитанной схеме таблицы
 
@@ -119,13 +127,15 @@ class ModelFactory:
 
 - `app_label` — метка, которой уточняются цели внешних ключей, в том числе составных
   (`"<app_label>.<TargetClass>"`); обычно та же метка, под которой вы регистрируете модель. Модели
-  целевых таблиц должны быть зарегистрированы раньше.
+  целевых таблиц должны быть зарегистрированы раньше или в том же вызове `register_live_models()`.
 - `foreign_key_target_overrides` — `{target_table: "app.Model"}`, полностью заменяет ссылку для этой
   таблицы; нужно, чтобы направить внешний ключ на уже зарегистрированную модель, имя класса которой не
   следует правилам именования `inspectdb`.
 - `skip_many_to_many_through_tables` — таблица только из колонок внешних ключей похожа на промежуточную
   таблицу `ManyToManyField`; по умолчанию она отклоняется с `ManyToManyThroughTableSkippedError` (там,
-  где генератор кода вставил бы комментарий `# NOTE`). `False` строит для неё обычную модель.
+  где генератор кода одной таблицы вставил бы комментарий `# NOTE`). `False` строит для неё обычную модель.
+  Эта проверка использует только форму таблицы; генератор модуля дополнительно проверяет связанные
+  таблицы перед восстановлением связей многие-ко-многим.
 
 Таблица без первичного ключа становится моделью с `Meta.primary_key = None` (см.
 [Модели без первичного ключа](meta-options.ru.md#primary_key)).

@@ -7,6 +7,7 @@ from hare.query.plans.statement.statement_plan import StatementPlan
 
 if TYPE_CHECKING:
     from hare.models import Model
+    from hare.models.write.declarations import InstanceWriteTemplates
     from hare.query.plans.statement.raw_sql_plan import RawSQLPlan
     from hare.query.rows.model_rows.model_columns import ModelColumns
     from hare.query.rows.native.hydration_layout import HydrationEntry
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 
 class StatementPlans:
     """The one owner of what hare keeps to run queries again: the plan of every plan key, the row
-    decode plans, the compiled row readers and the accelerator's read and write plans. A change to a
+    decode plans and prepared write statements. A change to a
     model or to the registries drops what was kept for it, as from every registered cache (``Caches``).
     The stores are bounded per model - the least recently used entries go first - and a collected
     model class takes its entries with it.
@@ -22,24 +23,12 @@ class StatementPlans:
 
     #: Plan key -> the plan kept under it.
     plans: ClassVar[Cache[StatementPlan]] = Cache(Cache.max_size_from_env())
-    #: (model, dialect, connection alias, selected columns, joined buckets) -> the positional row
+    #: (model, dialect, connection alias, native types, selected columns, joined buckets) -> the positional row
     #: decode plan of a model query selecting those columns, None where rows are read by name.
     decode_plans: ClassVar[Cache[tuple[HydrationEntry, ...] | None]] = Cache(Cache.max_size_from_env())
     #: (model, connection alias, dialect, builder class, schema, table) -> the statements and
     #: column lists ``InstanceWriter`` writes one instance of the model with.
-    instance_writes: ClassVar[Cache[tuple[Any, ...]]] = Cache(Cache.max_size_from_env())
-    #: (model, columns, column keys, is partial, is related) -> the compiled function building
-    #: an instance of the model from a row.
-    hydrate_functions: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
-    #: (model, hydration entries, is partial, type registry, zone name) -> the
-    #: ``rust.native.rows.ModelReader`` reading those columns of the model.
-    model_readers: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
-    #: (model, columns, type registry, zone name) -> the ``rust.native.rows.ModelWriter``
-    #: writing those columns of the model.
-    model_writers: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
-    #: (model, value fields, type registry, native types, zone name) -> the
-    #: ``rust.native.rows.ValuesReader`` reading those columns of a values query of the model.
-    values_readers: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
+    instance_writes: ClassVar[Cache[InstanceWriteTemplates]] = Cache(Cache.max_size_from_env())
     #: (model, placeholders, first parameter index, row count) -> the ``VALUES`` rows SQL of a bulk
     #: write of the model.
     values_rows_sql: ClassVar[Cache[str]] = Cache(Cache.max_size_from_env())
@@ -47,14 +36,6 @@ class StatementPlans:
     #: returning) -> the single-row INSERT template of a bulk create of the model and the values
     #: of the parameters following the row's; ``None`` columns for its ``DEFAULT VALUES`` INSERT.
     insert_templates: ClassVar[Cache[tuple[str, list[Any]]]] = Cache(Cache.max_size_from_env())
-    #: (field's model, field, type registry) -> the native writer of a list of the field's filter
-    #: values and the value type it converts (``HydrateAccelerator.get_lookup_list_writer()``),
-    #: False for a field without one.
-    lookup_list_writers: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
-    #: (field's model, field, type registry) -> the native writer of one filter value of the field
-    #: and the value type it converts (``HydrateAccelerator.get_lookup_writer()``), False for a
-    #: field without one.
-    lookup_writers: ClassVar[Cache[Any]] = Cache(Cache.max_size_from_env())
     #: (model, "calls", query class, ...) -> the plan of ``plans`` a query of a queryset made by
     #: simple calls alone runs on (``CallSignaturePlans``), with the position of the call value each
     #: of its values is (None in the plan's own order) - found in one lookup, without hashing the
@@ -79,48 +60,37 @@ class StatementPlans:
     #: (model, connection alias, dialect, column names) -> the columns of a ``.raw()`` query's
     #: rows that are no field of the model - each an attribute of the instances read.
     raw_sql_annotation_names: ClassVar[Cache[list[str]]] = Cache(Cache.max_size_from_env(), holds_sql=False)
-    #: (model, connection alias, dialect, result column names, annotations, read by position,
-    #: select_related buckets) -> the columns of each model the rows of a result hold
+    #: (model, connection alias, dialect, native types, result column names, annotations, read by position,
+    #: select_related buckets, compiler decode-plan key, partial selection) -> the columns of each model
+    #: the rows of a result hold
     #: (``ModelRows.get_columns()``).
     row_columns: ClassVar[Cache[list[ModelColumns]]] = Cache(Cache.max_size_from_env(), holds_sql=False)
     #: How many queries ran on a found plan - for tests.
     hits: ClassVar[int] = 0
 
     @classmethod
-    def find(cls, key: tuple[Any, ...]) -> StatementPlan | None:
+    def find(cls, model: type[Model], key: tuple[Any, ...]) -> StatementPlan | None:
         """The plan kept under a key.
 
         Args:
+            model: The lifetime holder of the plan.
             key: The plan key.
 
         Returns:
             The plan, or None when the key has none yet.
         """
-        return cls.plans.get(key)
+        return cls.plans.get_model_bucket(model).get(key)
 
     @classmethod
-    def find_for_model(cls, model: type[Model], key: tuple[Any, ...]) -> StatementPlan | None:
-        """The plan kept under a key that starts with its model - found in the model's own plans,
-        with nothing to locate in the key.
-
-        Args:
-            model: The model the key starts with.
-            key: The rest of the key.
-
-        Returns:
-            The plan, or None when the key has none yet.
-        """
-        return cls.plans.get_for_model(model, key)
-
-    @classmethod
-    def record(cls, key: tuple[Any, ...], plan: StatementPlan) -> None:
+    def record(cls, model: type[Model], key: tuple[Any, ...], plan: StatementPlan) -> None:
         """Keeps the plan a query was built into under its key.
 
         Args:
+            model: The lifetime holder of the plan.
             key: The plan key.
             plan: The plan.
         """
-        cls.plans[key] = plan
+        cls.plans.get_model_bucket(model)[key] = plan
 
     @classmethod
     def count_hit(cls) -> None:

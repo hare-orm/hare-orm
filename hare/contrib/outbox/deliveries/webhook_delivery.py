@@ -14,6 +14,7 @@ from hare.contrib.outbox.deliveries.constants import (
     WEBHOOK_SIGNATURE_PREFIX,
     WEBHOOK_URL_REFUSED_ERROR,
 )
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.deliveries.webhook_target import WebhookTarget
 from hare.contrib.outbox.exceptions import DeliveryError
@@ -47,7 +48,8 @@ class WebhookDelivery(OutboxDelivery):
             request: an event of a refused URL is not sent and fails.
         signature_header: The header carrying the signature - ``WEBHOOK_SIGNATURE_HEADER``
             (``hare-outbox-signature``) by default, another name for receivers expecting their own.
-        result_field: A field of the outbox model each attempt's result is written to -
+        result_field: An application field of the outbox model. Returned metadata asks the store
+            to write the attempt result while the claim token matches -
             ``{"status_code", "body", "error"}``, the body and the error cut to
             ``WEBHOOK_RESULT_BODY_MAX_LENGTH`` characters; None writes none.
 
@@ -143,28 +145,24 @@ class WebhookDelivery(OutboxDelivery):
             allowed = await allowed
         return bool(allowed)
 
-    async def write_result(
-        self, event: OutboxEvent, status_code: int | None, body: str | None, error: str | None
-    ) -> None:
-        """Writes an attempt's result to ``result_field`` of the event's row.
-
-        Args:
-            event: The event.
-            status_code: The response's status, None without a response.
-            body: The response's body, None without a response.
-            error: Why the attempt failed before a response, None with one.
-        """
-        if self.result_field is None:
-            return
-        result = {
-            "status_code": status_code,
-            "body": WebhookDelivery.get_result_text(body),
-            "error": WebhookDelivery.get_result_text(error),
-        }
-        model = type(event)
-        # The relay serves every tenant's events - its writes are of the whole table.
-        queryset = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
-        await queryset.filter(pk=event.pk).update(**{self.result_field: result})
+    def get_result(
+        self,
+        event: OutboxEvent,
+        *,
+        status_code: int | None = None,
+        body: str | None = None,
+        error_text: str | None = None,
+        error: BaseException | None = None,
+    ) -> DeliveryResult:
+        """Returns attempt metadata without database IO; the store checks the claim token."""
+        metadata = {}
+        if self.result_field is not None:
+            metadata[self.result_field] = {
+                "status_code": status_code,
+                "body": self.get_result_text(body),
+                "error": self.get_result_text(error_text),
+            }
+        return DeliveryResult(event.id, error, metadata)
 
     @staticmethod
     def get_result_text(text: str | None) -> str | None:
@@ -182,11 +180,14 @@ class WebhookDelivery(OutboxDelivery):
             return None
         return text[:WEBHOOK_RESULT_BODY_MAX_LENGTH].replace("\x00", WEBHOOK_RESULT_NUL_REPLACEMENT)
 
-    async def deliver(self, event: OutboxEvent) -> None:
+    async def deliver(self, event: OutboxEvent) -> DeliveryResult:
         target = await self.get_target(event)
         if not await self.is_url_allowed(target.url):
-            await self.write_result(event, None, None, WEBHOOK_URL_REFUSED_ERROR)
-            raise DeliveryError(f"the webhook URL of outbox event {event.id} is refused")
+            return self.get_result(
+                event,
+                error_text=WEBHOOK_URL_REFUSED_ERROR,
+                error=DeliveryError(f"the webhook URL of outbox event {event.id} is refused"),
+            )
         body = self.get_body(event)
         headers = {**self.headers, **target.headers, **self.get_headers(event), "content-type": "application/json"}
         if target.secret is not None:
@@ -199,11 +200,13 @@ class WebhookDelivery(OutboxDelivery):
                 target.url, content=body, headers={name: value.encode() for name, value in headers.items()}
             )
         except self.httpx.HTTPError as error:
-            await self.write_result(event, None, None, str(error) or type(error).__name__)
-            raise DeliveryError(f"the webhook request of outbox event {event.id} failed: {error!r}") from error
-        await self.write_result(event, response.status_code, response.text, None)
+            delivery_error = DeliveryError(f"the webhook request of outbox event {event.id} failed: {error!r}")
+            delivery_error.__cause__ = error
+            return self.get_result(event, error_text=str(error) or type(error).__name__, error=delivery_error)
+        failure = None
         if not 200 <= response.status_code < 300:
-            raise DeliveryError(f"the webhook answered {response.status_code} for outbox event {event.id}")
+            failure = DeliveryError(f"the webhook answered {response.status_code} for outbox event {event.id}")
+        return self.get_result(event, status_code=response.status_code, body=response.text, error=failure)
 
     async def close(self) -> None:
         if self.client is not None:

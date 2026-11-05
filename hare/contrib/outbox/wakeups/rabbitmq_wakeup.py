@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.brokers.rabbitmq_connection import RabbitMQConnection
 from hare.contrib.outbox.wakeups.constants import DEFAULT_WAKEUP_CHANNEL, WAKEUP_TOPIC_SEPARATOR
 from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
 from hare.contrib.package_checks import PackageChecks
+
+if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
 
 
 class RabbitMQWakeup(OutboxWakeup):
@@ -45,7 +48,7 @@ class RabbitMQWakeup(OutboxWakeup):
         body = WAKEUP_TOPIC_SEPARATOR.join(sorted(topics)).encode()
         await exchange.publish(RabbitMQConnection.aio_pika.Message(body=body), routing_key="")
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         exchange = await self.broker_connection.get_exchange()
         channel = exchange.channel
         queue = await channel.declare_queue(exclusive=True, auto_delete=True)

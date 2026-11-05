@@ -13,7 +13,7 @@ from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlS
 from hare.exceptions import ConfigurationError
 from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
-from tests.utils.fake_client import FakeClient, MockIntrospectionClient
+from tests.utils.fake_client import FakeClient
 
 pytestmark = pytest.mark.database_independent
 
@@ -496,11 +496,9 @@ async def test_postgres_alter_field_db_constraint_true_to_false_drops_constraint
     new_field = copy_field(old_field)
     new_field.db_constraint = False
 
-    client = MockIntrospectionClient("postgresql", inline_comment=False)
+    client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.foreign_key_rebuild.alter_foreign_key_on_delete(
-        Item, old_field.source_fields[0], old_field, new_field
-    )
+    await editor.foreign_key_rebuild.get_foreign_key_change_plan(Item, old_field, new_field).execute(editor)
 
     # The constraint's name is the one hare gave it - never read from the database.
     foreign_key_name = GeneratedNames.get_foreign_key_name("item", ("category_id",))
@@ -534,11 +532,9 @@ async def test_postgres_alter_field_db_constraint_false_to_true_adds_constraint(
     new_field = copy_field(old_field)
     new_field.db_constraint = True
 
-    client = MockIntrospectionClient("postgresql", constraint_names=[], inline_comment=False)
+    client = FakeClient("postgresql", inline_comment=False)
     editor = PostgresqlSchemaEditor(client)
-    await editor.foreign_key_rebuild.alter_foreign_key_on_delete(
-        Item, old_field.source_fields[0], old_field, new_field
-    )
+    await editor.foreign_key_rebuild.get_foreign_key_change_plan(Item, old_field, new_field).execute(editor)
 
     assert len(client.executed) == 1
     sql = client.executed[0]

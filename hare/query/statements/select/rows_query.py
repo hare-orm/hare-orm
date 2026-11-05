@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast
 
 from hare.exceptions import QueryError
 from hare.fields.data.constants import INT32_MAX
+from hare.query.execution.query_execution import QueryExecution
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.single_rows.get_exceptions import GetExceptions
@@ -29,14 +30,17 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
     #: A plain SELECT - see AwaitableQuery.is_read_only.
     is_read_only: ClassVar[bool] = True
 
-    def __await__(self) -> Generator[Any, None, Any]:
+    async def _execute_bound(self) -> Any:
         if self._is_none:
-            return self._execute_none().__await__()
+            return await self._execute_none()
         query = self._get_execution_query(self._select_for_update)
         query._make_query_to_run()
-        if query._extension_calls and QuerySetExtensions.runs_queries(query):
-            return query._execute_with_retry_context(QuerySetExtensions.run(query)).__await__()
-        return query._execute_with_retry_context(query._execute()).__await__()
+        result = await query._execute_reading(query._execute())
+        return (
+            QuerySetExtensions.transform_result(query, result)
+            if query._extension_calls and query._applies_result_transform
+            else result
+        )
 
     async def _execute_none(self) -> Any:
         return GetExceptions.empty_single_or_list_result(self)
@@ -54,28 +58,37 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
 
     @staticmethod
     async def iterate_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
-        """Pages through the rows of the query ``get_query()`` makes once iteration starts,
+        """Read with one set of dependency inputs throughout the iterator's lifetime."""
+        query = get_query()
+        query._check_chunk_size(chunk_size)
+        iterator = QueryExecution.iterate(query, RowsQuery._iterate_rows(query, chunk_size))
+        async with contextlib.aclosing(iterator):
+            async for row in iterator:
+                yield row
+
+    @staticmethod
+    async def _iterate_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[Any]:
+        """Pages through the rows of the prepared query,
         ``chunk_size`` at a time - one generator hands out every row. An unordered query follows its
         default iteration order; a tie-breaker makes the ordering unique per row. Pages by keyset
-        when every ordering value can be read off a row, else by ``OFFSET``. The query's own slice
+        when the query provides supported keyset readers, else by ``OFFSET``. The query's own slice
         and keyset boundary bound the whole iteration; a page is fetched with one row more,
         which tells whether another page follows.
 
         Args:
-            get_query: Makes the query - an error in making it is raised by the first ``anext()``.
-            chunk_size: The page size.
+            rows_query: The query created when iteration starts.
+            chunk_size: The validated page size.
 
         Raises:
-            QueryError: ``chunk_size`` isn't an int from 1 to ``2**63 - 2``, or a ``before_cursor()`` query.
+            QueryError: The query uses ``before_cursor()``.
         """
-        rows_query = get_query()
-        rows_query._check_chunk_size(chunk_size)
         if rows_query._reverse_result_order:
             raise QueryError("iterator() does not support .before_cursor() - await the page instead")
         if rows_query._is_none:
             return
         query = rows_query._get_iterated_query()
         page_template = query._get_execution_query(query._select_for_update)
+        page_template._applies_result_transform = False
         page_template._single = False
         page_template._raise_does_not_exist = False
         keyset_readers = page_template._prepare_paging()
@@ -169,22 +182,27 @@ class RowsQuery(AwaitableQuery[TModel], abstract=True):
 
     @staticmethod
     async def stream_query(get_query: Callable[[], RowsQuery[Any]], chunk_size: int) -> AsyncGenerator[Any]:
-        """Streams the rows of the query ``get_query()`` makes once iteration starts - an error in
-        making it is raised by the first ``anext()``, like any other.
+        """Read with one set of dependency inputs throughout the iterator's lifetime."""
+        query = get_query()
+        query._check_chunk_size(chunk_size, INT32_MAX)
+        iterator = QueryExecution.iterate(query, RowsQuery._stream_rows(query, chunk_size))
+        async with contextlib.aclosing(iterator):
+            async for row in iterator:
+                yield row
+
+    @staticmethod
+    async def _stream_rows(rows_query: RowsQuery[Any], chunk_size: int) -> AsyncGenerator[Any]:
+        """Stream an already created query with its dependency inputs bound.
 
         Args:
-            get_query: Makes the query.
-            chunk_size: How many rows to fetch per round trip.
+            rows_query: The query created when iteration starts.
+            chunk_size: The validated number of rows to fetch per round trip.
 
         Raises:
-            QueryError: ``chunk_size`` isn't an int from 1 to ``2**31 - 1``.
             UnSupportedError: The database has no streaming (``features.supports_streaming``).
             QueryError: Outside a transaction, a ``before_cursor()`` query, or model instances
                 with ``prefetch_related()``.
         """
-        rows_query = get_query()
-        # The rows a cursor fetch takes at once - a 32-bit count on every driver.
-        rows_query._check_chunk_size(chunk_size, INT32_MAX)
         if rows_query._is_none:
             return
         if rows_query._reverse_result_order:

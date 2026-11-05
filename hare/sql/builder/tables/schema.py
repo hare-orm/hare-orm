@@ -21,13 +21,7 @@ class Schema:
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return hash(self._hash_key())
-
-    def _hash_key(self) -> tuple[str, Any]:
-        # Schema defines __eq__ (making it unhashable by Python's default rule), and its
-        # equality is recursive over _parent - the hash key mirrors that structure exactly
-        # so it stays consistent with __eq__.
-        return (self._name, self._parent._hash_key() if self._parent else None)
+        return hash((self._name, self._parent))
 
     @BuilderMethods.ignore_copy
     def __getattr__(self, item: str) -> Table:

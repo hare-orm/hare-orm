@@ -18,7 +18,9 @@ class ParameterDescription:
         parameter_type: What it does.
         annotation: The type the request query validates its value with.
         description: Its description in the API schema, None for none.
-        default: Its value when a request gives none (None for a required parameter).
+        default: Its static default, or None for required parameters and default factories.
+        has_default_factory: Whether Pydantic creates a value for each request that omits it.
+            Describing a parameter never calls its factory.
         required: Whether a request must give it.
         takes_many_values: Whether it takes every value of a repeated query parameter, or a
             comma-separated list (``CommaSeparated``) - a multi-select.
@@ -64,3 +66,4 @@ class ParameterDescription:
     relation: RelationDescription | None = None
     bound: BoundSide | None = None
     paired_parameters: tuple[str, ...] = ()
+    has_default_factory: bool = False

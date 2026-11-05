@@ -46,10 +46,15 @@ Keyset boundaries on JSON fields also bind fresh values into the saved plan, usi
 ordering as `order_by()`. This applies to `after_cursor()` and `before_cursor()`, including their
 `values()`, `count()` and `exists()` queries.
 
+The cached plan retains SQL text, immutable parameter slots and result metadata. It does not
+retain the first query's SQL tree or its replaceable input values. Repeated occurrences share the
+same fresh converted value, and sensitive parameter positions stay hidden on every execution.
+
 ## <a id="shape-key"></a>What's part of the shape (the cache key)
 
-The model class, the dialect, the connection alias, the query builder the model is bound to, which
-columns/relations are selected (`select_related`/`.only()`/ `.defer()`/`.values()`), ordering,
+The model class, the dialect, the connection alias and declared native result types, the query builder
+the model is bound to, which columns/relations are selected
+(`select_related`/`.only()`/`.defer()`/`.values()`), ordering,
 `distinct()`, the WHERE tree's *structure* (join type, negation, which field/lookup at which position —
 never the compared value), annotation *names and expression structure* (never literal annotation values)
 and whether each one is an `.alias()`, the `select_for_update()` flags, how many
@@ -75,9 +80,10 @@ part of the key) and values that are plain, expressions (`F("other") + 1`) or qu
 of field names, `limit()`/`offset()`, `first()`/`last()`, `get()`, `only()`, `select_related()`,
 `values()`/`values_list()` of field names, `group_by()`, `prefetch_related()`, and
 `count()`/`exists()`/`aggregate()` at the end — runs on an entry found by the calls themselves: its
-filters aren't even built. A model query with no relation joined and no annotation, or a
-`values()`/`values_list()` query, runs without a query object at all — its rows are read the way the
-entry keeps for its row shape. Each call's values — a filter's, an expression's literals — are found
+filters aren't even built. Both a cache hit and a fresh compilation run through the same statement
+executor. The plan supplies SQL, parameters and row layout; the executor applies the query's result
+shape, single-row policy and relation loading. Each call's values — a filter's, an expression's literals — are
+found
 among the entry's values by where they come from, so the entry's own order of values (the annotations'
 before the filters') doesn't have to be the order of the calls. A `prefetch_related()` call keys the
 relations it prefetches — a forward relation's key column is selected for its prefetch even past `only()`
@@ -96,13 +102,12 @@ each key column, the instance or the key tuple bound column by column. A generic
 filter on a to-many relation's own name (`tags=obj`, `tags__in=[...]`, `books=obj`) and reading a
 many-to-many relation (`obj.tags.all()`) keep their entry, an instance standing for its primary key; so
 do a composite primary key's `pk__in=[(a, b), ...]` (by the number of rows), `__iexact`, PostgreSQL's
-`__search`, and filters on a JSON path (`data__a=`, `data__a__gt=`, `data__a__in=`) and JSON containment
-on both dialects.
+`__search`, and filters on a JSON path (`data__a=`, `data__a__gt=`, `data__a__in=`).
 
 A one-sided or fully-open `__range` (`(None, 10)`, `(None, None)`) keeps an entry for each open side, its
-remaining bound a value. A JSON `__filter=` keeps an entry for the keys of its dict, the values bound per
-query; `__has_keys=` and `__has_any_keys=` keep one for the number of keys. `.contains(obj)` keeps an
-entry like `exists()`, the instance's key bound per query.
+remaining bound a value. `.contains(obj)` keeps an entry like `exists()`, the instance's key bound per query.
+A lookup that derives SQL structure from a JSON document or a container is cached only when every
+input has a declared parameter conversion; otherwise it uses normal query preparation.
 
 A filter whose value is a query — `field__in=Other.objects.filter(...).values_list("id", flat=True)`, a
 bare queryset (compared by its primary key), `Subquery(...)` — keeps its entry with the subquery in it:
@@ -190,7 +195,7 @@ operation's branch — even one joining a `FilteredRelation(...)` under the name
 The vector distances, full-text search and PostgreSQL's expressions keep their entry like the built-in
 ones: `L2Distance`/`CosineDistance`/`InnerProduct` (the query vector bound, converted the way the dialect
 stores the compared `VectorField`), `SearchVector`, `SearchQuery` (a `Lexeme` query included),
-`SearchRank` and `SearchHeadline` (the search text bound, on every dialect), `STDistance`/`STDWithin`
+`SearchRank` and `SearchHeadline` (the search text bound, on every dialect), `Distance`/`DWithin`
 (the point and the radius bound) and the trigram functions.
 
 `count()` and `exists()` past a keyset boundary (`.after_cursor()`/`.before_cursor()`), `exists()` past
@@ -270,7 +275,7 @@ its values other than `None`, a longer one by nothing more: one entry serves eve
 fully-bounded `__range`'s two bounds, `.after_cursor()`'s boundary values, annotation literals (`Value()`
 nested inside an expression, `Case`/`When` literal `then=`/`default=`, `RawSQL` parameters,
 `Coalesce`/`Concat`/`NTile`/`Lag`/`Lead` default arguments, `Aggregate(_filter=Q(...))`'s own filter
-values), `select_related(relation, extra_condition=Q(...))`'s and `FilteredRelation(...)`'s condition
+values), `select_related(Select(relation, extra_condition=Q(...)))`'s and `FilteredRelation(...)`'s condition
 values, `with_recursive()`'s `max_depth`, the values of a `hare.sql` term built by hand, `.raw()`
 parameters, an `aggregate()` metric's own values, the values an `update()` assigns (converted the way a
 write converts them — a `DecimalField` value is rounded to its decimal places) and the moment it sets
@@ -287,13 +292,13 @@ fast path:
 | `Lateral(...)` and `JsonTable(...)` | The subquery or table function joined under the name has no description — its values sit in the JOIN. |
 | `.sample(...)` | The percent and the seed are written into `FROM`, not bound. |
 | A dialect's QuerySet method called with a list or dict argument | The argument can't be part of a key. |
-| A `register_lookup()`-registered lookup whose operator **transforms** the value, without `binds_by_rebuild=True` | Only safe when the criterion embeds the encoder's own output directly — see below. |
+| A `register_lookup()`-registered lookup whose operator **transforms** the value | Only safe when the criterion embeds the encoder's own output directly — see below. |
 | A `hare.sql` term built by hand that renders on its own dialect only, or binds a value no `ValueWrapper` holds | Its description is its SQL text rendered by the neutral dialect, with every value a `ValueWrapper` binds. |
 
 None of these need any code change on your side — each one just runs without the cache.
 
 A JOIN to a model with a default scope — `Meta.tenant_field`, `Meta.soft_delete_field` or a custom
-`Meta.manager` `get_queryset()` on the related model or a many-to-many `through=` model — takes the fast
+`Manager(scope=...)` provider on the related model or a many-to-many `through=` model — takes the fast
 path: the plan records the scope's values apart from the query's own, and a query running on it binds the
 scope of its own context (the active tenant, what a custom manager filters by now). A scope whose filter
 has another shape than when the plan was recorded — another number of tenants under `Tenancy.scope(...)`,
@@ -301,73 +306,41 @@ a custom manager filtering differently — builds the query in full.
 
 ## <a id="scope-and-lifetime"></a>Scope and lifetime
 
-`StatementPlans.plans`, `StatementPlans.call_signature_plans` (a call chain's key -> the plan of `plans`
-it runs on, dropped whenever `plans` drops any plan) and `StatementPlans.decode_plans`
-(`hare.query.plans.statement.statement_plans`) are `Cache` instances (`hare.core.caching.cache`) —
-bounded and scoped **per model class**, not one unbounded global dict. Each model class gets its own
-`OrderedDict` bucket with real LRU behavior: a hit moves its entry to the end
-(`OrderedDict.move_to_end()`), and once a model's bucket exceeds `max_size` entries the oldest one is
-evicted (`OrderedDict.popitem(last=False)`). The per-model cap defaults to 512 and is configurable
-process-wide via the `HARE_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL` environment variable
-(`hare.core.caching.constants.DEFAULT_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL`), a whole number from 1 to
-1,000,000 (anything else is a `ConfigurationError` when hare is imported) — one "noisy" model's shape
-diversity (e.g. `pk__in=` called with ever-different list lengths) can never evict another, unrelated
-model's entries the way one shared global limit would.
+Plans are bounded per model. A cache hit refreshes LRU order; a full bucket evicts
+its least recently used entry. The environment variable
+`HARE_STATEMENT_PLAN_CACHE_MAX_SIZE_PER_MODEL` selects the configured plan limit.
+A model's lifetime storage is attached to its metadata. The cache registry tracks
+buckets weakly, so a cached plan referring back to its model does not keep that
+model alive after its application context is released.
 
-A model's buckets live on the model itself (`Model._meta`), and a cache knows the models holding its
-buckets only through a `WeakSet` — so a model class replaced at runtime (e.g. via
-[`Hare.register_live_models()`](../models/runtime-models.md) re-registering the same table under a fresh
-class) is garbage-collected together with its entries once nothing else references it.
+`Cache` and `ModelCache` use the same `CacheBucket` implementation:
 
-There is no way to bypass it. `hare.core.caching.caches.Caches.forget_model_caches([Book, ...])` drops
-every entry built for the given models — this cache, the decode plans (`StatementPlans.decode_plans`),
-the cached save/delete SQL, the relation walks of the delete cascade and every other cache built for
-models — which hare itself does when a model's relations change after first use, and when a live model is
-registered again or unregistered. Reach for it in a test that needs a cold cache; application code has no
-reason to.
+- `cache.get_model_bucket(model)` explicitly selects model storage. SQL buckets
+  are invalidated when the model's query builder changes.
+- `cache.get_bucket(holder)` selects storage attached to another class or object.
+- `cache.new_shared_bucket()` creates storage retained by its callers.
+- `cache.get_value(holder)` and `set_value(holder, value)` store one derived value.
+- The mapping interface on `Cache` addresses global entries. Keys are opaque:
+  putting a model inside a tuple does not select that model's lifetime.
+- `ModelCache` provides a model-to-value mapping backed by these same buckets.
 
-Every one of those caches is registered in `Caches` (`hare.core.caching.caches`) where it is defined: a
-cache of values by key is a `Cache` (it registers itself; a key holding a model class goes into that
-model's bucket, any other key into the cache's own one, each bucket least-recently-used), a cache of one
-value per model class is a `ModelCache` (it registers itself too, and with `depends_on_other_models=True`
-is dropped whole when any model changes, for values that describe a relation graph), and anything else
-implementing `forget_model(model)` / `forget_all()` is passed to `Caches.register()`.
-`forget_model_caches()` and `forget_all_caches()` (run on every change to a registry — a lookup, a field
-type, a dialect method registered) go through the registered caches; no list of caches is kept anywhere
-else.
+Every bucket enforces its size bound, including writes through `update()` and
+`setdefault()`. Clearing preserves its identity, so retained references see the
+invalidation. Generation belongs to the bucket; callers do not compare generations
+or maintain parallel metadata dictionaries. Holder buckets use `max_size`, or
+the default holder bound when no size is supplied.
 
-Besides `max_size` (the most entries a bucket holds), a `Cache` takes these options. `holds_sql=False` is
-for values that hold no SQL (a generated pydantic model, a description of a filter key): a model's
-entries then stay whichever query builder the model is bound to, and for a model not bound yet.
-`keyed_by_model=False` is for keys that never hold a model class — they are not searched for one.
-`depends_on_other_models=True` drops every entry when any model changes, as a `ModelCache` does.
-For model-keyed caches, iteration and `len(cache)` exclude SQL entries from a different query builder,
-just as a lookup treats them as misses.
-`model_attribute` names an attribute of a model's `_meta` its plain bucket (below) is kept in as well,
-`owner_attribute` the attribute an owner keeps its one value in, and `dropped_with=<another cache>` drops
-every entry of this cache whenever that cache drops any.
+Individual bucket reads, writes and invalidations are synchronized across threads, including
+LRU maintenance. Concurrent callers share the same bucket for a holder. A computation between
+reading and writing the cache can still run more than once; cache access does not serialize
+query execution or make a sequence of mapping operations atomic.
 
-Where a lookup must cost no more than a dict's, the cache hands out a plain dict it still owns:
-`Cache.get_model_bucket(model)` is the dict a model keeps for the cache (the descriptions of its filter
-keys and ordering names, its parsed lookup paths, its row layouts), dropped with the model's entries, so
-it is asked for on every read; `Cache.get_owner_bucket(owner)` is the dict another object keeps (a
-dialect's type registry and term renderers keep what they found through a class's bases there, a request
-query class its checked declaration) — the owner holds it in its `cache_buckets`, and the cache empties
-it in place; `Cache.new_shared_bucket()` is a dict that belongs to whoever holds it (a queryset and its
-clones keep their descriptions of keys starting with an annotation there). One value read on every query
-stays in an attribute of its owner (`owner_attribute`, `Cache.set_owner_value()` — a manager's queryset),
-set back to `None` when the cache drops it. A fact of a model — computed once from its fields and
-relations — is a function decorated with `ModelCache.fact()`.
-
-> [!NOTE]
-> **Scoped by connection and query builder**
->
-> The key includes the dialect of the connection the query runs on, that connection's alias, and the
-> query builder class the model is currently bound to. Two connections never share entries, even when
-> they share a dialect and point the same model class at structurally different schemas. A query built
-> while a nested `HareContext` had bound the same models to another database's builder is never served
-> under the outer context's key once the nested context exits. The SQL cached for saves, deletes and
-> `Model.objects.get()`-style lookups is keyed the same way.
+`holds_sql=False` marks data independent of a model's SQL builder.
+`depends_on_other_models=True` clears all entries when any model changes.
+`dropped_with=source` clears dependent storage when that cache is invalidated.
+`Caches.forget_model_caches()` and `forget_all_caches()` invalidate registered
+storage; consumers need no separate clearing lists. `len(cache)` counts global
+mapping entries, and `cache.entry_count` also counts live holder entries.
 
 ## <a id="correctness-notes"></a>Correctness notes
 
@@ -381,9 +354,9 @@ silent data-correctness bug, not just a missed optimization. Two rules follow fr
   *else* from the value (e.g. reversing a string before comparing) can't be — a shape hit would silently
   keep applying the *first* call's transformed value. hare checks this by identity before trusting a
   shape's values can be bound, so an unsafe custom lookup is automatically excluded rather than silently
-  miscached. A lookup whose `FieldLookup` declares `binds_by_rebuild=True` is planned anyway: a query
-  running on the entry builds the criterion again from its own value and binds what it holds — correct
-  only when the SQL text depends on nothing of the value but its type (and a list's length).
+  miscached. Binding never rebuilds a criterion to recover its values.
+  A prepared slot records its SQL positions and rendering constraints; the conversion receives the
+  current input. Conversion errors propagate directly rather than requesting another query build.
 - **Anything built into the query's structure, rather than stored as a value a hit binds, must be part of
   the shape key.** The clearest example: `field__year`/`__month`/etc. build the active timezone's name
   into their criterion (`EXTRACT(... AT TIME ZONE $1)`) — it reaches the database as a bind parameter,

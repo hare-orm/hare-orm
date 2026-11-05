@@ -8,8 +8,6 @@ from hare.dialects.clickhouse.request_query import ClickhouseRequestQuery
 from hare.exceptions import ConfigurationError
 from tests.dialects.clickhouse.models import Device
 
-REQUIRES = ("request-query",)
-
 
 @pytest.mark.asyncio
 async def test_a_clickhouse_request_query_filters_by_the_dialects_fields(clickhouse_db):

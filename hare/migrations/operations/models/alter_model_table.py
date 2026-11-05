@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from hare.migrations.operations.models.delete_model import DeleteModel
 from hare.migrations.operations.models.table_renaming_operation import TableRenamingOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
 
@@ -25,11 +26,11 @@ class AlterModelTable(TableRenamingOperation):
         """The model whose table is renamed."""
         return frozenset({self.get_model_label(self.name, app_label)})
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """A later table name or deletion of the same model takes this one's place."""
         if isinstance(other, (AlterModelTable, DeleteModel)) and self.is_same_model_name(self.name, other.name):
-            return [other]
-        return super().reduce(other, app_label)
+            return OperationRewrite((other,))
+        return super().get_rewrite(other, app_label)
 
     def get_table_model_names(self) -> tuple[str, ...]:
         return (self.name,)

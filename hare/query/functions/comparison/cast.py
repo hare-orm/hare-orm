@@ -13,6 +13,8 @@ from hare.query.expressions import Expression, Function
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -23,10 +25,13 @@ from hare.time import Timezone
 
 
 class Cast(Function):
-    """Converts a value to ``output_field``'s type as its database converts it - a value the database
-    would silently turn into another (text that isn't a number, an integer past its type) raises
-    ``OperationalError``, a Decimal rounds half away from zero to its places:
+    """Converts a value to ``output_field``'s type using the database's native conversion rules.
+    Rounding, truncation and errors follow the database:
     ``Cast("price", IntField())``, ``Cast("code", CharField(max_length=3))``."""
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),), keywords=(("expression", ArgumentRole.FIELD),)
+    )
 
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
@@ -98,7 +103,6 @@ class Cast(Function):
                 cast_term.args[0] = expression_context.dialect.renderers.get_enum_number_term(cast_term.args[0])
             cast_term.source = FunctionArguments.get_cast_type(result.output_field)
             cast_term.is_aware = Timezone.get_use_timezone()
-        self.field_object = self.cast_output_field
         return ExpressionResult(term=cast_term, joins=result.joins, output_field=self.cast_output_field)
 
     def get_value_field(self, result: ExpressionResult) -> Field[Any] | None:

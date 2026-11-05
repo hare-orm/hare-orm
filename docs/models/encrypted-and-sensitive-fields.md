@@ -18,15 +18,23 @@ class Integration(Model):
     answers = fields.EncryptedJSONField(null=True, encrypt_keys=True)  # keys are secret too
 ```
 
-The keys are configured once per process:
+Each application has its own immutable keyring. `configure(..., context=application)` targets a
+specific `HareContext`; without `context`, it configures the active application. When no application
+is active, it sets the default captured by subsequently created contexts. Changing one application
+does not reconfigure existing others. Queries, iterator pages and complete field conversions keep
+the keyring they started with; newly started executions use the replacement.
+
+Key rotation reads and writes through the same selected connection and keeps one keyring for
+all batches. Pass `using=` to select a connection explicitly; otherwise the model’s write
+connection is used. `reset(context=...)` clears that application’s configuration:
 
 ```python
 class FieldEncryption:  # hare.fields.encrypted.field_encryption
     @classmethod
-    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None) -> None: ...
+    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None, *, context: HareContext | None = None) -> None: ...
 
     @classmethod
-    async def reencrypt(cls, *models: type[Model], batch_size: int = 500) -> int: ...
+    async def reencrypt(cls, *models: type[Model], batch_size: int = 500, using: str | DatabaseClient | None = None) -> int: ...
 ```
 
 | Field | Stored as | What is encrypted |
@@ -65,7 +73,8 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
   it — the first actual use (a write, a read, or `FieldEncryption.configure()`) raises
   `ConfigurationError` telling you to install the extra.
 - `FieldEncryption.configure()` derives each key as `urlsafe_b64encode(sha256(secret))`; the keys are
-  process-wide and shared by every encrypted field. Values are written with `secret_key` and read with it
+  shared by encrypted fields in the selected application and execution binding. Values are written
+  with `secret_key` and read with it
   or any of `previous_keys` (see [Changing the key](#changing-the-encryption-key)). Using a field before
   it's called raises `ConfigurationError`, and so do an empty secret and `previous_keys` given as one
   string.
@@ -106,8 +115,9 @@ key. `sqlmigrate` lists the step as a comment — the rewrite runs in Python, no
 - `update()`/`save()`/`update_or_create(defaults=...)` accept an expression for an encrypted field only
   as a bare `F()` of another field of the same class storing its values the same way
   (`EncryptedTextField` ↔ `EncryptedTextField`, `EncryptedJSONField` ↔ `EncryptedJSONField` of the same
-  `encrypt_keys`) — the ciphertext is copied as-is, which works because every encrypted field shares one
-  key. A `Value(...)` literal is written encrypted, as the plain value is. Any other expression
+  `encrypt_keys`) — the ciphertext is copied as-is, using the keyring shared by those fields in the
+  selected application and execution binding. A `Value(...)` literal is written encrypted, as the plain
+  value is. Any other expression
   (`F("plain_field")`, `Upper(...)`, `Case(...)`, ...) raises `FieldError`: its result would be written
   unencrypted. Copying an encrypted field into a plain one
   (`title=F("secret")`) is rejected the same way.

@@ -83,7 +83,6 @@ async def test_a_json_value_nesting_past_254_containers_is_refused_alike(
     nested 255 deep was refused by a message naming no reason."""
     if not native:
         monkeypatch.setattr(JsonCodec, "storable_value_checker", None)
-        monkeypatch.setattr(JsonCodec, "native_encoder", None)
     with pytest.raises(ValidationError, match="nests more than 254 lists, tuples and dicts"):
         await WritePathRecord.objects.create(data=make_value())
     # 254 containers - the innermost empty list is one.

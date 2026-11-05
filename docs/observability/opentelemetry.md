@@ -57,7 +57,7 @@ class OpenTelemetryInstrumentor:
 |---|---|
 | `tracer_provider` | The `TracerProvider` of the spans — the global one (`opentelemetry.trace.get_tracer_provider()`) when not passed; set it up (an SDK `TracerProvider` with your exporter) before calling `instrument()` |
 | `meter_provider` | The `MeterProvider` of the pool metrics — the global one (`opentelemetry.metrics.get_meter_provider()`) when not passed |
-| `record_sql_statement` | `True` (the default) sets the `db.query.text` span attribute to the SQL text with its parameter placeholders — hare never inlines values into it; `False` omits it, if even the query's structure is sensitive |
+| `record_sql_statement` | `True` (the default) records the submitted SQL in `db.query.text`, including any literals in raw SQL or DDL. Bind values are not recorded separately. `False` omits the attribute |
 | `query_spans` | Whether `instrument()` starts the spans (`QuerySpans`) |
 | `pool_metrics` | Whether `instrument()` starts the pool metrics (`PoolMetricInstruments`) and, while instrumented, `PoolMetrics` — the measuring of each wait for a connection — see [Pool metrics and health](pool-health.md#opentelemetry-metrics) |
 

@@ -1,29 +1,31 @@
 from __future__ import annotations
 
 import inspect
-import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
-from robyn import Headers, Request, Response, Robyn, SubRouter
+from robyn import FunctionInfo, Request, Response, Robyn, SubRouter
 
 from hare.contrib.frameworks.hare_lifecycle import HareLifecycle
 from hare.contrib.frameworks.health_routes import HealthRoutes
 from hare.contrib.frameworks.request_state import RequestState
 from hare.contrib.frameworks.request_transaction import RequestTransaction
-from hare.contrib.frameworks.robyn.constants import JSON_CONTENT_TYPE
 from hare.contrib.frameworks.robyn.hare_exception_handlers import HareExceptionHandlers
 from hare.contrib.frameworks.robyn.hare_open_api import HareOpenAPI
 from hare.contrib.frameworks.robyn.route_handler import RouteHandler
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
+from hare.core.constants import INITIALIZATION_RELEASE_FAILED
 from hare.instrumentation.queries.query_tags import QueryTags
 from hare.models.tenancy.tenancy import Tenancy
 
 if TYPE_CHECKING:
     from robyn import HttpMethod
     from robyn.openapi import OpenAPI
+    from robyn.router import GlobalMiddleware, Route, RouteMiddleware
 
     from hare.core.config import HareConfig
-from hare.contrib.frameworks.robyn.application.hare_sub_router import HareSubRouter
+    from hare.core.hare_context import HareContext
 
 
 class HareRobyn(Robyn):
@@ -59,14 +61,15 @@ class HareRobyn(Robyn):
     Args:
         file_object: What ``Robyn()`` takes first - the application's module file.
         hare_config: The Hare configuration, as for ``Hare.init(config=...)``.
-        atomic_requests: True for a transaction per request on the default connection, the
+        hare_context: An initialized context to borrow without closing it, None to create one.
+        atomic_requests: True for a transaction per request on the automatically selected connection, the
             connection aliases for one on each of them, False for none.
         openapi: The OpenAPI schema, a ``HareOpenAPI`` by default.
         health_routes: The readiness and liveness routes to add - none when None.
         kwargs: What ``Robyn()`` takes besides.
 
     Raises:
-        ConfigurationError: ``atomic_requests`` is neither a bool nor a sequence of names, or the
+        ConfigurationError: ``atomic_requests`` is neither a bool nor an iterable of names, or the
             configuration is wrong.
     """
 
@@ -75,12 +78,13 @@ class HareRobyn(Robyn):
         file_object: str,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         openapi: OpenAPI | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
     ) -> None:
-        self.hare = HareLifecycle(hare_config, atomic_requests=atomic_requests)
+        self.hare = HareLifecycle(hare_config, atomic_requests=atomic_requests, context=hare_context)
         self.hare.bind_models()
         self.application_startup_handler: Callable[[], Any] | None = None
         self.application_shutdown_handler: Callable[[], Any] | None = None
@@ -103,47 +107,107 @@ class HareRobyn(Robyn):
         @RequestTransaction.skip
         async def readiness() -> Response:
             status_code, body = await health_routes.get_readiness_answer()
-            return HareRobyn.get_json_response(status_code, body)
+            return HareExceptionHandlers.get_json_response(status_code, body)
 
         @RequestTransaction.skip
         async def liveness() -> Response:
             status_code, body = health_routes.get_liveness_answer()
-            return HareRobyn.get_json_response(status_code, body)
+            return HareExceptionHandlers.get_json_response(status_code, body)
 
         self.get(health_routes.readiness_path, include_in_schema=False)(readiness)
         self.get(health_routes.liveness_path, include_in_schema=False)(liveness)
 
-    @staticmethod
-    def get_json_response(status_code: int, body: dict[str, Any]) -> Response:
-        """A JSON response.
-
-        Args:
-            status_code: The status.
-            body: The body.
-
-        Returns:
-            The response.
-        """
-        return Response(
-            status_code=status_code,
-            headers=Headers({"Content-Type": JSON_CONTENT_TYPE}),
-            description=json.dumps(body),
-        )
-
     def add_route(
         self, route_type: HttpMethod | str, endpoint: str, handler: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
+        middleware_start = len(self.middleware_router.route_middlewares)
         if RouteHandler.is_const_route(args, kwargs):
-            return super().add_route(route_type, endpoint, handler, *args, **kwargs)
-        route_handler = RouteHandler(handler, kwargs.get("response_model"), kwargs.get("status_code"))
-        route_handler.transaction_connection_names = self.hare.transaction_connection_names
-        return super().add_route(route_type, endpoint, route_handler.build_function(), *args, **kwargs)
+            result = super().add_route(route_type, endpoint, handler, *args, **kwargs)
+        else:
+            route_handler = RouteHandler(handler, kwargs.get("response_model"), kwargs.get("status_code"))
+            result = super().add_route(route_type, endpoint, route_handler.build_function(), *args, **kwargs)
+            self.router.routes[-1] = self.bind_entry(self.router.routes[-1])
+        # Native authentication middleware is registered outside before_request().
+        middlewares = self.middleware_router.route_middlewares
+        for index in range(middleware_start, len(middlewares)):
+            middlewares[index] = self.bind_entry(middlewares[index])
+        return result
 
     def include_router(self, router: SubRouter) -> None:
+        collections: tuple[list[Route] | list[GlobalMiddleware] | list[RouteMiddleware], ...] = (
+            self.router.routes,
+            self.middleware_router.global_middlewares,
+            self.middleware_router.route_middlewares,
+        )
+        starts = tuple(len(collection) for collection in collections)
+        previous_websockets = dict(self.web_socket_router.routes)
         super().include_router(router)
-        if isinstance(router, HareSubRouter):
-            for route_handler in router.route_handlers:
-                route_handler.transaction_connection_names = self.hare.transaction_connection_names
+        # Robyn shares callback objects when including a router. Bind only the entries
+        # copied into this application, so another application can reuse the router.
+        for collection, start in zip(collections, starts, strict=True):
+            for index in range(start, len(collection)):
+                entry = collection[index]
+                if getattr(entry, "is_const", False):
+                    continue
+                collection[index] = self.bind_entry(entry)
+        for endpoint, handlers in self.web_socket_router.routes.items():
+            if previous_websockets.get(endpoint) is not handlers:
+                self.web_socket_router.routes[endpoint] = {
+                    name: self.bind_function(function) for name, function in handlers.items()
+                }
+
+    def add_web_socket(self, endpoint: str, handlers: dict[str, FunctionInfo]) -> None:
+        super().add_web_socket(endpoint, {name: self.bind_function(function) for name, function in handlers.items()})
+
+    def bind_entry(self, entry: Any) -> Any:
+        """Copy a native route/middleware entry with an application-scoped callback.
+
+        Wrapping the native callback includes argument parsing and exception handlers,
+        which execute outside the user route function. Shared router entries stay intact.
+        """
+        return entry._replace(function=self.bind_function(entry.function))
+
+    def bind_function(self, function: FunctionInfo) -> FunctionInfo:
+        """Preserve native callback arguments while binding execution to this application."""
+        return FunctionInfo(
+            self.scope_handler(function.handler, is_async=function.is_async),
+            function.is_async,
+            function.number_of_params,
+            function.args,
+            function.kwargs,
+        )
+
+    def before_request(self, endpoint: str | None = None) -> Callable[..., None]:
+        register = super().before_request(endpoint)
+        return lambda handler: register(self.scope_handler(handler, is_async=inspect.iscoroutinefunction(handler)))
+
+    def after_request(self, endpoint: str | None = None) -> Callable[..., None]:
+        register = super().after_request(endpoint)
+        return lambda handler: register(self.scope_handler(handler, is_async=inspect.iscoroutinefunction(handler)))
+
+    def scope_handler(self, handler: Callable[..., Any], *, is_async: bool) -> Callable[..., Any]:
+        """Bind a callback to the application while preserving Robyn's sync or async execution path.
+
+        A synchronous request hook must remain synchronous so its request-state changes stay in
+        the context Robyn passes to subsequent callbacks. The application scope itself owns no task.
+        """
+
+        if not is_async:
+
+            @wraps(handler)
+            def scoped_sync(*args: Any, **kwargs: Any) -> Any:
+                with self.hare.scope():
+                    return handler(*args, **kwargs)
+
+            return scoped_sync
+
+        @wraps(handler)
+        async def scoped(*args: Any, **kwargs: Any) -> Any:
+            with self.hare.scope():
+                result = handler(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
+
+        return scoped
 
     def startup_handler(self, handler: Callable[[], Any]) -> None:
         self.application_startup_handler = handler
@@ -156,15 +220,33 @@ class HareRobyn(Robyn):
 
         Raises:
             ConfigurationError: See ``HareLifecycle.start()``.
+            BaseExceptionGroup: Startup and context cleanup both fail.
         """
         await self.hare.start()
-        await self.run_application_handler(self.application_startup_handler)
+        try:
+            with self.hare.scope():
+                await self.run_application_handler(self.application_startup_handler)
+        except BaseException as error:
+            try:
+                await self.hare.stop()
+            except BaseException as release_error:
+                raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
+            raise
 
     async def stop_hare(self) -> None:
-        """Runs the application's own shutdown handler, then closes the Hare context."""
+        """Runs the application's shutdown handler and closes its context, preserving both failures."""
+        if self.hare.context is None:
+            return
         try:
-            await self.run_application_handler(self.application_shutdown_handler)
-        finally:
+            with self.hare.scope():
+                await self.run_application_handler(self.application_shutdown_handler)
+        except BaseException as error:
+            try:
+                await self.hare.stop()
+            except BaseException as release_error:
+                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
+            raise
+        else:
             await self.hare.stop()
 
     @staticmethod

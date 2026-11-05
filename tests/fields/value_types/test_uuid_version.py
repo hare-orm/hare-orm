@@ -7,10 +7,10 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import hare_test_context
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ValidationError
 from hare.fields.uuid7 import Uuid7
-from hare.migrations.writer.import_manager import ImportManager
-from hare.migrations.writer.migration_writer import MigrationWriter
 from hare.models import Model
 
 pytestmark = pytest.mark.sqlite_only
@@ -79,7 +79,7 @@ def test_a_migration_writes_the_version():
     path, _, kwargs = VersionedKey._meta.fields_map["random_key"].deconstruct()
     assert kwargs["version"] == 4
     imports = ImportManager()
-    written = MigrationWriter.render_value(VersionedKey._meta.fields_map["id"], imports)
+    written = DeclarationValueSerializer.render_value(VersionedKey._meta.fields_map["id"], imports)
     assert "version=7" in written
     assert "default=" in written
 

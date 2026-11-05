@@ -7,13 +7,13 @@ if TYPE_CHECKING:
     from hare.migrations.state.model_state import ModelState
 
 from hare.core.apps import Apps
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.apps.relation_linking import RelationLinking
 from hare.core.connections.connection_handler import ConnectionHandler
-from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.models import Model
-from hare.sql import Table
 
 
 class StateApps(Apps):
@@ -25,12 +25,11 @@ class StateApps(Apps):
         self,
         default_connections: dict[str, str] | None = None,
         connections: ConnectionHandler | None = None,
+        *,
+        environment: MigrationEnvironment | None = None,
     ) -> None:
-        if connections is None:
-            context = HareContext.get_current()
-            connections = context.connections if context is not None else ConnectionHandler()
-
-        super().__init__({}, connections)
+        self.environment = environment if environment is not None else MigrationEnvironment.capture(connections)
+        super().__init__({}, self.environment.connections, swappable=self.environment.swappable_settings)
         self._default_connections = default_connections or {}
 
     def register_model(self, app_label: str, model: type[Model]) -> None:
@@ -43,13 +42,13 @@ class StateApps(Apps):
         Raises:
             ConfigurationError: The model is registered under another app.
         """
-        if app_label not in self.apps:
-            self.apps[app_label] = {}
-
         if model._meta.app and model._meta.app != app_label:
             raise ConfigurationError(f"Given model is already registered with label {model._meta.app}")
 
-        self.apps[app_label][model.__name__] = model
+        graph = ModelBindingGraph.current.get()
+        if graph is not None and graph.apps is self:
+            graph.include((model,))
+        self.apps.setdefault(app_label, {})[model.__name__] = model
         model._meta.app = app_label
         if app_label in self._default_connections:
             model._meta.default_connection = self._default_connections[app_label]
@@ -61,91 +60,15 @@ class StateApps(Apps):
         return super().get_identifier_key(model, name)
 
     def get_swappable_label(self, setting: str) -> str:
-        """The label a ``swappable`` setting points at, read from the live app registry - a
-        migration state has no configuration of its own. Falls back to this state's own models
-        outside an initialized Hare.
+        """Read captured application settings, falling back to historical declarations."""
+        return self.environment.get_swappable_label(setting) or super().get_swappable_label(setting)
 
-        Raises:
-            ConfigurationError: The setting is neither configured nor declared by any model.
-        """
-        live_context = HareContext.get_current()
-        if live_context is not None and live_context.apps is not None and live_context.apps is not self:
-            return live_context.apps.get_swappable_label(setting)
-        return super().get_swappable_label(setting)
-
-    @staticmethod
-    def get_live_swappable_label(setting: str) -> str | None:
-        """The label a ``swappable`` setting points at in the live app registry.
-
-        Args:
-            setting: The setting name.
-
-        Returns:
-            The label, None outside an initialized Hare.
-
-        Raises:
-            ConfigurationError: The live registry neither configures nor declares the setting.
-        """
-        live_context = HareContext.get_current()
-        live_apps = live_context.apps if live_context is not None else None
-        if live_apps is None:
-            return None
-        return live_apps.get_swappable_label(setting)
-
-    @staticmethod
-    def is_unmanaged_live_model(app_label: str, model_name: str) -> bool:
-        """Whether the running application has a ``Meta.managed = False`` model under the name -
-        no migration creates it, so a relation to it is resolved against the live class.
-
-        Args:
-            app_label: The model's app.
-            model_name: The model's name.
-        """
-        live_model = StateApps.get_live_model(app_label, model_name)
-        return live_model is not None and live_model._meta.managed is False
-
-    @staticmethod
-    def get_live_model(app_label: str, model_name: str) -> type[Model] | None:
-        """A model of the running application.
-
-        Args:
-            app_label: The model's app.
-            model_name: The model's name.
-
-        Returns:
-            The model, None outside an initialized Hare or for an unknown model.
-        """
-        live_context = HareContext.get_current()
-        live_apps = live_context.apps if live_context is not None else None
-        if live_apps is None:
-            return None
-        try:
-            return live_apps.get_model(f"{app_label}.{model_name}")
-        except ConfigurationError:
-            return None
-
-    @staticmethod
-    def get_live_model_of_lower_name(app_label: str, lower_model_name: str) -> type[Model] | None:
-        """A model of the running application by its name in lower case, as dependencies name models.
-
-        Args:
-            app_label: The model's app.
-            lower_model_name: The model's name in lower case.
-
-        Returns:
-            The model, None outside an initialized Hare or for an unknown model.
-        """
-        live_context = HareContext.get_current()
-        live_apps = live_context.apps if live_context is not None else None
-        if live_apps is None:
-            return None
-        return next(
-            (
-                model
-                for model_name, model in live_apps.apps.get(app_label, {}).items()
-                if model_name.lower() == lower_model_name
-            ),
-            None,
+    def get_model_reference(self, reference: Any) -> Any:
+        """Bind a reference against this registry, independent of the current context."""
+        return (
+            self.get_swappable_label(reference.setting)
+            if isinstance(reference, SwappableModelReference)
+            else reference
         )
 
     def _reference_is_missing(self, reference: Any) -> bool:
@@ -170,24 +93,11 @@ class StateApps(Apps):
         """
         if reference_app in self.apps and reference_model in self.apps[reference_app]:
             return True
-        live_model = self.get_live_model(reference_app, reference_model)
-        if live_model is None:
+        model_state = self.environment.unmanaged_models.get((reference_app, reference_model))
+        if model_state is None:
             return False
-        if live_model._meta.managed is False:
-            self.register_model(reference_app, self._clone_unmanaged_model(reference_app, live_model))
-            return True
-        return False
-
-    def _clone_unmanaged_model(self, app_label: str, live_model: type[Model]) -> type[Model]:
-        """A state-only copy of an unmanaged model, rendered like ``CreateModel`` renders a model -
-        relation setup changes the copy, not the live class. Only its table and relations are copied: no
-        migration makes its objects, and a view's query would need the connections.
-        """
-        # Imported here: the model state module imports this one.
-        from hare.migrations.state.model_state import ModelState
-
-        model_state = ModelState.make_from_model(app_label, live_model, with_schema_objects=False)
-        return model_state.render(self, deepcopy_fields=False)
+        self.register_model(reference_app, model_state.render())
+        return True
 
     def _check_table_name_collisions(self) -> None:
         """No-op - a model moved to another app is recorded under both apps for the span of
@@ -214,7 +124,7 @@ class StateApps(Apps):
         for model in uninited_models:
             for field_name in (*model._meta.foreign_key_fields, *model._meta.one_to_one_fields):
                 foreign_key_object = model._meta.fields_map[field_name]
-                reference = SwappableModelReference.get_model_reference(foreign_key_object.model_name)  # type: ignore[attr-defined]
+                reference = self.get_model_reference(foreign_key_object.model_name)  # type: ignore[attr-defined]
                 if self._reference_is_missing(reference):
                     models_with_missing_references.add(model)
                     break  # No need to check remaining fields
@@ -224,8 +134,8 @@ class StateApps(Apps):
 
             for field_name in model._meta.many_to_many_fields:
                 many_to_many_object = model._meta.fields_map[field_name]
-                references = [SwappableModelReference.get_model_reference(many_to_many_object.model_name)]  # type: ignore[attr-defined]
-                through_reference = SwappableModelReference.get_model_reference(many_to_many_object.through_model)  # type: ignore[attr-defined]
+                references = [self.get_model_reference(many_to_many_object.model_name)]  # type: ignore[attr-defined]
+                through_reference = self.get_model_reference(many_to_many_object.through_model)  # type: ignore[attr-defined]
                 if through_reference is not None:
                     # A through model referenced as "app.Model" must be registered too.
                     references.append(through_reference)
@@ -258,20 +168,16 @@ class StateApps(Apps):
         if self._connections._db_config is None:
             return
 
-        for model in models:
-            if model._meta.default_connection is None:
-                continue
-            if not model._meta._inited:
-                continue
-            model._meta.finalise_model()
-            model._meta.basetable = Table(
-                name=model._meta.db_table,
-                schema=model._meta.schema,
-                table_options=tuple(model._meta.table_options),
-            )
-            basequery = model._meta.connection.query_class.from_(model._meta.basetable)
-            model._meta.basequery = basequery
-            model._meta.basequery_all_fields = basequery.select(*model._meta.db_fields)
+        models = tuple(models)
+        with ModelBindingGraph(self, models):
+            for model in models:
+                if model._meta.default_connection is None:
+                    continue
+                if not model._meta._inited:
+                    continue
+                model._meta.finalise_model()
+                connection = self._connections.get(model._meta.default_connection)
+                self.bind_model_base_queries(model, connection)
 
     def unregister_model(self, app_label: str, model_name: str) -> None:
         try:
@@ -281,11 +187,11 @@ class StateApps(Apps):
             return
 
     @staticmethod
-    def split_reference(reference: str | type[Model] | SwappableModelReference) -> tuple[str, str]:
+    def split_reference(reference: str | type[Model]) -> tuple[str, str]:
         """A model reference as its app label and model name.
 
         Args:
-            reference: ``"app.Model"``, a model class or a ``swappable()`` reference.
+            reference: ``"app.Model"`` or a model class; bind swappable settings before calling.
 
         Returns:
             The app label and the model name.
@@ -293,8 +199,6 @@ class StateApps(Apps):
         Raises:
             ConfigurationError: The reference isn't of two parts, or the model is registered in no app.
         """
-        if isinstance(reference, SwappableModelReference):
-            reference = reference.get_label()
         if not isinstance(reference, str):
             model_class = reference
             app_label = model_class._meta.app
@@ -322,20 +226,21 @@ class StateApps(Apps):
 
         state_apps = self.__class__(
             default_connections=dict(self._default_connections),
-            connections=self._connections,
+            environment=self.environment,
         )
-        if model_states is not None:
-            for (app_label, _model_name), model_state in model_states.items():
-                # Rendered from copies: relation setup fills derived attributes into the fields,
-                # which must not leak into the state.
-                model = model_state.render(state_apps)
-                state_apps.register_model(app_label, model)
-        else:
-            for app_label, app in self.apps.items():
-                for model in app.values():
-                    model_clone = ModelState.make_from_model(app_label, model).render(state_apps)
-                    state_apps.register_model(app_label, model_clone)
+        with ModelBindingGraph(state_apps):
+            if model_states is not None:
+                for (app_label, _model_name), model_state in model_states.items():
+                    # Rendered from copies: relation setup fills derived attributes into the fields,
+                    # which must not leak into the state.
+                    model = model_state.render()
+                    state_apps.register_model(app_label, model)
+            else:
+                for app_label, app in self.apps.items():
+                    for model in app.values():
+                        model_clone = ModelState.make_from_model(app_label, model).render()
+                        state_apps.register_model(app_label, model_clone)
 
-        state_apps.init_relations()
-        state_apps.build_initial_querysets()
+            state_apps.init_relations()
+            state_apps.build_initial_querysets()
         return state_apps

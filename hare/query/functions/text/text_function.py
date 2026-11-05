@@ -37,8 +37,7 @@ class TextFunction(Function):
     returns_integer: ClassVar[bool] = False
     refused_argument_value_types = NON_TEXT_VALUE_TYPES
 
-    #: Shared, long-lived instances - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     TEXT_OUTPUT_FIELD = TextField()
     INTEGER_OUTPUT_FIELD = IntField()
 
@@ -95,7 +94,7 @@ class TextFunction(Function):
         dialect = expression_context.dialect
         integer_sql_type = dialect.parameters.get_parameter_cast_type(0, ParameterPosition.TEXT_FUNCTION_ARGUMENT)
         typed_terms = []
-        for index, (term, result) in enumerate(zip(terms, default_results, strict=True)):
+        for term, result in zip(terms, default_results, strict=True):
             if isinstance(term, ValueWrapper):
                 term = Value.get_typed_term(term, term.value, ParameterPosition.TEXT_FUNCTION_ARGUMENT, dialect)
             elif (

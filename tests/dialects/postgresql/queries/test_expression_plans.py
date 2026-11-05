@@ -6,8 +6,9 @@ compares a plan hit with the same query built in full."""
 import pytest
 
 from hare.contrib.test import requires_features
-from hare.dialects.postgresql.functions.spatial import STDistance, STDWithin
 from hare.dialects.postgresql.search import Lexeme
+from hare.gis import Point
+from hare.gis.functions import Distance, DWithin
 from hare.query.expressions import Case, When
 from hare.search import SearchHeadline, SearchQuery, SearchRank, SearchVector
 from hare.vectors import CosineDistance, L2Distance
@@ -39,19 +40,17 @@ async def test_a_vector_distance_runs_on_its_plan(db_vector, distance_class):
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_a_geography_distance_and_radius_run_on_their_plans(db_postgis):
-    await Place.objects.create(name="Moscow", location=(55.7558, 37.6173))
-    await Place.objects.create(name="Kyiv", location=(50.45, 30.52))
+    await Place.objects.create(name="Moscow", location=Point(37.6173, 55.7558))
+    await Place.objects.create(name="Kyiv", location=Point(30.52, 50.45))
 
     def nearest(point):
-        return (
-            Place.objects.annotate(dist=STDistance("location", point)).order_by("dist").values_list("name", flat=True)
-        )
+        return Place.objects.annotate(dist=Distance("location", point)).order_by("dist").values_list("name", flat=True)
 
-    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(nearest, ((55.7, 37.6), (50.4, 30.5)))
+    await StatementPlanChecks.assert_a_later_query_runs_on_its_plan(nearest, (Point(37.6, 55.7), Point(30.5, 50.4)))
 
     def near(radius_m):
         return (
-            Place.objects.annotate(near=STDWithin("location", (55.7558, 37.6173), radius_m))
+            Place.objects.annotate(near=DWithin("location", Point(37.6173, 55.7558), radius_m))
             .filter(near=True)
             .order_by("name")
             .values_list("name", flat=True)

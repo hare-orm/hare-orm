@@ -25,7 +25,7 @@ class PostgresqlExtensions(Extensions):
         await self.editor.run_sql(f"DROP EXTENSION IF EXISTS {self.editor.quote(extension_name)};")
 
     async def create_collation(self, name: str, locale: str, provider: str, deterministic: bool) -> None:
-        locale_literal = "'" + locale.replace("'", "''") + "'"
+        locale_literal = self.editor.client.dialect.literals.get_string_literal_sql(locale)
         options = [f"locale = {locale_literal}", f"provider = {provider}"]
         if not deterministic:
             options.append("deterministic = false")

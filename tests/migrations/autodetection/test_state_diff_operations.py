@@ -324,6 +324,26 @@ def test_generate_rename_field_source_field_matrix(
     assert any(isinstance(op, AlterField) for op in operations) is expect_alter
 
 
+@pytest.mark.parametrize("relation", [fields.ForeignKeyField, fields.OneToOneField])
+def test_unbound_relation_reuses_the_scalar_column(relation) -> None:
+    author = make_model("Author", "author", id=fields.IntField(primary_key=True))
+    before = make_model("Book", "book", author_id=fields.IntField())
+    after = make_model("Book", "book", author=relation("models.Author", related_name="books"))
+    old_state = build_state("models", author, before)
+    new_state = build_state("models", author, after)
+
+    operations = OperationGenerator(old_state, new_state).generate()
+
+    assert [type(operation) for operation in operations] == [RenameField, AlterField]
+    rename = operations[0]
+    assert (rename.old_name, rename.new_name) == ("author_id", "author")
+    for operation in operations:
+        operation.state_forward("models", old_state)
+        model = old_state.apps.get_model("models.Book")
+        assert set(model._meta.fields_db_projection.values()) == {"id", "author_id"}
+    assert old_state.apps.get_model("models.Book")._meta.fields_map["author"].related_model.__name__ == "Author"
+
+
 def test_generate_two_fields_swapping_db_columns_raises() -> None:
     """Two fields keeping their own Python attribute names but swapping which DB column each one
     points at (field 'a' -> source_field='b', field 'b' -> source_field='a') used to generate two
@@ -896,7 +916,7 @@ def test_generate_alter_field_for_an_unrelated_pk_attribute_change_does_not_drop
     unrelated attribute change on an auto-increment pk (description here, but equally nullability
     or an index) triggered a drop-and-recreate of the PRIMARY KEY column itself instead of a
     plain AlterField - which would break every FK referencing it. Mirrors
-    BaseSchemaEditor._alter_generated_field()'s own identical pk exclusion."""
+    BaseSchemaEditor.raise_if_generated_field_changes()'s own identical pk exclusion."""
     OldWidget = make_model("Widget", "widget", id=fields.IntField(primary_key=True), name=fields.TextField())
     NewWidget = make_model(
         "Widget", "widget", id=fields.IntField(primary_key=True, description="Primary key"), name=fields.TextField()
@@ -1623,39 +1643,49 @@ def test_generate_create_model_mutual_fk_cycle_defers_one_field() -> None:
     assert set(tracked_state.models) == {("models", "Team"), ("models", "Player")}
 
 
-def test_generate_delete_model_mutual_fk_cycle_defers_one_field() -> None:
-    """Mirror of test_generate_create_model_mutual_fk_cycle_defers_one_field for deletion: two
-    EXISTING models with a genuine mutual FK cycle, both removed in the same autodetect round,
-    reproduce the identical cycle on the way out - DeleteModel.state_forward() would otherwise
-    always raise IncompatibleStateError (the still-referenced model, regardless of delete order)
-    for whichever of the two models is dropped second. One field must be removed via RemoveField
-    BEFORE either DeleteModel runs, breaking the cycle the same way CreateModel's own
-    exclude_fields=+AddField-after breaks it on the way in."""
+@pytest.mark.parametrize("relation_count", [1, 2])
+def test_generate_delete_model_mutual_fk_cycle_removes_parallel_relations(relation_count) -> None:
+    """Breaking a cyclic edge removes every parallel relation before deleting either model."""
     Team = make_model(
         "Team",
         "team",
         id=fields.IntField(primary_key=True),
         captain=fields.ForeignKeyField("models.Player", related_name="captained_teams", null=True),
+        **(
+            {"backup_captain": fields.ForeignKeyField("models.Player", related_name="backup_teams", null=True)}
+            if relation_count == 2
+            else {}
+        ),
     )
     Player = make_model(
         "Player",
         "player",
         id=fields.IntField(primary_key=True),
         team=fields.ForeignKeyField("models.Team", related_name="players", null=True),
+        **(
+            {"backup_team": fields.ForeignKeyField("models.Team", related_name="backup_players", null=True)}
+            if relation_count == 2
+            else {}
+        ),
     )
 
     old_state = build_state("models", Team, Player)
     new_state = build_state("models")
 
+    _, deferred = OperationGenerator._sort_by_dependencies(list(old_state.models), old_state)
+    assert len(deferred) == relation_count
     operations = OperationGenerator(old_state, new_state).generate()
     remove_field_ops = [op for op in operations if isinstance(op, RemoveField)]
     delete_ops = [op for op in operations if isinstance(op, DeleteModel)]
     assert {op.name for op in delete_ops} == {"Team", "Player"}
-    assert len(remove_field_ops) == 1
-    assert remove_field_ops[0].name in ("captain", "team")
+    assert len(remove_field_ops) == relation_count
+    assert {op.name for op in remove_field_ops} in (
+        {"captain", "backup_captain"} if relation_count == 2 else {"captain"},
+        {"team", "backup_team"} if relation_count == 2 else {"team"},
+    )
     # The RemoveField must come before BOTH DeleteModel operations - neither model may still
     # carry a live FK to the other when it's dropped.
-    assert operations.index(remove_field_ops[0]) < min(operations.index(op) for op in delete_ops)
+    assert max(operations.index(op) for op in remove_field_ops) < min(operations.index(op) for op in delete_ops)
 
     # Replaying state_forward() in generated order (what the real executor does) must not raise
     # IncompatibleStateError - this is exactly what used to fail before the fix, regardless of

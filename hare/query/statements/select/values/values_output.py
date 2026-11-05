@@ -4,9 +4,10 @@ from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import FieldError
+from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.key_columns import KeyColumns
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
-from hare.query.rows.native.enums import FieldBucket
 from hare.query.rows.values_rows.value_field import ValueField
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_joins import QueryJoins
@@ -25,25 +26,21 @@ class ValuesOutput:
     returned one."""
 
     @staticmethod
-    def get_composite_key_components(
-        model: type[Model], name: str, annotations: dict[str, Any], alias_keys: Collection[str] = ()
-    ) -> tuple[str, ...]:
+    def get_composite_key_components(model: type[Model], name: str, annotations: dict[str, Any]) -> tuple[str, ...]:
         """The field paths of a selected name reading a composite key - ``pk`` of a composite
-        primary key, or a relation to one (``target``, ``target__pk``, ``tags``).
+        primary key, a relation to one (``target``, ``target__pk``, ``tags``), or an ``F`` annotation
+        naming such a key.
 
         Args:
             model: The queried model.
             name: The selected name.
             annotations: The query's annotations.
-            alias_keys: Names used as aliases rather than scalar annotations.
 
         Returns:
             The key's field paths in key order, empty when the name reads one column.
         """
         if annotations:
-            expanded = KeyColumns.get_primary_key_name(model, annotations, name)
-            if name not in annotations or name in alias_keys or expanded == "pk":
-                name = expanded
+            name = KeyColumns.get_primary_key_name(model, annotations, name)
         if name in annotations:
             return ()
         field_paths = ConcreteFieldPaths.get_paths(model, name)
@@ -150,16 +147,20 @@ class ValuesOutput:
             query.query._select_field(table[db_field].as_(return_as))
             return
 
-        field_, __, forwarded_fields = field.partition("__")
-        if field_ in query.model._meta.fetch_fields:
-            related_table, related_db_field = QueryJoins.join_table_with_forwarded_fields(
-                query,
+        if field.partition("__")[0] in query.model._meta.fetch_fields:
+            context = ExpressionContext(
                 model=query.model,
                 table=table,
-                field=field_,
-                forwarded_fields=forwarded_fields,
+                annotations=query._annotations,
+                dialect=query.dialect,
+                connection=query._connection,
+                visibility=query._visibility,
+                select_related_extra_conditions=query._select_related_extra_conditions,
             )
-            query.query._select_field(related_table[related_db_field].as_(return_as))
+            bound_path = BoundLookupPath.bind(context, field)
+            for join in bound_path.joins:
+                QueryJoins.join_table(query, join)
+            query.query._select_field(bound_path.columns[0].as_(return_as))
             return
 
         raise FieldError(f"Unknown field {field!r} for model {query.model.__name__!r}")
@@ -178,8 +179,8 @@ class ValuesOutput:
                 name can be one of the query's annotations.
 
         Returns:
-            The model and name of a model field (the model None for an annotation), with the field
-            the value is decoded through - None for a value used as the driver returns it.
+            The value field and whether to preserve the driver's value without conversion.
+            A missing field leaves the driver value unchanged.
 
         Raises:
             FieldError: The name is neither a field nor an annotation.
@@ -189,19 +190,19 @@ class ValuesOutput:
 
         if field in model._meta.fetch_fields:
             # return as is to get whole model objects
-            return ValueField(None, field, None, is_native=True)
+            return ValueField(None, is_native=True)
 
         layout_entry = model._meta.get_hydration_layout(query._connection).entry_by_field_name.get(field)
-        if layout_entry is not None and layout_entry[2] == FieldBucket.NATIVE:
-            return ValueField(model, field, layout_entry[1], is_native=True)
+        if layout_entry is not None and layout_entry[2] is None:
+            return ValueField(layout_entry[1], is_native=True)
 
         if is_root and field in query._annotations:
             # Read from this build's own dict - the annotation expression is shared between queries.
             field_object = query._annotation_output_fields.get(field)
-            return ValueField(None, field, field_object or None, is_native=not field_object)
+            return ValueField(field_object or None, is_native=not field_object)
 
         if field in model._meta.fields_map:
-            return ValueField(model, field, model._meta.fields_map[field], is_native=False)
+            return ValueField(model._meta.fields_map[field], is_native=False)
 
         field_, __, forwarded_fields = field.partition("__")
         if field_ in model._meta.fetch_fields:

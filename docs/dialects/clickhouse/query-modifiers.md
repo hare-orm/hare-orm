@@ -22,8 +22,10 @@ except a `sample()` one, whose share is written into `FROM`.
 | [`AsofJoin`](../../querying/filters.md#asof-join) | `ASOF LEFT JOIN` |
 | [`ArrayJoin`](../../querying/filters.md#array-join) | `ARRAY JOIN` |
 
-The `hare stubs` stubs and the [mypy plugin](../../querying/type-checking.md#dialect-methods) declare
-these methods on the queryset of a model whose connection is a ClickHouse one.
+`hare stubs` declares these methods on the generated queryset for each ClickHouse model.
+The [mypy plugin](../../querying/type-checking.md#dialect-methods) adds them to the shared `QuerySet`
+type when ClickHouse is configured, so it also accepts these calls on models using another dialect.
+Runtime execution still requires a ClickHouse connection.
 
 ## <a id="final"></a>`final()`
 
@@ -34,13 +36,21 @@ see a row's old versions next to its last one. `final()` reads the model's table
 versions merged as a merge would.
 
 ```python
+from hare import Model, fields
+from hare.ddl import RawSQLTerm
+from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
+from hare.query.expressions import F, Q
+from hare.query.functions import Count, Sum
+
+
 class Reading(Model):
     id = fields.BigIntField(primary_key=True, generated=False)
     value = fields.IntField()
     version = fields.IntField(default=0)
 
     class Meta:
-        table_options = [ClickhouseTableOptions(engine="ReplacingMergeTree(version)")]
+        table_options = [ClickhouseTableOptions(engine=ClickhouseEngine("ReplacingMergeTree", F("version")))]
 
 
 await Reading.objects.filter(id=1).values_list("value", flat=True)  # [1, 1000] - two versions
@@ -67,6 +77,8 @@ of `order_by`:
 class PageView(Model):
     id = fields.BigIntField(primary_key=True, generated=False)
     site = fields.CharField(max_length=50)
+    duration_ms = fields.IntField()
+    viewed_at = fields.DatetimeField()
 
     class Meta:
         table_options = [
@@ -85,8 +97,8 @@ second_half = PageView.objects.sample(50).sample_offset(50)  # SAMPLE 0.5 OFFSET
   while the table doesn't change — ClickHouse takes no seed, so `seed=` and `method="system"` raise
   `UnSupportedError`; `sample(0)` raises it too, as ClickHouse reads a `SAMPLE 0` as the whole table.
 - `sample_rows(rows)` reads about `rows` rows — at least 2: `SAMPLE 1` is the whole table.
-- `sample_offset(percent)` reads the sample from the part of the key range after `percent` of it, so
-  samples with offsets read disjoint rows; without a sample it raises `QueryError`.
+- `sample_offset(percent)` starts the sample at `percent` percent of the key range. Samples read
+  disjoint rows only when their intervals do not overlap; without a sample it raises `QueryError`.
 - A model declaring no `sample_by` raises `QueryError`. The primary key of a table with `sample_by` runs
   from the model's key through the sample key: ClickHouse samples by a key of the primary key.
 - `sample()` and `sample_rows()` together, and a write of a sampled queryset, raise `QueryError`.
@@ -124,7 +136,7 @@ await PageView.objects.order_by("id").limit_by(1, F("duration_ms") % 2, offset=1
 
 - The expressions are field names — across relations too —, annotation names or expressions; `"pk"` of a
   composite primary key groups by each of its columns.
-- `count()` and `exists()` count the rows kept; `aggregate()` and writes raise `QueryError`.
+- `count()`, `exists()` and `aggregate()` read the rows kept; writes raise `QueryError`.
 - A query reading its rows in a derived table — one filtering on a window function — raises
   `UnSupportedError`: `LIMIT BY` would keep the rows before they are filtered. `final()`, `sample()` and
   `prewhere()` read the table inside such a query as in any other.
@@ -137,7 +149,8 @@ connection's own — in its `SETTINGS` clause. A later call adds to an earlier o
 ```python
 await PageView.objects.settings(max_threads=4, max_execution_time=30).count()
 await PageView.objects.filter(site="docs").settings(mutations_sync=2).update(duration_ms=0)
-await PageView.objects.filter(id__global_in=...).settings(distributed_product_mode="global")
+docs_ids = PageView.objects.filter(site="docs").values("id")
+await PageView.objects.filter(id__global_in=docs_ids).settings(distributed_product_mode="global")
 ```
 
 - A value is a `bool` (written `1`/`0`), an `int` of ClickHouse's 64-bit range, a finite `float` or a
@@ -160,10 +173,11 @@ rows.totals  # {"site": "", "views": 100, "time": 130000} - every site
 ```
 
 - The query returns a `TotalsResult` (`hare.dialects.clickhouse.query.totals_result`): the list of its
-  rows, and `.totals` — the row of its aggregates over all the rows its conditions match, before
-  `ORDER BY`, `limit_by()` and the slice, read as its rows are. Its grouped fields hold their column type's
-  default value (`""`, `0`), as ClickHouse writes them. A filter on an aggregate (`HAVING`) keeps the groups
-  it keeps there too. Over no rows `Count` is `0`, and the other aggregates their type's default value.
+  rows, and `.totals` — its aggregate totals before `ORDER BY`, `limit_by()` and the slice, read as its
+  rows are. Its grouped fields hold their column type's default value (`""`, `0`), as ClickHouse writes
+  them. Whether a filter on an aggregate (`HAVING`) affects the totals depends on ClickHouse's
+  [`totals_mode`](https://clickhouse.com/docs/reference/statements/select/group-by#configuring-totals-processing)
+  setting; hare does not override it. Results over no rows depend on the aggregate function.
 - The rows and the totals row come from the one statement: over clickhouse-driver hare reads the
   protocol's totals packet apart from the rows; over clickhouse-connect, whose `Native` format the server
   sends no totals in, the statement is read in `JSONCompact`.
@@ -176,9 +190,9 @@ list or subquery once, on the server the query was sent to, and sends the result
 `Distributed` table — with a plain `IN` each shard runs the subquery itself.
 
 ```python
-active = Session.objects.filter(active=True).values("user_id")
-await PageView.objects.filter(user_id__global_in=active).count()
-await PageView.objects.filter(team__global_not_in=[team_a, team_b])
+docs_ids = PageView.objects.filter(site="docs").values("id")
+await PageView.objects.filter(id__global_in=docs_ids).count()
+await PageView.objects.filter(id__global_not_in=[1, 2])
 ```
 
 They take what `__in` takes — a list or a queryset — on a field of one column, and treat `None` and an

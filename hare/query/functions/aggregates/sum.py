@@ -10,8 +10,10 @@ from hare.query.expressions.numeric.numeric_typing import NumericTyping
 
 
 class Sum(Aggregate):
-    """The sum of the values of a group, NULLs left out - NULL for a group of none: ``Sum("amount")``.
-    Numbers and durations are added up."""
+    """The sum of a group's values, NULLs left out: ``Sum("amount")``.
+
+    Numbers and durations are added up. The database determines the result for an empty group.
+    """
 
     function_name = "SUM"
     refused_argument_value_types = UNSUMMED_VALUE_TYPES

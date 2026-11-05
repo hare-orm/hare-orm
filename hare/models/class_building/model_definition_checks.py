@@ -502,7 +502,7 @@ class ModelDefinitionChecks:
         """
         for index in meta.indexes:
             if isinstance(index, Index):
-                index.get_expressions(meta._model)
+                index.get_key_terms(meta._model, index.get_expression_dialect())
 
     @staticmethod
     def validate_unnamed_indexes_are_distinct(meta: MetaInfo) -> None:
@@ -520,11 +520,11 @@ class ModelDefinitionChecks:
             index = entry if isinstance(entry, Index) else Index(fields=tuple(entry))
             if index.name:
                 continue
-            name_source = (index.unique, tuple(index.field_names), index.get_name_parts())
+            name_source = (index.unique, tuple(index.get_key_names(meta._model)), index.get_name_parts())
             if name_source in name_sources:
                 raise ConfigurationError(
                     f"Model {meta._model.__name__}: Meta.indexes declares the same unnamed index over "
-                    f"{list(index.field_names)!r} twice - they get the same generated name. Remove the "
+                    f"{index.get_key_names(meta._model)!r} twice - they get the same generated name. Remove the "
                     "redundant one, or give one of them a name."
                 )
             name_sources.add(name_source)

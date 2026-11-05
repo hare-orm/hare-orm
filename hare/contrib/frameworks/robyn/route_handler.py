@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
+from functools import wraps
 from http import HTTPStatus
 from typing import Any
 from urllib.parse import urlencode, urlunsplit
@@ -12,6 +13,7 @@ from urllib.parse import urlencode, urlunsplit
 from pydantic import TypeAdapter
 from robyn import Headers, Request, Response
 
+from hare.contrib.application_lifecycle import ApplicationLifecycle
 from hare.contrib.frameworks.request_transaction import RequestTransaction
 from hare.contrib.frameworks.robyn.constants import (
     HARE_ROUTE_HANDLER_ATTRIBUTE,
@@ -47,7 +49,6 @@ class RouteHandler:
         self.response_adapter: TypeAdapter[Any] | None = (
             None if response_model is None else TypeAdapter(response_model)
         )
-        self.transaction_connection_names: tuple[str | None, ...] = ()
         self.signature = inspect.signature(handler)
         self.request_queries: dict[str, type[RequestQuery[Any]]] = {
             name: parameter.annotation
@@ -77,6 +78,7 @@ class RouteHandler:
             The function.
         """
 
+        @wraps(self.handler)
         async def route_function(**arguments: Any) -> Any:
             return await self.call(arguments)
 
@@ -91,10 +93,6 @@ class RouteHandler:
         route_function.__signature__ = self.signature.replace(  # type: ignore[attr-defined]
             parameters=parameters, return_annotation=return_annotation
         )
-        route_function.__name__ = getattr(self.handler, "__name__", route_function.__name__)
-        route_function.__qualname__ = getattr(self.handler, "__qualname__", route_function.__qualname__)
-        route_function.__doc__ = self.handler.__doc__
-        route_function.__module__ = self.handler.__module__
         setattr(route_function, HARE_ROUTE_HANDLER_ATTRIBUTE, self)
         return route_function
 
@@ -128,11 +126,11 @@ class RouteHandler:
         try:
             for name, request_query_class in self.request_queries.items():
                 handler_arguments[name] = self.build_request_query(request_query_class, request)
-            if not self.transaction_connection_names or RequestTransaction.is_skipped(self.handler):
+            lifecycle = ApplicationLifecycle.active.get()
+            connections = () if lifecycle is None else lifecycle.transaction_connection_names
+            if not connections or RequestTransaction.is_skipped(self.handler):
                 return await self.run(handler_arguments)
-            return await RequestTransaction(self.transaction_connection_names).run(
-                lambda: self.run(handler_arguments), self.get_status_code
-            )
+            return await RequestTransaction(connections).run(lambda: self.run(handler_arguments), self.get_status_code)
         except InvalidRequestQuery as error:
             return HareExceptionHandlers.get_invalid_request_query_response(request, error)
 
@@ -186,11 +184,9 @@ class RouteHandler:
             InvalidRequestQuery: See ``RequestQuery.__init__()``.
         """
         pairs = [(name, value) for name, values in request.query_params.to_dict().items() for value in values]
-        request_query_class.prepare_parameters()
+        schema = request_query_class.prepare_parameters()
         path_values = {
-            name: value
-            for name, value in dict(request.path_params or {}).items()
-            if name in request_query_class.model_fields
+            name: value for name, value in dict(request.path_params or {}).items() if name in schema.model_fields
         }
         request_query = request_query_class.from_query_parameters(pairs, request=request, **path_values)
         url = request.url

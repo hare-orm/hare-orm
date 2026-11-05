@@ -33,19 +33,19 @@ class SqliteJsonLookups:
     @staticmethod
     def filter(term: Term, value: dict[str, Any]) -> Criterion:
         """`field__filter=...` on a `JSONField`."""
-        return SqliteJsonFilterGuards.build(term, value)
+        return SqliteJsonFilterGuards().build(term, value)
 
     @staticmethod
     def has_key(term: Term, value: str) -> Criterion:
         """`field__has_key=...` on a `JSONField`."""
-        return SqliteJsonFilterGuards.key_existence_criterion(term, [], JsonLookups.has_key, value)
+        return SqliteJsonFilterGuards().key_existence_criterion(term, [], JsonLookups.has_key, value)
 
     @staticmethod
     def has_keys(term: Term, value: list[str]) -> Criterion:
         """`field__has_keys=...` on a `JSONField`."""
-        return SqliteJsonFilterGuards.key_existence_criterion(term, [], JsonLookups.has_keys, value)
+        return SqliteJsonFilterGuards().key_existence_criterion(term, [], JsonLookups.has_keys, value)
 
     @staticmethod
     def has_any_keys(term: Term, value: list[str]) -> Criterion:
         """`field__has_any_keys=...` on a `JSONField`."""
-        return SqliteJsonFilterGuards.key_existence_criterion(term, [], JsonLookups.has_any_keys, value)
+        return SqliteJsonFilterGuards().key_existence_criterion(term, [], JsonLookups.has_any_keys, value)

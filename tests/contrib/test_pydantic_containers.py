@@ -15,8 +15,6 @@ from hare.contrib.pydantic import pydantic_model_creator
 from tests.dialects.clickhouse.dynamic_types.models import Sample
 from tests.dialects.clickhouse.models import Shipment
 
-REQUIRES = ("pydantic",)
-
 pytestmark = pytest.mark.database_independent
 
 

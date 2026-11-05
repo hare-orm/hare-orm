@@ -21,12 +21,20 @@ from hare.migrations.operations import (
     RunPython,
     RunSQL,
 )
+from hare.migrations.operations.dependencies.prepared_operation_graph import PreparedOperationGraph
+from hare.migrations.operations.operation_rewrite import OperationRewrite
+from hare.migrations.state.prepared_operation_states import PreparedOperationStates
+from hare.migrations.state.state import State
 
 pytestmark = pytest.mark.database_independent
 
 
-def optimize(*operations):
-    return MigrationOptimizer("app").optimize(list(operations))
+def optimize(*operations, state_before=None):
+    return MigrationOptimizer("app").optimize(list(operations), state_before if state_before is not None else State())
+
+
+def state_after(*operations):
+    return PreparedOperationStates("app", operations, State()).after
 
 
 def create_book(**extra_options):
@@ -78,25 +86,39 @@ def test_a_table_altered_and_then_the_model_renamed_keeps_its_name():
 
 
 def test_field_operations_fold_into_each_other():
+    existing_book = state_after(create_book())
     assert (
-        describe(optimize(AddField("Book", "pages", fields.IntField(default=0)), RemoveField("Book", "pages"))) == []
+        describe(
+            optimize(
+                AddField("Book", "pages", fields.IntField(default=0)),
+                RemoveField("Book", "pages"),
+                state_before=existing_book,
+            )
+        )
+        == []
     )
     result = optimize(
-        AddField("Book", "pages", fields.IntField(default=0)), AlterField("Book", "pages", fields.BigIntField())
+        AddField("Book", "pages", fields.IntField(default=0)),
+        AlterField("Book", "pages", fields.BigIntField()),
+        state_before=existing_book,
     )
     assert describe(result) == ["AddField"]
     assert isinstance(result[0].field, fields.BigIntField)
+    with_pages = state_after(create_book(), AddField("Book", "pages", fields.IntField()))
     result = optimize(
-        AlterField("Book", "pages", fields.IntField()), AlterField("Book", "pages", fields.BigIntField())
+        AlterField("Book", "pages", fields.IntField()),
+        AlterField("Book", "pages", fields.BigIntField()),
+        state_before=with_pages,
     )
     assert describe(result) == ["AlterField"]
-    assert describe(optimize(AlterField("Book", "pages", fields.IntField()), RemoveField("Book", "pages"))) == [
-        "RemoveField"
-    ]
-    result = optimize(RenameField("Book", "a", "b"), RenameField("Book", "b", "c"))
+    assert describe(
+        optimize(AlterField("Book", "pages", fields.IntField()), RemoveField("Book", "pages"), state_before=with_pages)
+    ) == ["RemoveField"]
+    with_a = state_after(create_book(), AddField("Book", "a", fields.IntField()))
+    result = optimize(RenameField("Book", "a", "b"), RenameField("Book", "b", "c"), state_before=with_a)
     assert [(operation.old_name, operation.new_name) for operation in result] == [("a", "c")]
-    assert optimize(RenameField("Book", "a", "b"), RenameField("Book", "b", "a")) == []
-    result = optimize(RenameModel("Book", "Volume"), RenameModel("Volume", "Tome"))
+    assert optimize(RenameField("Book", "a", "b"), RenameField("Book", "b", "a"), state_before=with_a) == []
+    result = optimize(RenameModel("Book", "Volume"), RenameModel("Volume", "Tome"), state_before=existing_book)
     assert [(operation.old_name, operation.new_name) for operation in result] == [("Book", "Tome")]
 
 
@@ -168,6 +190,7 @@ def test_an_added_field_altered_to_have_its_own_index_folds_into_one_add_field()
     result = optimize(
         AddField("Book", "pages", fields.IntField(null=True)),
         AlterField("Book", "pages", fields.IntField(null=True, db_index=True)),
+        state_before=state_after(create_book()),
     )
     assert describe(result) == ["AddField"]
     assert result[0].field.index
@@ -221,7 +244,10 @@ def test_a_created_model_takes_a_field_rename_where_its_other_fields_read_the_fi
             ("author", fields.ForeignKeyField("app.Author", related_name="books", null=True, to_field="code")),
         ],
     )
-    result = optimize(created, RenameField("Book", "code", "number"))
+    existing_author = state_after(
+        CreateModel("Author", [("id", fields.IntField(primary_key=True)), ("code", fields.IntField(unique=True))])
+    )
+    result = optimize(created, RenameField("Book", "code", "number"), state_before=existing_author)
     assert describe(result) == ["CreateModel"]
     renamed_fields = dict(result[0].fields)
     assert list(renamed_fields) == ["id", "number", "sequel", "author"]
@@ -279,3 +305,89 @@ def test_a_field_of_an_enum_type_is_never_moved_before_the_type_is_created():
     assert describe(result) == ["CreateModel", "CreateEnumType", "CreateModel"]
     assert result[-1].name == "Book"
     assert [name for name, _field in result[-1].fields] == ["id", "title", "status"]
+
+
+def test_prepared_dependencies_keep_a_relation_removal_before_deleting_its_target():
+    before = state_after(
+        CreateModel("Author", [("id", fields.IntField(primary_key=True))]),
+        CreateModel(
+            "Book",
+            [
+                ("id", fields.IntField(primary_key=True)),
+                ("author", fields.ForeignKeyField("app.Author", related_name="books")),
+            ],
+        ),
+    )
+    graph = PreparedOperationGraph("app", [RemoveField("Book", "author"), DeleteModel("Author")], before)
+    assert "author" not in graph.states.get(1).models["app", "Book"].fields
+    assert not graph.can_move_across(0, 1)
+    assert "author" in before.models["app", "Book"].fields
+
+
+def test_a_rewrite_cannot_replace_a_callback_by_another_with_the_same_name():
+    calls = []
+
+    def original_default():
+        calls.append("original")
+        return 1
+
+    def different_default():
+        calls.append("different")
+        return 2
+
+    different_default.__name__ = original_default.__name__
+
+    class IncorrectAddition(AddField):
+        def get_rewrite(self, other, app_label):
+            return OperationRewrite((AddField("Book", "pages", fields.IntField(default=different_default)),))
+
+    before = state_after(create_book())
+    result = optimize(
+        IncorrectAddition("Book", "pages", fields.IntField(default=original_default)),
+        AlterField("Book", "pages", fields.IntField(default=original_default)),
+        state_before=before,
+    )
+    assert len(result) == 2
+    assert result[-1].field.default is original_default
+    assert "pages" not in before.models["app", "Book"].fields
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_initial_squash_uses_predecessor_state_and_preserves_declarations():
+    from hare.migrations.loading.graph.migration_key import MigrationKey
+    from hare.migrations.loading.migration_definitions import MigrationDefinitions
+    from hare.migrations.making.migration_squasher import MigrationSquasher
+    from hare.migrations.migration import Migration
+    from hare.migrations.state.state_values import StateValues
+
+    migrations = [
+        Migration("0001_initial", "app", operations=[create_book()]),
+        Migration(
+            "0002_pages",
+            "app",
+            operations=[AddField("Book", "pages", fields.IntField(default=1))],
+            dependencies=[("app", "0001_initial")],
+        ),
+        Migration(
+            "0003_default",
+            "app",
+            operations=[AlterField("Book", "pages", fields.IntField(default=2))],
+            dependencies=[("app", "0002_pages")],
+        ),
+    ]
+    definitions = MigrationDefinitions(
+        {MigrationKey("app", migration.name): migration for migration in migrations},
+        frozenset({"app"}),
+        frozenset(),
+    )
+    result = await MigrationSquasher({"app": {"migrations": "app.migrations"}}, definitions=definitions).squash(
+        "app", "0003", start_name="0002"
+    )
+    assert len(result.writer.operations) == 1
+    assert result.writer.dependencies == [("app", "0001_initial")]
+    before = migrations[0].prepare(State()).after
+    expected = migrations[2].prepare(migrations[1].prepare(before).after).after
+    actual = Migration("squashed", "app", operations=result.writer.operations).prepare(before).after
+    assert StateValues.get(actual) == StateValues.get(expected)
+    assert migrations[1].operations[0].field.default == 1

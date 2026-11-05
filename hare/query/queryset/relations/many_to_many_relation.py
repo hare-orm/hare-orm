@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.core.connections.connections import Connections
@@ -244,12 +243,11 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         ThroughDefaults.through_defaults_columns_and_values(self, through_defaults, connection.dialect.types)
         # On a database without transactions the removals and additions are one step a cancel can't split.
         await WriteSteps.get_whole_run(
-            connection, self._set_members(members, members_by_pk_values, through_defaults, clear, connection)
+            connection, self._set_members(members_by_pk_values, through_defaults, clear, connection)
         )
 
     async def _set_members(
         self,
-        members: Sequence[Any],
         members_by_pk_values: dict[tuple[Any, ...], Any],
         through_defaults: dict[str, Any] | None,
         clear: bool,
@@ -258,14 +256,13 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         """Replaces the relation's members, in one transaction - see ``set()``.
 
         Args:
-            members: The members.
             members_by_pk_values: The members by their DB-ready primary key values.
             through_defaults: Passed on to ``add()`` for the added members.
             clear: Clear the whole relation first and add every member afresh.
             connection: The connection of the through table.
         """
         async with connection._in_transaction() as transaction_connection:
-            if not members:
+            if not members_by_pk_values:
                 await self.clear(using=transaction_connection)
                 return
             linked_pk_values = await LinkedKeys.get_linked_pk_values(self, transaction_connection)

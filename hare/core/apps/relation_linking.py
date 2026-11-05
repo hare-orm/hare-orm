@@ -24,7 +24,7 @@ from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.core.apps.apps import Apps
-    from hare.core.apps.declarations import ModelReference
+    from hare.core.apps.declarations import ModelReference, TableIdentity
     from hare.fields.field import Field
 
 
@@ -520,7 +520,7 @@ class RelationLinking:
             )
 
     @staticmethod
-    def get_table_owners(apps: Apps) -> dict[tuple[str | None, str], tuple[type[Model], str | None]]:
+    def get_table_holders(apps: Apps) -> dict[TableIdentity, tuple[type[Model], str | None]]:
         """Who holds each table name of a registry - a model its own table, a many-to-many field the through
         table it names; looked up for every automatic through table instead of walking every model again.
 
@@ -528,27 +528,35 @@ class RelationLinking:
             apps: The registry.
 
         Returns:
-            ``(schema, table)`` -> ``(model, None)`` for a model's table, ``(model, field)`` for a through table.
+            ``(connection, schema, table)`` -> ``(model, None)`` for a model's table,
+            ``(model, field)`` for a through table.
         """
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]] = {}
+        table_holders: dict[TableIdentity, tuple[type[Model], str | None]] = {}
         for registered_model in apps.get_models_iterable():
             meta = registered_model._meta
             if meta.swapped is not None:
                 # A swapped model has no table, nor through tables of its own.
                 continue
-            table_owners.setdefault((meta.schema, meta.db_table), (registered_model, None))
+            table_holders.setdefault(
+                apps.get_table_identity(registered_model, meta.schema, meta.db_table), (registered_model, None)
+            )
             for many_to_many_field_name in meta.many_to_many_fields:
                 many_to_many_field = cast("ManyToManyFieldInstance[Any]", meta.fields_map[many_to_many_field_name])
                 if not many_to_many_field._generated and many_to_many_field.through:
-                    table_owners.setdefault(
-                        (many_to_many_field.through_schema, many_to_many_field.through),
+                    table_holders.setdefault(
+                        apps.get_table_identity(
+                            many_to_many_field.through_model_class or registered_model,
+                            many_to_many_field.through_schema,
+                            many_to_many_field.through,
+                        ),
                         (registered_model, many_to_many_field_name),
                     )
-        return table_owners
+        return table_holders
 
     @staticmethod
     def check_auto_through_table_name_free(
-        table_owners: dict[tuple[str | None, str], tuple[type[Model], str | None]],
+        apps: Apps,
+        table_holders: dict[TableIdentity, tuple[type[Model], str | None]],
         through: str,
         model: type[Model],
         field: str,
@@ -557,7 +565,8 @@ class RelationLinking:
         through table or by a model's own table, then holds it for the field.
 
         Args:
-            table_owners: Who holds each table name - ``get_table_owners()``, the through tables named so far
+            apps: The registry providing identifier comparison rules.
+            table_holders: Who holds each table name - ``get_table_holders()``, the through tables named so far
                 added.
             through: The automatic through table's name.
             model: The model declaring the field.
@@ -566,22 +575,22 @@ class RelationLinking:
         Raises:
             ConfigurationError: ``through`` is taken.
         """
-        key = (model._meta.schema, through)
-        owner = table_owners.get(key)
-        if owner is not None and owner != (model, field):
-            owner_model, owner_field_name = owner
-            if owner_field_name is None:
+        key = apps.get_table_identity(model, model._meta.schema, through)
+        holder = table_holders.get(key)
+        if holder is not None and holder != (model, field):
+            holder_model, holder_field_name = holder
+            if holder_field_name is None:
                 raise ConfigurationError(
                     f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
-                    f"{through!r}, which is the table of model {owner_model.__name__} - set through= "
+                    f"{through!r}, which is the table of model {holder_model.__name__} - set through= "
                     "explicitly."
                 )
             raise ConfigurationError(
                 f'ManyToManyField "{model.__name__}.{field}" gets the auto-generated through table '
-                f'{through!r}, already used by "{owner_model.__name__}.{owner_field_name}" - set '
+                f'{through!r}, already used by "{holder_model.__name__}.{holder_field_name}" - set '
                 "through= explicitly on one of them."
             )
-        table_owners[key] = (model, field)
+        table_holders[key] = (model, field)
 
     @staticmethod
     def get_component_default(default: Any, position: int) -> Any:

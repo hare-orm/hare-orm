@@ -23,7 +23,6 @@ from hare.dialects.postgresql.fields.naive_time_field import NaiveTimeField
 from hare.dialects.postgresql.fields.native_enum.native_enum_field_instance import NativeEnumFieldInstance
 from hare.dialects.postgresql.fields.network.mac_address_field import MacAddressField
 from hare.dialects.postgresql.fields.network.network_field import NetworkField
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
 from hare.dialects.postgresql.fields.ranges.range_field import RangeField
 from hare.dialects.postgresql.fields.ts_vector_field import TSVectorField
 from hare.dialects.postgresql.spatial.constants import (
@@ -33,6 +32,7 @@ from hare.dialects.postgresql.spatial.constants import (
     POSTGIS_GEOMETRY_TYPE_NAMES,
 )
 from hare.dialects.postgresql.types.postgresql_container_values import PostgresqlContainerValues
+from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 from hare.dialects.postgresql.vectors.constants import PGVECTOR_EXTENSION
 from hare.dialects.postgresql.vectors.postgresql_vector_values import PostgresqlVectorValues
 from hare.exceptions import ConfigurationError
@@ -55,18 +55,6 @@ from hare.vectors.vector_field import VectorField
 
 class PostgresqlTypes:
     """How PostgreSQL stores hare's fields."""
-
-    @staticmethod
-    def get_field_column_type(field: Field[Any]) -> str:
-        """The column type of a field of PostgreSQL's own - the one the field names.
-
-        Args:
-            field: The field.
-
-        Returns:
-            The type.
-        """
-        return field.SQL_TYPE
 
     @staticmethod
     def build() -> TypeRegistry:
@@ -99,7 +87,6 @@ class PostgresqlTypes:
                 to_db=DatetimeField.to_db_instant_value,
                 to_lookup=DatetimeField.to_db_instant_value,
                 to_python=PostgresqlTypes.get_datetime_python_value,
-                naive_datetime_is_utc=True,
             ),
         )
         types.register(TimeField, TypeMapping(column_type="TIMETZ"))
@@ -115,18 +102,9 @@ class PostgresqlTypes:
         )
         types.register(BinaryField, TypeMapping(column_type="BYTEA"))
         # PostgreSQL's own fields - each column type its field's.
-        types.register(
-            CitextField, TypeMapping(column_type=PostgresqlTypes.get_field_column_type, extension=CITEXT_EXTENSION)
-        )
-        types.register(
-            HStoreField, TypeMapping(column_type=PostgresqlTypes.get_field_column_type, extension=HSTORE_EXTENSION)
-        )
-        types.register(
-            LtreeField, TypeMapping(column_type=PostgresqlTypes.get_field_column_type, extension=LTREE_EXTENSION)
-        )
-        types.register(
-            PostGISField, TypeMapping(column_type=PostgresqlTypes.get_field_column_type, extension=POSTGIS_EXTENSION)
-        )
+        types.register(CitextField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=CITEXT_EXTENSION))
+        types.register(HStoreField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=HSTORE_EXTENSION))
+        types.register(LtreeField, TypeMapping(column_type=attrgetter("SQL_TYPE"), extension=LTREE_EXTENSION))
         for field_class in (
             FixedCharField,
             IntervalField,
@@ -139,7 +117,7 @@ class PostgresqlTypes:
             RangeField,
             TSVectorField,
         ):
-            types.register(field_class, TypeMapping(column_type=PostgresqlTypes.get_field_column_type))
+            types.register(field_class, TypeMapping(column_type=attrgetter("SQL_TYPE")))
         types.register(
             GeometryField,
             TypeMapping(column_type=PostgresqlTypes.get_geometry_column_type, extension=POSTGIS_EXTENSION),
@@ -178,10 +156,13 @@ class PostgresqlTypes:
         if isinstance(field, RelationalField):
             return True
         try:
-            sql_type = field.get_column_type(POSTGRESQL_DIALECT)
+            sql_type: object = field.get_column_type(POSTGRESQL_DIALECT)
         except (AttributeError, ConfigurationError):
             return False
-        return isinstance(sql_type, str) and sql_type.lower().split("(")[0].strip() in BTREE_GIST_SQL_TYPES
+        if not isinstance(sql_type, str):
+            return False
+        physical = PostgresqlPhysicalType.from_sql(sql_type)
+        return physical.element is None and physical.name in BTREE_GIST_SQL_TYPES
 
     @staticmethod
     def get_geometry_column_type(field: Field[Any]) -> str:

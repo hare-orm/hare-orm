@@ -9,6 +9,7 @@ from hare.query.scopes.row_visibility import RowVisibility
 
 if TYPE_CHECKING:
     from hare.query.queryset import QuerySet
+    from hare.query.statements.select.model_rows_query import ModelRowsQuery
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +19,7 @@ class PrefetchRequest:
     was pinned with ``.using()``.
     """
 
-    #: Relation name -> the nested relations prefetched through it.
+    #: Relation or to_attribute name -> dependent relation lookups.
     prefetch_map: dict[str, set[str | Prefetch]]
     #: Relation name -> ``(to_attribute, queryset)`` of each explicit ``Prefetch()``.
     prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]]
@@ -28,3 +29,26 @@ class PrefetchRequest:
     select_for_update_skip_locked: bool = False
     select_for_update_strength: RowLockStrength | None = None
     db_explicitly_chosen: bool = False
+
+    @classmethod
+    def from_query(
+        cls,
+        query: QuerySet[Any] | ModelRowsQuery[Any],
+        prefetch_map: dict[str, set[str | Prefetch]],
+        prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]],
+    ) -> PrefetchRequest:
+        """Capture a query's visibility, row lock and connection choice for explicit prefetch maps.
+
+        The maps can describe the query's relations or dependencies of a custom ``to_attribute``;
+        they are retained without mutation.
+        """
+        return cls(
+            prefetch_map,
+            prefetch_queries,
+            visibility=query._visibility,
+            select_for_update=query._select_for_update,
+            select_for_update_nowait=query._select_for_update_nowait,
+            select_for_update_skip_locked=query._select_for_update_skip_locked,
+            select_for_update_strength=query._select_for_update_strength,
+            db_explicitly_chosen=query._connection_explicitly_chosen,
+        )

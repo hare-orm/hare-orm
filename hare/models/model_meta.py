@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.exceptions import DoesNotExist, ValidationError
@@ -17,7 +18,6 @@ from hare.models.class_building.model_managers import ModelManagers
 from hare.models.class_building.primary_key_declaration import PrimaryKeyDeclaration
 from hare.models.meta_info import MetaInfo
 from hare.query.managers.manager import Manager
-from hare.query.queryset import QuerySetSingle
 
 if TYPE_CHECKING:
     from hare.models.model import Model
@@ -31,6 +31,7 @@ class ModelMeta(type):
     __slots__ = ()
 
     def __new__(cls, name: str, bases: tuple[type, ...], attributes: dict[str, Any]) -> ModelMeta:
+        attributes = ModelFieldCollection.snapshot_attributes(attributes)
         fields_db_projection: dict[str, str] = {}
         primary_key_attribute: str | tuple[str, ...] = "id"
         # The C3 order of the ancestors, nearest first.
@@ -69,7 +70,7 @@ class ModelMeta(type):
             # an AddField of its own, after the field it indexes.
             attributes = BlindIndexes.expand_declarations(attributes, name)
         fields_map, foreign_key_fields, many_to_many_fields, one_to_one_fields = ModelFieldCollection.dispatch_fields(
-            attributes, fields_db_projection, is_abstract
+            attributes, fields_db_projection
         )
         if name != "Model":
             ModelFieldCollection.check_field_name_conflicts(fields_map, name)
@@ -95,7 +96,7 @@ class ModelMeta(type):
         )
         meta.pk_without_overlaps = pk_without_overlaps and isinstance(primary_key_attribute, tuple)
         attributes["objects"] = meta.manager = ModelManagers.get_default_manager(
-            name, attributes, "objects" in declared_attribute_names, meta_class, meta.manager
+            attributes, "objects" in declared_attribute_names, meta_class, meta.manager
         )
 
         new_class = super().__new__(cls, name, bases, attributes)
@@ -115,13 +116,6 @@ class ModelMeta(type):
             attributes: The attributes the class was created with.
         """
         fields_map = meta.fields_map
-        for field in fields_map.values():
-            field.model = new_class  # type: ignore[assignment]
-            if isinstance(field, GeneratedField):
-                # A GeneratedField's output_field is a field of its own, not in fields_map - bound
-                # here.
-                field.output_field.model = new_class  # type: ignore[assignment]
-
         # A class without fields - the base Model, a mixin - has no comment to read.
         if fields_map and not attributes.get("_no_comments"):
             for field_name, comment in FieldComments.get_comments(new_class).items():  # type: ignore[arg-type]
@@ -134,6 +128,10 @@ class ModelMeta(type):
 
         if new_class.__doc__ and not meta.table_description:
             meta.table_description = inspect.cleandoc(new_class.__doc__).split("\n")[0]
+        for field_name, field in fields_map.items():
+            field.bind_to_model(new_class, field_name)  # type: ignore[arg-type]
+            if isinstance(field, GeneratedField):
+                field.output_field.bind_to_model(new_class, field_name)  # type: ignore[arg-type]
         for value in attributes.values():
             if isinstance(value, Manager):
                 value._model = new_class  # type: ignore[assignment]
@@ -230,8 +228,8 @@ class ModelMeta(type):
             meta.abstract = True
         return meta
 
-    def __getitem__(cls: type[TModel], key: Any) -> QuerySetSingle[TModel]:  # type: ignore[misc]
-        return ModelMeta._get_by_primary_key(cls, key)  # type: ignore[return-value]
+    def __getitem__(cls: type[TModel], key: Any) -> Coroutine[Any, Any, TModel]:  # type: ignore[misc]
+        return ModelMeta._get_by_primary_key(cls, key)
 
     #: A model class isn't a sequence of its objects - without this, ``iter(Model)`` would read
     #: ``Model[0]``, ``Model[1]``, ... through ``__getitem__`` without end.

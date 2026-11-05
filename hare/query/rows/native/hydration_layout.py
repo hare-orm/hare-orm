@@ -6,38 +6,34 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
 from hare.fields.field import Field
-from hare.query.rows.native.enums import FieldBucket
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models.meta_info import MetaInfo
 
-    HydrationEntry = tuple[str, Field[Any], FieldBucket, Callable[[Any], Any] | None]
+    HydrationEntry = tuple[str, Field[Any], Callable[[Any], Any] | None]
 
 
 @dataclass(frozen=True, slots=True)
 class HydrationLayout:
-    """How the rows of one model are read on one type of connection: each column's hydration
-    bucket and reader, which depend on the driver's native types and the dialect's type hooks.
+    """The field and bound reader of each model column on one type of connection.
 
     Attributes:
-        entry_by_column: Column name -> its entry.
-        entry_by_field_name: Model field name -> ``(column, field, bucket, dialect_reader)``.
-        reader_by_column: Column name -> the call converting its raw value in Python, None for a column
-            used as the driver returns it - what the native codecs read alike.
-        reader_by_field_name: Model field name -> the same reader as in ``reader_by_column``.
+        entry_by_column: Column name -> (model field name, field, reader).
+        entry_by_field_name: Model field name -> (column name, field, reader).
         full_column_count: How many columns a full row has.
+
+    A None reader preserves the driver's value. Every other entry carries the complete
+    conversion chosen from the dialect hook, native types and field's Python conversion.
     """
 
     #: A model's layouts, in a bucket the model keeps: (driver's native Python types, dialect) ->
     #: how the model's rows are read on such a connection.
-    layouts: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False, model_attribute="hydration_layouts")
+    layouts: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     entry_by_column: dict[str, HydrationEntry]
-    entry_by_field_name: dict[str, tuple[str, Field[Any], FieldBucket, Callable[[Any], Any] | None]]
-    reader_by_column: dict[str, Callable[[Any], Any] | None]
-    reader_by_field_name: dict[str, Callable[[Any], Any] | None]
+    entry_by_field_name: dict[str, tuple[str, Field[Any], Callable[[Any], Any] | None]]
     full_column_count: int
 
     @staticmethod
@@ -54,28 +50,23 @@ class HydrationLayout:
         types = connection.dialect.types
         native_types = connection.native_python_types
         entry_by_column: dict[str, HydrationEntry] = {}
-        entry_by_field_name: dict[str, tuple[str, Field[Any], FieldBucket, Callable[[Any], Any] | None]] = {}
-        reader_by_column: dict[str, Callable[[Any], Any] | None] = {}
-        reader_by_field_name: dict[str, Callable[[Any], Any] | None] = {}
+        entry_by_field_name: dict[str, tuple[str, Field[Any], Callable[[Any], Any] | None]] = {}
         for column in meta.db_fields:
             model_field = meta.fields_db_projection_reverse[column]
             field = meta.fields_map[model_field]
-            bucket, reader, dialect_reader = HydrationLayout.get_field_reading(field, types, native_types)
-            entry_by_column[column] = (model_field, field, bucket, dialect_reader)
-            entry_by_field_name[model_field] = (column, field, bucket, dialect_reader)
-            reader_by_column[column] = reader_by_field_name[model_field] = reader
+            reader = HydrationLayout.get_field_reader(field, types, native_types)
+            entry_by_column[column] = (model_field, field, reader)
+            entry_by_field_name[model_field] = (column, field, reader)
         return HydrationLayout(
             entry_by_column=entry_by_column,
             entry_by_field_name=entry_by_field_name,
-            reader_by_column=reader_by_column,
-            reader_by_field_name=reader_by_field_name,
             full_column_count=len(entry_by_column),
         )
 
     @staticmethod
-    def get_field_reading(
+    def get_field_reader(
         field: Field[Any], types: TypeRegistry, native_types: frozenset[type]
-    ) -> tuple[FieldBucket, Callable[[Any], Any] | None, Callable[[Any], Any] | None]:
+    ) -> Callable[[Any], Any] | None:
         """How a column of ``field`` is read on a connection.
 
         Args:
@@ -84,17 +75,16 @@ class HydrationLayout:
             native_types: The Python types the driver returns values as already.
 
         Returns:
-            The bucket, the reader (None for a value used as the driver returns it) and the
-            dialect's reader (None when the dialect registers none).
+            The complete reader, or None for a value used as the driver returns it.
         """
         dialect_reader = types.get_python_reader(field) if types.get_python_converter(type(field)) else None
         if dialect_reader is not None:
-            return FieldBucket.COMPLEX, dialect_reader, dialect_reader
+            return dialect_reader
         if field.field_type in native_types and field.keeps_native_db_values:
-            return FieldBucket.NATIVE, None, None
+            return None
         if type(field).from_db_value is Field.from_db_value and type(field).to_python is Field.to_python:
-            return FieldBucket.DEFAULT, HydrationLayout.get_field_type_reader(field.field_type), None
-        return FieldBucket.COMPLEX, field.from_db_value, None
+            return HydrationLayout.get_field_type_reader(field.field_type)
+        return field.from_db_value
 
     @staticmethod
     def get_field_type_reader(field_type: Callable[[Any], Any]) -> Callable[[Any], Any]:

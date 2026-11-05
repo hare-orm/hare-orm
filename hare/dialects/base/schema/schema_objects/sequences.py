@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hare.ddl.schema_objects.database_sequence import DatabaseSequence
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.models import Model
 
@@ -78,10 +79,10 @@ class Sequences(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Sequences")
 
-    async def move_to_schema(
+    def get_schema_move_plan(
         self, model: type[Model], sequence: DatabaseSequence, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        """Moves an object a model declares to the schema the model's table moved to.
+    ) -> SchemaChangePlan:
+        """Prepares moving a declared object with its model to another schema.
 
         Args:
             model: The model, rendered in its old schema.

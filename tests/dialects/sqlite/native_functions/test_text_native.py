@@ -9,8 +9,6 @@ import pytest
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.dialects.sqlite.functions.text.sqlite_text_functions import SqliteTextFunctions
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]
@@ -33,8 +31,8 @@ def test_text_functions() -> None:
     functions = SqliteTextFunctions.get_functions()
     native = SqliteNativeFunctions.module.TextFunctions(functions)
     grids = {
-        "left": itertools.product(TEXTS, COUNTS),
-        "right": itertools.product(TEXTS, COUNTS),
+        "left": itertools.product(TEXTS, [*COUNTS, -(2**63), 2**63 - 1]),
+        "right": itertools.product(TEXTS, [*COUNTS, -(2**63), 2**63 - 1]),
         "lpad": itertools.product(TEXTS, COUNTS, [None, "", "xy", "😀"]),
         "rpad": itertools.product(TEXTS, COUNTS, [None, "", "xy", "😀"]),
         "repeat": itertools.product(TEXTS, COUNTS),

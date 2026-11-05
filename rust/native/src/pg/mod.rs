@@ -8,24 +8,30 @@
 pub mod bounded_statement_tracker;
 pub mod client;
 pub mod closing_connect;
+pub(crate) mod connection_executor;
+pub(crate) mod connection_opening;
 pub mod copy;
+pub(crate) mod decode_context;
 pub mod described_rows;
 pub mod error;
 pub mod first_row;
+pub mod managed_connection;
 pub mod one_round_trip;
-pub mod parameter_rows;
+pub(crate) mod parameter_encoding;
 pub mod parameter_value_rows;
 pub mod parameter_values;
-pub mod parameters;
 pub mod result;
-pub mod result_cell;
 pub mod result_columns;
 pub mod result_data;
 pub mod row;
+pub(crate) mod row_decoder;
+pub(crate) mod statement_lease;
 pub mod timed_manager;
+pub(crate) mod tls;
 pub mod transaction;
 pub mod types;
 pub mod value;
+pub(crate) mod wire_reader;
 
 use pyo3::prelude::*;
 
@@ -38,8 +44,6 @@ pub fn register(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<transaction::RowStreamIterator>()?;
     module.add_class::<row::PgRow>()?;
     module.add_class::<result::PgResult>()?;
-    module.add_class::<parameters::PgParameters>()?;
-    module.add_class::<parameter_rows::PgParameterRows>()?;
     module.add_function(wrap_pyfunction!(client::connect, module)?)?;
     error::register(py, module)?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;

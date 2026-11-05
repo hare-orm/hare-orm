@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.instrumentation.capture.capture_needs import CaptureNeeds
     from hare.models import Model
+    from hare.models.write.declarations import WriteOutcome
     from hare.models.write.instance_writer import InstanceWriter
     from hare.models.write.rules.enums import WriteType
 
@@ -61,10 +62,11 @@ class InstanceCapture:
         if values is not None:
             return values, ChangeCapturing.get_tenant(obj, capture_needs)
         values_by_pk = await ChangeCapturing.read_values(type(obj), connection, [obj.pk], capture_needs)
-        return values_by_pk.get(obj.pk, (None, None))
+        row = ChangeCapturing.get_read_row(obj, connection.dialect.types, obj.pk, values_by_pk)
+        return (None, None) if row is None else row
 
     @staticmethod
-    async def insert(writer: InstanceWriter, obj: Model, capture_needs: CaptureNeeds) -> None:
+    async def insert(writer: InstanceWriter, obj: Model, capture_needs: CaptureNeeds) -> WriteOutcome:
         """Inserts the obj's row and captures it.
 
         Args:
@@ -74,9 +76,10 @@ class InstanceCapture:
         """
         captured = CapturedWrite(type(obj), capture_needs, writer.connection, RowOperation.INSERT)
         async with captured.transaction() as connection:
-            await InstanceCapture.get_capturing_writer(writer, connection).execute_insert(obj)
+            outcome = await InstanceCapture.get_capturing_writer(writer, connection).execute_insert(obj)
             after, tenant = await InstanceCapture.get_values(obj, connection, capture_needs)
             await captured.capture_values([(obj.pk, None, after, tenant)])
+        return outcome
 
     @staticmethod
     def get_snapshot_values(obj: Model, capture_needs: CaptureNeeds) -> dict[str, Any] | None:
@@ -104,7 +107,7 @@ class InstanceCapture:
         apply_active_tenant_scope_guard: bool,
         only_live_row: bool,
         write_type: WriteType,
-    ) -> int | None:
+    ) -> WriteOutcome:
         """Updates the obj's row and captures it.
 
         Args:
@@ -117,7 +120,7 @@ class InstanceCapture:
             write_type: See ``InstanceWriter.execute_update()``.
 
         Returns:
-            The number of matched rows, or None when there was nothing to write.
+            The outcome, distinguishing an unknown row count from no statement.
         """
         model = type(obj)
         update_fields = list(update_fields) if update_fields is not None else None
@@ -139,8 +142,11 @@ class InstanceCapture:
             if capture_needs.reads_before:
                 before = InstanceCapture.get_snapshot_values(obj, capture_needs) if wrote_every_field else None
                 if before is None:
-                    before = (await captured.read_before([obj.pk])).get(obj.pk)
-            rows = await InstanceCapture.get_capturing_writer(writer, connection).execute_update(
+                    row = ChangeCapturing.get_read_row(
+                        obj, connection.dialect.types, obj.pk, await captured.read_before([obj.pk])
+                    )
+                    before = row
+            outcome = await InstanceCapture.get_capturing_writer(writer, connection).execute_update(
                 obj,
                 update_fields,
                 apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
@@ -148,12 +154,12 @@ class InstanceCapture:
                 write_type=write_type,
             )
             # A count the database doesn't report may be of the changed row.
-            if rows or (rows is None and not connection.features.reports_written_row_count):
+            if outcome.performed and outcome.row_count != 0:
                 after, tenant = await InstanceCapture.get_values(
                     obj, connection, capture_needs, wrote_every_field=wrote_every_field
                 )
                 await captured.capture_values([(obj.pk, before, after, tenant)])
-        return rows
+        return outcome
 
     @staticmethod
     async def delete(
@@ -178,6 +184,7 @@ class InstanceCapture:
             )
             # A count the database doesn't report may be of the removed row.
             if rows is None or rows:
-                before, tenant = values_by_pk.get(obj.pk, (None, None))
+                row = ChangeCapturing.get_read_row(obj, connection.dialect.types, obj.pk, values_by_pk)
+                before, tenant = (None, None) if row is None else row
                 await captured.capture_values([(obj.pk, before, None, tenant)])
         return rows

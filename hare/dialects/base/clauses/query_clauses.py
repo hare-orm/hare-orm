@@ -13,9 +13,9 @@ if TYPE_CHECKING:
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.returned_value import ReturnedValue
+    from hare.sql.builder.update_from_values import UpdateFromValues
     from hare.sql.enums import JoinType, SetOperation
     from hare.sql.sql_context import SqlContext
-    from hare.sql.tables.table import Table
     from hare.sql.terms.criteria.like import Like
 
 
@@ -29,6 +29,12 @@ class QueryClauses:
 
     #: The keyword of each join the dialect writes.
     join_keywords: ClassVar[Mapping[str, str]] = JOIN_KEYWORDS
+
+    @staticmethod
+    def get_tagged_statement_sql(sql: str, comment: str) -> str:
+        """Append an escaped query comment, separated from a possible final line comment."""
+        separator = "\n" if "--" in sql[sql.rfind("\n") + 1 :] else " "
+        return f"{sql}{separator}/*{comment}*/"
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -575,7 +581,7 @@ class QueryClauses:
         """
         if cast_type is None:
             return placeholder_template
-        return f"CAST({placeholder_template} AS {cast_type.upper()})"
+        return f"CAST({placeholder_template} AS {cast_type})"
 
     def get_insert_rows_source_sql(
         self, table_sql: str, rows_source_sql: str, returned: Sequence[ReturnedValue]
@@ -596,7 +602,7 @@ class QueryClauses:
         """The select list giving the columns of a ``VALUES`` table their names.
 
         Args:
-            column_names: The names, in column order.
+            column_names: The already quoted names, in column order.
 
         Returns:
             The select list.
@@ -626,38 +632,23 @@ class QueryClauses:
         return f"(SELECT {columns_sql} FROM (VALUES {', '.join(row_sqls)}) AS {alias_sql}{condition_sql})"  # nosec B608
 
     def get_update_from_values_sql(
-        self,
-        *,
-        with_sql: str,
-        table: Table,
-        table_sql: str,
-        assignments: Sequence[tuple[str, str]],
-        values_columns_sql: str,
-        values_sql: str,
-        values_alias_sql: str,
-        matches: Sequence[tuple[str, str]],
-        condition_sql: str | None,
-        returned: Sequence[ReturnedValue],
+        self, *, write: UpdateFromValues, with_sql: str, values_sql: str, sql_context: SqlContext
     ) -> str:
-        """An ``UPDATE`` writing each row of a ``VALUES`` table into the table row it matches.
+        """Render an UPDATE from structural assignments and already-bound input rows.
 
         Args:
-            with_sql: The ``WITH`` clause, or an empty string.
-            table: The updated table.
-            table_sql: Its SQL.
-            assignments: ``(column, value SQL)`` per assigned column.
-            values_columns_sql: The select list naming the ``VALUES`` table's columns.
-            values_sql: The rows of the ``VALUES`` table.
-            values_alias_sql: The alias of the ``VALUES`` table.
-            matches: ``(table column SQL, VALUES column SQL)`` pairs a row is matched by.
-            condition_sql: A further condition on the updated rows, or None.
-            returned: The returned values, as ``get_returning_sql()`` takes them.
+            write: Unquoted identifiers, input-row positions, expression trees, matching
+                keys and optional filter. Raw SQL in a tree remains opaque.
+            with_sql: The WITH clause, or an empty string.
+            values_sql: The bound rows, rendered in the dialect's value syntax.
+            sql_context: The shared rendering and parameter-binding context.
 
         Returns:
-            The statement.
+            The complete statement. A dialect chooses qualification and row addressing
+            before rendering; it never recovers either by parsing SQL fragments.
 
         Raises:
-            UnSupportedError: ISO SQL's ``UPDATE`` reads no other table.
+            UnSupportedError: The dialect has no UPDATE from a row source.
         """
         raise UnSupportedError(f"An UPDATE from a VALUES table has no SQL for the {self.dialect} dialect")
 

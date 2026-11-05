@@ -8,6 +8,7 @@ from hare.dialects.postgresql.search.constants import (
     POSTGRESQL_TS_VECTOR_SOURCE_PATTERN,
     POSTGRESQL_TS_VECTOR_WEIGHTED_PATTERN,
 )
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
 
 
@@ -24,12 +25,17 @@ class TSVectorExpressionReader:
             attribute_names_by_column: The model's attributes, by column.
 
         Returns:
-            ``source_fields``, ``config`` and ``weights``; None for an expression no
-            ``TSVectorField`` writes.
+            ``source_fields``, ``config`` and optional ``weights`` for a uniform configuration,
+            or ``expression`` for vectors with different configurations or mixed weights;
+            None for an expression no ``TSVectorField`` writes.
         """
         source_fields: list[str] = []
         weights: list[str | None] = []
         configs: set[str] = set()
+        vectors = []
+        from hare.search.vector.combined_search_vector import CombinedSearchVector
+        from hare.search.vector.search_vector import SearchVector
+
         for vector_sql in TSVectorExpressionReader.split_concatenation(expression_sql):
             weight = None
             if weighted := POSTGRESQL_TS_VECTOR_WEIGHTED_PATTERN.fullmatch(vector_sql):
@@ -46,11 +52,18 @@ class TSVectorExpressionReader:
             attribute_name = attribute_names_by_column.get(column)
             if attribute_name is None:
                 return None
-            configs.add(vector["config"].replace("''", "'"))
+            config = vector["config"].replace("''", "'")
+            configs.add(config)
             source_fields.append(attribute_name)
             weights.append(weight)
+            vectors.append(SearchVector(attribute_name, config=config, weight=weight))
         if len(configs) != 1 or len({weight is None for weight in weights}) != 1:
-            return None
+            if not vectors:
+                return None
+            expression: SearchVector | CombinedSearchVector = vectors[0]
+            for vector_expression in vectors[1:]:
+                expression = expression + vector_expression
+            return {"expression": expression}
         kwargs: dict[str, Any] = {"source_fields": tuple(source_fields), "config": configs.pop()}
         if weights[0] is not None:
             kwargs["weights"] = tuple(weights)
@@ -68,39 +81,7 @@ class TSVectorExpressionReader:
             The concatenated parts, each without its parentheses.
         """
         sql = SchemaIntrospector.strip_outer_parentheses(sql) or ""
-        parts = TSVectorExpressionReader.split_top_level_concatenation(sql)
+        parts = CatalogSql.split_terms(sql, POSTGRESQL_TS_VECTOR_CONCATENATION_SQL)
         if len(parts) == 1:
             return parts
         return [vector_sql for part in parts for vector_sql in TSVectorExpressionReader.split_concatenation(part)]
-
-    @staticmethod
-    def split_top_level_concatenation(sql: str) -> list[str]:
-        """Splits an expression on its top-level ``||`` - one outside parentheses and literals.
-
-        Args:
-            sql: The expression.
-
-        Returns:
-            The concatenated parts.
-        """
-        parts = []
-        depth = 0
-        in_literal = False
-        start = 0
-        index = 0
-        while index < len(sql):
-            char = sql[index]
-            if char == "'":
-                in_literal = not in_literal
-            elif not in_literal and char == "(":
-                depth += 1
-            elif not in_literal and char == ")":
-                depth -= 1
-            elif not in_literal and depth == 0 and sql.startswith(POSTGRESQL_TS_VECTOR_CONCATENATION_SQL, index):
-                parts.append(sql[start:index])
-                index += len(POSTGRESQL_TS_VECTOR_CONCATENATION_SQL)
-                start = index
-                continue
-            index += 1
-        parts.append(sql[start:])
-        return parts

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import copy
 from typing import Any, ClassVar, Self
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -271,12 +272,9 @@ class Geometry:
         Returns:
             The copy.
         """
-        copy = object.__new__(type(self))
-        for slot_class in type(self).__mro__:
-            for name in getattr(slot_class, "__slots__", ()):
-                object.__setattr__(copy, name, getattr(self, name))
-        object.__setattr__(copy, "srid", self.get_validated_srid(srid))
-        return copy
+        geometry = copy(self)
+        object.__setattr__(geometry, "srid", self.get_validated_srid(srid))
+        return geometry
 
     def __setattr__(self, name: str, value: Any) -> None:
         if hasattr(self, name):

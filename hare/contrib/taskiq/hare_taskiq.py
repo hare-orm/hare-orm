@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 from taskiq import TaskiqEvents
 
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from taskiq import AsyncBroker, TaskiqState
 
     from hare.core.config import HareConfig
+    from hare.core.hare_context import HareContext
 
 
 class HareTaskiq:
@@ -28,13 +29,14 @@ class HareTaskiq:
     Args:
         broker: The broker.
         config: The Hare configuration, as for ``Hare.init(config=...)``.
-        atomic_tasks: True for a transaction per task on the default connection, the connection
+        hare_context: An initialized context to borrow without closing it, None to create one.
+        atomic_tasks: True for a transaction per task on the automatically selected connection, the connection
             names for one on each of them, False for none.
         tenant_label: The label a task's tenant goes in; None to leave tenants alone.
         transaction_retries: How many times a task is sent again after a transaction conflict.
 
     Raises:
-        ConfigurationError: An option has the wrong type or is out of range.
+        ConfigurationError: ``atomic_tasks`` is neither a bool nor an iterable of connection names.
     """
 
     def __init__(
@@ -42,15 +44,25 @@ class HareTaskiq:
         broker: AsyncBroker,
         config: Mapping[str, Any] | HareConfig | str,
         *,
-        atomic_tasks: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_tasks: bool | Iterable[str] = False,
         tenant_label: str | None = DEFAULT_TENANT_LABEL,
         transaction_retries: int = 0,
     ) -> None:
         self.broker = broker
-        self.middleware = HareTaskiqMiddleware(
-            atomic_tasks=atomic_tasks, tenant_label=tenant_label, transaction_retries=transaction_retries
+        self.lifecycle = ApplicationLifecycle(
+            config, transactions=atomic_tasks, transactions_option="atomic_tasks", context=hare_context
         )
-        self.lifecycle = ApplicationLifecycle(config, transactions=atomic_tasks, transactions_option="atomic_tasks")
+        self.middleware = HareTaskiqMiddleware(
+            atomic_tasks=(
+                atomic_tasks
+                if isinstance(atomic_tasks, bool)
+                else cast(tuple[str, ...], self.lifecycle.transaction_connection_names)
+            ),
+            tenant_label=tenant_label,
+            transaction_retries=transaction_retries,
+            lifecycle=self.lifecycle,
+        )
         broker.add_middlewares(self.middleware)
         broker.add_event_handler(TaskiqEvents.WORKER_STARTUP, self.start)
         broker.add_event_handler(TaskiqEvents.WORKER_SHUTDOWN, self.stop)

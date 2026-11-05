@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from hare.dialects.postgresql.client.constants import (
     POSTGRESQL_CURRENT_SEARCH_PATH_SQL,
 )
+from hare.dialects.postgresql.connection.search_path import SearchPath
 from hare.dialects.postgresql.server_versions import POSTGRESQL_REPORTED_SEARCH_PATH_SERVER_VERSION
 from hare.exceptions import ConfigurationError
 from hare.instrumentation.enums import PoolRole
@@ -57,8 +58,8 @@ class TransactionPooler:
             ConfigurationError: The statements run with another search path.
         """
         (row,) = await client.execute_dicts(POSTGRESQL_CURRENT_SEARCH_PATH_SQL)
-        current_schemas = TransactionPooler.get_search_path_schemas(row["search_path"])
-        if current_schemas == TransactionPooler.get_search_path_schemas(expected_search_path):
+        current_path = SearchPath.parse(row["search_path"])
+        if current_path == SearchPath.parse(expected_search_path):
             return
         await client.close_refused_pool()
         raise ConfigurationError(
@@ -66,18 +67,6 @@ class TransactionPooler:
             f"search path on: statements run with {row['search_path']!r}, not {expected_search_path!r} - "
             "PgBouncer needs `track_extra_parameters = search_path` (PgBouncer 1.20+)"
         )
-
-    @staticmethod
-    def get_search_path_schemas(search_path: str) -> tuple[str, ...]:
-        """The schemas of a search path, as the server lists them - spaces and quotes dropped.
-
-        Args:
-            search_path: The search path.
-
-        Returns:
-            The schema names, in order.
-        """
-        return tuple(schema.strip().strip('"') for schema in search_path.split(",") if schema.strip())
 
     @staticmethod
     def get_direct_settings(client: PostgresqlClient) -> dict[str, Any]:
@@ -106,6 +95,8 @@ class TransactionPooler:
             "host": client.direct_host,
             "port": client.direct_port or client.port,
             "schema": client.schema,
+            "search_path": client.search_path,
+            "server_settings": {key: value for key, value in client.server_settings.items() if key != "search_path"},
             "transaction_pooling": False,
             "direct_host": None,
             "direct_port": None,

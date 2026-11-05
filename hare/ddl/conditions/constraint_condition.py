@@ -6,9 +6,14 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.ddl.conditions.dialect_condition import DialectCondition
 from hare.ddl.conditions.enum_members_condition import EnumMembersCondition
 from hare.ddl.conditions.exclusive_arc_condition import ExclusiveArcCondition
+from hare.ddl.conditions.messages import (
+    ROW_CONDITION_OUTER_MESSAGE,
+    ROW_CONDITION_QUERY_MESSAGE,
+    ROW_CONDITION_RELATION_MESSAGE,
+)
 from hare.ddl.ddl_term_sql import DdlTermSql
 from hare.ddl.raw_sql_term import RawSQLTerm
-from hare.exceptions import ConfigurationError, FieldError, QueryError, UnSupportedError
+from hare.exceptions import ConfigurationError, FieldError, QueryError
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -101,58 +106,48 @@ class ConstraintCondition:
 
     @staticmethod
     def raise_if_reads_other_columns(condition: Any, model: type[Model]) -> None:
-        """Refuses a ``Q`` condition reading anything but the model's own columns - another model's column
-        through a relation (a join), an aggregate, an expression - as the DDL of every database refuses it,
-        when the model is defined: a relation compared by its own column (``owner=1``, ``owner__isnull``)
-        reads the model's column. A condition of another type isn't read; one a dialect can't write is
-        refused by that dialect's DDL.
+        """Check declaration dependencies before any dialect renders SQL.
 
-        Args:
-            condition: The declared condition.
-            model: The model declaring it.
-
-        Raises:
-            ConfigurationError: The ``Q`` reads something else, or names no field of the model.
+        Forward relation comparisons read local key columns. Related column paths,
+        aggregates, windows and query scopes cannot belong to a row constraint.
+        Scalar functions are checked by the actual dialect when DDL is rendered.
         """
-        # Local imports: the query package imports the ddl package.
-        from hare.dialects.base.constants import SQL_DIALECT
-        from hare.query.expressions import Q
-        from hare.query.expressions.expression_context import ExpressionContext
-        from hare.sql import Table as SqlTable
+        # Local imports: model binding imports the DDL package before query setup.
+        from hare.query.enums import LookupTarget
+        from hare.query.expressions import Aggregate, Q, Window
+        from hare.query.expressions.structure.expression_declaration import ExpressionDeclaration
+        from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
+        from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
+        from hare.query.queryset.query_specification import QuerySpecification
 
         if not isinstance(condition, Q):
             return
-        if not ConstraintCondition.has_expression(condition):
-            try:
-                modifier = condition.get_result(
-                    ExpressionContext(
-                        model=model,
-                        table=SqlTable(model._meta.db_table),
-                        annotations={},
-                        dialect=SQL_DIALECT,
-                        connection=None,
-                    )
+        try:
+            for node in ExpressionTraversal.walk(condition):
+                if isinstance(node, (Aggregate, Window, QuerySpecification)) or (
+                    isinstance(node, ExpressionDeclaration) and node.structure.query_scope
+                ):
+                    raise QueryError(ROW_CONDITION_QUERY_MESSAGE)
+            for reference in ExpressionTraversal.get_field_references(condition):
+                if reference.outer_scopes:
+                    raise QueryError(ROW_CONDITION_OUTER_MESSAGE)
+                if not reference.lookup:
+                    if LookupInfoBuilder.get_ordering_info(model, reference.path).relations:
+                        raise QueryError(ROW_CONDITION_RELATION_MESSAGE)
+                    continue
+                lookup = LookupInfoBuilder.get_lookup_info(model, reference.path)
+                if not lookup.relations:
+                    continue
+                local_relation = (
+                    lookup.target is LookupTarget.RELATION
+                    and len(lookup.relations) == 1
+                    and lookup.relations[0].model_field_name
+                    in model._meta.foreign_key_fields | model._meta.one_to_one_fields
                 )
-            except UnSupportedError:
-                return
-            except (FieldError, QueryError):
-                modifier = None
-            if modifier is not None and not modifier.joins and not modifier.having_criterion:
-                return
-        raise ConfigurationError(
-            f"{model.__name__}: a constraint or index condition reads only the model's own columns, got {condition!r}"
-        )
-
-    @staticmethod
-    def has_expression(condition: Q) -> bool:
-        """Whether a ``Q`` tree holds an expression - ``Q(Exists(...))`` - anywhere.
-
-        Args:
-            condition: The condition.
-
-        Returns:
-            True when it or a child of it wraps an expression.
-        """
-        return condition.expression is not None or any(
-            ConstraintCondition.has_expression(child) for child in condition.children
-        )
+                if not local_relation:
+                    raise QueryError(ROW_CONDITION_RELATION_MESSAGE)
+        except (FieldError, QueryError) as error:
+            raise ConfigurationError(
+                f"{model.__name__}: a constraint or index condition reads only the model's own columns, "
+                f"got {condition!r}"
+            ) from error

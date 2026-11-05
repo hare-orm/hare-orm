@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -46,25 +45,21 @@ def _build_migrations(num_models: int, batch_size: int = 20) -> list[Migration]:
 
 
 @pytest.mark.asyncio
-async def test_apply_dry_run_does_not_clone_state():
-    """Verify that apply(dry_run=True) never calls State.clone()."""
-    migrations = _build_migrations(10)
-    state = State()
+async def test_apply_dry_run_preserves_previous_states():
+    """Returned states accumulate migrations without changing earlier states or sharing fields."""
+    migrations = _build_migrations(10, batch_size=5)
+    states = [State()]
+    for migration in migrations:
+        previous = states[-1]
+        model_names = tuple(previous.models)
+        result = await migration.apply(previous, dry_run=True, schema_editor=None)
+        assert result is not previous
+        assert tuple(previous.models) == model_names
+        states.append(result)
 
-    clone_calls = 0
-    original_clone = State.clone
-
-    def counting_clone(self):
-        nonlocal clone_calls
-        clone_calls += 1
-        return original_clone(self)
-
-    with patch.object(State, "clone", counting_clone):
-        for migration in migrations:
-            await migration.apply(state, dry_run=True, schema_editor=None)
-
-    assert len(state.models) == 10
-    assert clone_calls == 0, f"State.clone() was called {clone_calls} times during dry_run"
+    assert [len(state.models) for state in states] == [0, 5, 10]
+    states[-1].models[("app", "Model0")].fields["name"].max_length = 64
+    assert states[1].models[("app", "Model0")].fields["name"].max_length == 255
 
 
 def test_state_clone_produces_independent_copy():

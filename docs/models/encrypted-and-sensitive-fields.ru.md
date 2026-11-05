@@ -18,15 +18,23 @@ class Integration(Model):
     answers = fields.EncryptedJSONField(null=True, encrypt_keys=True)  # ключи тоже секретны
 ```
 
-Ключи задаются один раз на процесс:
+У каждого приложения свой неизменяемый набор ключей. `configure(..., context=application)`
+настраивает конкретный `HareContext`; без `context` — активное приложение. Вне приложения вызов
+задаёт набор по умолчанию для создаваемых впоследствии контекстов. Изменение одного приложения
+не перенастраивает другие существующие приложения. Запрос, страницы итератора и преобразование
+целого значения поля сохраняют исходный набор ключей; новые выполнения используют новый.
+
+Ротация читает и записывает данные через одно выбранное соединение и использует один набор
+ключей для всех пакетов. `using=` явно выбирает соединение; по умолчанию берётся соединение
+модели для записи. `reset(context=...)` очищает настройки выбранного приложения:
 
 ```python
 class FieldEncryption:  # hare.fields.encrypted.field_encryption
     @classmethod
-    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None) -> None: ...
+    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None, *, context: HareContext | None = None) -> None: ...
 
     @classmethod
-    async def reencrypt(cls, *models: type[Model], batch_size: int = 500) -> int: ...
+    async def reencrypt(cls, *models: type[Model], batch_size: int = 500, using: str | DatabaseClient | None = None) -> int: ...
 ```
 
 | Поле | Как хранится | Что шифруется |
@@ -67,7 +75,8 @@ Python, а не командой SQL.
   нужен — первое настоящее использование (запись, чтение или `FieldEncryption.configure()`) даёт
   `ConfigurationError` с подсказкой установить пакет.
 - `FieldEncryption.configure()` получает каждый ключ как `urlsafe_b64encode(sha256(secret))`; ключи общие
-  для всего процесса и всех зашифрованных полей. Значения записываются ключом `secret_key`, а читаются им
+  для зашифрованных полей выбранного приложения и контекста выполнения. Значения записываются
+  ключом `secret_key`, а читаются им
   или любым из `previous_keys` (см. [Смена ключа](#changing-the-encryption-key)). Использование поля до
   вызова этого метода даёт `ConfigurationError`, как и пустой секрет или `previous_keys`, переданный
   одной строкой.
@@ -110,7 +119,8 @@ Python, а не командой SQL.
 - `update()`/`save()`/`update_or_create(defaults=...)` принимают для зашифрованного поля только простое
   `F()` другого поля того же класса, которое хранит значения так же (`EncryptedTextField` ↔
   `EncryptedTextField`, `EncryptedJSONField` ↔ `EncryptedJSONField` с тем же `encrypt_keys`) — шифротекст
-  копируется как есть, и это работает, потому что у всех зашифрованных полей один ключ. Любое другое
+  копируется как есть; поля используют общий набор ключей выбранного приложения и контекста выполнения.
+  Любое другое
   значение `Value(...)` записывается зашифрованным, как и само значение; любое другое выражение
   (`F("plain_field")`, `Upper(...)`, `Case(...)` и т. п.) даёт `FieldError`: его результат был бы записан
   без шифрования. Копирование зашифрованного поля в обычное

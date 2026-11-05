@@ -13,6 +13,8 @@ from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
 from hare.query.expressions.frames.window_frame import WindowFrame
 from hare.query.expressions.ordering import Ordering
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.analytics.declarations import Following, Preceding
@@ -41,9 +43,14 @@ class Window(CombinableExpression):
             a ranking function (``RowNumber``, ``Rank``, ...) doesn't.
 
     Raises:
-        QueryError: ``partition_by`` or ``order_by`` isn't a list, an item of them isn't a name, an
-            expression or (``order_by``) an ordering, or ``frame`` isn't a ``WindowFrame``.
+        QueryError: An item of ``partition_by`` or ``order_by`` isn't a name, an expression or
+            (``order_by``) an ordering, or the frame is incompatible with the function or ordering.
     """
+
+    structure = ExpressionStructure(
+        positions=((1, ArgumentRole.FIELD), (2, ArgumentRole.ORDERING)),
+        keywords=(("partition_by", ArgumentRole.FIELD), ("order_by", ArgumentRole.ORDERING)),
+    )
 
     # The result is decoded by the aggregated field. A ranking function has none and stays an int.
     populate_field_object = True
@@ -161,14 +168,9 @@ class Window(CombinableExpression):
             )
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        # Deferred import: hare.query.queryset imports Q/Expression/... from this package at
-        # import time, so a direct top-level import here would be circular (same reason as
-        # elsewhere in this package).
-        from hare.query.queryset import QuerySet
-
         orderings = [
             (read_target, order)
-            for target, order in map(QuerySet._get_ordering_string, self.order_by)
+            for target, order in map(Ordering.get_parts, self.order_by)
             for read_target in Window.get_read_targets(expression_context, target)
         ]
         term, joins, output_field = self.expression.build(expression_context)

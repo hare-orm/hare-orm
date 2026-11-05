@@ -19,8 +19,6 @@ from hare.exceptions import ConfigurationError
 from hare.query.functions import Count
 from tests.contrib.frameworks.models import Chapter, Writer
 
-REQUIRES = ("litestar",)
-
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {
@@ -105,6 +103,7 @@ def build_app() -> Litestar:
         [counted_writers, plain_writers, partial_writers, flat_chapters, unloaded_chapters, writer_pages],
         plugins=[HarePlugin(CONFIG)],
         lifespan=[create_rows],
+        logging_config=None,
     )
 
 
@@ -240,7 +239,7 @@ def test_a_wrong_declaration_is_refused_when_the_handler_is_built(dto, message, 
     wrong.__annotations__["return"] = list[dto.model_type]
 
     with pytest.raises(ConfigurationError, match=message):
-        Litestar([get("/wrong", return_dto=dto)(wrong)], plugins=[HarePlugin(CONFIG)])
+        Litestar([get("/wrong", return_dto=dto)(wrong)], plugins=[HarePlugin(CONFIG)], logging_config=None)
 
 
 @pytest.mark.asyncio

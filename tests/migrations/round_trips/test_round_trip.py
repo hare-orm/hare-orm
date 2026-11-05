@@ -124,7 +124,7 @@ async def database_url(tmp_path: Path) -> AsyncGenerator[str]:
         return
     raw_database_url = raw_database_url.replace("\\{", "{").replace("\\}", "}")
     resolved_database_url = raw_database_url.format(f"rt_{uuid.uuid4().hex}")
-    credentials = DbUrlConfigGenerator.expand(resolved_database_url, testing=False)["credentials"]
+    credentials = DbUrlConfigGenerator.expand(resolved_database_url)["credentials"]
     # The template may carry a per-run prefix (test_<run tag>_{}) - create exactly the database the URL names.
     database_name = credentials["database"]
     administrative_connection = await ServerSession.open(resolved_database_url, "postgres")

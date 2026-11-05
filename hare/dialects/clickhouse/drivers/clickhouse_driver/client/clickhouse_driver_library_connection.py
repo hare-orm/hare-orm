@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from typing import Any
+
 from clickhouse_driver.connection import Connection
 
-from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_service_block_stream import (
-    ClickhouseDriverServiceBlockStream,
+from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_block_input import (
+    ClickhouseDriverBlockInput,
+)
+from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_block_output import (
+    ClickhouseDriverBlockOutput,
 )
 
 
-class ClickhouseDriverLibraryConnection(Connection):  # type: ignore[misc]  # the library ships no types
-    """clickhouse-driver's connection, reading the blocks the server sends besides a statement's rows
-    through ``ClickhouseDriverServiceBlockStream``."""
+class ClickhouseDriverLibraryConnection(Connection):  # type: ignore[misc]
+    """A connection with local column codecs and the library's ordinary transport lifecycle."""
 
-    def _init_connection(self, host: str, port: int) -> None:
-        super()._init_connection(host, port)
-        self.block_in_raw = ClickhouseDriverServiceBlockStream(self.fin, self.context)
+    def get_block_in_stream(self) -> Any:
+        return ClickhouseDriverBlockInput(super().get_block_in_stream())
+
+    def get_block_out_stream(self) -> Any:
+        return ClickhouseDriverBlockOutput(super().get_block_out_stream())

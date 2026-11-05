@@ -36,14 +36,11 @@ class Grants(SchemaEditorPart):
         """Revokes the privileges of a grant."""
         await self.editor.run_sqls(self.get_revoke_sqls(model, grant))
 
-    async def grant_again(self, model: type[Model], target: GrantTarget, object_name: str) -> None:
-        """Grants a model's privileges on an object again - created anew, it has none.
-
-        Args:
-            model: The model, rendered with its grants.
-            target: The type of the object.
-            object_name: Its name.
-        """
-        for grant in model._meta.grants:
-            if grant.on == target and grant.object_name == object_name:
-                await self.add_grant(model, grant)
+    def get_grant_again_sqls(self, model: type[Model], target: GrantTarget, object_name: str) -> list[str]:
+        """Compile retained privileges before replacing an object, so invalid grants cannot follow a DROP."""
+        return [
+            sql
+            for grant in model._meta.grants
+            if grant.on == target and grant.object_name == object_name
+            for sql in self.get_grant_sqls(model, grant)
+        ]

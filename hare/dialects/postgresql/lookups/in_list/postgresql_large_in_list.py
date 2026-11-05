@@ -19,8 +19,7 @@ class PostgresqlLargeInList(LargeInList):
     bound as one array parameter (``= ANY($1::type[])``, or ``unnest`` for value rows), typed by
     the compared field or, when none is known, by the values themselves."""
 
-    @classmethod
-    def get_array_term(cls, values: list[Any], array_element_type: str, *, typed_by_values: bool = False) -> Term:
+    def get_array_term(self, values: list[Any], array_element_type: str, *, typed_by_values: bool = False) -> Term:
         """One array parameter holding ``values``, cast to ``array_element_type[]``.
 
         Args:
@@ -33,9 +32,8 @@ class PostgresqlLargeInList(LargeInList):
         """
         return ArrayParameter(values, array_element_type, typed_by_values=typed_by_values)
 
-    @classmethod
     def get_membership_criterion(
-        cls, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
+        self, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
     ) -> Criterion | None:
         # A SQL term element keeps the plain IN (...) form.
         if len(values) < POSTGRES_IN_ARRAY_THRESHOLD or ArrayParameter.holds_term(values):
@@ -44,12 +42,11 @@ class PostgresqlLargeInList(LargeInList):
         element_type = element_type or ArrayParameter.get_array_element_type(non_null_values)
         if element_type is None:
             return None
-        array_term = cls.get_array_term(non_null_values, element_type, typed_by_values=typed_by_values)
+        array_term = self.get_array_term(non_null_values, element_type, typed_by_values=typed_by_values)
         return BasicCriterion(Equality.EQ, term, AnyValue(array_term))
 
-    @classmethod
     def get_row_container(
-        cls, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None
+        self, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None
     ) -> UnnestRowValues | None:
         """The ``unnest`` container for a long list of value rows.
 
@@ -74,5 +71,5 @@ class PostgresqlLargeInList(LargeInList):
             )
             if element_type is None:
                 return None
-            column_arrays.append(cls.get_array_term(column_values, element_type))
+            column_arrays.append(self.get_array_term(column_values, element_type))
         return UnnestRowValues(column_arrays)

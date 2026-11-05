@@ -69,10 +69,6 @@ DATABASE_HEADING_FORM = re.compile(
     r"|\((?:PostgreSQL|SQLite|ClickHouse) only\)"
     r"|(?:PostgreSQL|SQLite|ClickHouse)-only"
 )
-#: A comment of a code block - Python's, SQL's, a shell's, an INI file's - to the end of its line.
-CODE_COMMENT = re.compile(r"\s*(?:#|--|//|;).*$")
-#: A docstring on one line - the text of an example, translated with the page.
-ONE_LINE_DOCSTRING = re.compile(r'^\s*""".*"""$')
 #: A hyphen standing for a dash between words of prose.
 HYPHEN_AS_DASH = re.compile(r"\w - \w")
 #: Straight quotes around Russian words, where the standard has «ёлочки».

@@ -74,7 +74,7 @@ async def test_generate_schemas_builds_the_schema_the_migrations_build():
         state = State()
         for position, split_migration in enumerate(split_migrations):
             migration = Migration(f"{position:04d}", split_migration.app_label, operations=split_migration.operations)
-            await migration.apply(state, schema_editor=editor)
+            state = await migration.apply(state, schema_editor=editor)
         migrated_schema = await read_schema(connection, models)
 
     assert sorted(generated_schema) == sorted(migrated_schema)

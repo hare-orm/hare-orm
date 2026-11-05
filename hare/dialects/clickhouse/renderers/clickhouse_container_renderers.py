@@ -110,8 +110,8 @@ class ClickhouseContainerRenderers:
         (array_sql,) = cls.get_argument_sqls(term, sql_context)
         return f"arraySlice({array_sql},{term.start + 1},{max(term.end - term.start, 0)})"
 
-    @classmethod
-    def render_map_value(cls, term: MapValueTerm, sql_context: SqlContext) -> str:
+    @staticmethod
+    def render_map_value(term: MapValueTerm, sql_context: SqlContext) -> str:
         """``map[key]`` - the key bound as ClickHouse's types write it (an enum by its number, which a
         map of enum keys takes where it takes no label)."""
         map_sql = Function.get_arg_sql(term.args[0], sql_context)

@@ -39,7 +39,8 @@ class HareFastAPI(FastAPI):
         self,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         lifespan: Lifespan | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -55,8 +56,8 @@ class HareFastAPI(FastAPI):
   Маршрутизатору, объявленному в модуле, который импортируется до создания приложения, нужен вызов
   `Hare.bind_models(HARE_CONFIG)` до этого импорта.
 - **`HareContext`.** Открывается при запуске приложения, до его собственного `lifespan` — у которого база
-  уже есть, — и закрывается при остановке. Контекст — глобальный запасной, поэтому его видит каждый
-  запрос. При остановке `Hare.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё
+  уже есть, — и закрывается при остановке. Middleware активирует контекст приложения для каждого
+  запроса. При остановке `HareContext.close_connections()` ещё и дожидается фоновых наблюдателей, которые ещё
   работают.
 - **Запросы из параметров проверяются при запуске.** `RequestQuery.check_declarations()` выполняется, как
   только модели настроены: ошибочный [запрос из параметров](request-queries.ru.md) не даёт приложению
@@ -148,6 +149,12 @@ app = HareFastAPI(hare_config=HARE_CONFIG, health_routes=HealthRoutes(HealthChec
 ## <a id="tests"></a>Тесты
 
 С pytest-плагином hare тестируемое приложение работает на тестовых базах: запущенное в цикле событий теста
-(его lifespan, с клиентом httpx и `ASGITransport`), под `hare_app_db` оно берёт контекст теста, и его
+(его lifespan, с клиентом httpx и `ASGITransport`), с `hare_context=hare_app_db` оно берёт контекст теста, и
+его
 записи откатываются вместе с записями теста, — см. [Тесты приложения](../testing/setup.ru.md#application-tests).
 `TestClient` из Starlette запускает приложение в своём потоке — с ним берите `hare_app_transactional_db`.
+
+Явно переданный `hare_context` остаётся под управлением вызывающего кода: интеграция не инициализирует
+и не закрывает его. Без этого аргумента приложение создаёт и закрывает отдельный контекст.
+Запуск приложения не задаёт глобальный запасной контекст. В тестах передавайте фикстуру явно:
+`hare_context=hare_app_db` или `hare_context=hare_app_transactional_db`.

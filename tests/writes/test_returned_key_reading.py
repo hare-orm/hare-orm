@@ -61,7 +61,7 @@ async def test_returned_rows_match_the_objects_after_read_conversion(db, model):
             pytest.skip("Matching generated keys requires ordered RETURNING")
         types = connection.dialect.types
         uses_mapping = model in (DialectReadKey, DialectReadPrimaryKey)
-        previous_mapping = types.mappings.get(MappedReadField)
+        previous_snapshot = Registries.snapshot
         if uses_mapping:
             types.register(MappedReadField, TypeMapping(to_python=UpperReadField.from_db_value))
         try:
@@ -77,8 +77,5 @@ async def test_returned_rows_match_the_objects_after_read_conversion(db, model):
             assert (await model.objects.get()).pk == first.pk
         finally:
             if uses_mapping:
-                if previous_mapping is None:
-                    types.mappings.pop(MappedReadField)
-                else:
-                    types.mappings[MappedReadField] = previous_mapping
+                Registries.snapshot = previous_snapshot
                 Registries.changed()

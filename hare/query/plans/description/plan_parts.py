@@ -79,14 +79,12 @@ class PlanParts:
         return ("literal", Value.get_literal_structure(value))
 
     @staticmethod
-    def describe_field(owner: Any, attribute: str, field: Any, context: PlanContext) -> PlanDescription | None:
+    def describe_field(field: Any, context: PlanContext) -> PlanDescription | None:
         """Describes what a function reads: an expression by its own description, a field or an
         annotation by its name - the annotation's values are bound where it is described - and a SQL
         term by its text and the values it binds.
 
         Args:
-            owner: The function.
-            attribute: The attribute holding what it reads.
             field: What it reads.
             context: The context the function is resolved in.
 

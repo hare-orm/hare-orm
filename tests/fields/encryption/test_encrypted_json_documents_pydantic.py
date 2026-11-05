@@ -13,8 +13,6 @@ from tests.fields.encryption.test_encrypted_json_documents import (
 )
 from tests.fields.models_encrypted_pydantic import EncryptedTypedDocumentRecord, EncryptedWebhookSettings
 
-REQUIRES = ("encryption", "pydantic")
-
 #: The table of EncryptedTypedDocumentRecord.
 TYPED_DOCUMENT_TABLE = "encrypted_typed_document_record"
 

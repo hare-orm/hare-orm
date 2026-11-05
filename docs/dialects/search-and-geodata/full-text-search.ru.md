@@ -14,14 +14,20 @@ ClickHouse через hare его нет: `__search` и любое выраже�
 | Конфигурации, лексемы, веса меток | есть | нет |
 | Веса полей | через `SearchVector(weight=...)` | `SearchRank(weights={"title": 10})` |
 
-То, что умеет только один диалект, объявляют два признака `Features`; вызов, которому нужен признак,
-которого нет у соединения, даёт `UnSupportedError` до отправки SQL:
+Поддержка проверяется по возможностям выбранного соединения до отправки SQL:
 
-- `supports_text_search_configurations` (PostgreSQL) — конфигурация поиска (`config=`), `SearchVector`
-  как самостоятельное значение (аннотация, `+`, вес), лексемы, веса меток, `normalization` и
-  `cover_density` у `SearchRank`, а также `config`, `min_words`, `short_word`, `highlight_all` и
-  `max_fragments` у `SearchHeadline`;
-- `supports_full_text_index` (SQLite) — `FullTextIndex` и веса полей у `SearchRank`.
+- `supports_text_search_configurations` разрешает только явный `config=`.
+- `SqliteFeatures.supports_full_text_index` разрешает обслуживаемую таблицу `FullTextIndex`.
+- `text_search_operations` — множество значений `TextSearchOperation` из
+  `hare.dialects.base.search.enums`. Построение, объединение и веса векторов, выражения сырого
+  поискового запроса, веса полей/меток ранга, нормализация, плотность покрытия и каждый
+  параметр разметки объявляются независимо. Наличие конфигураций не включает эти операции.
+
+PostgreSQL поддерживает операции векторов, выражения сырого запроса, веса меток, нормализацию,
+плотность покрытия и все параметры разметки. SQLite через FTS5 поддерживает веса полей и
+параметры `start_sel`, `stop_sel`, `max_words`, `fragment_delimiter`.
+Удаление операции из возможностей соединения запрещает только её; без соединения используются
+возможности диалекта.
 
 ```python
 from hare.search import SearchHeadline, SearchQuery, SearchRank, SearchType, SearchVector
@@ -33,7 +39,12 @@ await (
     .annotate(rank=SearchRank("description", "white whale"))
     .order_by("-rank")
 )
-await Book.objects.annotate(excerpt=SearchHeadline("description", "white whale", max_words=20))
+await Book.objects.annotate(
+    excerpt=SearchHeadline(
+        "description", "white whale", max_words=20,
+        start_sel="<b>", stop_sel="</b>", fragment_delimiter=" ... ",
+    )
+)
 ```
 
 В SQLite модель объявляет индекс, по которому идёт поиск:
@@ -72,7 +83,7 @@ SearchQuery(value, config=None, search_type=SearchType.PLAIN, invert=False)
 |---|---|
 | `value` | Текст поиска, выражение, которое его даёт, или лексемы PostgreSQL (читаются как `RAW`) |
 | `config` | Конфигурация поиска (`"english"`) — PostgreSQL |
-| `search_type` | Как читается текст — `SearchType`; другое значение даёт `ConfigurationError` |
+| `search_type` | Как читается текст — `SearchType` или его строковое значение; неизвестное значение даёт `ConfigurationError` |
 | `invert` | Отрицание запроса |
 
 `SearchType`:
@@ -134,7 +145,7 @@ SearchRank(vector, query, weights=None, normalization=None, cover_density=False)
 |---|---|
 | `vector` | Ранжируемое поле, кортеж полей, `SearchVector` или (PostgreSQL) выражение tsvector — `TSVectorField` ранжируется как есть |
 | `query` | Текст поиска (`PLAIN`) или `SearchQuery` |
-| `weights` | Словарь весов полей — совпадение в более тяжёлом поле выше, у поля, которого нет в словаре, вес 1, каждый вес — конечное число от 0 до 1000000 (SQLite); или веса меток D, C, B, A PostgreSQL последовательностью из четырёх чисел или выражением — другая последовательность даёт `ConfigurationError` |
+| `weights` | Словарь весов полей — совпадение в более тяжёлом поле выше, у поля, которого нет в словаре, вес 1, каждый вес — конечное неотрицательное число (SQLite); или веса меток D, C, B, A PostgreSQL последовательностью из четырёх чисел или выражением — другая последовательность даёт `ConfigurationError` |
 | `normalization` | Битовая маска нормализации по длине текста — PostgreSQL; 32-битное целое число или выражение, другое значение вызывает `ConfigurationError` |
 | `cover_density` | `TS_RANK_CD()` вместо `TS_RANK()` — PostgreSQL |
 
@@ -159,14 +170,20 @@ SearchHeadline(
 |---|---|
 | `expression` | Поле, текст которого размечается; в PostgreSQL — и выражение |
 | `query` | Текст поиска (`PLAIN`) или `SearchQuery` |
-| `start_sel`, `stop_sel` | Текст до и после найденного слова — по умолчанию `<b>` и `</b>` PostgreSQL; в SQLite обязательны, своих меток у FTS5 нет; не длиннее 1000 символов |
+| `start_sel`, `stop_sel` | Текст до и после найденного слова — по умолчанию `<b>` и `</b>` PostgreSQL; в SQLite обязательны, своих меток у FTS5 нет; текст без NUL |
 | `max_words` | Наибольшее число слов фрагмента — от 1; в SQLite не больше 64, и с ним используется `snippet()` FTS5; в PostgreSQL больше `min_words`, который по умолчанию 15, — для `max_words=3` нужен меньший `min_words`, иначе PostgreSQL даёт `OperationalError` |
 | `fragment_delimiter` | Текст между фрагментами — по умолчанию `" ... "` PostgreSQL; в SQLite обязателен вместе с `max_words` |
 | `config`, `min_words`, `short_word`, `highlight_all`, `max_fragments` | Собственные параметры `TS_HEADLINE()` — PostgreSQL |
 
 В SQLite строка, которая не подходит под запрос, получает `NULL`, а `SearchHeadline` без `start_sel` и
-`stop_sel` или с `max_words` без `fragment_delimiter` даёт `QueryError` до отправки SQL. Число вне
-диапазона или метка, которая не является текстом, дают `ConfigurationError`.
+`stop_sel` или с `max_words` без `fragment_delimiter` даёт `QueryError` до отправки SQL. Число ниже
+минимума, логическое значение вместо счётчика или нетекстовая метка/метка с NUL дают `ConfigurationError`.
+
+Общего верхнего предела счётчиков и длины меток в Hare нет. PostgreSQL разбирает счётчики как знаковые
+32-битные числа и ограничивает каждую метку/разделитель 32767 байтами в серверной кодировке.
+Без `highlight_all=True` дополнительно требуется `0 < min_words < max_words`; `short_word` и
+`max_fragments` неотрицательны. Нарушение серверных ограничений PostgreSQL возвращает как ошибку БД.
+В SQLite сохраняется предел фрагмента в 64 слова.
 
 ## <a id="lexemes"></a>Лексемы (PostgreSQL)
 
@@ -206,7 +223,7 @@ hare, — а при создании она заполняется уже име
 
 Модели нужен целочисленный первичный ключ (rowid FTS5); модель без него, пустой список полей, ключ по
 убыванию или пустой токенизатор дают `ConfigurationError`. На соединении без
-`Features.supports_full_text_index` модель с этим индексом даёт `ConfigurationError` в `Hare.init()`, а
+`SqliteFeatures.supports_full_text_index` модель с этим индексом даёт `ConfigurationError` в `Hare.init()`, а
 миграция, которая создаёт или удаляет его, — `UnSupportedError` до отправки SQL.
 
 ## <a id="query-plans"></a>Планы запросов

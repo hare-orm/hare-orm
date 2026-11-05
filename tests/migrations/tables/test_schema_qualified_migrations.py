@@ -337,7 +337,7 @@ async def test_create_schema_and_drop_schema_noop_for_real_sqlite_editor(empty_s
     editor = SqliteSchemaEditor(client)
 
     create_op = CreateSchema(schema_name="custom")
-    await apply_operations("models", empty_state, create_op, schema_editor=editor)
+    empty_state = await apply_operations("models", empty_state, create_op, schema_editor=editor)
     drop_op = DropSchema(schema_name="custom")
     await apply_operations("models", empty_state, drop_op, schema_editor=editor)
 
@@ -696,7 +696,7 @@ async def test_moving_a_model_to_another_schema_moves_the_objects_it_declares():
         "sequences": [DatabaseSequence("ledger_number")],
         "triggers": [Trigger(name="ledger_touch", on=TriggerEvent.UPDATE, body=RawSQLTerm("RETURN NEW;"))],
     }
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(name="Ledger", fields=[("id", fields.IntField(primary_key=True))], options=options),

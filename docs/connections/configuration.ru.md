@@ -21,7 +21,7 @@ class Hare:
         _create_db: bool = False,
         use_timezone: bool = True,
         timezone: str = "UTC",
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         table_name_generator: Callable[[type[Model]], str] | None = None,
         slow_query_threshold_ms: float = 500.0,
         _enable_global_fallback: bool = False,
@@ -43,8 +43,8 @@ await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models
 базы и `{app_label: [module paths]}`. Источник, который нельзя прочитать, — отсутствующий файл,
 несуществующий модуль или переменная — даёт `ConfigurationError`.
 
-Общие для всего процесса настройки (`slow_query_threshold_ms` и `table_name_generator`) меняются только
-после успешного `init()`; если `init()` завершился ошибкой, они остаются прежними.
+`table_name_generator` принадлежит контексту и его реестру моделей. Контекст публикует его
+и обновляет общую для процесса настройку `slow_query_threshold_ms` только после успешного `init()`.
 
 | Аргумент | Что задаёт |
 |---|---|
@@ -52,7 +52,7 @@ await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models
 | `connect` | `False` — настроить модели и подключения, не подключаясь ни к одной базе; имена подключений всё равно сверяются с настройками. Для инструментов, которым нужны модели и их SQL, но не база: создание миграций, вывод DDL. |
 | `_create_db` | Сначала создать саму базу (удобно в тестах). |
 | `use_timezone` / `timezone` | Как `DatetimeField` работает с часовыми поясами. |
-| `routers` | Список классов маршрутизаторов или путей к ним через точку — см. [Маршрутизаторы](multiple-databases.ru.md#routers). |
+| `routers` | Классы или фабрики маршрутизаторов без аргументов, напрямую или по пути через точку — см. [Маршрутизаторы](multiple-databases.ru.md#routers). |
 | `table_name_generator` | Функция `Callable[[type[Model]], str]`, которая заменяет правило именования таблиц — см. [`table_name_generator`](#table-name-generator) |
 | `slow_query_threshold_ms` | Запросы, которые выполнялись столько миллисекунд или дольше, записываются в журнал на уровне DEBUG как «Slow query». По умолчанию 500 мс — см. [Журнал медленных запросов](../observability/observers.ru.md#slow-query-logging). |
 | `_enable_global_fallback` | Позволяет коду, который выполняется не в той задаче asyncio, что вызвала `init()` (например, в фоновой задаче, запущенной при старте ASGI-приложения), найти текущий контекст. Интеграции с Litestar, FastAPI и Robyn включают это сами. |
@@ -107,7 +107,7 @@ class HareConfig:
         self,
         connections: dict[str, ConnectionConfig | DBUrlConfig],
         apps: dict[str, AppConfig],
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         read_your_writes_seconds: float | None = None,
         use_timezone: bool | None = None,
         timezone: str | None = None,
@@ -157,8 +157,8 @@ class MigrationSafetyConfig:
 Настройки можно собрать в коде из этих классов `hare.core.config`, а не словарём.
 `read_your_writes_seconds` — см. [Чтение своих записей](multiple-databases.ru.md#read-your-writes); `cli`
 задаёт дополнительные подкоманды `hare`. Подключение можно задать и словарём `{"db_url": "..."}` — в
-такой вид превращается `ConnectionConfig(db_url=...)`. `models` — список или кортеж путей к модулям или
-самих модулей.
+такой вид превращается `ConnectionConfig(db_url=...)`. `models` принимает итерируемый объект с путями
+к модулям или самими модулями, например список или кортеж; он перебирается один раз.
 
 ### <a id="migrations-settings"></a>Раздел `migrations`
 
@@ -166,8 +166,7 @@ class MigrationSafetyConfig:
 другим сеансом, прежде чем `migrate` завершится ошибкой, — см.
 [Ожидание блокировок](../migrations/migrations.ru.md#lock-timeout); и `safety` — настройки проверки
 миграций: `{"large_table_rows": 100000}` — с какого числа строк `checkmigrations` считает таблицу
-большой, целое число от 0 до 10<sup>12</sup>, — см. [Проверка
-миграций](../migrations/zero-downtime.ru.md#checking-migrations).
+большой, — см. [Проверка миграций](../migrations/zero-downtime.ru.md#checking-migrations).
 
 ### <a id="swappable-settings"></a>Раздел `swappable`
 
@@ -190,9 +189,10 @@ class MigrationSafetyConfig:
 Ключи словаря настроек — это поля тех же классов: на верхнем уровне поля `HareConfig`, в подключении,
 заданном словарём, — поля `ConnectionConfig`, в приложении — `AppConfig`, в разделе `cli` — `CliConfig`.
 Любой другой ключ даёт `ConfigurationError` с ближайшим известным именем: иначе опечатка вроде
-`default_conection` молча оставила бы модели приложения на подключении по умолчанию. Сами настройки,
-их разделы `connections` и `apps` и каждое приложение — словари, каждое подключение — словарь или адрес:
-что-то другое (пустой YAML-файл, список) тоже даёт `ConfigurationError`.
+`default_conection` молча оставила бы модели приложения на подключении по умолчанию. Настройки, разделы
+`connections` и `apps` и каждое приложение используют операции отображения; подключение — отображение
+или адрес. Совместимые объекты принимаются без проверки класса. Неверная структура Python может дать
+естественный `TypeError` или `AttributeError`.
 
 Неизвестный `engine` даёт `ConfigurationError`, как и параметр подключения, которого не знает драйвер:
 опечатку в `credentials` (`comand_timeout`) отклоняют оба драйвера PostgreSQL. `rust_pg` принимает только
@@ -264,6 +264,13 @@ QuerySet запоминается, а `init()` повторяет его выз�
 
 ## <a id="bind-models"></a>Привязка моделей без базы
 
+Список модулей моделей принимает объекты импортированных модулей, в том числе созданные во время
+работы и отсутствующие в `sys.modules`: конфигурация сохраняет сами объекты, а не заменяет их путями
+импорта. Неудачная привязка восстанавливает метаданные, а отложенные запросы остаются отложенными.
+Перед повторной инициализацией исправьте объявление или запрос. При ошибке подготовки повторная
+инициализация сохраняет прежние подключения и роутер; повторная сборка старой привязки для отката
+не требуется.
+
 ```python
 Hare.bind_models(config, table_name_generator=None)   # синхронный
 ```
@@ -289,8 +296,9 @@ Hare.bind_models(config, table_name_generator=None)   # синхронный
 Задача, которая ещё держит выброшенный объект подключения, на следующем запросе получает `DBConnectionError`,
 а не открывает новый пул; запрос через модель снова ищет своё подключение — и внутри транзакции тоже — и
 получает `ConfigurationError`, как до `Hare.init()`. Контекст забывает свои подключения, даже если закрытие не
-удалось, а первая ошибка поднимается после; наблюдателям, которые ещё отправляют метрику или трассировку,
-даётся до 10 секунд. `close_all()` у `ConnectionHandler` — то же закрытие для одного контекста — см.
+удалось. Одиночная ошибка поднимается после; несколько ошибок сохраняются в `BaseExceptionGroup`.
+Наблюдателям, которые ещё отправляют метрику или трассировку, даётся до 10 секунд.
+`close_all()` у `ConnectionHandler` — то же закрытие для одного контекста — см.
 [Подключения](connections.ru.md#connections).
 
 ```python
@@ -328,8 +336,8 @@ await Hare.close_connections()
 
 ## <a id="run-async"></a>Скрипты: `Hare.run_async()`
 
-Для разового скрипта (не долго работающего приложения и не теста) `Hare.run_async()` вызывает
-`asyncio.run` и сам закрывает соединения в конце:
+Для разового скрипта `Hare.run_async()` выполняет корутину через блокирующий портал AnyIO в отдельном
+потоке с собственным циклом событий и закрывает подключения её контекста при завершении:
 
 ```python
 from hare import Hare, HareConfig

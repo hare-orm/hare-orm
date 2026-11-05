@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import re
-
 from hare.ddl.enums import FunctionVolatility, GrantTarget, PolicyCommand, Privilege
-from hare.lazy_loading.lazy_pattern import LazyPattern
 
 #: Lookup of the deferrable foreign key constraint behind one ``on_delete=PROTECT`` field: $1 is the
 #: quoted (optionally schema-qualified) referencing table, $2 the referenced table, $3 the ordered
@@ -107,17 +104,12 @@ BTREE_GIST_SQL_TYPES = frozenset(
 #: Moves a table (``{table}``, as a string literal) to the database's default tablespace - named
 #: at run time, since ``ALTER TABLE ... SET TABLESPACE`` takes no DEFAULT and the database's
 #: default isn't always ``pg_default``.
-POSTGRESQL_SET_DEFAULT_TABLESPACE_SQL = """DO $hare$ BEGIN
+POSTGRESQL_SET_DEFAULT_TABLESPACE_BODY = """BEGIN
 EXECUTE format('ALTER TABLE %s SET TABLESPACE %I', {table}, (
     SELECT dts.spcname FROM pg_database db JOIN pg_tablespace dts ON dts.oid = db.dattablespace
     WHERE db.datname = current_database()
 ));
-END $hare$"""
-
-#: A column type as hare writes it: its name, and its size arguments in parentheses if any.
-POSTGRES_COLUMN_TYPE_RE = LazyPattern(
-    r"^\s*(?P<name>[a-z][a-z ]*?)\s*(?:\((?P<arguments>[^)]*)\))?\s*$", re.IGNORECASE
-)
+END;"""
 
 #: The names of the variable-length text types - one type to PostgreSQL.
 POSTGRES_VARCHAR_TYPE_NAMES = frozenset({"varchar", "character varying"})
@@ -145,14 +137,18 @@ POSTGRESQL_ALTER_FIELD_TYPE_THROUGH_TEXT_TEMPLATE = (
 #: An ``EXCLUDE USING`` constraint of a CREATE TABLE.
 POSTGRESQL_EXCLUSION_CONSTRAINT_CREATE_TEMPLATE = "CONSTRAINT {name} EXCLUDE USING {using} ({expressions}){where}"
 
-#: The start of a CREATE [UNIQUE] INDEX statement, where CONCURRENTLY goes.
-POSTGRESQL_CONCURRENT_INDEX_CREATE_PATTERN = re.compile(r"^(CREATE (?:UNIQUE )?INDEX )")
+POSTGRESQL_CONCURRENT_INDEX_CREATE_TEMPLATE = (
+    "CREATE INDEX CONCURRENTLY {exists}{index_name} ON {table_name} {index_type}({fields}){extra};"
+)
+POSTGRESQL_CONCURRENT_UNIQUE_INDEX_CREATE_TEMPLATE = (
+    "CREATE UNIQUE INDEX CONCURRENTLY {exists}{index_name} ON {table_name} {index_type}({fields}){extra};"
+)
+POSTGRESQL_CONCURRENT_INDEX_DROP_TEMPLATE = "DROP INDEX CONCURRENTLY {name};"
 
 #: Moves an object - its type in SQL (TABLE, VIEW, ...) and its name, qualified, as an SQL string
 #: literal - to the connection's current schema; SET SCHEMA takes no expression, so it runs as dynamic SQL.
 POSTGRESQL_MOVE_OBJECT_TO_CURRENT_SCHEMA_TEMPLATE = (
-    "DO $hare_move$ BEGIN EXECUTE format('ALTER {object_type} %s SET SCHEMA %I', "
-    "{name_literal}, current_schema()); END $hare_move$;"
+    "BEGIN EXECUTE format('ALTER {object_type} %s SET SCHEMA %I', {name_literal}, current_schema()); END;"
 )
 
 #: Sets the comment of a table.
@@ -165,22 +161,41 @@ POSTGRESQL_COLUMN_COMMENT_TEMPLATE = "COMMENT ON COLUMN {table}.{column} IS {com
 POSTGRESQL_GENERATED_PK_TEMPLATE = "{field_name} {generated_sql}{primary_key}"
 
 #: Adds a constraint unless one of its name exists - PostgreSQL has no ``ADD CONSTRAINT IF NOT EXISTS``.
-POSTGRESQL_SAFE_ADD_CONSTRAINT_TEMPLATE = (
-    "DO $hare$ BEGIN {statement}; EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $hare$"
+POSTGRESQL_SAFE_ADD_CONSTRAINT_BODY = (
+    "BEGIN {statement}; EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END;"
 )
 
 #: Creates an ENUM type unless it exists - PostgreSQL has no ``CREATE TYPE IF NOT EXISTS``.
-POSTGRESQL_SAFE_CREATE_TYPE_SQL = (
-    "DO $hare$ BEGIN {create_sql}; EXCEPTION WHEN duplicate_object THEN NULL; END $hare$;"
-)
+POSTGRESQL_SAFE_CREATE_TYPE_BODY = "BEGIN {create_sql}; EXCEPTION WHEN duplicate_object THEN NULL; END;"
+
+POSTGRESQL_ENUM_TYPE_METADATA_SQL = """
+SELECT type.oid::bigint AS type_oid, type.typname AS name, namespace.nspname AS schema_name,
+    pg_get_userbyid(type.typowner) AS owner_name, obj_description(type.oid, 'pg_type') AS comment,
+    ARRAY(SELECT enumlabel FROM pg_enum WHERE enumtypid = type.oid ORDER BY enumsortorder) AS labels
+FROM pg_type type JOIN pg_namespace namespace ON namespace.oid = type.typnamespace
+WHERE type.oid = $1::regtype
+"""
+
+POSTGRESQL_ENUM_TYPE_GRANTS_SQL = """
+SELECT CASE WHEN permission.grantee = 0 THEN NULL ELSE pg_get_userbyid(permission.grantee) END AS grantee,
+    permission.is_grantable, permission.grantor = type.typowner AS granted_by_owner
+FROM pg_type type
+CROSS JOIN LATERAL aclexplode(COALESCE(type.typacl, acldefault('T', type.typowner))) permission
+WHERE type.oid = $1::regtype
+ORDER BY permission.grantee
+"""
 
 #: The columns of an ENUM type ($1) and of its array type - each with whether it is the array.
 POSTGRESQL_ENUM_TYPE_COLUMNS_SQL = """
 SELECT namespace.nspname AS schema_name, class.relname AS table_name, attribute.attname AS column_name,
-    attribute.atttypid <> $1::regtype AS is_array
+    attribute.atttypid <> $1::regtype AS is_array,
+    attribute.attinhcount > 0 AS inherited,
+    pg_get_expr(default_value.adbin, default_value.adrelid) AS default_sql
 FROM pg_attribute attribute
 JOIN pg_class class ON class.oid = attribute.attrelid
 JOIN pg_namespace namespace ON namespace.oid = class.relnamespace
+LEFT JOIN pg_attrdef default_value
+    ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
 WHERE attribute.attnum > 0 AND NOT attribute.attisdropped AND class.relkind IN ('r', 'p')
     AND attribute.atttypid IN ($1::regtype, (SELECT typarray FROM pg_type WHERE oid = $1::regtype))
 ORDER BY 1, 2, 3
@@ -195,52 +210,52 @@ POSTGRESQL_ENUM_ARRAY_LABELS_HELD_SQL = "SELECT count(*) AS held_count FROM {tab
 #: The suffix of the name an ENUM type is renamed to while a new one of its name replaces it.
 POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX = "__hare_old"
 
-#: Replaces an ENUM type by one of other labels: renames it, creates the new one, converts every
-#: column (and array column) of the old type through text - its default too - and drops the old.
-POSTGRESQL_REPLACE_ENUM_TYPE_SQL = """DO $hare$
-DECLARE
-    column_row record;
-BEGIN
-    ALTER TYPE {type_sql} RENAME TO {old_type_name_sql};
-    CREATE TYPE {type_sql} AS ENUM ({labels_sql});
-    FOR column_row IN
-        SELECT namespace.nspname AS schema_name, class.relname AS table_name, attribute.attname AS column_name,
-            attribute.atttypid <> {old_type_literal}::regtype AS is_array,
-            pg_get_expr(default_value.adbin, default_value.adrelid) AS default_sql
-        FROM pg_attribute attribute
-        JOIN pg_class class ON class.oid = attribute.attrelid
-        JOIN pg_namespace namespace ON namespace.oid = class.relnamespace
-        LEFT JOIN pg_attrdef default_value
-            ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
-        WHERE attribute.attnum > 0 AND NOT attribute.attisdropped AND class.relkind IN ('r', 'p')
-            AND attribute.atttypid IN (
-                {old_type_literal}::regtype,
-                (SELECT typarray FROM pg_type WHERE oid = {old_type_literal}::regtype)
-            )
-    LOOP
-        IF column_row.default_sql IS NOT NULL THEN
-            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I DROP DEFAULT',
-                column_row.schema_name, column_row.table_name, column_row.column_name);
-        END IF;
-        EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I TYPE %s USING %I::text%s::%s',
-            column_row.schema_name, column_row.table_name, column_row.column_name,
-            {type_literal} || CASE WHEN column_row.is_array THEN '[]' ELSE '' END,
-            column_row.column_name, CASE WHEN column_row.is_array THEN '[]' ELSE '' END,
-            {type_literal} || CASE WHEN column_row.is_array THEN '[]' ELSE '' END);
-        IF column_row.default_sql IS NOT NULL THEN
-            EXECUTE format('ALTER TABLE %I.%I ALTER COLUMN %I SET DEFAULT %s',
-                column_row.schema_name, column_row.table_name, column_row.column_name,
-                regexp_replace(column_row.default_sql, {old_type_pattern_literal}, '::' || {type_literal}, 'g'));
-        END IF;
-    END LOOP;
-    DROP TYPE {old_type_sql};
-END $hare$;"""
+#: Preview is a runtime catalog step, not a misleading executable sequence with invented defaults.
+POSTGRESQL_ENUM_REPLACEMENT_PREVIEW = (
+    "-- Replace ENUM {type}: lock dependent tables, read catalog defaults, check labels and dependencies; "
+    "convert columns and restore the unchanged expressions in one transaction."
+)
+POSTGRESQL_ENUM_DEPENDENCIES_CHANGED = "Dependencies of ENUM {type} changed while acquiring locks; retry the migration"
+POSTGRESQL_ENUM_IDENTITY_CHANGED = "Identity of ENUM {type} changed while acquiring locks; retry the migration"
+POSTGRESQL_ENUM_DEPENDENCIES_UNSUPPORTED = "Replacing ENUM {type} requires explicit operations for: {objects}"
+POSTGRESQL_ENUM_GRANTS_UNSUPPORTED = "Replacing ENUM {type} requires explicit operations for delegated grants"
+
+#: Direct dependencies supported by replacement are ordinary table columns, their defaults, and
+#: PostgreSQL's automatic array type. Other dependency graphs require explicit migration operations.
+POSTGRESQL_ENUM_UNSUPPORTED_DEPENDENCIES_SQL = """
+WITH enum_types AS (
+    SELECT oid, typarray FROM pg_type WHERE oid = $1::regtype
+), columns AS (
+    SELECT attribute.attrelid, attribute.attnum, default_value.oid AS default_oid
+    FROM pg_attribute attribute
+    JOIN pg_class table_class ON table_class.oid = attribute.attrelid
+    CROSS JOIN enum_types
+    LEFT JOIN pg_attrdef default_value
+        ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+    WHERE attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attgenerated = ''
+        AND table_class.relkind IN ('r', 'p') AND attribute.atttypid IN (enum_types.oid, enum_types.typarray)
+)
+SELECT DISTINCT pg_describe_object(dependency.classid, dependency.objid, dependency.objsubid) AS description
+FROM pg_depend dependency CROSS JOIN enum_types
+WHERE dependency.refclassid = 'pg_type'::regclass
+    AND dependency.refobjid IN (enum_types.oid, enum_types.typarray)
+    AND NOT (dependency.classid = 'pg_type'::regclass AND dependency.objid = enum_types.typarray)
+    AND NOT (dependency.classid = 'pg_class'::regclass AND EXISTS (
+        SELECT FROM columns WHERE columns.attrelid = dependency.objid AND columns.attnum = dependency.objsubid
+    ))
+    AND NOT (dependency.classid = 'pg_attrdef'::regclass AND EXISTS (
+        SELECT FROM columns WHERE columns.default_oid = dependency.objid
+    ))
+UNION
+SELECT pg_describe_object(dependency.refclassid, dependency.refobjid, dependency.refobjsubid)
+FROM pg_depend dependency CROSS JOIN enum_types
+WHERE dependency.classid = 'pg_type'::regclass AND dependency.objid = enum_types.oid
+    AND dependency.deptype IN ('e', 'x')
+ORDER BY 1
+"""
 
 #: The language of a DatabaseFunction declared without one.
 POSTGRESQL_DEFAULT_FUNCTION_LANGUAGE = "plpgsql"
-
-#: The dollar quote around a DatabaseFunction's body - a body holding it is refused.
-POSTGRESQL_FUNCTION_BODY_QUOTE = "$hare_function$"
 
 #: The keyword of each function volatility.
 POSTGRESQL_FUNCTION_VOLATILITY_KEYWORDS = {
@@ -316,7 +331,7 @@ POSTGRESQL_INDEX_RENAME_TEMPLATE = "ALTER INDEX {index_name} RENAME TO {new_name
 POSTGRESQL_FUNCTION_CREATE_TEMPLATE = (
     "CREATE {or_replace}FUNCTION {function}({arguments}) RETURNS {returns}\n"
     "LANGUAGE {language} {volatility}{security}\n"
-    "AS {quote}\n{body}\n{quote};"
+    "AS {body};"
 )
 
 POSTGRESQL_FUNCTION_DROP_TEMPLATE = "DROP FUNCTION {function}({arguments});"
@@ -328,6 +343,19 @@ POSTGRESQL_FUNCTION_RENAME_TEMPLATE = "ALTER FUNCTION {function}({arguments}) RE
 POSTGRESQL_SEQUENCE_CREATE_TEMPLATE = "CREATE SEQUENCE {if_not_exists}{sequence}{options};"
 
 POSTGRESQL_SEQUENCE_ALTER_TEMPLATE = "ALTER SEQUENCE {sequence}{options};"
+
+#: pg_get_serial_sequence resolves the owning sequence even after a table/column rename.
+POSTGRESQL_GENERATED_SEQUENCE_TYPE_TEMPLATE = """
+DO $hare_sequence_type$
+DECLARE sequence_name text;
+BEGIN
+    sequence_name := pg_get_serial_sequence({table_literal}, {column_literal});
+    IF sequence_name IS NOT NULL THEN
+        EXECUTE format('ALTER SEQUENCE %s AS {sql_type}', sequence_name);
+    END IF;
+END;
+$hare_sequence_type$;
+"""
 
 POSTGRESQL_SEQUENCE_OWNER_TEMPLATE = "ALTER SEQUENCE {sequence} OWNED BY {owner};"
 #: Frees a sequence of its owner column - it outlives the column's table, its value too.

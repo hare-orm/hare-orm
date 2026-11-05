@@ -145,7 +145,7 @@ async def test_only_touching_a_tenant_scoped_relation_keeps_a_plan_binding_the_a
     with Tenancy.scope(2):
         second = {o.name: o for o in await TenantScopedOrder.objects.all().only("id", "name", "widget__name")}
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first["O1"].widget is not None and first["O1"].widget.name == "W1"
     assert first["O2"].widget is None
     assert second["O1"].widget is None
@@ -208,9 +208,7 @@ async def test_filter_across_relation_scopes_join_to_the_active_tenant(db):
 
 @pytest.mark.asyncio
 async def test_values_across_relation_scopes_join_to_the_active_tenant(db):
-    """.values("relation__field") builds its JOIN through _join_table_with_forwarded_fields()
-    (shared with .group_by()) - needing the exact same Meta.tenant_field scoping applied on its
-    own."""
+    """A relation path selected by values() applies the joined model's tenant scope."""
     widget_1 = await TenantScopedWidget.objects.create(name="W1", company_id=1)
     widget_2 = await TenantScopedWidget.objects.create(name="W2", company_id=2)
     order_1 = await TenantScopedOrder.objects.create(name="O1", widget=widget_1)
@@ -254,7 +252,7 @@ async def test_values_filter_touching_a_tenant_scoped_relation_keeps_a_plan_bind
     with Tenancy.scope(2):
         second = await TenantScopedOrder.objects.filter(widget__name="W1").values("name")
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert {row["name"] for row in first} == {"O1"}
     assert {row["name"] for row in second} == set()
 
@@ -289,7 +287,7 @@ async def test_values_touching_a_tenant_scoped_relation_keeps_a_plan_binding_the
     with Tenancy.scope(2):
         await make_query()
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
 
 
 @pytest.mark.asyncio
@@ -318,7 +316,7 @@ async def test_values_annotate_f_touching_a_tenant_scoped_relation_keeps_a_plan_
     with Tenancy.scope(2):
         second = {row["name"]: row["widget_name"] for row in await annotated_query().values("name", "widget_name")}
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first["O1"] == "W1"
     assert first["O2"] is None
     assert second["O1"] is None
@@ -329,13 +327,10 @@ async def test_values_annotate_f_touching_a_tenant_scoped_relation_keeps_a_plan_
 async def test_values_list_bare_forwarded_field_touching_tenant_scoped_relation_keeps_a_plan_binding_the_active_tenant(
     db,
 ):
-    """The narrowest reproduction of the same gap - no .filter()/.order_by()/.annotate()/
-    .group_by() at all, just selecting a forwarded field ("widget__name") is enough to reach
-    add_field_to_select_query()'s shared _join_table_with_forwarded_fields() helper and fold the
-    ambient tenant condition into an unthreaded JOIN.
+    """Selecting a relation field alone records the JOIN's scope separately from query values.
 
-    The JOIN's scope is recorded apart from the query's own values - the plan keeps it and binds
-    the active tenant's on each run."""
+    The cached plan binds the active tenant on each run.
+    """
 
     widget_1 = await TenantScopedWidget.objects.create(name="W1", company_id=1)
     widget_2 = await TenantScopedWidget.objects.create(name="W2", company_id=2)
@@ -353,7 +348,7 @@ async def test_values_list_bare_forwarded_field_touching_tenant_scoped_relation_
     with Tenancy.scope(2):
         second = await selecting_query().values_list("widget__name", flat=True)
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert list(first) == ["W1", None]
     assert list(second) == [None, "W2"]
 
@@ -391,7 +386,7 @@ async def test_values_list_distinct_on_touching_a_tenant_scoped_relation_keeps_a
     with Tenancy.scope(2):
         await selecting_query().values_list("id", flat=True)
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
 
 
 @pytest.mark.asyncio
@@ -445,7 +440,7 @@ async def test_filter_touching_a_tenant_scoped_relation_keeps_a_plan_binding_the
     with Tenancy.scope(2):
         second = await TenantScopedOrder.objects.filter(widget__name="W1")
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert {o.name for o in first} == {"O1"}
     assert {o.name for o in second} == set()
 
@@ -465,7 +460,7 @@ async def test_order_by_touching_a_tenant_scoped_relation_keeps_a_plan_binding_t
     with Tenancy.scope(2):
         await TenantScopedOrder.objects.all().order_by("widget__name")
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
 
 
 @pytest.mark.asyncio
@@ -487,7 +482,7 @@ async def test_annotate_f_touching_a_tenant_scoped_relation_keeps_a_plan_binding
     with Tenancy.scope(2):
         await TenantScopedOrder.objects.filter(pk=order_1.pk).annotate(widget_name=F("widget__name"))
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
 
 
 @pytest.mark.asyncio
@@ -546,7 +541,7 @@ async def test_annotate_window_touching_a_tenant_scoped_relation_keeps_a_plan_bi
             row["name"]: row["widget_company"] for row in await annotated_query().values("name", "widget_company")
         }
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first["O1"] == 1
     assert first["O2"] is None
     assert second["O1"] is None
@@ -588,7 +583,7 @@ async def test_a_window_reading_a_tenant_scoped_relation_keeps_a_plan_binding_th
     with Tenancy.scope(2):
         second = {row["name"]: row["widget_company"] for row in await companies()}
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first == {"O1": 1, "O2": None}
     assert second == {"O1": None, "O2": 2}
 
@@ -619,7 +614,7 @@ async def test_a_window_condition_reading_a_tenant_scoped_relation_keeps_a_plan_
     with Tenancy.scope(2):
         second = {row["name"]: row["matching"] for row in await counts()}
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first == {"O1": 1, "O2": 0}
     assert second == {"O1": 0, "O2": 1}
 
@@ -665,7 +660,7 @@ async def test_annotate_bare_string_function_touching_a_tenant_scoped_relation_k
             row["name"]: row["widget_company"] for row in await annotated_query().values("name", "widget_company")
         }
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first["O1"] == 1
     assert first["O2"] is None
     assert second["O1"] is None
@@ -721,7 +716,7 @@ async def test_distinct_on_touching_a_tenant_scoped_relation_keeps_a_plan_bindin
             .values_list("widget__name", flat=True)
         )
 
-    assert len(StatementPlans.plans) > cache_size_before
+    assert StatementPlans.plans.entry_count > cache_size_before
     assert first == ["W1"]
     assert second == [None]
 
@@ -798,7 +793,7 @@ async def test_a_plan_across_a_tenant_scoped_relation_binds_each_tenant(db):
             orders = await TenantScopedOrder.objects.select_related("widget").order_by("name")
         results[tenant] = {order.name: order.widget.name if order.widget else None for order in orders}
         assert results[tenant] == {"O1": "W1" if tenant == 1 else None, "O2": "W2" if tenant == 2 else None}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from hare.ddl.indexes import Index
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.ddl.schema_objects.materialized_view import MaterializedView
 from hare.ddl.schema_objects.view import View
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
 from hare.dialects.clickhouse.fields import (
     ClickhouseDateField,
@@ -34,7 +35,7 @@ from hare.dialects.clickhouse.schema_objects import ClickhouseDictionary, Clickh
 from hare.dialects.clickhouse.schema_objects.clickhouse_projection import ClickhouseProjection
 from hare.fields.db_defaults import Now
 from hare.models import Model
-from hare.query.expressions import Q
+from hare.query.expressions import F, Q
 from hare.query.functions import Lower, Upper
 
 
@@ -124,7 +125,7 @@ class Reading(Model):
     class Meta:
         table_options = [
             ClickhouseTableOptions(
-                engine="ReplacingMergeTree(version)",
+                engine=ClickhouseEngine("ReplacingMergeTree", F("version")),
                 order_by=("id", RawSQLTerm("intHash32(id)")),
                 sample_by=RawSQLTerm("intHash32(id)"),
             )
@@ -167,7 +168,7 @@ class Hit(Model):
     class Meta:
         table_options = [
             ClickhouseTableOptions(
-                engine="ReplacingMergeTree( duration_ms )",
+                engine=ClickhouseEngine("ReplacingMergeTree", F("duration")),
                 order_by=("id", "site", RawSQLTerm("intHash32( id )")),
                 sample_by=RawSQLTerm("intHash32( id )"),
                 partition_by=RawSQLTerm("toYYYYMM(seen)"),

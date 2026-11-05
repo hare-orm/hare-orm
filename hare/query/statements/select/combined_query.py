@@ -117,7 +117,7 @@ class CombinedQuery(RowsQuery[Any]):
         description = self._describe_statement(False)
         if description is None:
             return None, None
-        return description, StatementPlans.find(description.structure)
+        return description, StatementPlans.find(self.model, description.structure)
 
     def _restore_from_plan(self, plan: StatementPlan) -> None:
         self._rows.restore(plan.result_reading)
@@ -198,7 +198,7 @@ class CombinedQuery(RowsQuery[Any]):
     def _stream_batches(self, connection: DatabaseClient, chunk_size: int) -> AsyncGenerator[list[Any]]:
         return cast(
             "AsyncGenerator[list[Any]]",
-            self._rows.stream_batches(self, connection, *self._get_parameterized_sql(), chunk_size),
+            self._rows.stream_batches(connection, *self._get_parameterized_sql(), chunk_size),
         )
 
     # --- the rows as a derived table ---------------------------------------------------------------

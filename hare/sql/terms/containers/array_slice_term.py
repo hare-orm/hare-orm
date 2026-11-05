@@ -20,6 +20,8 @@ class ArraySliceTerm(ContainerFunction):
         ValidationError: A bound isn't an int in range.
     """
 
+    structure_attributes = ("end", "start")
+
     function_name: ClassVar[str] = "array_slice"
 
     def __init__(self, array: Any, start: int, end: int, alias: str | None = None) -> None:

@@ -9,10 +9,10 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
 from hare.core.routing import Routing
 from hare.core.routing.written_connections import WrittenConnections
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from tests.multiple_connections.read_your_writes_models import Note, Tag
 
 
@@ -37,7 +37,7 @@ class ReplicaReadsRouter:
 @asynccontextmanager
 async def primary_and_replica(read_your_writes_seconds=None, router=PrimaryReplicaRouter):
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    connections = {alias: DbUrlConfigGenerator.expand(db_url, testing=True) for alias in ("primary", "replica")}
+    connections = {alias: DatabaseConfig.from_url(db_url).config for alias in ("primary", "replica")}
     config = {
         "connections": connections,
         "apps": {
@@ -112,16 +112,15 @@ async def test_two_tasks_keep_their_own_writes():
 
 
 @pytest.mark.asyncio
-async def test_the_reads_return_to_the_replica_after_the_window():
+async def test_the_reads_return_to_the_replica_after_the_window(monkeypatch):
     async with primary_and_replica(read_your_writes_seconds=60):
 
         async def request():
             await Note.objects.create(id=1, text="written")
             assert await read_texts() == ["written"]
             # The window runs out: the write turns older than it.
-            written_at_by_connection = WrittenConnections.current.get().written_at_by_connection
-            for connection_alias in written_at_by_connection:
-                written_at_by_connection[connection_alias] -= 61
+            last_write = max(WrittenConnections.current.get().written_at_by_connection.values())
+            monkeypatch.setattr(WrittenConnections, "get_time", staticmethod(lambda: last_write + 61))
             assert await read_texts() == []
             Routing.forget_writes()
 

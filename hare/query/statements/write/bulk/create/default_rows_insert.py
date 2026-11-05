@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from hare.query.execution.write_statements import WriteStatement
+from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
+from hare.query.statements.write.bulk.create.declarations import BoundInsertBatch
 from hare.query.statements.write.bulk.create.returned_rows_matching import ReturnedRowsMatching
 from hare.sql.builder.returned_value import ReturnedValue
 
@@ -17,15 +20,17 @@ class DefaultRowsInsert:
     dialect has a source of them, else a DEFAULT VALUES insert per object."""
 
     @staticmethod
-    async def insert_default_rows(
+    def bind_batches(
         bulk_create: BulkCreateQuery[Any],
         insert_sql: str,
         objects: list[TModel],
         omit_fields: set[str],
         populate_returned_fields: bool,
-    ) -> None:
-        """Inserts one all-defaults row per object - a single statement of all of them where the dialect
-        writes one, else one ``DEFAULT VALUES`` statement per object.
+    ) -> list[BoundInsertBatch]:
+        """Bind all-defaults rows, respecting the requested batch size.
+
+        Each chunk uses a source of default rows where supported, otherwise one
+        ``DEFAULT VALUES`` command per object. No statement is sent while binding.
 
         Args:
             bulk_create: The bulk insert.
@@ -34,30 +39,29 @@ class DefaultRowsInsert:
             omit_fields: Fields left out of the INSERT because every object relies on its DB default.
             populate_returned_fields: Set each object's returned columns from its RETURNING row.
         """
-        if not objects:
-            return
-        if (
-            default_rows_source_sql := bulk_create._connection.dialect.parameters.get_default_rows_source_sql(
-                len(objects)
-            )
-        ) is not None:
-            _, returned_rows = await bulk_create._connection.execute(
-                DefaultRowsInsert.build_default_rows_sql(
-                    bulk_create, default_rows_source_sql, omit_fields, populate_returned_fields
-                ),
-                [],
-            )
-            if populate_returned_fields:
-                ReturnedRowsMatching.populate_returned_fields_from_returning_rows(bulk_create, objects, returned_rows)
-            return
-        for obj in objects:
-            # insert_sql (self._writer.insert_query) already carries its own RETURNING clause
-            # for every generated_db_fields column (pk included, when auto-generated).
-            returned_rows = (await bulk_create._connection.execute(insert_sql, [], returns_rows=True)).rows
-            if populate_returned_fields and returned_rows:
-                ReturnedRowsMatching.populate_returned_fields_from_returning_rows(
-                    bulk_create, [obj], [returned_rows[0]]
+        batches: list[BoundInsertBatch] = []
+        for chunk in BulkWriteBatches.get_batches(objects, bulk_create._batch_size):
+            chunk = list(chunk)
+            if not chunk:
+                continue
+            rows_source = bulk_create._connection.dialect.parameters.get_default_rows_source_sql(len(chunk))
+            if rows_source is not None:
+                sql = DefaultRowsInsert.build_default_rows_sql(
+                    bulk_create, rows_source, omit_fields, populate_returned_fields
                 )
+                batches.append(
+                    BoundInsertBatch(
+                        WriteStatement(sql, [], populate_returned_fields), chunk, populate_returned_fields
+                    )
+                )
+            else:
+                # The supplied template can include generated columns even when the
+                # caller does not ask for them to be assigned to its objects.
+                batches.extend(
+                    BoundInsertBatch(WriteStatement(insert_sql, [], True), [obj], populate_returned_fields)
+                    for obj in chunk
+                )
+        return batches
 
     @staticmethod
     def build_default_rows_sql(

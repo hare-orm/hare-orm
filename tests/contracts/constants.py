@@ -1,6 +1,6 @@
 import re
 
-from tests.matrix.constants import REPOSITORY_DIRECTORY
+from tests.matrix.paths import REPOSITORY_DIRECTORY
 
 #: Server versions observed to refuse correlated IN/NOT IN with NOT_IMPLEMENTED.
 CLICKHOUSE_VERSIONS_WITHOUT_CORRELATED_MEMBERSHIP = frozenset(
@@ -103,11 +103,6 @@ DIALECT_REQUEST_QUERIES = {
 
 #: The samples whose field has no column in its model's table - a many-to-many keeps its links in another table.
 FIELD_SAMPLES_WITHOUT_ROW_COLUMN = ("many_to_many",)
-#: The samples with an expression the database rewrites (a generated column's, a check's) - their
-#: statements are compared without quotes, parentheses and spaces.
-FIELD_SAMPLES_WITH_DATABASE_EXPRESSION = ("generated", "generic_foreign_key")
-#: The types ClickHouse stores as one String - a table read back holds the text type for each.
-CLICKHOUSE_STRING_PATTERN = re.compile(r"VARCHAR\(\d+\)|\bTEXT\b|\bString\b")
 #: What the change capture of the write matrix adds to every event: a key of its payload and its headers.
 WRITE_EXTENSION_PAYLOAD = {"source": "matrix"}
 WRITE_EXTENSION_HEADERS = {"author": "matrix"}

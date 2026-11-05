@@ -165,8 +165,6 @@ class GenericForeignKeyFilters:
         Returns:
             The rewritten copy - ``condition`` itself when nothing names a generic foreign key.
         """
-        # Loops and list comprehensions, not generators: this runs for every condition of a filter
-        # once any model declares a generic foreign key.
         if condition.children:
             children = [GenericForeignKeyFilters.rewrite_q(model, child) for child in condition.children]
             changed = False
@@ -181,13 +179,10 @@ class GenericForeignKeyFilters:
             return rewritten
         if not condition.filters:
             return condition
-        declared_names = GenericForeignKeyFieldInstance.declared_names
         branch_conditions = {
             key: branch_q
             for key, value in condition.filters.items()
-            # Checked here first: most keys name no generic foreign key.
-            if (key in declared_names or ("__" in key and not declared_names.isdisjoint(key.split("__"))))
-            and (branch_q := GenericForeignKeyFilters.get_branch_q(model, key, value)) is not None
+            if (branch_q := GenericForeignKeyFilters.get_branch_q(model, key, value)) is not None
         }
         if not branch_conditions:
             return condition
@@ -218,8 +213,6 @@ class GenericForeignKeyFilters:
             The conditions and the keyword filters - the ones given when nothing names a generic
             foreign key.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return conditions, kwargs
         changed = False
         rewritten_conditions = conditions
         if conditions:
@@ -232,15 +225,10 @@ class GenericForeignKeyFilters:
                     changed = True
                     rewritten_conditions = tuple(rewritten_list)
                     break
-        declared_names = GenericForeignKeyFieldInstance.declared_names
         branch_conditions: list[Q] = []
         plain_kwargs: dict[str, Any] = {}
         for key, value in kwargs.items():
-            branch_q = (
-                GenericForeignKeyFilters.get_branch_q(model, key, value)
-                if key in declared_names or ("__" in key and not declared_names.isdisjoint(key.split("__")))
-                else None
-            )
+            branch_q = GenericForeignKeyFilters.get_branch_q(model, key, value)
             if branch_q is None:
                 plain_kwargs[key] = value
             else:

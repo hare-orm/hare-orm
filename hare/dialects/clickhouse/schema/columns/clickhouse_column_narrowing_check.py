@@ -15,8 +15,7 @@ from hare.dialects.clickhouse.schema.constants import (
 )
 from hare.exceptions import IntegrityError
 from hare.fields.data.constants import INT64_MIN
-from hare.fields.data.containers.array_field import ArrayField
-from hare.fields.data.containers.tuple_field import TupleField
+from hare.fields.data.containers.container_field import ContainerField
 from hare.fields.data.text.char_field import CharField
 from hare.fields.data.text.text_field import TextField
 from hare.fields.enums import HeldValueStep, NarrowedValueSource
@@ -81,7 +80,7 @@ class ClickhouseColumnNarrowingCheck(ColumnNarrowingCheck):
         old_field: Field[Any], new_field: Field[Any], value_sql: str, depth: int = 0
     ) -> str | None:
         """A WHERE predicate matching the rows holding NULL where a change of a container field takes it no
-        more - an element of an array, a member of a tuple (a row of a Nested field), at any depth.
+        more - array elements, map values and tuple members (including Nested rows), at any depth.
 
         Args:
             old_field: The field before the change.
@@ -92,28 +91,32 @@ class ClickhouseColumnNarrowingCheck(ColumnNarrowingCheck):
         Returns:
             The predicate, None when no value held takes NULL no more.
         """
-        if isinstance(old_field, ArrayField) and isinstance(new_field, ArrayField):
-            element_sql = f"{CLICKHOUSE_HELD_ELEMENT_NAME}_{depth}"
-            element_predicate_sql = ClickhouseColumnNarrowingCheck.get_held_null_predicate_sql(
-                old_field.base_field, new_field.base_field, element_sql, depth + 1
-            )
-            if element_predicate_sql is None:
-                return None
-            return f"arrayExists({element_sql} -> {element_predicate_sql}, {value_sql})"
-        if isinstance(old_field, TupleField) and isinstance(new_field, TupleField):
-            member_predicate_sqls = [
-                member_predicate_sql
-                for position, (old_member, new_member) in enumerate(
-                    zip(old_field.fields_in_order, new_field.fields_in_order, strict=False), start=1
+        if isinstance(old_field, ContainerField) and isinstance(new_field, ContainerField):
+            old_steps = dict(old_field.get_held_steps())
+            predicates = []
+            for (step, position), new_child in new_field.get_held_steps():
+                old_child = old_steps.get((step, position))
+                if old_child is None:
+                    continue
+                element_sql = (
+                    f"tupleElement({value_sql}, {(position or 0) + 1})"
+                    if step == HeldValueStep.TUPLE_ELEMENT
+                    else f"{CLICKHOUSE_HELD_ELEMENT_NAME}_{depth}"
                 )
-                if (
-                    member_predicate_sql := ClickhouseColumnNarrowingCheck.get_held_null_predicate_sql(
-                        old_member, new_member, f"tupleElement({value_sql}, {position})", depth + 1
-                    )
+                predicate = ClickhouseColumnNarrowingCheck.get_held_null_predicate_sql(
+                    old_child, new_child, element_sql, depth + 1
                 )
-                is not None
-            ]
-            return " OR ".join(f"({sql})" for sql in member_predicate_sqls) or None
+                if predicate is None:
+                    continue
+                if step != HeldValueStep.TUPLE_ELEMENT:
+                    values_sql = {
+                        HeldValueStep.ELEMENT: value_sql,
+                        HeldValueStep.KEY: f"mapKeys({value_sql})",
+                        HeldValueStep.VALUE: f"mapValues({value_sql})",
+                    }[step]
+                    predicate = f"arrayExists({element_sql} -> {predicate}, {values_sql})"
+                predicates.append(predicate)
+            return " OR ".join(f"({sql})" for sql in predicates) or None
         if depth and old_field.null and not new_field.null:
             return f"isNull({value_sql})"
         return None

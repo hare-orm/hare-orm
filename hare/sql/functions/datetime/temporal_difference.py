@@ -12,6 +12,9 @@ class TemporalDifference(Function):
     difference for dates, or by hare's function where it has none.
     """
 
+    structure_attributes = ("is_date",)
+    has_repeatable_value = True
+
     requires_dialect_renderer = True
 
     def __init__(self, left: Any, right: Any, *, is_date: bool = False, alias: str | None = None) -> None:

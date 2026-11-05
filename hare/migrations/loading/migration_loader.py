@@ -4,15 +4,18 @@ import hashlib
 import pkgutil
 import sys
 from importlib import import_module, invalidate_caches, reload
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
+from hare.core.caching.cache import Cache
 from hare.fields.field import Field
 from hare.migrations.constants import FIRST_MIGRATION, LATEST_MIGRATION
 from hare.migrations.exceptions import MigrationLoadError
 from hare.migrations.loading.graph.migration_graph import MigrationGraph
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
 from hare.migrations.migration import Migration
 
@@ -20,9 +23,8 @@ from hare.migrations.migration import Migration
 class MigrationLoader:
     """Reads the migrations on disk and the journal of the applied ones, and builds their graph."""
 
-    #: SHA-256 of each migration module's source as last executed in this process, keyed by
-    #: dotted module path.
-    MIGRATION_SOURCE_DIGESTS: dict[str, bytes] = {}
+    #: SHA-256 of the executed source, with lifetime tied to its imported module.
+    source_digests: ClassVar[Cache[bytes]] = Cache(holds_sql=False)
 
     def __init__(
         self,
@@ -30,6 +32,7 @@ class MigrationLoader:
         recorder: MigrationRecorder,
         *,
         ignore_no_migrations: bool = False,
+        definitions: MigrationDefinitions | None = None,
     ) -> None:
         """Keeps what the graph is loaded from - ``build_graph()`` loads it.
 
@@ -38,9 +41,12 @@ class MigrationLoader:
             recorder: Reads the applied migrations.
             ignore_no_migrations: Drop a "__first__" dependency on an app that has no migration
                 yet instead of failing - makemigrations is about to write that app's first one.
+            definitions: A session's captured definitions. When present, graph refreshes
+                copy these declarations and read the journal without reloading files.
         """
         self.apps_config = apps_config
         self.ignore_no_migrations = ignore_no_migrations
+        self.definitions = definitions
         self.recorder = recorder
         self.disk_migrations: dict[MigrationKey, Migration] = {}
         #: The squashed migrations on disk - each one's ``replaces`` names the migrations it replaces.
@@ -61,6 +67,11 @@ class MigrationLoader:
         Raises:
             MigrationLoadError: A migration file can't be read, or declares no ``Migration``.
         """
+        if self.definitions is not None:
+            self.disk_migrations = self.definitions.copy_migrations()
+            self.migrated_apps = set(self.definitions.migrated_apps)
+            self.unmigrated_apps = set(self.definitions.unmigrated_apps)
+            return
         self.disk_migrations = {}
         self.unmigrated_apps = set()
         self.migrated_apps = set()
@@ -126,20 +137,35 @@ class MigrationLoader:
             module = import_module(migration_path)
             source = cls._read_module_source(module)
             if source is not None:
-                cls.MIGRATION_SOURCE_DIGESTS[migration_path] = hashlib.sha256(source).digest()
+                cls.source_digests.set_value(module, hashlib.sha256(source).digest())
             return module
         source = cls._read_module_source(module)
         if source is None:
             return module
         source_digest = hashlib.sha256(source).digest()
-        if cls.MIGRATION_SOURCE_DIGESTS.get(migration_path) == source_digest:
+        if cls.source_digests.get_value(module) == source_digest:
             return module
         # Compiled from the source directly - a cached .pyc is only validated by whole-second
         # mtime and size, so a same-size edit within the same second would otherwise be ignored.
         code = compile(source, cast("str", module.__file__), "exec")
-        exec(code, module.__dict__)  # nosec B102
-        cls.MIGRATION_SOURCE_DIGESTS[migration_path] = source_digest
-        return module
+        spec = module.__spec__ or spec_from_file_location(migration_path, cast("str", module.__file__))
+        # _read_module_source accepts only .py files, for which importlib supplies a source loader.
+        assert spec is not None  # nosec B101
+        replacement = module_from_spec(spec)
+        # Decorators and recursive imports read the executing module through sys.modules.
+        # Publish it during execution as importlib does, restoring the last version on failure.
+        sys.modules[migration_path] = replacement
+        try:
+            exec(code, replacement.__dict__)  # nosec B102
+        except BaseException:
+            sys.modules[migration_path] = module
+            raise
+        cls.source_digests.set_value(replacement, source_digest)
+        parent_name, _, child_name = migration_path.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None:
+            setattr(parent, child_name, replacement)
+        return replacement
 
     @staticmethod
     def _read_module_source(module: ModuleType) -> bytes | None:
@@ -154,7 +180,7 @@ class MigrationLoader:
             return None
 
     async def build_graph(self, *, replaces_migrations: bool = True) -> None:
-        """Builds the graph of the migrations on disk.
+        """Build the graph from definitions and a freshly read applied journal.
 
         Args:
             replaces_migrations: Put each squashed migration in place of the ones it replaces, as

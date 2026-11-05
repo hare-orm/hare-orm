@@ -26,13 +26,11 @@ class FieldComments:
     #: (source file,) -> the file's lines, the last line of each class in it by the class's first
     #: line and the classes' first lines by qualified name (``get_class_spans()``).
     source_class_spans: ClassVar[Cache[tuple[list[str], dict[int, int], dict[str, list[int]]]]] = Cache(
-        Cache.max_size_from_env(), holds_sql=False, keyed_by_model=False
+        Cache.max_size_from_env(), holds_sql=False
     )
     #: (source file,) -> the module its source was last checked for being current - every class of
     #: one loaded module reads the same source, checked once.
-    checked_modules: ClassVar[Cache[ModuleType]] = Cache(
-        Cache.max_size_from_env(), holds_sql=False, keyed_by_model=False
-    )
+    checked_modules: ClassVar[Cache[ModuleType]] = Cache(Cache.max_size_from_env(), holds_sql=False)
 
     @staticmethod
     def get_comments(model_class: type[Model]) -> dict[str, str]:

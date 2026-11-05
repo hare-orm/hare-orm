@@ -88,6 +88,6 @@ class SqliteTableOptions(TableOptions):
         if not self.strict:
             return column_type
         # Local import: the introspector reads into hare's models, whose modules import this one.
-        from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
+        from hare.dialects.sqlite.types.sqlite_physical_type import SqlitePhysicalType
 
-        return SQLITE_STRICT_COLUMN_TYPES[SqliteIntrospector.get_type_affinity(column_type)]
+        return SQLITE_STRICT_COLUMN_TYPES[SqlitePhysicalType.from_sql(column_type).affinity]

@@ -383,7 +383,7 @@ class ToManyFilters:
             through_only=LookupPaths.crosses_connections(relation_field),
         )
         through_join = relation_joins[0]
-        criterion, _, _, _, _, operator, encoded_value, _ = FilterKwargs.process_filter_kwarg(
+        criterion, _, _, _, _, operator, encoded_value = FilterKwargs.process_filter_kwarg(
             expression_context, lookup_info, filter_value, expression_context.table, join_table=through_join[0]
         )
         modifier = QueryModifier(joins=value_joins) & QueryModifier(where_criterion=criterion, joins=[through_join])

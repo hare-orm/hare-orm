@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, Generator, TypeVar, cast
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -15,7 +14,6 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.fields.constants import SENSITIVE_VALUE_PLACEHOLDER
-from hare.fields.field import Field
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.fields.relations.relation_values import RelationValues
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
@@ -39,6 +37,7 @@ from hare.models.instances.instance_saving import InstanceSaving
 from hare.models.meta_info import MetaInfo
 from hare.models.model_meta import ModelMeta
 from hare.models.tenancy.tenancy import Tenancy
+from hare.models.write.declarations import RollbackRestoreLayer
 from hare.models.write.instance_writer import InstanceWriter
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
 from hare.models.write.write_steps import WriteSteps
@@ -87,7 +86,7 @@ class Model(metaclass=ModelMeta):
     _allow_soft_delete_write: bool = False
     #: The values to put back on the instance should the transactions of its writes roll back - one
     #: layer per open savepoint span; None until a write in a transaction registers one.
-    _pending_rollback_restore_stack: list[dict[str, Any]] | None = None
+    _pending_rollback_restore_stack: list[RollbackRestoreLayer] | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         meta = self._meta
@@ -95,11 +94,6 @@ class Model(metaclass=ModelMeta):
             InstanceInitialization.raise_for_computed_fields(type(self), kwargs)
         if meta.generic_foreign_key_fields:
             kwargs = GenericForeignKeys.expand_kwargs(meta, kwargs, apply_defaults=True)
-        constructor = meta.instance_constructor
-        if constructor is None:
-            constructor = meta.get_instance_constructor()
-        if constructor and constructor.construct(self, kwargs):
-            return
         # Not field names - set past the overridden __setattr__.
         _setattr = object.__setattr__
         _setattr(self, "_saved_in_db", False)
@@ -270,13 +264,9 @@ class Model(metaclass=ModelMeta):
         """
         return dict(self)
 
-    def __getstate__(self) -> dict[str, Any]:
-        """Drops the pending rollback-restore bookkeeping before pickling or deep-copying - it refers
-        to a live connection and an open transaction of this process.
-        """
-        state = self.__dict__.copy()
-        state.pop("_pending_rollback_restore_stack", None)
-        return state
+    def __getstate__(self) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
+        """Retain dictionary and slot values without live transaction rollback bookkeeping."""
+        return InstanceCopies.get_state(self)
 
     def __eq__(self, other: object) -> bool:
         if type(other) is not type(self):
@@ -333,48 +323,7 @@ class Model(metaclass=ModelMeta):
         forward relation is shared; a reverse or many-to-many container is replaced with an
         unfetched one bound to the copy, and a cached reverse one-to-one is dropped.
         """
-        cls = type(self)
-        obj = cls.__new__(cls)
-        obj.__dict__.update(self.__dict__)
-        _setattr = object.__setattr__
-
-        # A dict of its own: assigning a field pops its pending default in place.
-        pending_defaults = self.__dict__.get("_await_when_save")
-        if pending_defaults is not None:
-            _setattr(obj, "_await_when_save", dict(pending_defaults))
-
-        # A dict of its own: a partial write updates the snapshot in place. Absent on an instance of
-        # a model without Meta.track_dirty_fields.
-        existing_dirty_snapshot = getattr(self, "_dirty_snapshot", None)
-        if existing_dirty_snapshot is not None:
-            _setattr(obj, "_dirty_snapshot", dict(existing_dirty_snapshot))
-
-        for field_name in self._meta.direct_fields:
-            if field_name not in obj.__dict__:
-                continue  # not loaded on a .only()/.defer() partial instance - leave it that way
-            value = obj.__dict__[field_name]
-            copied_value = FieldSnapshot.copy_value(value)
-            if copied_value is not value:
-                _setattr(obj, field_name, copied_value)
-
-        meta = self._meta
-        # The copy's to-many relations unfetched - not the original's rows.
-        for key in (*meta.backward_foreign_key_fields, *meta.many_to_many_fields):
-            cache_key = f"_{key}"
-            if cache_key in obj.__dict__:
-                _setattr(obj, cache_key, RelationRows())
-        for key in meta.backward_one_to_one_fields:
-            cache_key = f"_{key}"
-            if cache_key in obj.__dict__:
-                object.__delattr__(obj, cache_key)
-
-        # Rollback bookkeeping never transfers to a copy - RollbackRestores.register_rollback_restore()'s pending
-        # stack (and the live DB clients it references) is scoped to the ORIGINAL instance's own
-        # writes inside a still-open transaction, meaningless once duplicated onto a second one.
-        if "_pending_rollback_restore_stack" in obj.__dict__:
-            object.__delattr__(obj, "_pending_rollback_restore_stack")
-
-        return obj
+        return InstanceCopies.copy(self)
 
     def clone(self: TModel, pk: Any = CLONE_PK_NOT_GIVEN) -> TModel:
         """An unsaved copy of the object - saving it inserts a new row.
@@ -393,66 +342,7 @@ class Model(metaclass=ModelMeta):
             QueryError: If pk is required but not provided.
             ConfigurationError: ``pk`` is given for a model without a primary key.
         """
-        obj = copy(self)
-        # A clone is a row not inserted yet - every field is dirty.
-        object.__setattr__(obj, "_dirty_snapshot", None)
-        # Marked unsaved before any pk assignment below: assigning a generated pk on an unsaved
-        # instance is what makes Model.__setattr__ send it in the INSERT (see its pk branch).
-        object.__setattr__(obj, "_saved_in_db", False)
-        # An auto_now_add value is only ever filled in while still None, so the copy would
-        # otherwise keep the original's timestamp instead of getting its own on first save.
-        for field_name, field in self._meta.fields_map.items():
-            if getattr(field, "auto_now_add", False):
-                setattr(obj, field_name, None)
-        # The values the database computed belong to the original's row - the copy's are read with its own.
-        for field_name in self._meta.computed_field_names:
-            obj.__dict__.pop(field_name, None)
-        # A copy of a soft-deleted row isn't born deleted.
-        soft_delete_field = self._meta.soft_delete_field
-        if soft_delete_field is not None:
-            setattr(obj, soft_delete_field, None)
-        if not self._meta.has_primary_key:
-            # No key to reset - the copy is a new row as it is.
-            if pk is not CLONE_PK_NOT_GIVEN:
-                self._meta.raise_if_no_primary_key(f"{type(self).__name__}.clone(pk=...)")
-            return obj
-        if pk is CLONE_PK_NOT_GIVEN:
-            if self._meta.has_composite_primary_key:
-                # Every component of a composite PK is resolved independently, the same way a
-                # single-column PK is below - a component with its own default=/db_default=
-                # (e.g. a version field) gets a fresh value; a component with neither raises.
-                for field_name, field in zip(self._meta.primary_key_attribute, self._meta.pk_fields, strict=True):
-                    InstanceCopies.apply_clone_pk_component_default(obj, field_name, field)
-                return obj
-            pk_field: Field[Any] = self._meta.pk
-            if pk_field.generated is False and pk_field.default is None and pk_field.has_db_default():
-                # A primary key with only a db_default: the INSERT leaves the column to the
-                # database.
-                obj.pk = pk_field.get_db_default_value()
-            elif pk_field.generated is False and pk_field.default is None:
-                raise QueryError(
-                    f"{self._meta.full_name} requires explicit primary key. Please use .clone(pk=<value>)"
-                )
-            elif pk_field.generated is False:
-                # An app-side default (UUIDField's uuid4): computed anew, the database assigns
-                # nothing.
-                pk_default = pk_field.default
-                if pk_field._default_is_coroutine:
-                    # After the assignment: __setattr__ pops the pending default of an assigned
-                    # field.
-                    obj.pk = None
-                    InstanceInitialization.add_pending_default(
-                        obj, cast("str", self._meta.primary_key_attribute), pk_default
-                    )
-                elif callable(pk_default):
-                    obj.pk = pk_default()
-                else:
-                    obj.pk = pk_default
-            else:
-                obj.pk = None
-        else:
-            obj.pk = pk
-        return obj
+        return InstanceCopies.clone(self, pk)
 
     @classmethod
     def construct(cls: type[TModel], *, _saved_in_db: bool = False, **kwargs: Any) -> TModel:
@@ -491,8 +381,7 @@ class Model(metaclass=ModelMeta):
             if key in meta.backward_foreign_key_fields or key in meta.many_to_many_fields:
                 # A to-many relation given its rows - fetched; its relation object is made when read.
                 relation_rows = RelationRows()
-                relation_rows._fetched = True
-                relation_rows.related_objects = list(value)
+                relation_rows.set_fetched(list(value))
                 _setattr(self, f"_{key}", relation_rows)
             elif key in meta.backward_one_to_one_fields:
                 # Backward O2O: store at _{key} for property getter
@@ -659,7 +548,7 @@ class Model(metaclass=ModelMeta):
                 saved (``get_dirty_fields()``, ``Meta.track_dirty_fields``) - as ``update_fields``
                 naming them; nothing changed sends no statement. An unsaved instance is inserted
                 whole.
-            update_fields: If provided, it should be a tuple/list of fields by name. This is
+            update_fields: If provided, an iterable of field names, including forward relations. This is
                 the subset of fields that should be updated. On an instance that has a pk it
                 always issues an UPDATE by primary key - even for an instance never loaded from
                 or saved to the database (``Model(id=known_id, name="x")``) - and raises
@@ -671,8 +560,7 @@ class Model(metaclass=ModelMeta):
             force_update: Update the row - ``IntegrityError`` when there is none.
 
         Raises:
-            FieldError: ``update_fields`` names an unknown field or a relation (name the relation's key
-                field, e.g. ``author_id``, instead).
+            FieldError: ``update_fields`` names an unknown field or a relation without writable columns.
             QueryError: ``update_fields`` is a single string or names the primary key or
                 ``Meta.soft_delete_field`` (use ``delete()``/``restore()``); both ``force_create`` and
                 ``force_update`` are set; ``changed_only`` is given with ``update_fields`` or
@@ -769,7 +657,10 @@ class Model(metaclass=ModelMeta):
 
     async def delete_preview(self, *, using: str | DatabaseClient | None = None) -> DeletePreview:
         """Reports what ``delete()`` would remove, soft-delete, null out or reset, and which rows block
-        it, without writing anything. An already soft-deleted instance gets an empty preview.
+        it, without writing anything. An already soft-deleted instance gets an empty preview
+        when it uses the standard deletion method. Overrides are never called: their row
+        keys appear in ``unknown_actions`` and ``can_delete`` is None unless known blockers
+        already make it False.
 
         Args:
             using: Specific DB connection to read through instead of the default one.
@@ -825,7 +716,9 @@ class Model(metaclass=ModelMeta):
         await WriteSteps.get_whole_run(connection, InstanceDeletion.restore_and_report(self, connection, cascade))
 
     def snapshot(self, fields: Iterable[str] | None = None) -> FieldSnapshot:
-        """Captures an immutable copy of the instance's direct field values.
+        """Captures direct field values in a read-only mapping, independently copied from the instance.
+
+        Nested mutable values in the snapshot are not frozen.
 
         Args:
             fields: Direct field names to capture. ``None`` captures every loaded direct field.

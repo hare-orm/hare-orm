@@ -91,5 +91,5 @@ async def test_an_exists_of_a_union_is_an_exists_of_either_part(clickhouse_db):
 @pytest.mark.asyncio
 async def test_a_grouping_by_a_correlated_subquery_is_refused(clickhouse_db):
     teams_named = Team.objects.filter(pk=OuterReference("team")).values("name")
-    with pytest.raises(UnSupportedError, match="groups rows by no correlated subquery"):
+    with pytest.raises(UnSupportedError, match="no correlated subquery in GROUP BY"):
         await Player.objects.annotate(team_name=Subquery(teams_named)).values("team_name").annotate(n=Count("id"))

@@ -1,6 +1,6 @@
 """The OpenTelemetry metrics of the pools of connections: every open pool's connections by state, its
 bounds, its waiting tasks, timeouts and failures to connect, the waits and connects as histograms
-recorded at the collection after they were measured; pools with equal attributes summed; read from
+recorded at completion independently of collection; pools with equal attributes summed; read from
 another thread; nothing once uninstrumented."""
 
 import asyncio
@@ -10,14 +10,66 @@ import tempfile
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.view import DropAggregation, View
 
 from hare import Connections
 from hare.contrib.opentelemetry import OpenTelemetryInstrumentor
+from hare.contrib.opentelemetry.pool_metric_instruments import PoolMetricInstruments
 from hare.contrib.test import requires_features
+from hare.dialects.base.client.pool.pool_statistics import PoolStatistics
+from hare.instrumentation.pools.declarations import PoolMeasurement
+from hare.instrumentation.pools.enums import PoolMetricEvent
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
+from hare.instrumentation.pools.pool_metrics_recorder import PoolMetricsRecorder
 from tests.utils.database_under_test import DatabaseUnderTest
 
-REQUIRES = ("opentelemetry",)
+
+@pytest.mark.database_independent
+def test_histogram_only_exports_keep_all_events_across_restart():
+    readers = [InMemoryMetricReader(), InMemoryMetricReader()]
+    providers = [
+        MeterProvider(
+            metric_readers=[reader],
+            views=[
+                View(instrument_name="*", aggregation=DropAggregation()),
+                View(instrument_name="db.client.connection.wait_time"),
+            ],
+        )
+        for reader in readers
+    ]
+    instruments = [PoolMetricInstruments(provider) for provider in providers]
+    statistics = PoolStatistics(capacity=2)
+    statistics.set_recorder(
+        lambda event, value: PoolMetricsRecorder.record(
+            PoolMeasurement("bounded", "main", None, "sqlite", PoolMetricEvent(event), value)
+        )
+    )
+    try:
+        for instrument in instruments:
+            instrument.start()
+            instrument.start()
+        for _ in range(100):
+            statistics.add_wait(0.25)
+        for reader in readers:
+            points = get_points(
+                reader.get_metrics_data(),
+                "db.client.connection.wait_time",
+                **{"db.client.connection.pool.name": "bounded"},
+            )
+            assert (points[0].count, points[0].sum) == (100, 25)
+        assert statistics.get_waits_since(0)[2] == 98
+        instruments[0].stop()
+        statistics.add_wait(0.25)
+        instruments[0].start()
+        statistics.add_wait(0.25)
+        assert get_points(readers[0].get_metrics_data(), "db.client.connection.wait_time")[0].count == 101
+        assert get_points(readers[1].get_metrics_data(), "db.client.connection.wait_time")[0].count == 102
+    finally:
+        statistics.set_recorder(None)
+        for instrument in instruments:
+            instrument.stop()
+        for provider in providers:
+            provider.shutdown()
 
 
 @pytest.fixture
@@ -61,7 +113,7 @@ def make_independent_client():
 
 @pytest.mark.asyncio
 @requires_features(supports_pool_status=True)
-async def test_every_open_pool_is_reported_by_its_attributes(db, metric_reader):
+async def test_every_open_pool_is_reported_by_its_attributes(db_simple, metric_reader):
     assert PoolMetrics.enabled is True
     await Connections.current().get_main("models").execute_dicts("SELECT 1 AS one")
     pool_attributes = {"db.client.connection.pool.name": "models", "hare.pool.role": "main"}
@@ -82,15 +134,14 @@ async def test_every_open_pool_is_reported_by_its_attributes(db, metric_reader):
 
 @pytest.mark.asyncio
 @requires_features(supports_pool_status=True)
-async def test_pools_of_equal_attributes_are_summed_and_the_durations_recorded_at_a_collection(db, metric_reader):
+async def test_pools_of_equal_attributes_are_summed_and_events_survive_closure(db, metric_reader):
     first, first_directory = make_independent_client()
     second, second_directory = make_independent_client()
     try:
         await first.execute_dicts("SELECT 1 AS one")
         await second.execute_dicts("SELECT 1 AS one")
         independent = {"db.client.connection.pool.name": "models", "hare.pool.role": "independent"}
-        # Collected on another thread, as an exporter does. The waits and connects measured so far are
-        # recorded during the collection, and its histograms carry them.
+        # Collection can read completed measurements from a different thread.
         data = await asyncio.to_thread(metric_reader.get_metrics_data)
         (max_point,) = get_points(data, "db.client.connection.max", **independent)
         assert max_point.value == first.get_pool_status().max_size + second.get_pool_status().max_size
@@ -105,18 +156,22 @@ async def test_pools_of_equal_attributes_are_summed_and_the_durations_recorded_a
             if directory is not None:
                 directory.cleanup()
     assert get_points(metric_reader.get_metrics_data(), "db.client.connection.max", **independent) == []
+    assert get_points(metric_reader.get_metrics_data(), "db.client.connection.wait_time", **independent)[0].count >= 2
 
 
 @pytest.mark.asyncio
 @requires_features(supports_pool_status=True)
-async def test_nothing_is_reported_once_uninstrumented(db):
+async def test_nothing_is_reported_once_uninstrumented(db_simple):
     reader = InMemoryMetricReader()
     provider = MeterProvider(metric_readers=[reader])
     instrumentor = OpenTelemetryInstrumentor(meter_provider=provider, query_spans=False)
     instrumentor.instrument()
-    await Connections.current().get_main("models").execute_dicts("SELECT 1 AS one")
-    assert get_points(reader.get_metrics_data(), "db.client.connection.max")
-    instrumentor.uninstrument()
-    assert PoolMetrics.enabled is False
-    assert get_points(reader.get_metrics_data(), "db.client.connection.max") == []
-    provider.shutdown()
+    try:
+        await Connections.current().get_main("models").execute_dicts("SELECT 1 AS one")
+        assert get_points(reader.get_metrics_data(), "db.client.connection.max")
+        instrumentor.uninstrument()
+        assert PoolMetrics.enabled is False
+        assert get_points(reader.get_metrics_data(), "db.client.connection.max") == []
+    finally:
+        instrumentor.uninstrument()
+        provider.shutdown()

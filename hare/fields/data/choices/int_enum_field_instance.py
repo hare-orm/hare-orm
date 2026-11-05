@@ -24,6 +24,7 @@ class IntEnumFieldInstance(SmallIntField[int]):
     #: A migration declares the enum itself, its members as they are when it is written - the column's
     #: enum type or its CHECK holds them, and a member added to the class later is a change.
     snapshots_enum_in_migrations: ClassVar[bool] = True
+    generated_primary_key_default = False
 
     def __init__(
         self,
@@ -54,12 +55,8 @@ class IntEnumFieldInstance(SmallIntField[int]):
                 :AUTO_DESCRIPTION_MAX_LENGTH
             ]
 
-        super().__init__(description=description, **kwargs)
+        super().__init__(description=description, generated=generated, **kwargs)
         self.enum_type = enum_type
-
-    def to_lookup_value(self, value: Any, instance: type[Model] | Model | None) -> int | None:
-        # A number of no member - 7, 1.5 - is refused in a filter as in a write: no row holds it.
-        return self.to_db_value(value, instance)
 
     def get_narrowing_limit(self, old_field: Field[Any]) -> NarrowingLimit | None:
         """An enum losing a member another field held, or an integer column becoming the enum's, stores only

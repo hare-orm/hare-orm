@@ -261,7 +261,7 @@ class ModelConnectionChecks:
         conditions.extend(index.condition for index in meta.indexes if isinstance(index, PartialIndex))
         try:
             for index in meta.indexes:
-                if isinstance(index, Index) and index.expressions:
+                if isinstance(index, Index) and index.declared_expressions:
                     index.get_key_sqls(model, dialect)
             for condition in conditions:
                 if isinstance(condition, Q):

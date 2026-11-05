@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 
-from hare import prefetch_related_objects
+from hare import fields, prefetch_related_objects
 from hare.contrib.test import requires_features
 from hare.exceptions import (
     DoesNotExist,
@@ -18,7 +18,7 @@ from hare.exceptions import (
     ValidationError,
 )
 from hare.fields.database_default import DatabaseDefault
-from hare.models import NoneAwaitable
+from hare.models import Model, NoneAwaitable
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, Q
 from hare.time import Timezone
@@ -1877,3 +1877,34 @@ async def test_a_delete_with_nothing_related_removes_the_row(db, model_class):
     obj = await model_class.objects.create(name="Lonely")
     await obj.delete()
     assert not await model_class.objects.filter(pk=obj.pk).exists()
+
+
+class SlottedBook(Model):
+    __slots__ = ("__note", "unassigned")
+
+    id = fields.IntField(primary_key=True)
+    payload = fields.JSONField()
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("method", ["copy", "deepcopy", "pickle"])
+def test_model_copies_preserve_slots_and_detach_rollback_state(method):
+    import copy as copy_module
+    import pickle
+
+    obj = SlottedBook(id=7, payload={"items": [1]})
+    obj._SlottedBook__note = "slot value"
+    obj.description = "dictionary value"
+    obj._pending_rollback_restore_stack = [lambda: None]
+    if method == "pickle":
+        copied = pickle.loads(pickle.dumps(obj))
+    else:
+        copied = getattr(copy_module, method)(obj)
+
+    assert copied.pk == 7
+    assert copied._SlottedBook__note == "slot value"
+    assert copied.description == "dictionary value"
+    assert not hasattr(copied, "unassigned")
+    assert copied._pending_rollback_restore_stack is None
+    copied.payload["items"].append(2)
+    assert obj.payload == {"items": [1]}

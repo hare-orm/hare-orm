@@ -4,12 +4,15 @@ the version bump and the auto_now moment, the active tenant, RETURNING - and wha
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
 from hare.exceptions import FieldError, QueryError, UnSupportedError
 from hare.models.tenancy.tenancy import Tenancy
 from hare.query.expressions import F, Q
+from hare.time import Timezone
 from tests.shared_models.testmodels import (
     DeletePreviewTenantProject,
     IntFields,
@@ -28,6 +31,23 @@ def upsert(merge):
 
 async def get_stock() -> dict[str, tuple[int, int]]:
     return {stock.sku: (stock.count, stock.version) for stock in await MergeStock.objects.all()}
+
+
+@requires_features(supports_merge=True)
+@pytest.mark.asyncio
+async def test_merge_branches_share_one_execution_timestamp(db, monkeypatch):
+    await MergeStock.objects.create(sku="before", count=1)
+    calls = []
+    moment = datetime(2040, 1, 1, tzinfo=UTC)
+
+    def now():
+        calls.append("clock")
+        return moment
+
+    monkeypatch.setattr(Timezone, "now", now)
+    await upsert(MergeStock.objects.merge([{"sku": "before", "count": 2}, {"sku": "new", "count": 3}], on="sku"))
+    assert calls == ["clock"]
+    assert await MergeStock.objects.order_by("sku").values_list("updated_at", flat=True) == [moment, moment]
 
 
 @requires_features(supports_merge=True)

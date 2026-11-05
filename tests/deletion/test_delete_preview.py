@@ -75,6 +75,23 @@ FIXTURE_MODELS: tuple[type[Model], ...] = (
 THROUGH_TABLES = ("delete_preview_author_tag", "delete_preview_book_shelf")
 
 
+@pytest.mark.asyncio
+async def test_root_override_is_unknown_without_running_application_code(db, monkeypatch):
+    obj = await DeletePreviewAuthor.objects.create(name="custom deletion")
+    calls = []
+
+    async def custom_delete(self, using=None):
+        calls.append(self.pk)
+
+    monkeypatch.setattr(DeletePreviewAuthor, "delete", custom_delete)
+    preview = await obj.delete_preview()
+    assert preview.unknown_actions == {DeletePreviewAuthor: [obj.pk]}
+    assert preview.can_delete is None
+    assert preview.deleted == {}
+    assert calls == []
+    assert await DeletePreviewAuthor.objects.filter(pk=obj.pk).exists()
+
+
 async def select_all_rows(model: type[Model]) -> list[dict[str, Any]]:
     """Every row of ``model``, soft-deleted and other tenants' ones included, ordered by pk."""
     query = model.objects.all_tenants() if model._meta.tenant_field else model.objects.all()
@@ -435,12 +452,13 @@ async def preview_and_delete(instance: Model, models: tuple[type[Model], ...]) -
     and changes nothing."""
     before = await count_total_and_live_rows(models)
     preview = await instance.delete_preview()
-    if not preview.can_delete:
+    if preview.can_delete is False:
         with pytest.raises((IntegrityError, ProtectedError)):
             async with Transactions.atomic():
                 await instance.delete()
         assert await count_total_and_live_rows(models) == before
         return preview
+    assert preview.can_delete is True, preview.unknown_actions
     await instance.delete()
     after = await count_total_and_live_rows(models)
     really_deleted = {
@@ -617,13 +635,17 @@ async def test_soft_delete_cascade_deletes_hard_children_of_another_tenant(db):
     DeletePreviewTenantAuditedTask.delete_override_calls.clear()
 
     with Tenancy.scope(1):
-        preview = await preview_and_delete(
-            project, (DeletePreviewTenantSoftProject, DeletePreviewTenantHardTask, DeletePreviewTenantAuditedTask)
-        )
+        preview = await project.delete_preview()
+        assert preview.can_delete is None
+        assert preview.unknown_actions == {DeletePreviewTenantAuditedTask: [audited_task.pk]}
+        assert DeletePreviewTenantAuditedTask.delete_override_calls == []
+        await project.delete()
 
     assert preview.soft_deleted == {DeletePreviewTenantSoftProject: 1}
-    assert preview.deleted == {DeletePreviewTenantHardTask: 1, DeletePreviewTenantAuditedTask: 1}
+    assert preview.deleted == {DeletePreviewTenantHardTask: 1}
     assert DeletePreviewTenantAuditedTask.delete_override_calls == [audited_task.pk]
+    assert await DeletePreviewTenantHardTask.objects.all_tenants().count() == 0
+    assert await DeletePreviewTenantAuditedTask.objects.all_tenants().count() == 0
 
 
 @pytest.mark.asyncio

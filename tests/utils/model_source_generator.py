@@ -36,9 +36,9 @@ class ModelSourceGenerator:
                 <TargetClass>"`` reference (keyed by the target's raw table name), for pointing an
                 FK at an already-registered model whose class name needn't match
                 ``ModelNaming.get_class_name()``.
-            skip_many_to_many_through_tables: Whether a table shaped exactly like hare-orm's own
-                ManyToManyField through table is skipped with a NOTE comment (the default) or
-                rendered as a real model instead.
+            skip_many_to_many_through_tables: Whether a table with a possible many-to-many junction
+                shape is skipped with a NOTE comment (the default) or rendered as an explicit model.
+                The shape alone does not establish that ManyToManyField preserves its constraints.
             class_name: The generated class name - defaults to ``ModelNaming.get_class_name()``.
 
         Returns:

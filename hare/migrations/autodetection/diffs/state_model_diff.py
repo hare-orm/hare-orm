@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
+from copy import copy
 from typing import Any
 
-from hare.classes.comparable_values import ComparableValues
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
+from hare.ddl.indexes.index import Index
+from hare.ddl.schema_references import SchemaReferences
+from hare.declarations.declaration_values import DeclarationValues
 from hare.exceptions import ConfigurationError
 from hare.migrations.autodetection.constants import FIELD_NAMING_MODEL_OPTIONS, OBJECT_ADDING_OPERATIONS
 from hare.migrations.autodetection.diffs.constraint_diff import ConstraintDiff
@@ -16,15 +19,19 @@ from hare.migrations.autodetection.rename_questions import RenameQuestions
 from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.migrations.operations import (
     AddConstraint,
+    AddField,
     AddIndex,
     AlterField,
     AlterModelOptions,
     AlterModelSchema,
     AlterModelTable,
     HareOperation,
+    RemoveConstraint,
     RemoveField,
+    RemoveIndex,
     RenameField,
 )
+from hare.migrations.operations.schema_objects.object_types.index_object_type import IndexObjectType
 from hare.migrations.state.model_state import ModelState
 from hare.models.enums import ModelOption
 
@@ -93,6 +100,65 @@ class StateModelDiff:
         for rename in reversed(renames):
             RenameField(rename.model_name, rename.new_name, rename.old_name).rename_in_model_state(model_state)
         return model_state.options
+
+    def get_state_before_field_removals(
+        self, field_operations: list[HareOperation]
+    ) -> tuple[ModelState, list[HareOperation]]:
+        """Detach declared dependencies before dropping columns, using their original selectors.
+
+        The normal object diff compares this remaining state with the target and restores
+        surviving declarations after the fields are added. This also handles renamed objects
+        and dependencies expressed in structured conditions or index expressions.
+        """
+        removed_names = {operation.name for operation in field_operations if isinstance(operation, RemoveField)}
+        if not removed_names:
+            return self.old_state, []
+        state = self.old_state.clone()
+        operations: list[HareOperation] = []
+        for option, diff, get_names in (
+            (ModelOption.INDEXES, IndexDiff(self.old_state, self.new_state), SchemaReferences.get_index_field_names),
+            (
+                ModelOption.CONSTRAINTS,
+                ConstraintDiff(self.old_state, self.new_state),
+                SchemaReferences.get_constraint_field_names,
+            ),
+        ):
+            retained = []
+            for schema_object in diff.get_objects(self.old_state):
+                if removed_names.isdisjoint(get_names(schema_object)):
+                    retained.append(schema_object)
+                else:
+                    operations.append(diff.get_remove_operation(schema_object))
+            if retained:
+                state.options[option] = tuple(retained)
+            else:
+                state.options.pop(option, None)
+        return state, operations
+
+    def get_removal_before_field_renames(
+        self, operation: HareOperation, field_operations: list[HareOperation]
+    ) -> HareOperation:
+        """Use original logical names for unnamed selectors executed before field renames."""
+        if not any(isinstance(field_operation, RenameField) for field_operation in field_operations):
+            return operation
+        if isinstance(operation, RemoveIndex) and not operation.name:
+            index = operation.index if operation.index is not None else Index(fields=operation.fields)
+            options = self.get_options_before_field_renames({ModelOption.INDEXES: (index,)}, field_operations)
+            original_index = options[ModelOption.INDEXES][0]
+            removal = copy(operation)
+            if operation.index is not None:
+                removal.index = original_index
+            else:
+                removal.fields = list(original_index.fields)
+            return removal
+        if isinstance(operation, RemoveConstraint) and not operation.name and operation.fields:
+            options = self.get_options_before_field_renames(
+                {ModelOption.CONSTRAINTS: (UniqueConstraint(fields=tuple(operation.fields)),)}, field_operations
+            )
+            constraint_removal = copy(operation)
+            constraint_removal.fields = list(options[ModelOption.CONSTRAINTS][0].fields)
+            return constraint_removal
+        return operation
 
     @staticmethod
     def get_changed_columns(model_state: ModelState, field_operations: list[HareOperation]) -> set[tuple[str, str]]:
@@ -166,7 +232,8 @@ class StateModelDiff:
         field_diff = StateFieldDiff(self.old_state, self.new_state, self.rename_questions)
         field_operations = field_diff.generate_operations()
         self.field_operations = list(field_operations)
-        self.old_state_after_renames = self.get_state_after_field_renames(self.old_state, field_operations)
+        comparison_state, dependent_removals = self.get_state_before_field_removals(field_operations)
+        self.old_state_after_renames = self.get_state_after_field_renames(comparison_state, field_operations)
         self.warnings.extend(field_diff.warnings)
         self.data_loss_warnings.extend(field_diff.data_loss_warnings)
 
@@ -208,19 +275,19 @@ class StateModelDiff:
                 "removing the old one)."
             )
 
-        operations: list[HareOperation] = []
+        table_operations: list[HareOperation] = []
         # Migration state leaves the table unresolved ("") for a model without Meta.table - the
         # default name is used.
         old_table = self.old_state.table or self.old_state.name.lower()
         new_table = self.new_state.table or self.new_state.name.lower()
         if old_table != new_table:
             # A Meta.table change has its own operation - AlterModelOptions touches no database.
-            operations.append(AlterModelTable(name=self.new_state.name, table=new_table))
+            table_operations.append(AlterModelTable(name=self.new_state.name, table=new_table))
         old_schema = self.old_state.options.get(ModelOption.SCHEMA)
         new_schema = self.new_state.options.get(ModelOption.SCHEMA)
         if old_schema != new_schema:
             # The same for Meta.schema.
-            operations.append(AlterModelSchema(name=self.new_state.name, schema=new_schema))
+            table_operations.append(AlterModelSchema(name=self.new_state.name, schema=new_schema))
         # A trigger's body may read the changed columns.
         object_operations = [
             *IndexDiff(self.old_state_after_renames, self.new_state).get_operations(),
@@ -236,9 +303,13 @@ class StateModelDiff:
         added_object_operations = [
             operation for operation in object_operations if isinstance(operation, OBJECT_ADDING_OPERATIONS)
         ]
+        operations = [*dependent_removals]
         operations.extend(
-            operation for operation in object_operations if not isinstance(operation, OBJECT_ADDING_OPERATIONS)
+            self.get_removal_before_field_renames(operation, field_operations)
+            for operation in object_operations
+            if not isinstance(operation, OBJECT_ADDING_OPERATIONS)
         )
+        operations.extend(table_operations)
         partition_diff = PartitionDiff(self.old_state_after_renames, self.new_state)
         old_options = StateSignatures.get_model_options_for_compare(self.old_state_after_renames.options)
         # The partitions added and removed one at a time are written as their own operations below.
@@ -255,7 +326,7 @@ class StateModelDiff:
         moved_field_options = [
             option
             for option in FIELD_NAMING_MODEL_OPTIONS
-            if not ComparableValues.are_equal(old_options.get(option), new_options.get(option))
+            if not DeclarationValues.are_equal(old_options.get(option), new_options.get(option))
         ]
         removed_fields: list[HareOperation] = []
         if moved_field_options and field_operations:
@@ -265,15 +336,25 @@ class StateModelDiff:
                     options_during_field_changes[option] = old_options[option]
                 else:
                     options_during_field_changes.pop(option, None)
-            removed_fields = [operation for operation in field_operations if isinstance(operation, RemoveField)]
-            field_operations = [operation for operation in field_operations if not isinstance(operation, RemoveField)]
-        elif field_operations and not ComparableValues.are_equal(new_options, options_during_field_changes):
+        if field_operations and (
+            moved_field_options or not DeclarationValues.are_equal(new_options, options_during_field_changes)
+        ):
             # The options held while the fields change may still read a removed field - it is removed once
             # the new options are set.
-            removed_fields = [operation for operation in field_operations if isinstance(operation, RemoveField)]
-            field_operations = [operation for operation in field_operations if not isinstance(operation, RemoveField)]
+            removed_fields = [
+                operation
+                for operation in field_operations
+                if isinstance(operation, RemoveField) and operation.name not in field_diff.recreated_field_names
+            ]
+            field_operations = [operation for operation in field_operations if operation not in removed_fields]
+        # Recreated columns briefly do not exist, even when their logical names are unchanged.
+        # Options referring to them return only after AddField has restored the columns.
+        for option in FIELD_NAMING_MODEL_OPTIONS:
+            if options_during_field_changes.get(option) in field_diff.recreated_field_names:
+                options_during_field_changes = dict(options_during_field_changes)
+                options_during_field_changes.pop(option, None)
         # Compared by their declarations - hare's expressions compare by identity.
-        if not ComparableValues.are_equal(options_during_field_changes, old_options):
+        if not DeclarationValues.are_equal(options_during_field_changes, old_options):
             operations.append(
                 AlterModelOptions(
                     name=self.new_state.name,
@@ -284,7 +365,7 @@ class StateModelDiff:
         operations.extend(partition_diff.get_operations())
         self.data_loss_warnings.extend(partition_diff.data_loss_warnings)
         operations.extend(field_operations)
-        if not ComparableValues.are_equal(new_options, options_during_field_changes):
+        if not DeclarationValues.are_equal(new_options, options_during_field_changes):
             operations.append(AlterModelOptions(name=self.new_state.name, options=new_options))
         operations.extend(removed_fields)
 
@@ -297,9 +378,25 @@ class StateModelDiff:
             self._unique_index_field_sets(self.new_state)
             & self._unique_constraint_field_sets(self.old_state_after_renames)
         )
-        swap_additions = [
-            operation for operation in added_object_operations if self._adds_unique_over(operation, swap_field_sets)
-        ]
+        changed_field_names = set()
+        for operation in self.field_operations:
+            if isinstance(operation, (AddField, AlterField, RemoveField)):
+                changed_field_names.add(operation.name)
+            elif isinstance(operation, RenameField):
+                changed_field_names.update((operation.old_name, operation.new_name))
+        swap_additions = []
+        if not table_operations:
+            for operation in added_object_operations:
+                if not self._adds_unique_over(operation, swap_field_sets):
+                    continue
+                if isinstance(operation, AddIndex):
+                    names = SchemaReferences.get_index_field_names(operation.index)
+                elif isinstance(operation, AddConstraint):
+                    names = SchemaReferences.get_constraint_field_names(operation.constraint)
+                else:
+                    continue
+                if changed_field_names.isdisjoint(names):
+                    swap_additions.append(operation)
         return [
             *swap_additions,
             *operations,
@@ -336,7 +433,7 @@ class StateModelDiff:
     def _unique_index_field_sets(state: ModelState) -> set[frozenset[str]]:
         return {
             frozenset(index.fields)
-            for index in StateSignatures.normalize_indexes(state.options.get(ModelOption.INDEXES, ()))
+            for index in map(IndexObjectType.as_schema_object, IndexObjectType.get_objects(state))
             if index.unique and index.fields
         }
 
@@ -364,7 +461,7 @@ class StateModelDiff:
                 options_during_field_changes
             ):
                 table_options_during_field_changes.append(options_during_field_changes)
-        if ComparableValues.are_equal(table_options_during_field_changes, list(new_table_options)):
+        if DeclarationValues.are_equal(table_options_during_field_changes, list(new_table_options)):
             return new_options
         options = dict(new_options)
         if table_options_during_field_changes:

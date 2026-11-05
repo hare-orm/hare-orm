@@ -1,19 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
+from hare.core.connections.messages import CONNECTION_RELEASE_FAILED
 from hare.dialects.clickhouse.keeper.constants import (
     KEEPER_DEFAULT_PORT,
-    KEEPER_EPHEMERAL_NODE,
     KEEPER_MIGRATION_LOCK_NAME,
     KEEPER_MIGRATION_LOCKS_PATH,
-    KEEPER_NO_ERROR,
-    KEEPER_NO_NODE_ERROR,
-    KEEPER_NODE_EXISTS_ERROR,
-    KEEPER_PERSISTENT_NODE,
 )
 from hare.dialects.clickhouse.keeper.keeper_session import KeeperSession
-from hare.exceptions import ConfigurationError, OperationalError
+from hare.exceptions import ConfigurationError
 
 
 class ClickhouseMigrationLock:
@@ -27,7 +26,7 @@ class ClickhouseMigrationLock:
         Args:
             addresses: The hosts and ports of the Keeper servers.
             database: The database migrated.
-            connect_timeout: Seconds a server may take to open the session.
+            connect_timeout: Seconds allowed to establish a Keeper session.
         """
         self.addresses = addresses
         self.path = f"{ClickhouseMigrationLock.get_database_path(database)}/{KEEPER_MIGRATION_LOCK_NAME}"
@@ -94,35 +93,46 @@ class ClickhouseMigrationLock:
         session = KeeperSession(self.addresses, self.connect_timeout)
         await session.open()
         self.session = session
-        while await self.create(session) == KEEPER_NODE_EXISTS_ERROR:
+        while not await session.create(self.path):
             await session.wait_for_deletion(self.path)
 
-    async def create(self, session: KeeperSession) -> int:
-        """Creates the node of the lock - with the nodes above it, when missing.
+    @asynccontextmanager
+    async def hold(self) -> AsyncGenerator[None]:
+        """Hold the fixed lock and interrupt the critical scope if its session becomes uncertain.
 
-        Args:
-            session: The session.
-
-        Returns:
-            The error code: none, or the node held by another session.
-
-        Raises:
-            OperationalError: Keeper refused the node.
+        A lost or suspended session is terminal, even if Kazoo reconnects. The standard
+        timeout context owns the interruption; unrelated timeouts and external cancellation
+        keep their identity. Cleanup completes before the scope returns.
         """
-        error_code = await session.create(self.path, KEEPER_EPHEMERAL_NODE)
-        if error_code == KEEPER_NO_NODE_ERROR:
-            parent_path = ""
-            for part in self.path.split("/")[1:-1]:
-                parent_path = f"{parent_path}/{part}"
-                parent_error_code = await session.create(parent_path, KEEPER_PERSISTENT_NODE)
-                if parent_error_code not in {KEEPER_NO_ERROR, KEEPER_NODE_EXISTS_ERROR}:
-                    raise OperationalError(
-                        f"ClickHouse Keeper refused the node {parent_path!r}: error {parent_error_code}"
-                    )
-            error_code = await session.create(self.path, KEEPER_EPHEMERAL_NODE)
-        if error_code not in {KEEPER_NO_ERROR, KEEPER_NODE_EXISTS_ERROR}:
-            raise OperationalError(f"ClickHouse Keeper refused the migration lock {self.path!r}: error {error_code}")
-        return error_code
+        try:
+            await self.take()
+            session = self.session
+            assert session is not None  # nosec B101 - set by take()
+            loop = asyncio.get_running_loop()
+            scope = asyncio.timeout(None)
+            try:
+                async with scope:
+                    session.check()
+                    session.on_end = lambda: scope.reschedule(loop.time())
+                    try:
+                        yield
+                        session.check()
+                    finally:
+                        session.on_end = None
+            except TimeoutError:
+                if scope.expired():
+                    session.check()
+                raise
+        except BaseException as error:
+            try:
+                await self.close()
+            except BaseException as release_error:
+                if release_error is error:
+                    raise
+                raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, [error, release_error]) from None
+            raise
+        else:
+            await self.close()
 
     async def close(self) -> None:
         """Gives the lock back, closing the session."""

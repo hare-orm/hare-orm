@@ -15,8 +15,8 @@ class ColstoreDriver(Driver):
     default_credentials = {"port": 9000}
     connection_options = ConnectionOptions(   # hare.dialects.base.connection.connection_options
         ConnectionOption("compression", ConnectionOptionType.BOOLEAN),
-        ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS, positive=True, maximum=3600),
-        ConnectionOption("max_block_size", ConnectionOptionType.WHOLE_NUMBER, minimum=1, maximum=1_000_000),
+        ConnectionOption("connect_timeout", ConnectionOptionType.SECONDS),
+        ConnectionOption("max_block_size", ConnectionOptionType.WHOLE_NUMBER),
     )
     strict_query_parameters = True            # неизвестный ?параметр — ConfigurationError
 
@@ -37,18 +37,19 @@ class ColstoreDriver(Driver):
 | `get_client_class(credentials)` | Класс клиента для подключения — его можно выбрать по учётному параметру и убрать этот параметр (`install_regexp_functions` у SQLite). |
 | `get_client_classes()` | Все классы клиентов, включая клиентов транзакций. |
 | `is_retryable(error)` | Означает ли ошибка драйвера, что база прервала транзакцию из-за параллельной (ошибка сериализации, взаимная блокировка); для неё hare даёт `TransactionRetryError`. |
-| `get_url_path(url)`, `get_testing_path(path, reuse_databases)` | Чтение пути из адреса и путь, к которому подключается запуск тестов (место `{}` из `HARE_TEST_DB`, заполненное новым именем). |
+| `get_url_path(url)` | Чтение пути базы из URL. Тестовыми именами и арендами ресурсов управляет `hare.contrib.test`, вне драйвера. |
 
 ### <a id="connection-options-strict-query"></a>`connection_options`, `strict_query_parameters`
 
-Настройки, которые принимает подключение; каждая объявляется один раз как
-`ConnectionOption(name, value_type, *, minimum, maximum, positive, power_of_two, choices)`, где тип
-значения — `ConnectionOptionType.WHOLE_NUMBER`, `SECONDS`, `BOOLEAN`, `CHOICE` или `TEXT`. Настройка
-проверяется одинаково, пришла ли она с типом из `credentials` словаря настроек или текстом из параметра
-адреса (`?connect_timeout=5`): клиент в своём `__init__` вызывает `options.read(settings)`, чтобы забрать
-известные настройки, проверенные по типу и диапазону, и
-`options.raise_for_unknown(settings, driver_name)`, чтобы отклонить настройку с опечаткой. Разбор вручную
-не нужен.
+Каждая настройка подключения объявляется через `ConnectionOption(name, value_type, *, sql_value=False, ...)`.
+Дополнительные параметры: `minimum=None`, `maximum=None`, `power_of_two=False` и `choices=()`. Тип
+значения — `ConnectionOptionType.WHOLE_NUMBER`, `SECONDS`, `BOOLEAN`, `CHOICE`, `TEXT` или `CALLABLE`
+(вызываемый объект или его путь импорта через точки). `options.read(settings)` преобразует текст URL,
+например `?connect_timeout=5`, и сохраняет типизированные настройки драйвера; допустимые значения
+определяет потребляющая их библиотека или драйвер. Объявленные варианты и пути функций обрабатываются
+тем же парсером. Для настроек, записываемых прямо в SQL, например SQLite PRAGMA, задайте `sql_value=True`:
+форма чисел, границы, степени двойки и разрешённые токены проверяются до построения команды.
+`options.raise_for_unknown(settings, driver_name)` отклоняет опечатки в именах. Разбор вручную не нужен.
 
 ## <a id="client"></a>2. Выполнение команд: клиент
 
@@ -61,6 +62,14 @@ class ColstoreClient(DatabaseClient):
     # Что поддерживает база — у диалекта; клиент добавляет то, что умеет его драйвер.
     features = COLSTORE_DIALECT.features.replace(max_bind_parameters=100_000)
 ```
+
+Передавайте все явные параметры конструктора вместе с `kwargs` в `DatabaseClient.__init__` до
+нормализации или извлечения настроек. Он сохраняет исходные значения в `ConnectionConfig` для
+независимых клиентов и клиентов схем арендаторов. `driver_name` должен называть зарегистрированный
+движок, чтобы и созданный напрямую клиент мог воспроизвести настройки подключения. Клиент, созданный
+через handler, получает сохранённую им конфигурацию, включая параметры выбора класса клиента.
+Производные клиенты сохраняют ссылки на callbacks и SSL-контексты; не меняйте вложенные настройки
+вызывающего кода при инициализации.
 
 Клиент реализует `create_connection(with_db)`, `close()`, `db_create()`, `db_delete()`,
 `acquire_connection()` (контекстный менеджер, выдающий сырое соединение) и методы выполнения команд —
@@ -81,7 +90,8 @@ class ColstoreClient(DatabaseClient):
 Одну команду. `StatementResult(row_count, rows, inserted_id=None, description=None)`
 (`hare.dialects.base.results`): строки, которые она вернула, — каждая читается по имени колонки, — и
 число строк, которые она изменила, для записи без `RETURNING`. `returns_rows` говорит, возвращает ли
-команда строки (`SELECT`, запись с `RETURNING`); при `None` драйвер определяет это по тексту SQL сам.
+команда строки (`SELECT`, запись с `RETURNING`); при `None` драйвер получает описание результата
+из метаданных команды. Один текст SQL не позволяет надёжно определить результат произвольной команды.
 `rows_by_position=True` передаёт читатель, берущий строки только по позиции, при
 `Features.supports_positional_rows`: драйвер может тогда отдать самые дешёвые строки, читаемые по
 позиции, — обычные кортежи — с DB-API `description` колонок, из которого читает
@@ -91,7 +101,17 @@ class ColstoreClient(DatabaseClient):
 на нём; задайте `row_to_dict`, если для корректности или скорости нужно преобразование,
 отличающееся от `dict(row)`). Оно сохраняет точное имя и значение каждой колонки: SQLite соединяет
 имена со значениями по позициям, поскольку поиск по имени в его строках не различает `a` и `A`.
-Потоковое чтение объединённых запросов тоже использует это преобразование.
+Потоковое чтение объединённых запросов использует общий читатель партий строк.
+
+`invalidate_schema_cache()` сбрасывает метаданные подготовленных команд и типов, устаревшие после DDL.
+По умолчанию метод ничего не делает; переопределите его, если драйвер хранит метаданные схемы.
+Редактор схемы вызывает его после попытки выполнить команду схемы, включая ошибку сценария,
+который уже мог изменить каталог. Сбор SQL и пакеты backfill, меняющие только строки, его не вызывают.
+Реализация с пулом должна обновить свободные и занятые подключения до их следующей команды ORM.
+За прямые вызовы на удерживаемом сыром подключении драйвера отвечает вызывающий код.
+Ошибка обновления кэша не должна скрывать исходную ошибку выполнения. Изменения схемы через raw SQL
+нужно явно передавать редактору схемы или вызывать этот hook: клиенты не угадывают такие изменения
+по ключевым словам SQL.
 
 `values` команды — это `list` или его подкласс `QueryParameters`
 (`hare.sql.terms.parameters.query_parameters`), если среди значений есть значение поля с
@@ -99,26 +119,42 @@ class ColstoreClient(DatabaseClient):
 параметры в лог через `%s`, скрывает их без лишних действий. Драйверу, который не принимает подклассы
 списка, передаётся `list(values)`.
 
-`native_python_types` — набор типов Python, которые драйвер возвращает уже в нужном полю виде: для поля
-такого типа чтение строк пропускает преобразование.
+`native_python_types` перечисляет типы Python, которые возвращает драйвер. `HydrationLayout` сначала
+использует преобразователь диалекта, если он зарегистрирован. Иначе чтение поля пропускается только
+при совпадении типа с нативным и `field.keeps_native_db_values=True`.
 
 Каждый метод выполнения переводит собственные исключения драйвера в исключения hare —
 `DBConnectionError`, `IntegrityError` и `OperationalError` или `TransactionRetryError` через
 `_get_operational_error()`, который спрашивает `is_retryable()` драйвера, — и сообщает о вызове
 [наблюдателям и обёрткам запросов](../../observability/observers.ru.md). И то и другое делает один
 декоратор, `DatabaseClient.translate_exceptions`, которым класс клиента диалекта оборачивает методы
-выполнения своих драйверов (`@ColstoreClient.translate_exceptions`). Он добавляет активные метки запроса
-(`DatabaseClient.get_tagged_query_arguments()`), выполняет вызов внутри обёрток запросов, если они
+выполнения своих драйверов (`@ColstoreClient.translate_exceptions(StatementForm.SQL)`). `StatementForm`
+импортируется из `hare.dialects.base.client.enums`: `SQL` принимает query/values, `BULK_LOAD` —
+table/columns, `MANY` и `SCRIPT` исполняют пачку или скрипт, `CONTROL` не содержит SQL. За операциями
+курсора наблюдает внешняя граница потока; она же переводит ошибки. Имя метода служит только меткой события.
+`StatementExecution` связывает
+`StatementRequest`, размещает метки через `QueryClauses.get_tagged_statement_sql(sql, comment)` и
+выполняет вызов внутри обёрток запросов, если они
 установлены (`Observers.run_wrapped(QueryCall(...), proceed)`), сообщает о нём наблюдателям, когда он
 завершился, успешно или нет (`Observers.record_query()`), и выбрасывает вместо исключения драйвера то,
 что вернёт `translate_driver_error(client, error, sql, parameters, args, is_query_executing)` клиента, —
 единственный метод, который клиент диалекта переопределяет, чтобы перевести исключения своего драйвера.
-Настройки, которые читает декоратор, — атрибуты класса клиента, читаемые один раз при оборачивании
-метода: `rejected_sql_character` (символ, на котором команда отклоняется до отправки),
+Настройки исполнения — атрибуты класса клиента: `rejected_sql_character` (символ, на котором команда
+отклоняется до отправки),
 `checks_aborted_transactions` и `aborted_transaction_message` (команда в транзакции, которую база
 прервала, отклоняется), `runs_statement_options` (`command_timeout`, `password_provider`, пулер
 транзакций, повторы чтения). Декоратор работает на каждой команде, поэтому читает `is_transaction_client`
 клиента (истинно у каждого `TransactionClient`), а не вызывает `isinstance()`.
+
+`execute(..., retry_read=True)` явно разрешает повтор этого вызова при потере соединения;
+по умолчанию разрешения нет. Наличие строк в результате или ключевое слово SQL не дают такого права.
+Разрешить повтор может только вызывающий код, который знает, что операция ничего не записывает;
+в транзакции, пакетной загрузке и потоковом чтении такой повтор не выполняется. Каждая попытка отдельно
+проходит перевод ошибок и наблюдение, чувствительные параметры скрываются до публикации событий.
+Вложенные вызовы и обёртки наблюдателей не наследуют разрешение на повтор. Получением соединения
+и завершением протокола управляет драйвер; отмена ожидания не означает завершённую запись или свободное
+соединение. Потоковое чтение использует тот же жизненный цикл и сообщает завершение после очистки,
+включая ошибки отмены. Raw SQL не разбирается ради определения безопасности или размещения комментария.
 
 Когда соединение открыто, клиент вызывает `_post_connect()`, который читает версию сервера из
 `get_server_version()` — `(major, minor, ...)`, без наблюдения за запросами; значение по умолчанию `None`
@@ -173,10 +209,11 @@ hare/dialects/sqlite/
         sqlite_client.py               # SqliteClient: общее для любого драйвера SQLite
         sqlite_transaction_client.py   # SqliteTransactionClient: общий жизненный цикл транзакции
         declarations.py                # SqliteDriverErrors: классы исключений драйвера
-    driver.py                          # SqliteDriver: общая основа Driver
+    connection/
+        sqlite_driver.py               # SqliteDriver: общая основа Driver
     drivers/
         aiosqlite/
-            driver.py                  # AiosqliteDriver: имя, схемы DB_URL, регистрация
+            aiosqlite_driver.py        # AiosqliteDriver: имя, схемы DB_URL, регистрация
             client/
                 aiosqlite_client.py    # AiosqliteClient(SqliteClient)
                 aiosqlite_transaction_client.py
@@ -261,14 +298,20 @@ hare/dialects/sqlite/
 | `supports_row_deletes` | Каждый `DELETE` даёт `UnSupportedError` до отправки, а каскад, которому он нужен, ничего не пишет. |
 | `rewrites_correlated_exists` | Включите, если база выполняет связанные подзапросы, но считает связанный `EXISTS` неверно: такой `EXISTS` остаётся в форме `IN`. |
 | `supports_ordered_correlated_subqueries` | Связанный подзапрос, который сам сортирует или срезает свои строки, даёт `UnSupportedError` до отправки команды. |
-| `orders_by_correlated_subqueries` | Запрос со связанным подзапросом в `ORDER BY` или выбранным рядом с `WHERE` выбирает строки в производной таблице — условия и ключи сортировки становятся её скрытыми колонками — и фильтрует, сортирует и срезает их снаружи; `UPDATE`/`DELETE` со связанным подзапросом даёт `UnSupportedError`. |
+| `supports_correlated_select` | Связанный подзапрос в SELECT |
+| `supports_correlated_order_by` | Связанный подзапрос в ORDER BY |
+| `supports_correlated_group_by` | Связанный подзапрос в GROUP BY |
+| `supports_correlated_update` | Связанный подзапрос в UPDATE |
+| `supports_correlated_delete` | Связанный подзапрос в DELETE |
+| `rewrites_correlated_order_by` | Сортировка по связанному подзапросу через колонку одного производного SELECT |
+| `correlated_select_requires_unfiltered_source` | Вычисление выбранного связанного подзапроса до внешних условий |
 | `supports_correlated_subqueries` | `EXISTS`, связанный равенством колонок, записывается как `(outer columns) IN (SELECT inner columns ...)` — см. [`supports_correlated_subqueries`](#supports-correlated-subqueries) |
 | `can_rollback_ddl` | Миграция не оборачивается в транзакцию. |
 | `supports_select_for_update` | `select_for_update()` и `RowChanges.get_for_update()` дают `UnSupportedError` при выполнении запроса; `update_or_create()` обходится без блокировки. |
 | `supports_select_for_no_key_update` | `select_for_update(no_key=True)` берёт обычную блокировку `FOR UPDATE`. |
 | `supports_select_for_share` / `supports_select_for_key_share` | `select_for_update(share=True)` / `(key_share=True)` дают `UnSupportedError` при выполнении запроса. |
 | `supports_update_limit_order_by` | `QuerySet.update()`/`delete()` запроса со срезом дают `QueryError` до отправки SQL; с ним срез без смещения пишется собственными `ORDER BY ... LIMIT` команды. |
-| `supports_returning` | `INSERT` ничего не запрашивает обратно, а `returning()` и `bulk_create(returning=True)` дают `UnSupportedError` — см. [`supports_returning`](#supports-returning) |
+| `supports_returning` | `INSERT` ничего не запрашивает обратно; операции, которым нужен SQL `RETURNING`, дают `UnSupportedError`. Удаление средствами hare может читать строки отдельно — см. [`supports_returning`](#supports-returning). |
 | `guarantees_returning_order` | Многострочный `INSERT ... RETURNING` сопоставляется со своими объектами по первичному ключу, а не по позиции. |
 | `supports_posix_regex` | Фильтр с `posix_regex`/`iposix_regex` даёт `UnSupportedError` до выполнения запроса. |
 | `cuts_like_pattern_at_null_byte` | Включите там, где `LIKE` читает шаблон только до первого нулевого байта: текстовый оператор фильтра с таким шаблоном даёт `ValidationError`. |
@@ -279,14 +322,13 @@ hare/dialects/sqlite/
 | `supports_copy` | `bulk_create(use_copy=True)` даёт `UnSupportedError`. |
 | `copies_bulk_inserts` | `bulk_create()` загружает строки через `copy()` только с `use_copy=True`. Задайте его там, где `copy()` — обычный для базы способ записать много строк: тогда `bulk_create()` выбирает его всегда, когда не обрабатывает конфликты и не читает строки обратно. |
 | `inline_comments` | Комментарии таблиц и колонок записываются в `CREATE TABLE`, а не через `COMMENT ON`. |
-| `supports_positional_rows` | Строки читаются только по имени колонки — без `execute(rows_by_position=True)`, без нативного чтения строк и без выполнения QuerySet по плану его вызовов. |
+| `supports_positional_rows` | Строки читаются только по имени колонки — без `execute(rows_by_position=True)`, без позиционного чтения строк и без выполнения QuerySet по плану его вызовов. |
 | `execute_many_scales_poorly` | Массовые записи отправляются командами на много строк, а не через `executemany()`. |
-| `binds_written_parameters` | Строки, записываемые встроенным записывающим кодом, передаются объектами Python. |
 | `binds_array_parameters` | Список, переданный одним параметром (параметр `RawSQL` вроде `= ANY(%s)`), даёт `UnSupportedError`. |
 | `max_bind_parameters` | Массовые записи, предзагрузка и каскады делят свои команды, чтобы не превысить его. |
 | `max_bulk_update_rows` | `bulk_update()` пишет не больше стольких строк одной командой. |
 | `supports_nulls_distinct` | `UniqueConstraint(nulls_distinct=...)` даёт `UnSupportedError` до отправки команды создания. |
-| `explain_options` | Параметр `EXPLAIN`, которого нет в списке, даёт `UnSupportedError` до отправки команды. |
+| `PostgresqlFeatures.explain_options` | Параметр `EXPLAIN`, которого нет в списке, даёт `UnSupportedError` до отправки команды. |
 | `supports_schemas` | Миграции не создают и не удаляют схем; таблица модели со схемой пишется как есть и должна существовать. Методы редактора схемы `get_index_name_sql()`, `get_indexed_table_sql()` и `get_referenced_table_sql()` пишут имена, которые получают индекс, триггер и внешний ключ, в собственной форме базы. |
 | `supports_distinct_on` | `distinct(*fields)` даёт `UnSupportedError` при построении запроса. |
 | `supports_grouping_sets` | `group_by(Rollup/Cube/GroupingSets(...))` и `Grouping()` дают `UnSupportedError`. |
@@ -299,7 +341,7 @@ hare/dialects/sqlite/
 | `supports_merge_returning` | `merge().returning()` даёт `UnSupportedError`. |
 | `supports_merge_not_matched_by_source` | `merge().when_not_matched_by_source()` даёт `UnSupportedError`. |
 | `supports_pool_status` | `get_pool_status()` даёт `UnSupportedError`, а пулы клиента не попадают в `Connections.get_pool_statuses()`. |
-| `sorts_nulls_first` | Где по умолчанию оказывается NULL при сортировке — `nulls_first`/`nulls_last` добавляют фразу, только если она меняет порядок. |
+| `sorts_nulls_first` | Где оказывается NULL без явного указания позиции. Явные `nulls_first`/`nulls_last` записываются в SQL даже при совпадении с этим порядком. |
 | `divides_integers_exactly` | Включите, если `/` двух целых даёт точное частное: поле вывода выражения — `FloatField` вместо целого поля. |
 | `computes_integer_statistics_exactly` | Включите, если база считает `AVG`, `STDDEV` и `VARIANCE` от целых точными десятичными числами: результат читается как `Decimal`; без этого hare читает его как число с плавающей точкой. |
 | `computes_decimal_statistics_exactly` | Включено по умолчанию. Выключите, если база считает `AVG`, `STDDEV` и `VARIANCE` от десятичных числами с плавающей точкой: тогда hare читает результат как такое число, а не `Decimal`. |
@@ -307,8 +349,9 @@ hare/dialects/sqlite/
 | `supports_conflict_constraint_names`, `supports_conflict_where` | `bulk_create(on_conflict_constraint=...)` / `conflict_where=` дают `UnSupportedError`. |
 | `matches_ordering_to_grouping_by_sql` | Задайте его, если выражение сортировки, по которому идёт и группировка, нужно записать точно как в `GROUP BY`. |
 | `supports_virtual_generated_columns` | `GeneratedField(stored=False)` даёт `UnSupportedError`. |
-| `supports_text_search_configurations` | Конфигурация поиска, `SearchVector` как значение, лексемы, веса меток, `normalization` и `cover_density` у `SearchRank` и параметры фрагментов `SearchHeadline` дают `UnSupportedError`. |
-| `supports_full_text_index` | `FullTextIndex` и веса полей у `SearchRank` дают `UnSupportedError`. |
+| `supports_text_search_configurations` | Явный config= для поискового запроса, вектора или разметки |
+| `text_search_operations` | Отдельно объявленные операции TextSearchOperation; проверяются диалектом по возможностям соединения |
+| `SqliteFeatures.supports_full_text_index` | `FullTextIndex` и веса полей у `SearchRank` дают `UnSupportedError`. |
 | `supports_vector_search` | Расстояния векторов и `__nearby` дают `UnSupportedError`. |
 | `supports_tenant_schemas` | `TenantSchemas.create()`/`drop()`/`get_tenants()` дают `UnSupportedError`; нужны `get_tenant_client_settings(schema_name)` клиента (путь поиска схемы арендатора), параметр подключения `tenant_schema_template` и `fetch_schema_names()` интроспектора. |
 | `supports_spatial` | Операторы, пути, функции и агрегаты `hare.gis` дают `UnSupportedError`; зарегистрируйте рендереры `GeometryValue`, `SpatialRelationTerm`, `SpatialFunctionTerm` и имена `SpatialAggregateFunction`, а также тип колонки `GeometryField` и преобразования его значений. |
@@ -343,7 +386,9 @@ outbox.
 записи строки, — а значения колонок `db_default` и вычисляемых колонок остаются непрочитанными:
 поле держит `DatabaseDefault`, вычисляемое поле не загружено, а `refresh_from_db()` читает их.
 `UPDATE` не читает изменённые генерируемые колонки, массовая запись не может узнать, какие строки она
-действительно вставила, а `returning()` и `bulk_create(returning=True)` дают `UnSupportedError`.
+действительно вставила. `bulk_create(returning=True)`, обновление и прямое SQL-удаление с возвратом строк
+дают `UnSupportedError`. Каскад в Python, мягкое удаление или переопределённый метод удаления могут
+вместо этого читать строки по первичному ключу; гарантии транзакции зависят от возможностей подключения.
 
 Возможности команд схемы перечислены вместе с [редактором схемы](schema.ru.md#schema-editor). Класс
 клиента может получить возможности другого с изменениями:
@@ -357,5 +402,7 @@ outbox.
 То, чем базы различаются, спрашивается у частей диалекта и у `Features` подключения: генерируемые колонки
 и колонки со значениями по умолчанию базы возвращаются через `INSERT ... RETURNING` при
 `supports_returning`; `clauses.get_upsert_inserted_flag_sql()` даёт выражение `RETURNING`, отличающее
-строку, вставленную вставкой-или-обновлением, от изменённой (`xmax = 0` в PostgreSQL; при `None` hare
-читает существующие ключи перед записью, и только пока есть наблюдатель).
+строку, вставленную вставкой-или-обновлением, от изменённой (`xmax = 0` в PostgreSQL). Существующие ключи
+читаются, когда наблюдателю или `Meta.change_capture` нужно различить вставленные и обновлённые строки,
+а диалект не предоставляет такого выражения. Захват прежних значений может требовать этого чтения
+даже при наличии выражения.

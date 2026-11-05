@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.declarations import ExtensionContribution
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.clickhouse.clauses.constants import CLICKHOUSE_MAX_BULK_UPDATE_ROWS
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
@@ -65,7 +66,12 @@ class ClickhouseDialect(Dialect):
         keeps_enum_columns=True,
         rewrites_correlated_exists=True,
         supports_ordered_correlated_subqueries=False,
-        orders_by_correlated_subqueries=False,
+        supports_correlated_order_by=False,
+        supports_correlated_group_by=False,
+        supports_correlated_update=False,
+        supports_correlated_delete=False,
+        rewrites_correlated_order_by=True,
+        correlated_select_requires_unfiltered_source=True,
         # A correlated subquery is joined to the rows around it - each read once per outer row of
         # its key, so a COUNT or SUM counts it that many times (25.8).
         supports_correlated_aggregates=False,
@@ -101,7 +107,6 @@ class ClickhouseDialect(Dialect):
         collates_in_ordering_only=True,
         supports_index_nulls_order=False,
         # The data of an INSERT follows its VALUES to the statement's end.
-        reads_trailing_comment_of_insert=False,
         # A column computed on read is an ALIAS of its expression.
         supports_virtual_generated_columns=True,
         supports_views=True,
@@ -155,14 +160,15 @@ class ClickhouseDialect(Dialect):
             names_qualified_columns=True, wraps_negated_criteria=True, as_keyword=True
         )
 
-    def install(self) -> None:
-        super().install()
+    def get_contribution(self) -> ExtensionContribution:
         # Local import: the methods and lookups resolve hare's queries, whose modules import this one.
         from hare.dialects.clickhouse.lookups.clickhouse_global_lookups import ClickhouseGlobalLookups
         from hare.dialects.clickhouse.query.clickhouse_queryset_methods import ClickhouseQuerySetMethods
 
-        ClickhouseQuerySetMethods.register(type(self))
-        ClickhouseGlobalLookups.register()
+        return ExtensionContribution(
+            methods=ClickhouseQuerySetMethods.get_registrations(type(self)),
+            lookups=ClickhouseGlobalLookups.get_registrations(),
+        )
 
     def build_literals(self) -> SqlLiterals:
         # Local import: the literals read the dialect's constants, which build this dialect.
@@ -219,10 +225,10 @@ class ClickhouseDialect(Dialect):
             JsonPathLookups.less_than: ClickhouseJsonPathLookups.less_than,
             JsonPathLookups.less_equal: ClickhouseJsonPathLookups.less_equal,
             JsonPathLookups.between: ClickhouseJsonPathLookups.between,
-            Lookups.is_in: ClickhouseLargeInList.is_in,
-            Lookups.not_in: ClickhouseLargeInList.not_in,
-            Lookups.row_is_in: ClickhouseLargeInList.row_is_in,
-            Lookups.row_not_in: ClickhouseLargeInList.row_not_in,
+            Lookups.is_in: ClickhouseLargeInList().is_in,
+            Lookups.not_in: ClickhouseLargeInList().not_in,
+            Lookups.row_is_in: ClickhouseLargeInList().row_is_in,
+            Lookups.row_not_in: ClickhouseLargeInList().row_not_in,
             ClickhouseGlobalLookups.global_in: ClickhouseGlobalLookups.global_in,
             ClickhouseGlobalLookups.global_not_in: ClickhouseGlobalLookups.global_not_in,
         }

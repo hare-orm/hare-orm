@@ -20,19 +20,23 @@ from hare.dialects.clickhouse.clauses.constants import (
     CLICKHOUSE_UNBOUNDED_LIMIT_SQL,
 )
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.cluster.clickhouse_placement_plan import ClickhousePlacementPlan
 from hare.dialects.clickhouse.enums import ClickhouseClause
 from hare.dialects.clickhouse.query.clickhouse_sql_context import ClickhouseSqlContext
 from hare.exceptions import QueryError, UnSupportedError
 from hare.query.enums import TableSampleMethod
+from hare.sql.builder.update_from_values import ValuesColumn
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.features import Features
     from hare.sql.builder.queries.query_builder import QueryBuilder
-    from hare.sql.builder.returned_value import ReturnedValue
+    from hare.sql.builder.tables.table import Table
+    from hare.sql.builder.update_from_values import UpdateFromValues
     from hare.sql.enums import SetOperation
     from hare.sql.sql_context import SqlContext
-    from hare.sql.tables.table import Table
 
 
 class ClickhouseQueryClauses(QueryClauses):
@@ -42,6 +46,14 @@ class ClickhouseQueryClauses(QueryClauses):
     only escape character."""
 
     join_keywords = CLICKHOUSE_JOIN_KEYWORDS
+
+    @staticmethod
+    def get_tagged_statement_sql(sql: str, comment: str) -> str:
+        """Prefix every statement: unknown raw SQL may contain a trailing data block.
+
+        Neither INSERT detection nor parsing its VALUES/FORMAT payload is needed.
+        """
+        return f"/*{comment}*/ {sql}"
 
     def get_bulk_load_statement_sql(self, table: str, columns: Sequence[str]) -> str:
         return CLICKHOUSE_BULK_LOAD_STATEMENT_TEMPLATE.format(table=table, columns=", ".join(columns))
@@ -226,7 +238,9 @@ class ClickhouseQueryClauses(QueryClauses):
             f"{field.get_sql(field_context)} = {value.get_sql(value_context)}" for field, value in builder._updates
         )
         where_sql = QuerySqlRendering.where_sql(builder, sql_context) if builder._wheres else " WHERE 1"
-        table_sql = builder._update_table.get_sql(sql_context)  # type: ignore[union-attr]
+        table_sql = ClickhousePlacementPlan.for_table(
+            cast("Table", builder._update_table), sql_context
+        ).get_mutation_target_sql(sql_context)
         update_sql = self.get_update_head_sql(builder._update_table, table_sql)
         return f"{update_sql} {assignments_sql}{where_sql}{self.get_statement_end_sql(builder, sql_context)}"
 
@@ -261,7 +275,9 @@ class ClickhouseQueryClauses(QueryClauses):
             )
         self.raise_if_server_rows_read(builder._from[0], [builder._wheres])
         where_sql = QuerySqlRendering.where_sql(builder, sql_context) if builder._wheres else " WHERE 1"
-        table_sql = builder._from[0].get_sql(sql_context)
+        table_sql = ClickhousePlacementPlan.for_table(
+            cast("Table", builder._from[0]), sql_context
+        ).get_mutation_target_sql(sql_context)
         statement_end_sql = self.get_statement_end_sql(builder, sql_context)
         # The table and the condition are hare's own rendering; values are inlined literals. A
         # lightweight DELETE fails on a set operation in its condition (the server's mutation of it
@@ -324,49 +340,55 @@ class ClickhouseQueryClauses(QueryClauses):
             The tables.
         """
         # Local import: the SQL builder package imports the dialects, which load this module.
-        from hare.query.expressions.subqueries.subquery import Subquery
+        from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
         from hare.sql.builder.queries.query_builder import QueryBuilder
-        from hare.sql.builder.queries.set_operation_query import SetOperationQuery
         from hare.sql.builder.tables.table import Table
 
         if isinstance(term, Table):
             return [term]
-        if isinstance(term, Subquery):
-            nested_query = term.get_nested_query()
-            return [] if nested_query is None else cls.get_read_tables(nested_query)
-        if isinstance(term, SetOperationQuery):
-            queries = [
-                term.base_query,
-                *(query for _, query in term._set_operation),
-                *(cte.query for cte in term._with),
-            ]
-            return [table for query in queries for table in cls.get_read_tables(query)]
         if isinstance(term, QueryBuilder):
-            limit_by = term._dialect_clauses.get(ClickhouseClause.LIMIT_BY)
-            parts = [
-                *term._from,
-                *(join.item for join in term._joins),
-                *(getattr(join, "criterion", None) for join in term._joins),
-                *(cte.query for cte in term._with),
-                *term._selects,
-                term._dialect_clauses.get(ClickhouseClause.PREWHERE),
-                term._wheres,
-                *term._groupbys,
-                term._havings,
-                *(ordering_term for ordering_term, _ in term._orderbys),
-                *(limit_by[2] if limit_by is not None else ()),
-            ]
             return [
-                table for part in parts if part is not None and part is not term for table in cls.get_read_tables(part)
+                table
+                for part in cls.iterate_query_read_parts(term)
+                if part is not term
+                for table in cls.get_read_tables(part)
             ]
         if not hasattr(term, "nodes_"):
             return []
         return [
             table
-            for node in term.nodes_()
-            if node is not term and isinstance(node, (Subquery, QueryBuilder, SetOperationQuery))
-            for table in cls.get_read_tables(node)
+            for query, _rewrites in CorrelatedSubqueries.iterate_term_queries(term)
+            for table in cls.get_read_tables(query)
         ]
+
+    @staticmethod
+    def iterate_query_read_parts(query: QueryBuilder) -> Iterator[Any]:
+        """Sources and expressions read by a query, including ClickHouse's additional clauses.
+
+        Both mutation checks use this list. Nested query scopes remain opaque here and are
+        traversed separately; a correlated field reference does not introduce another scope.
+
+        Args:
+            query: The statement whose direct parts are read.
+
+        Yields:
+            Sources, CTE definitions and statement expressions, including PREWHERE and LIMIT BY.
+        """
+        # Local import: the SQL builder package imports the dialects, which load this module.
+        from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
+
+        yield from query._from
+        for join in query._joins:
+            yield join.item
+        for cte in query._with:
+            yield cte.query
+        yield from CorrelatedSubqueries.iterate_query_terms(query)
+        prewhere = query._dialect_clauses.get(ClickhouseClause.PREWHERE)
+        if prewhere is not None:
+            yield prewhere
+        limit_by = query._dialect_clauses.get(ClickhouseClause.LIMIT_BY)
+        if limit_by is not None:
+            yield from limit_by[2]
 
     def get_update_head_sql(self, table: Any, table_sql: str) -> str:
         """How an update of a table begins - a lightweight ``UPDATE`` of a table declaring
@@ -395,36 +417,36 @@ class ClickhouseQueryClauses(QueryClauses):
             Whether it does.
         """
         # Local import: the SQL builder package imports the dialects, which load this module.
-        from hare.query.expressions.subqueries.subquery import Subquery
+        from hare.sql.builder.queries.correlated_subqueries import CorrelatedSubqueries
         from hare.sql.builder.queries.query_builder import QueryBuilder
         from hare.sql.builder.queries.set_operation_query import SetOperationQuery
+        from hare.sql.terms.node_traversal import NodeTraversal
 
         if not hasattr(term, "nodes_"):
             return False
-        for node in term.nodes_():
-            if isinstance(node, SetOperationQuery):
+        for node in NodeTraversal.walk(term, lambda child: not CorrelatedSubqueries.is_query_boundary(child)):
+            nested = (
+                getattr(node, "inner_query")
+                if getattr(type(node), "rewrites_inner_correlation", False)
+                else getattr(node, "get_nested_query")()
+                if getattr(type(node), "holds_nested_query", False)
+                else node
+            )
+            if isinstance(nested, SetOperationQuery):
                 return True
-            # A subquery expression holds the query it was built into.
-            if isinstance(node, Subquery) and cls.reads_set_operation(node.get_nested_query()):
-                return True
-            if isinstance(node, QueryBuilder):
-                parts = [*node._from, *(join.item for join in node._joins), node._wheres]
-                if any(part is not node and cls.reads_set_operation(part) for part in parts):
+            if isinstance(nested, QueryBuilder):
+                if any(
+                    part is not nested and cls.reads_set_operation(part)
+                    for part in cls.iterate_query_read_parts(nested)
+                ):
                     return True
         return False
 
-    def get_typed_placeholder_template(self, placeholder_template: str, cast_type: str | None) -> str:
-        # ClickHouse's type names are written in their own case.
-        if cast_type is None:
-            return placeholder_template
-        return f"CAST({placeholder_template} AS {cast_type})"
-
     def get_values_table_columns_sql(self, column_names: Sequence[str]) -> str:
-        """The columns of the rows ``get_update_from_values_sql()`` reads - each row is a tuple, its
-        columns read by position.
+        """The SELECT list of a VALUES row source, retaining its column names.
 
         Args:
-            column_names: The names of the columns, ``c<N>``.
+            column_names: The already quoted column names, in order.
 
         Returns:
             The names, comma-separated - the rows are read by them.
@@ -432,82 +454,43 @@ class ClickhouseQueryClauses(QueryClauses):
         return ", ".join(column_names)
 
     def get_update_from_values_sql(
-        self,
-        *,
-        with_sql: str,
-        table: Table,
-        table_sql: str,
-        assignments: Sequence[tuple[str, str]],
-        values_columns_sql: str,
-        values_sql: str,
-        values_alias_sql: str,
-        matches: Sequence[tuple[str, str]],
-        condition_sql: str | None,
-        returned: Sequence[ReturnedValue],
+        self, *, write: UpdateFromValues, with_sql: str, values_sql: str, sql_context: SqlContext
     ) -> str:
-        """An UPDATE mutation writing each row of a list into the table row it matches - the rows
-        are an array of tuples, a column's new value the matching tuple's element.
+        """Render a mutation from input-row positions and unquoted column names.
 
-        Args:
-            with_sql: The ``WITH`` clause, or an empty string.
-            table: The updated table.
-            table_sql: Its SQL.
-            assignments: ``(column, value SQL)`` per assigned column - the value names a row column or
-                is an expression of the table's columns.
-            values_columns_sql: The rows' column names (``get_values_table_columns_sql()``).
-            values_sql: The rows, ``(...), (...)``.
-            values_alias_sql: The alias the value SQL names the rows by.
-            matches: ``(table column SQL, row column SQL)`` pairs a row is matched by.
-            condition_sql: A further condition on the updated rows, or None.
-            returned: The returned values - none on ClickHouse.
-
-        Returns:
-            The statements.
-
-        Raises:
-            UnSupportedError: Values are returned, or the update has a ``WITH`` clause.
+        Expressions and filters render without a table namespace in the mutation's
+        scope. Subqueries retain their own rendering rules, and raw SQL is unchanged.
+        No alias, column name or literal is recovered from or replaced in printed SQL.
         """
-        if returned or with_sql:
+        if write.returned or with_sql:
             raise UnSupportedError("A ClickHouse UPDATE mutation returns nothing and reads no WITH clause")
-        column_names = [name.strip() for name in values_columns_sql.split(",")]
-
-        def get_row_element_number(value_sql: str) -> int:
-            # alias.c<N> -> the position of the column in a row tuple, from 1.
-            return column_names.index(value_sql.rsplit(".", 1)[-1]) + 1
-
-        def get_row_element_sql(value_sql: str) -> str:
-            return f"row.{get_row_element_number(value_sql)}"
-
+        local_context = sql_context.copy(with_namespace=False)
+        quote = sql_context.quote
         rows_sql = f"[{values_sql}]"
-        # A mutation names the columns of its one table unqualified. A row is found by comparing
-        # each key column - a tuple compares only with a tuple of the same element types.
-        table_prefix = f"{table_sql}."
-        match_sql = " AND ".join(
-            f"{get_row_element_sql(value)} = {column.removeprefix(table_prefix)}" for column, value in matches
-        )
+        match_sql = " AND ".join(f"row.{value.position + 1} = {quote(column)}" for column, value in write.matches)
         position_sql = f"arrayFirstIndex(row -> {match_sql}, {rows_sql})"
-        row_prefix = f"{values_alias_sql}."
         assignments_sql = ", ".join(
-            f"{column} = tupleElement(arrayElement({rows_sql}, {position_sql}), {get_row_element_number(value)})"
-            if value.startswith(row_prefix)
-            else f"{column} = {value.replace(table_prefix, '')}"
-            for column, value in assignments
+            f"{quote(column)} = "
+            + (
+                f"tupleElement(arrayElement({rows_sql}, {position_sql}), {value.position + 1})"
+                if isinstance(value, ValuesColumn)
+                else value.get_sql(local_context)
+            )
+            for column, value in write.assignments
         )
-        # The rows' keys as a set first, which skips every other table row cheaply - the search of
-        # the rows runs for the matching ones alone.
-        key_columns_sql = ", ".join(column.removeprefix(table_prefix) for column, _value in matches)
-        row_keys_sql = ", ".join(get_row_element_sql(value) for _column, value in matches)
-        if len(matches) == 1:
+        key_columns_sql = ", ".join(quote(column) for column, _value in write.matches)
+        row_keys_sql = ", ".join(f"row.{value.position + 1}" for _column, value in write.matches)
+        if len(write.matches) == 1:
             key_set_sql = f"(SELECT arrayJoin(arrayMap(row -> tuple({row_keys_sql}), {rows_sql})))"
         else:
             key_set_sql = CLICKHOUSE_ROW_KEY_COLUMNS_TEMPLATE.format(row_keys=row_keys_sql, rows=rows_sql)
         where_sql = f" WHERE tuple({key_columns_sql}) IN {key_set_sql} AND {position_sql} > 0"
-        if condition_sql:
-            where_sql += f" AND ({condition_sql.replace(table_prefix, '')})"
-        # The key set is a subquery of the rows' own values - the same on every replica, which a
-        # replicated table would refuse as maybe not.
+        if write.condition is not None:
+            where_sql += f" AND ({write.condition.get_sql(local_context.copy(subquery=True))})"
+        # The key set is a subquery of constant values, identical on every replica.
+        table_sql = ClickhousePlacementPlan.for_table(write.table, sql_context).get_mutation_target_sql(sql_context)
         return (
-            f"{self.get_update_head_sql(table, table_sql)} {assignments_sql}{where_sql}"
+            f"{self.get_update_head_sql(write.table, table_sql)} {assignments_sql}{where_sql}"
             f"{CLICKHOUSE_CONSTANT_KEY_SET_MUTATION_SETTINGS_SQL}"
         )
 

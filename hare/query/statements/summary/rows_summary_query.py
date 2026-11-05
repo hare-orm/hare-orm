@@ -13,6 +13,7 @@ from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.plans.statement.statement_plan import StatementPlan
 from hare.query.plans.statement.statement_plan_descriptions import StatementPlanDescriptions
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.queryset.extensions.query_set_extensions import QuerySetExtensions
 from hare.query.queryset.query_specification import QuerySpecification
 from hare.query.statements.awaitable_query import AwaitableQuery
 from hare.query.statements.building.query_conditions import QueryConditions
@@ -20,6 +21,7 @@ from hare.query.statements.building.query_grouping import QueryGrouping
 from hare.query.statements.building.query_joins import QueryJoins
 
 if TYPE_CHECKING:
+    from hare.query.queryset.queryset import QuerySet
     from hare.sql.builder.queries.query_builder import QueryBuilder
 
 
@@ -32,7 +34,7 @@ class RowsSummaryQuery(AwaitableQuery[Any]):
     # Never built into another query - it keeps plans of its own only.
     plannable = False
 
-    __slots__ = ("_rows_query", "_bound_rows_query")
+    __slots__ = ("_rows_query", "_bound_rows_query", "_extension_source")
 
     def __init__(self, source: QuerySpecification[Any], *, rows_query: AwaitableQuery[Any] | None = None) -> None:
         """Takes the rows ``source`` matches - its filters, annotations, slice and ``.distinct()``.
@@ -54,12 +56,14 @@ class RowsSummaryQuery(AwaitableQuery[Any]):
             self._limit = source._limit
             self._offset = source._offset
             self._is_none = source._is_none
+            self._execution_dependencies = source._execution_dependencies
             source._share_default_scope(self)
             # The rows query applies the calls of the dialect's QuerySet methods - the summary reads
             # its rows as they are.
             self._options = self._options.updated(extension_calls=())
         self._init_build_state()
         self._rows_query = rows_query
+        self._extension_source = source if rows_query is None and source._extension_calls else None
         # The rows query on this query's connection, for one build.
         self._bound_rows_query: AwaitableQuery[Any] | None = None
         self._offset = self._offset or 0
@@ -138,6 +142,19 @@ class RowsSummaryQuery(AwaitableQuery[Any]):
 
     def _prepare_build(self) -> None:
         rows_query = self._rows_query
+        if rows_query is None and self._extension_source is not None and QuerySetExtensions.changes_rows(self):
+            # Source selection is delayed until this execution has its connection.
+            from hare.query.queryset.selection.statement_selection import StatementSelection
+
+            source = cast("QuerySet[Any]", self._extension_source)._clone()
+            source._apply_connection(self._connection)
+            if not self.keeps_grouping:
+                source = StatementSelection.get_values_rows_queryset(source)
+                source._limit = source._offset = None
+            rows_query = StatementSelection.get_values_query(source.values())
+            self._rows_query = rows_query
+            self._extension_calls = ()
+            self._bound_extensions = ()
         if rows_query is not None:
             rows_query = copy(rows_query)
             rows_query._apply_connection(self._connection)
@@ -154,7 +171,7 @@ class RowsSummaryQuery(AwaitableQuery[Any]):
         description = self._describe_over_rows(False)
         if description is None:
             return None, None
-        return description, StatementPlans.find(description.structure)
+        return description, StatementPlans.find(self.model, description.structure)
 
     def _describe_over_rows(self, built_into_another: bool) -> PlanDescription | None:
         """Describes the statement over a rows query from ``rows_plan_slots`` (``QueryKeyCompiler``).

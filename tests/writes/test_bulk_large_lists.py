@@ -159,10 +159,10 @@ async def test_composite_pk_in_short_list_is_a_plain_row_list(large_list_db):
 def test_sqlite_row_container_keeps_values_json_cannot_carry_exactly():
     long_row_count = SQLITE_IN_JSON_ARRAY_THRESHOLD
 
-    assert SqliteLargeInList.get_row_container([(index, float("nan")) for index in range(long_row_count)]) is None
-    assert SqliteLargeInList.get_row_container([(index, 2**70) for index in range(long_row_count)]) is None
-    assert SqliteLargeInList.get_row_container([(1, 2), (3, 4)]) is None
-    container = SqliteLargeInList.get_row_container([(index, str(index)) for index in range(long_row_count)])
+    assert SqliteLargeInList().get_row_container([(index, float("nan")) for index in range(long_row_count)]) is None
+    assert SqliteLargeInList().get_row_container([(index, 2**70) for index in range(long_row_count)]) is None
+    assert SqliteLargeInList().get_row_container([(1, 2), (3, 4)]) is None
+    container = SqliteLargeInList().get_row_container([(index, str(index)) for index in range(long_row_count)])
     assert container is not None
     assert container.decode_hex_columns == (False, False)
 

@@ -6,7 +6,7 @@ class NativeModules:
     None for a part where the extension isn't built, and the Python code does the same work there.
     """
 
-    #: ``rust.native.rows`` - reads and writes rows, values and JSON text.
+    #: ``rust.native.rows`` - attribute operations, relation grouping and value-format helpers.
     try:
         from rust.native import rows
     except ImportError:

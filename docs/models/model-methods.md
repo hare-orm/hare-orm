@@ -61,6 +61,12 @@ detects a concurrent modification; `QueryError` if both `force_create` and `forc
   `db_default`/are generated), `save()` of a saved instance and `save(force_update=True)` still check
   that the row exists and raise `IntegrityError` when it doesn't.
 
+An executed write with an unknown row count is distinct from this no-statement case:
+it does not trigger a second existence query or imply that zero rows matched. On rollback,
+Hare restores the instance's prior connection alias, saved/generated-key flags and dirty baseline,
+as well as automatic and returned values. Returned values are registered for rollback before
+assignment, so a custom setter that raises after changing an attribute can still be undone.
+
 ### <a id="delete"></a>`delete()`
 
 ```python
@@ -71,16 +77,17 @@ A real `DELETE` — or, if `Meta.soft_delete_field` is set, an `UPDATE` that set
 cascades that same decision to related rows. The cascade and the `PROTECT`/`RESTRICT` checks see every
 related row physically referencing the deleted ones — in every tenant, soft-deleted or hidden by a custom
 `Meta.manager` filter. Whatever part of the cascade the database can't run itself (a soft delete, a
-`db_constraint=False` relation) runs in Python, in the same transaction, wave by wave: each wave costs
-one query per relation and model, however many rows it reaches. A related model that overrides `delete()`
+`db_constraint=False` relation) runs in Python, wave by wave, with queries per relation and batch.
+Writes on the same connection share a transaction where supported; writes on other connections or
+without transaction support have no shared atomicity guarantee. A related model that overrides `delete()`
 has that override called for each of its rows — a relation leading to it, even one the database enforces,
 is then cascaded in Python. A row a hard delete removes for real (`hard_delete()`, or the cascade of a
 model without soft delete) whose model has `Meta.soft_delete_field` goes through that model's own
 `hard_delete()` override instead — its `delete()` would only mark it deleted; without one the cascade
 goes on below it to the overrides there. With `Meta.optimistic_lock_field` the row is deleted only at
-the version the instance read it at — a row changed since raises `StaleObjectError` and stays, the rows
-the cascade
-removed with it too. Raises `QueryError` (never saved), `IncompleteInstanceError` (the pk or
+the version the instance read it at — a row changed since raises `StaleObjectError` and stays.
+Cascade writes in the same transaction roll back with it; this does not undo writes outside that
+transaction. Raises `QueryError` (never saved), `IncompleteInstanceError` (the pk or
 `Meta.optimistic_lock_field` not loaded), `ProtectedError` (a `PROTECT` relation blocks it),
 `IntegrityError`, `StaleObjectError`.
 
@@ -106,7 +113,13 @@ itself). `DeletePreview` (importable from `hare.models`) holds:
 | `many_to_many_through_nulled: dict[str, int]` | auto-generated through rows whose key column becomes `NULL` (M2M `SET_NULL`) |
 | `protected_by: list[Model]` | rows blocking the delete via `PROTECT`, transitively; empty if nothing protects it |
 | `restricted_by: list[Model]` | rows blocking the delete via `RESTRICT`/`NO_ACTION` |
-| `can_delete: bool` | `True` when both lists above are empty |
+| `unknown_actions: dict[type[Model], list[Any]]` | keys handed to overridden deletion methods; their effects are unknown |
+| `can_delete: bool \| None` | False for known blockers, None when overrides make the outcome unknown, True otherwise |
+
+The preview and execution share a prepared cascade policy and relationship selectors.
+Application deletion overrides are never called by preview: their keys appear in
+`unknown_actions` and their effects are excluded from row counts. A root overriding
+`delete()` has only an unknown result. A known count is not a prediction of arbitrary callbacks.
 
 A `through=Model` M2M relation is an ordinary FK of its through model, so its rows show up under that
 model in `deleted`/`nulled`. Every count is of distinct rows; a row the same delete removes is not also
@@ -127,7 +140,9 @@ accounted for.
 
 ```python
 preview = await author.delete_preview()
-if not preview.can_delete:
+if preview.can_delete is None:
+    raise ValidationError("Deletion includes custom actions that need application review")
+if preview.can_delete is False:
     raise ValidationError(f"blocked by {preview.protected_by + preview.restricted_by}")
 print(preview.deleted)  # {Author: 1, Book: 2, Chapter: 3}
 ```
@@ -178,6 +193,11 @@ collection) is a no-op. A relation is named by its own name (`fields=["author"]`
 key column of a relation keyed by several (`document_version` of a relation to a `VersionedModel`)
 refreshes every column of that key, so the instance never holds a key made of two.
 
+All requested values are read before changing the instance; a missing column is not treated as
+`None`. If assigning the refreshed values fails, Hare restores the previous fields, loaded relation
+caches and dirty-field baseline. If a custom setter also fails during restoration, both errors are
+reported. Refresh does not register database rollback callbacks.
+
 To load relations of instances you already hold, use
 [`prefetch_related_objects()`](relations.md#prefetch-related-objects):
 `await prefetch_related_objects([book], "author", "tags")`.
@@ -196,17 +216,24 @@ rejects, `QueryError` for `None` in a non-null field.
 
 ```python
 class Model:
-    def clone(self: TModel, pk: Any = EMPTY) -> TModel: ...
+    def clone(self: TModel, pk: Any = ...) -> TModel: ...
 ```
-Returns a new, unsaved copy (deep-copying mutable field values). For a composite primary key, each
-component is resolved independently — a component with its own `default=`/`db_default=` doesn't need an
-explicit value; only components with neither need to come from `pk=(...)`. A single-column pk that's
-neither `generated=True` nor has a `default` needs an explicit `pk=` too — otherwise `QueryError`. An
+Returns a new, unsaved copy (deep-copying mutable field values). The default above means `pk` was not
+passed. Without `pk`, every component of a composite primary key receives its own `default=` or
+`db_default=`; a component with neither raises `QueryError`. An explicit `pk=(...)` must contain the
+complete key in component order and replaces every component without filling any from defaults.
+A single-column pk that's neither `generated=True` nor has a `default` or `db_default` also needs an
+explicit `pk=` — otherwise `QueryError`. An
 explicit `pk=` is always used, even for an auto-generated pk, and every `auto_now_add` field is reset so
 the new row gets its own first-save value (set one on the clone before `save()` to keep it); a clone of a
 soft-deleted row is live — its `Meta.soft_delete_field` is cleared. The values the database computed for
 the original's row (a `GeneratedField`) aren't copied: the copy reads its own once saved, and reading one
 before raises `NoValuesFetched`.
+
+Structural copies preserve custom attributes in both `__dict__` and `__slots__`, including inherited
+and private slots; uninitialized slots stay unset. Copying, deep-copying and pickling exclude pending
+transaction rollback callbacks. `copy.copy()` and `clone()` isolate mutable field values and reverse
+relation caches while retaining forward-related object identity.
 
 ### <a id="to-dict"></a>`to_dict()`
 
@@ -262,6 +289,13 @@ value. A NaN (of a `FloatField`, a `DecimalField`) is no change against a NaN, t
 value in Python. The same holds for `snapshot()`/`diff_against()`. When a transaction containing
 `save()`/`delete()`/`restore()` rolls back, the dirty baseline goes back to what it was before the write.
 
+Values that Hare changes during a write are restored through snapshots tied to the actual
+transaction and savepoint that performed it. Within a scope the first previous value wins;
+released inner savepoints are undone before the outer snapshot. An unloaded field remains
+unloaded rather than becoming `None`. Restoration attempts every captured field even when a
+custom setter fails, then reports all restoration errors. Persistence bookkeeping bypasses
+custom field setters.
+
 This is the mechanism to reach for instead of a manual "fetch a fresh copy and diff `to_dict()` against
 it" pattern before publishing an event — the diff is computed for you, from an in-memory snapshot rather
 than an extra `SELECT`.
@@ -278,8 +312,9 @@ class Model:
 ```
 A manual "before/after" pair for audit logs, approvals or undo — works on **any** model, no
 `Meta.track_dirty_fields` needed. `snapshot()` captures the direct field values (every loaded direct
-field by default, or just `fields=`) into an immutable `FieldSnapshot`
+field by default, or just `fields=`) into a `FieldSnapshot`
 (`from hare.models import FieldSnapshot`) — a read-only mapping with `.fields` and `.model_class`.
+Its values are copied independently of the model; nested lists and dictionaries are not frozen.
 `diff_against()` returns `{field: (snapshot_value, current_value)}` for the snapshotted fields that
 changed since.
 
@@ -399,11 +434,12 @@ The connection the router gives the model, its tenancy unchecked — for reading
 ```python
 class Model:
     @classmethod
-    def construct(cls: type[TModel], **kwargs: Any) -> TModel: ...
+    def construct(cls: type[TModel], *, _saved_in_db: bool = False, **kwargs: Any) -> TModel: ...
 ```
 Builds a "detached" instance with **no** validation, no database checks, no FK-saved checks — for tests
 and deserialization. Nested relation values passed as plain values/lists are wrapped so they read back as
-already-fetched. An unsaved instance given an auto-generated pk is inserted with that pk;
+already-fetched. The instance is unsaved by default; `_saved_in_db=True` marks it as saved without
+querying the database. An unsaved instance given an auto-generated pk is inserted with that pk;
 `get_dirty_fields()` on a `track_dirty_fields` model reports every field until the first `save()`.
 
 ### <a id="model-getitem"></a>`Model[pk]`
@@ -411,7 +447,8 @@ already-fetched. An unsaved instance given an auto-generated pk is inserted with
 ```python
 await Model[some_pk]  # -> Self, or raises DoesNotExist
 ```
-`Model[pk]` is `Model.objects.get(pk=pk)`; a key that can't be a value of the primary key field
+`await Model[pk]` looks up the object through `Model.objects.get(pk=pk)`; a key that can't be a value of
+the primary key field
 (`Book["abc"]` for an integer key) is `DoesNotExist` too.
 
 ## <a id="model-meta"></a>`Model._meta`

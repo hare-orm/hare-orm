@@ -61,7 +61,7 @@ class DatabaseUnderTest:
         """Whether the connection goes through a transaction pooler (``transaction_pooling``) - its
         server sessions are lent out a transaction at a time, so what a test pins on one session
         (a backend's pid, a database setting new sessions pick up) doesn't hold."""
-        credentials = DbUrlConfigGenerator.expand(url or cls.get_url(), testing=False)["credentials"]
+        credentials = DbUrlConfigGenerator.expand(url or cls.get_url())["credentials"]
         return str(credentials.get("transaction_pooling", "")).lower() in ("true", "1")
 
     @staticmethod

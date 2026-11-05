@@ -29,7 +29,7 @@ class CLICommandRegistry:
 
     @staticmethod
     def instantiate(command_class: object, source: str) -> LoadedCLICommand:
-        """Validates a loaded plugin object and creates the command.
+        """Creates the command from a loaded plugin class and records its source.
 
         Args:
             command_class: The object the plugin reference points at.
@@ -121,17 +121,18 @@ class CLICommandRegistry:
                     f"already taken by {sources_by_name[command.name]}"
                 )
                 continue
-            # Declared on a detached parser first, so a failing add_arguments() leaves no half-added
-            # subcommand behind.
-            probe_parser = argparse.ArgumentParser(add_help=False)
+            # The callback receives the actual parser exactly once, including its final prog.
+            # argparse exposes no removal API: roll back its name and help entry if declaration fails.
+            help_count = len(subparsers._choices_actions)
+            command_parser = subparsers.add_parser(command.name, help=command.help)
             try:
-                command.add_arguments(probe_parser)
+                command.add_arguments(command_parser)
             except Exception as error:
+                del subparsers.choices[command.name]
+                del subparsers._choices_actions[help_count:]
                 CLICommandRegistry.warn(
                     f"skipping CLI command {command.name!r} from {loaded_command.source}: {error!r}"
                 )
                 continue
             sources_by_name[command.name] = loaded_command.source
-            command_parser = subparsers.add_parser(command.name, help=command.help)
-            command.add_arguments(command_parser)
             command_parser.set_defaults(func=command.run)

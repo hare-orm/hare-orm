@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import re
 
-#: The quotes of ClickHouse SQL - of a string, and of an identifier.
-CLICKHOUSE_SQL_QUOTES = frozenset({"'", "`", '"'})
+#: Engine families whose positional arguments are column references rather than literal configuration.
+CLICKHOUSE_ENGINE_COLUMN_ARGUMENTS = frozenset(
+    {"ReplacingMergeTree", "CollapsingMergeTree", "VersionedCollapsingMergeTree"}
+)
+
 #: A character of an unquoted word of SQL.
 CLICKHOUSE_SQL_WORD_PATTERN = re.compile(r"[A-Za-z0-9_]")
 #: The character each backslash escape of a quoted text stands for - any other escaped character is itself.
@@ -21,12 +24,10 @@ CLICKHOUSE_NO_SORT_SQL = "tuple()"
 CLICKHOUSE_PROJECTION_DEFINITION_PREFIX = "PROJECTION "
 #: How ``system.columns`` wraps the codecs of a column.
 CLICKHOUSE_CODEC_PREFIX = "CODEC("
-#: A character a string of the server escapes.
-CLICKHOUSE_ESCAPED_CHARACTER_PATTERN = re.compile(r"\\(.)")
 #: A whole number as a table setting holds it.
 CLICKHOUSE_INTEGER_SETTING_PATTERN = re.compile(r"-?\d+")
 #: The server's own values of the table settings named - a table setting equal to it changes nothing.
-CLICKHOUSE_TABLE_SETTING_DEFAULTS_SQL = "SELECT name, value FROM system.merge_tree_settings WHERE name IN ({names})"
+CLICKHOUSE_TABLE_SETTING_DEFAULTS_SQL = "SELECT name, value FROM system.merge_tree_settings"
 #: What a constraint's definition in a table's column list begins with.
 CLICKHOUSE_CONSTRAINT_DEFINITION_PREFIX = "CONSTRAINT "
 #: What a CHECK constraint's condition follows, after its name.
@@ -35,26 +36,18 @@ CLICKHOUSE_CHECK_CONSTRAINT_PREFIX = "CHECK "
 
 #: The engine of a table, with its arguments.
 CLICKHOUSE_TABLE_ENGINE_SQL = "SELECT engine, engine_full FROM system.tables WHERE database = $1 AND name = $2"
+CLICKHOUSE_REPLICA_DEFAULTS_SQL = (
+    "SELECT name, value FROM system.server_settings WHERE name IN ('default_replica_path', 'default_replica_name')"
+)
 
 
 #: The engine whose last argument is a version column the server appends to the table's sorting key - its
 #: replicated and shared variants end with the name too.
 CLICKHOUSE_VERSIONED_COLLAPSING_ENGINE_NAME = "VersionedCollapsingMergeTree"
 #: A string literal as the server writes it - a backslash escapes the character after it.
-CLICKHOUSE_QUOTED_STRING_PATTERN = re.compile(r"'((?:[^'\\]|\\.)*)'", re.DOTALL)
-#: An escape of a string literal - a byte by its hex digits, or one character.
-CLICKHOUSE_STRING_ESCAPE_PATTERN = re.compile(r"\\(x[0-9a-fA-F]{2}|.)", re.DOTALL)
-#: The characters the escapes of a string literal stand for - any other escaped character stands for itself.
-CLICKHOUSE_ESCAPED_CHARACTERS = {
-    "n": "\n",
-    "t": "\t",
-    "r": "\r",
-    "0": "\0",
-    "b": "\b",
-    "f": "\f",
-    "a": "\a",
-    "v": "\v",
-}
+CLICKHOUSE_QUOTED_STRING_PATTERN = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.DOTALL)
+#: A backslash escape (a hexadecimal byte or one character), or a doubled SQL quote.
+CLICKHOUSE_STRING_ESCAPE_PATTERN = re.compile(r"\\(x[0-9a-fA-F]{2}|.)|''", re.DOTALL)
 
 #: The engine of a table reading the tables of a cluster, and how a model names its own database in it.
 CLICKHOUSE_DISTRIBUTED_ENGINE_NAME = "Distributed"
@@ -73,3 +66,6 @@ CLICKHOUSE_DATE_DEFAULT_PATTERN = re.compile(r"toDate32\('([0-9]{4}-[0-9]{2}-[0-
 CLICKHOUSE_MOMENT_DEFAULT_PATTERN = re.compile(
     r"toDateTime64\('([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?)', *[0-9]+, *'UTC'\)"
 )
+
+#: Physical sources whose reads cover all shards; used by materialized-view fill preconditions.
+CLICKHOUSE_DISTRIBUTED_IDENTITIES_SQL = "SELECT database, name FROM system.tables WHERE engine = 'Distributed'"

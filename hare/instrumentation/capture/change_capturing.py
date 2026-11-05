@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.core.constants import CACHE_MISS
 from hare.exceptions import ConfigurationError
@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from hare.dialects.base.types.type_registry import TypeRegistry
     from hare.models import Model
     from hare.models.meta_info import MetaInfo
+
+
+TRow = TypeVar("TRow")
 
 
 class ChangeCapturing:
@@ -86,7 +89,7 @@ class ChangeCapturing:
 
     @staticmethod
     @asynccontextmanager
-    async def transaction(connection: DatabaseClient) -> AsyncIterator[DatabaseClient]:
+    async def transaction(connection: DatabaseClient) -> AsyncGenerator[DatabaseClient]:
         """The transaction a write of a captured model and its changes share - a new one around both, a
         savepoint of the open one: a change failing after its row is written undoes the write, also when the
         caller of the write goes on in the open transaction. On a database without transactions, none.
@@ -171,7 +174,7 @@ class ChangeCapturing:
                 database locks rows.
 
         Returns:
-            The values and the tenant of each row found, by primary key.
+            The values and tenant of each row, by its Python primary key.
         """
         # Local import: the deletion helpers import the queryset package, which imports this module.
         from hare.models.deletion.cascade.related_rows import RelatedRows
@@ -199,7 +202,7 @@ class ChangeCapturing:
                 database locks rows.
 
         Returns:
-            The values and the tenant of each row found, by primary key.
+            The values and tenant of each row, by its Python primary key.
         """
         # Local import: the deletion helpers import the queryset package, which imports this module.
         from hare.models.deletion.cascade.related_rows import RelatedRows
@@ -214,11 +217,43 @@ class ChangeCapturing:
         rows: dict[Any, tuple[dict[str, Any], Any]] = {}
         for row in await queryset.values_list(*names):
             values = dict(zip(names, row, strict=True))
-            rows[ChangeCapturing.get_pk(model, values)] = (
+            pk = ChangeCapturing.get_pk(model, values)
+            rows[pk] = (
                 {name: values[name] for name in needs.field_names},
                 values[needs.tenant_field_name] if needs.tenant_field_name else None,
             )
         return rows
+
+    @staticmethod
+    def get_stored_pk(model: type[Model] | Model, types: TypeRegistry, pk: Any) -> Any:
+        """The Python primary key after its fields' storage conversion.
+
+        Args:
+            model: The model or instance supplying the field conversion context.
+            types: The write connection's type registry.
+            pk: The original Python primary key.
+
+        Returns:
+            The key as a subsequent read returns it, retaining scalar or composite shape.
+        """
+        meta = model._meta
+        values = pk if meta.has_composite_primary_key else (pk,)
+        stored = tuple(
+            types.get_python_value(field, types.get_db_value(field, value, model))
+            for name, value in zip(meta.primary_key_attribute_names, values, strict=True)
+            for field in (meta.fields_map[name],)
+        )
+        return stored if meta.has_composite_primary_key else stored[0]
+
+    @staticmethod
+    def get_read_row(
+        model: type[Model] | Model, types: TypeRegistry, pk: Any, rows: Mapping[Any, TRow]
+    ) -> TRow | None:
+        """Matches a row by the given key, then by the key after its storage conversion."""
+        if not rows:
+            return None
+        row = rows.get(pk)
+        return row if row is not None else rows.get(ChangeCapturing.get_stored_pk(model, types, pk))
 
     @staticmethod
     def get_old_value_terms(model: type[Model], needs: CaptureNeeds) -> list[OldRowValue]:
@@ -356,6 +391,7 @@ class ChangeCapturing:
         changed: Iterable[str] | None = None,
         returns_old: bool = False,
         before_by_pk: Mapping[Any, Mapping[str, Any]] | None = None,
+        occurred_at: datetime.datetime | None = None,
     ) -> list[CapturedChange]:
         """The changes of the rows a write returned - ``RETURNING`` of the captured columns.
 
@@ -367,13 +403,14 @@ class ChangeCapturing:
             operation: What the write did.
             changed: The fields an update set.
             returns_old: The rows hold the values before the write too (``RETURNING OLD``).
-            before_by_pk: The values before the write, read before it, by primary key.
+            before_by_pk: The rows before the write, indexed by their Python primary keys.
+            occurred_at: The time shared by this write's batches; the current time when absent.
 
         Returns:
             A change per row.
         """
         changed_names = None if changed is None else tuple(changed)
-        occurred_at = Timezone.now()
+        occurred_at = occurred_at or Timezone.now()
         changes: list[CapturedChange] = []
         for raw_row in raw_rows:
             # A driver's row may have no .get() - read as a dict.
@@ -416,6 +453,7 @@ class ChangeCapturing:
         read_after: Mapping[Any, tuple[Mapping[str, Any], Any]] | None,
         *,
         changed: Iterable[str] | None = None,
+        occurred_at: datetime.datetime | None = None,
     ) -> list[CapturedChange]:
         """The changes of the rows of a write read before it and, for an update or an insert, after it
         - on a database whose writes return no rows.
@@ -424,17 +462,18 @@ class ChangeCapturing:
             model: The model.
             needs: The model's needs.
             operation: What the write did.
-            read_before: The captured fields and the tenant of each row before the write, by primary key -
+            read_before: The rows before the write, indexed by their Python primary keys -
                 empty for an insert.
             read_after: The same after the write - None for a delete; a row of an update missing from it
                 is left out.
             changed: The fields an update set.
+            occurred_at: The time shared by this write's batches; the current time when absent.
 
         Returns:
             A change per row.
         """
         changed_names = None if changed is None else tuple(changed)
-        occurred_at = Timezone.now()
+        occurred_at = occurred_at or Timezone.now()
         changes: list[CapturedChange] = []
         rows = read_after if operation is RowOperation.INSERT and read_after is not None else read_before
         for pk, (before_values, tenant) in rows.items():

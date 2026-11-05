@@ -22,7 +22,7 @@ class TransactionMiddleware(ASGIMiddleware):
     rolls back those not yet committed, not those already committed.
 
     Args:
-        connection_aliases: The connections, None for the default one.
+        connection_aliases: The connections; a None entry uses automatic transaction connection selection.
     """
 
     scopes = (ScopeType.HTTP,)

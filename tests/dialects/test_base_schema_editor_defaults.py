@@ -8,13 +8,10 @@ import pytest
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
-from hare.dialects.base.schema.relations.foreign_key_rebuild import ForeignKeyRebuild
 from hare.dialects.base.schema.runtime_statements.table_locks import TableLocks
 from hare.dialects.base.schema.runtime_statements.tenant_conditions import TenantConditions
 from hare.dialects.base.schema.schema_objects.dictionaries import Dictionaries
-from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.dialects.base.schema.triggers.trigger_statements import TriggerStatements
-from hare.dialects.sqlite.schema.relations.sqlite_foreign_key_rebuild import SqliteForeignKeyRebuild
 from hare.fields import IntField
 from hare.fields.narrowing.enum_values_limit import EnumValuesLimit
 from hare.inspectdb.introspection.schema_introspector import SchemaIntrospector
@@ -58,14 +55,14 @@ def test_the_default_sql_of_the_parts():
 async def test_the_default_statements_of_the_parts():
     editor = get_editor()
     client = editor.client
-    await editor.constraint_statements.add_unique_constraint_using_index(
+    await editor.constraint_statements.get_unique_constraint_using_index_plan(
         DefaultsItem, UniqueConstraint(fields=("code",), name="defaults_item_code"), "defaults_item_code_index"
-    )
+    ).execute(editor)
     # The constraint's own index is built, the one it would take over dropped.
     assert client.executed[-1].startswith('DROP INDEX "defaults_item_code_index"')
     executed_count = len(client.executed)
     # A comment the table keeps inside its CREATE TABLE is changed with the table - nothing is run.
-    await editor.table_comments.alter_table_comment(DefaultsItem)
+    await editor.table_comments.alter_table_comment(DefaultsItem, DefaultsItem)
     assert len(client.executed) == executed_count
 
 
@@ -95,32 +92,8 @@ async def test_the_default_object_changes_go_through_the_other_parts(monkeypatch
     constraint = ForeignKeyConstraint(
         fields=("code",), to_table='"defaults_item"', to_fields=("id",), on_delete="CASCADE", name="fk_code"
     )
-    await editor.foreign_key_rebuild.add_foreign_key_constraint_not_valid(DefaultsItem, constraint)
+    await editor.foreign_key_rebuild.get_foreign_key_not_valid_plan(DefaultsItem, constraint).execute(editor)
     assert editor.client.executed[-1].startswith('ALTER TABLE "defaults_item" ADD CONSTRAINT "fk_code" FOREIGN KEY')
-
-    altered: list[object] = []
-
-    async def alter_foreign_key_on_delete(self, model, column, old_field, new_field):
-        altered.append((column, old_field is new_field))
-
-    monkeypatch.setattr(ForeignKeyRebuild, "alter_foreign_key_on_delete", alter_foreign_key_on_delete)
-    await editor.foreign_key_rebuild.rebuild_foreign_key_constraints(
-        DefaultsItem, SimpleNamespace(source_fields=("owner_id",))
-    )
-    assert altered == [("owner_id", True)]
-
-
-@pytest.mark.asyncio
-async def test_sqlite_rebuilds_a_table_for_its_foreign_keys(monkeypatch):
-    editor = get_editor()
-    remade: list[tuple[type[Model], type[Model]]] = []
-
-    async def remake_table(self, old_model, new_model):
-        remade.append((old_model, new_model))
-
-    monkeypatch.setattr(TableRebuild, "remake_table", remake_table)
-    await SqliteForeignKeyRebuild(editor).rebuild_foreign_key_constraints(DefaultsItem, SimpleNamespace())
-    assert remade == [(DefaultsItem, DefaultsItem)]
 
 
 @pytest.mark.asyncio

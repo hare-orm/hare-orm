@@ -2,6 +2,7 @@
 again once the password is older than ``password_refresh_seconds``; the settings are checked."""
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -10,7 +11,7 @@ from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGen
 from hare.exceptions import ConfigurationError
 from tests.utils.constants import ASYNCPG_CLIENT_PATH, POSTGRES_CLIENT_PATHS, RUST_PG_CLIENT_PATH
 from tests.utils.driver_classes import DriverClasses
-from tests.utils.waiting import wait_until
+from tests.utils.waiting import WAIT_DEADLINE_SECONDS
 
 CLIENT_CLASSES = DriverClasses.get_parameters(*POSTGRES_CLIENT_PATHS)
 
@@ -104,17 +105,33 @@ async def test_a_function_failing_to_renew_the_password_leaves_the_last_one_in_u
 @pytest.mark.asyncio
 async def test_the_background_refresh_applies_new_passwords():
     passwords = CountingPasswords(is_async=False)
-    # A refresh at every turn of the event loop.
-    provider = PasswordProvider(passwords, refresh_seconds=0)
-    applied = []
-    provider.start_refreshing(applied.append)
-    await wait_until(lambda: len(applied) >= 2)
-    await provider.stop_refreshing()
-    count = len(applied)
-    assert applied[0] == "password-1"
-    for _ in range(10):
-        await asyncio.sleep(0)
-    assert len(applied) == count
+    provider = PasswordProvider(passwords, refresh_seconds=60)
+    waiting = asyncio.Queue()
+    ticks = asyncio.Queue()
+    applied = asyncio.Queue()
+
+    async def wait_for_tick(seconds):
+        waiting.put_nowait(seconds)
+        await ticks.get()
+
+    # Drive the provider's timer explicitly without replacing the event loop's scheduler.
+    with patch("hare.dialects.base.client.password_provider.asyncio", wraps=asyncio) as scheduler:
+        scheduler.sleep = wait_for_tick
+        provider.start_refreshing(applied.put_nowait)
+        task = provider._refresh_task
+        try:
+            for expected in ("password-1", "password-2"):
+                assert await asyncio.wait_for(waiting.get(), WAIT_DEADLINE_SECONDS) == 60
+                ticks.put_nowait(None)
+                assert await asyncio.wait_for(applied.get(), WAIT_DEADLINE_SECONDS) == expected
+            assert await asyncio.wait_for(waiting.get(), WAIT_DEADLINE_SECONDS) == 60
+            await provider.stop_refreshing()
+            assert task.done() and task.cancelled()
+            assert provider._refresh_task is None
+            assert passwords.calls == 2
+            assert applied.empty()
+        finally:
+            await provider.stop_refreshing()
 
 
 @pytest.mark.database_independent
@@ -122,10 +139,11 @@ async def test_the_background_refresh_applies_new_passwords():
 @pytest.mark.parametrize(
     "password_provider", [get_password, "tests.configuration.test_password_provider.get_password"]
 )
-def test_a_client_takes_a_function_or_its_dotted_path(client_class, password_provider):
-    client = make_client(client_class, password_provider=password_provider, password_refresh_seconds=30)
+@pytest.mark.parametrize("refresh_seconds", (30, 86401))
+def test_a_client_takes_a_function_or_its_dotted_path(client_class, password_provider, refresh_seconds):
+    client = make_client(client_class, password_provider=password_provider, password_refresh_seconds=refresh_seconds)
     assert client.password_provider.get_password is get_password
-    assert client.password_provider.refresh_seconds == 30
+    assert client.password_provider.refresh_seconds == refresh_seconds
     assert "password_provider" not in client.extra
 
 
@@ -151,8 +169,8 @@ INVALID_PROVIDER_SETTINGS = [
     ({"password": "secret", "password_provider": get_password}, "password and password_provider"),
     ({"password_refresh_seconds": 30}, "password_refresh_seconds needs password_provider"),
     ({"password_provider": get_password, "password_refresh_seconds": 0}, "password_refresh_seconds"),
-    ({"password_provider": get_password, "password_refresh_seconds": 86401}, "password_refresh_seconds"),
-    ({"password_provider": get_password, "password_refresh_seconds": True}, "password_refresh_seconds"),
+    ({"password_provider": get_password, "password_refresh_seconds": -1}, "password_refresh_seconds"),
+    ({"password_provider": get_password, "password_refresh_seconds": float("nan")}, "password_refresh_seconds"),
     ({"password_provider": "tests.configuration.test_password_provider.missing"}, "password_provider"),
     ({"password_provider": "no_such_module_anywhere.get"}, "password_provider"),
     ({"password_provider": "tests.configuration.test_password_provider.CLIENT_CLASSES"}, "password_provider"),

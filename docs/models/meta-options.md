@@ -135,17 +135,20 @@ the table.
 
 ## <a id="manager"></a>`manager`
 
-A `Manager()` instance customizing the default queryset (e.g. auto-filters). Fresh-copied per concrete
-subclass. Whatever its `get_queryset()` filters is also applied to every JOIN to the model
-(`select_related()`, `.only()`, `.order_by()`, nested `.filter()`), so a joined row is scoped exactly
-like `Model.objects.all()`; only plain `.filter()`/`.exclude()` conditions on the model's own fields are
-supported there (annotations, `LIMIT`, or a filter across a further relation raise `ConfigurationError`).
-Its filter is not applied by `refresh_from_db()`, nor by `delete()`/`delete_preview()`'s
-`CASCADE`/`SET_NULL`/`SET_DEFAULT` handling and `PROTECT`/`RESTRICT` checks — those see every row that
-exists (and every row physically referencing the deleted ones), keeping only
-`Meta.tenant_field`/`Meta.soft_delete_field` handling. A `Manager` assigned as a class attribute (e.g.
-`all_objects = Manager()`) on the model, an abstract base or a plain mixin class is copied together with
-its constructor arguments and bound to each concrete model.
+A `Manager(queryset_class=None, scope=None)` instance, copied and bound per concrete model.
+The queryset factory controls the class and local query options. A `RowScopeProvider` passed
+as `scope` declares row visibility separately: its `get_condition(model, visibility)` returns
+a condition or `None`. The default provider governs root queries, JOINs and related loading.
+See [providers](../querying/managers.md#default-filter) for the execution context and examples.
+
+JOIN predicates use direct fields; a predicate requiring a further JOIN raises
+`ConfigurationError`. Factory annotations, ordering and limits are not JOIN policies.
+Additional managers keep their own root predicates. Tenant and soft-delete scopes are independent.
+
+`refresh_from_db()` and cascade/referential-integrity operations do not apply the user provider:
+they must see the rows they refresh or that physically reference a deleted row, under the tenant
+and soft-delete rules of that operation. Managers declared on models, abstract bases or mixins
+retain their constructor state when copied to each concrete model.
 
 ## <a id="extension-options"></a>Options of extensions
 

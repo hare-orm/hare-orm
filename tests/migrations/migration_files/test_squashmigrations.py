@@ -1,6 +1,7 @@
 """squashmigrations: a run of an app's migrations squashed into one that the loader puts in their
 place where none or all of them are applied, and leaves out until all are."""
 
+import ast
 import importlib
 import sqlite3
 import sys
@@ -10,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from hare import Hare
 from hare.exceptions import ConfigurationError
 from hare.migrations.api import migrate, squashmigrations
 from hare.migrations.exceptions import MigrationLoadError, UnknownMigrationError
@@ -166,10 +166,7 @@ class SquashProject:
         }
 
     async def migrate(self, target: str | None = None) -> None:
-        try:
-            await migrate(config=self.config, target=target)
-        finally:
-            await Hare.close_connections()
+        await migrate(config=self.config, target=target)
 
     async def squash(self, end_name: str, start_name: str | None = None, squashed_name: str | None = None) -> str:
         squashed = await squashmigrations(
@@ -231,7 +228,14 @@ async def test_squashed_migration_shortens_operations_and_keeps_the_data_migrati
     assert "async def seed_widgets(apps, schema_editor):" in source
     assert "import json" in source
     assert "RunSQL" not in source
-    assert "squash_app_" not in source
+    # Original callback paths survive as inert declaration identities, never imports.
+    imports = [
+        node.module if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    ]
+    assert all(not name.startswith("squash_app_") for name in imports if name is not None)
 
 
 @pytest.mark.asyncio
@@ -340,11 +344,11 @@ async def test_deleted_replaced_files_while_some_are_still_unapplied_is_refused(
 @pytest.mark.asyncio
 async def test_squash_refuses_unknown_names_and_a_start_after_the_end(tmp_path, monkeypatch):
     project = SquashProject(tmp_path, monkeypatch)
-    with pytest.raises(UnknownMigrationError, match="No migration"):
+    with pytest.raises(UnknownMigrationError, match="Cannot find migration"):
         await squashmigrations(config=project.config, app_label="app", end_name="9999")
     with pytest.raises(ConfigurationError, match="doesn't come before"):
         await squashmigrations(config=project.config, app_label="app", start_name="0004", end_name="0002")
-    with pytest.raises(UnknownMigrationError, match="More than one"):
+    with pytest.raises(UnknownMigrationError, match="Ambiguous migration name '000'"):
         await squashmigrations(config=project.config, app_label="app", end_name="000")
     single = await squashmigrations(config=project.config, app_label="app", start_name="0002", end_name="0002")
     assert single.writer is None

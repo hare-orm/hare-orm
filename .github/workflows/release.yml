@@ -11,9 +11,30 @@ permissions:
   contents: read
 
 jobs:
+  catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      python-versions: ${{ steps.catalog.outputs.python-versions }}
+      newest-python: ${{ steps.catalog.outputs.newest-python }}
+      linux-interpreters: ${{ steps.catalog.outputs.linux-interpreters }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: catalog
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from tests.matrix.matrix_catalog import MatrixCatalog
+          versions = MatrixCatalog.get("versions.python")
+          print("python-versions=" + json.dumps(versions))
+          print("newest-python=" + versions[-1])
+          print("linux-interpreters=" + " ".join("python" + version for version in versions))
+          PY
+
   # Checks the tag against the project's release rules (CONTRIBUTING.md, Releases) and takes the
   # release notes out of the changelog.
   check-release:
+    needs: [catalog]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     steps:
@@ -22,9 +43,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: ${{ needs.catalog.outputs.newest-python }}
       - name: Install poetry
-        run: pipx install poetry==2.1.4
+        run: pipx install "poetry==$(python -m tests.matrix.matrix_catalog tools.poetry)"
       - name: The tag matches the package version
         run: |
           package_version=$(poetry version --short)
@@ -64,12 +85,13 @@ jobs:
     permissions:
       contents: read
 
-  # The wheels of one platform, one per Python (cp312, cp313, cp314), built on that platform's own
+  # The wheels of one platform, one per catalog Python, built on that platform's own
   # runner: maturin builds the rust.native extension for each Python (in a manylinux/musllinux
   # container on Linux), build_wheel.py packs each into a hare-orm wheel with the same tags, and
   # check_wheel.py installs each wheel into a fresh environment of its Python and runs hare on
   # SQLite - and on PostgreSQL through the Rust driver where the runner can start a server.
   platform-wheels:
+    needs: [catalog]
     name: wheels (${{ matrix.platform }})
     strategy:
       fail-fast: false
@@ -115,52 +137,43 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
-      # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
-      # `python` of the steps below.
+      # Every catalog Python; the final version is the default Python of subsequent steps.
       - uses: actions/setup-python@v7
-        id: python312
         with:
-          python-version: '3.12'
-      - uses: actions/setup-python@v7
-        id: python313
-        with:
-          python-version: '3.13'
-      - uses: actions/setup-python@v7
-        id: python314
-        with:
-          python-version: '3.14'
-      - name: Install poetry and wheel
+          python-version: ${{ join(fromJSON(needs.catalog.outputs.python-versions), fromJSON('"\n"')) }}
+      - name: Install build tools
         shell: bash
         run: |
-          pipx install poetry==2.1.4
-          python -m pip install wheel
-      # Linux: in the manylinux/musllinux container, whose own python3.12/3.13/3.14 the extension is
-      # built for.
+          pipx install "poetry==$(python -m tests.matrix.matrix_catalog tools.poetry)"
+          findpython_version=$(python -c 'import sys, tomllib; from pathlib import Path; sys.stdout.write(tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["tool"]["poetry"]["group"]["dev"]["dependencies"]["findpython"])')
+          python -m pip install wheel "findpython==$findpython_version"
+      # Linux uses the container's interpreters, not paths from the host runner.
       - name: Build the rust.native extension (Linux)
         if: runner.os == 'Linux'
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --interpreter python3.12 python3.13 python3.14 --manifest-path rust/native/Cargo.toml --out extension-wheels
+          args: --release --interpreter ${{ needs.catalog.outputs.linux-interpreters }} --manifest-path rust/native/Cargo.toml --out extension-wheels
       # The toolchain rust-toolchain.toml pins; the Linux container's maturin reads the file itself.
       - name: Install Rust
         if: runner.os != 'Linux'
         run: rustup toolchain install
-      # macOS and Windows: on the runner itself, for the three Pythons set up above.
-      # PYO3_USE_RAW_DYLIB=0: Windows raw-dylib linking does not resolve the private CPython symbol the
-      # crate declares itself (_PyDict_NewPresized).
+      # macOS and Windows: on the runner itself, for the catalog Pythons set up above.
+      # Windows builds explicitly use CPython's import library.
       - name: Build the rust.native extension (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash
         env:
           PYO3_USE_RAW_DYLIB: '0'
-          PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          PYTHON_314: ${{ steps.python314.outputs.python-path }}
         run: |
           python -m pip install maturin
-          maturin build --release --interpreter "$PYTHON_312" "$PYTHON_313" "$PYTHON_314" \
+          interpreter_lines=$(python -c 'import sys; from tests.matrix.native_interpreters import NativeInterpreters; sys.stdout.reconfigure(newline="\n"); print(*(path.as_posix() for path in NativeInterpreters.get_paths()), sep="\n")')
+          interpreter_arguments=()
+          while IFS= read -r interpreter; do
+            interpreter_arguments+=(--interpreter "$interpreter")
+          done <<< "$interpreter_lines"
+          maturin build --release "${interpreter_arguments[@]}" \
             --manifest-path rust/native/Cargo.toml --out extension-wheels
       - name: Absolute links in the README, for PyPI
         shell: bash
@@ -182,19 +195,16 @@ jobs:
       - name: Check the wheels
         if: matrix.check == 'native'
         shell: bash
-        env:
-          PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          PYTHON_314: ${{ steps.python314.outputs.python-path }}
         run: |
           cp .github/scripts/check_wheel.py "$RUNNER_TEMP/"
           postgres_arguments=()
           if [ "$RUNNER_OS" = "Linux" ]; then
             postgres_arguments=(--postgres-url postgresql://postgres:postgres@127.0.0.1:5432/postgres)
           fi
-          for version in 312 313 314; do
-            python_variable="PYTHON_$version"
-            "${!python_variable}" -m venv "$RUNNER_TEMP/wheel-check-$version"
+          interpreter_lines=$(python -c 'import sys; from tests.matrix.native_interpreters import NativeInterpreters; sys.stdout.reconfigure(newline="\n"); print(*(path.as_posix() for path in NativeInterpreters.get_paths()), sep="\n")')
+          while IFS= read -r interpreter; do
+            version=$("$interpreter" -c 'import sys; sys.stdout.write(f"{sys.version_info.major}{sys.version_info.minor}")')
+            "$interpreter" -m venv "$RUNNER_TEMP/wheel-check-$version"
             if [ "$RUNNER_OS" = "Windows" ]; then
               check_python="$RUNNER_TEMP/wheel-check-$version/Scripts/python.exe"
             else
@@ -207,11 +217,12 @@ jobs:
             fi
             "$check_python" -m pip install "${wheels[0]}"
             (cd "$RUNNER_TEMP" && "$check_python" check_wheel.py --platform-wheel "${postgres_arguments[@]}")
-          done
+          done <<< "$interpreter_lines"
       - name: Check the wheels on Alpine
         if: matrix.check == 'alpine'
         run: |
-          for version in 3.12 3.13 3.14; do
+          versions=$(python -m tests.matrix.matrix_catalog versions.python)
+          for version in $versions; do
             docker run --rm -v "$PWD/dist:/dist" -v "$PWD/.github/scripts:/scripts" -w /tmp \
               -e "PYTHON_TAG=cp${version/./}" "python:$version-alpine" \
               sh -c 'pip install /dist/*-"$PYTHON_TAG"-"$PYTHON_TAG"-*.whl && python /scripts/check_wheel.py --platform-wheel'
@@ -226,15 +237,16 @@ jobs:
   # SQLite work there; postgresql:// says the Rust driver isn't there), and the sdist - neither
   # carries a compiled extension.
   pure-wheel-and-sdist:
+    needs: [catalog]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: ${{ needs.catalog.outputs.newest-python }}
       - name: Install poetry and wheel
         run: |
-          pipx install poetry==2.1.4
+          pipx install "poetry==$(python -m tests.matrix.matrix_catalog tools.poetry)"
           python -m pip install wheel
       - name: Absolute links in the README, for PyPI
         run: python .github/scripts/absolute_readme_links.py --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA"

@@ -100,8 +100,6 @@ class GenericForeignKeyTypes:
         Returns:
             Name to its expression; empty when no name reads a type.
         """
-        if not GenericForeignKeyFieldInstance.declared_names:
-            return {}
         aliases: dict[str, Case] = {}
         for name in names:
             if not isinstance(name, str):

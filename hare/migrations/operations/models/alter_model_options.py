@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hare.ddl.indexes.index import Index
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.migrations.constants import MODEL_OPTIONS_OUTSIDE_MIGRATION_STATE, MODEL_OPTIONS_WITH_DEDICATED_OPERATIONS
 from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.operations.models.delete_model import DeleteModel
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
 
@@ -26,12 +29,12 @@ class AlterModelOptions(HareOperation):
         """The model whose options change."""
         return frozenset({self.get_model_label(self.name, app_label)})
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """Later options of the same model - its whole set of them - or its deletion take this
         one's place."""
         if isinstance(other, (AlterModelOptions, DeleteModel)) and self.is_same_model_name(self.name, other.name):
-            return [other]
-        return super().reduce(other, app_label)
+            return OperationRewrite((other,))
+        return super().get_rewrite(other, app_label)
 
     def get_table_model_names(self) -> tuple[str, ...]:
         return (self.name,)
@@ -131,13 +134,20 @@ class AlterModelOptions(HareOperation):
         new_model = new_state.apps.get_model(f"{app_label}.{self.name}")
         if old_model._meta.managed is False or new_model._meta.managed is False:
             return
-        if (old_model._meta.table_description or "") != (new_model._meta.table_description or ""):
-            await state_editor.table_comments.alter_table_comment(new_model)
         dialect = state_editor.client.dialect
         old_table_options = old_model._meta.get_table_options(dialect)
         new_table_options = new_model._meta.get_table_options(dialect)
-        if old_table_options != new_table_options:
-            await state_editor.table_partitions.alter_table_options(new_model, old_table_options, new_table_options)
+        plan = (
+            state_editor.table_partitions.get_alter_table_options_plan(old_model, new_model)
+            if old_table_options != new_table_options
+            else SchemaChangePlan(())
+        )
+        if (old_model._meta.table_description or "") != (
+            new_model._meta.table_description or ""
+        ) and SchemaEffect.REPLACE_TABLE not in plan.effects:
+            comments = state_editor.table_comments.get_table_comment_plan(old_model, new_model)
+            plan = SchemaChangePlan((*plan.steps, *comments.steps), before=plan.before, after=plan.after)
+        await plan.execute(state_editor)
 
     async def database_forward(
         self,

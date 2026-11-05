@@ -1,11 +1,10 @@
 //! `rust.native` - the native part of hare-orm: the `pg` PostgreSQL driver, the `pool` parts every
-//! native driver shares (the asyncio bridge, `asyncio`, stays inside the crate), the `rows` readers
-//! and writers of model rows, the `sqlite_functions` hare registers on a SQLite connection, the
+//! native driver shares, the `pyo3_async_runtimes` bridge to asyncio, the `rows` attribute,
+//! JSON and value-format operations, the `sqlite_functions` hare registers on a SQLite connection, the
 //! precise system `clock`.
 
-mod asyncio;
 mod clock;
-mod codecs;
+mod json_string;
 mod pg;
 mod pool;
 mod python;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.migrations.messages import KEY_SERIES_SYNCHRONIZATION_PREVIEW
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 
 if TYPE_CHECKING:
@@ -19,16 +20,11 @@ class SynchronizeKeySeries(ModelBoundOperation):
         model_name: The model.
     """
 
-    reads_old_state = False
-
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name
 
     def describe(self) -> str:
         return f"Synchronize the key series of {self.model_name}"
-
-    def state_forward(self, app_label: str, state: State) -> None:
-        return None
 
     async def database_forward(
         self,
@@ -37,15 +33,11 @@ class SynchronizeKeySeries(ModelBoundOperation):
         new_state: State,
         state_editor: BaseSchemaEditor | None = None,
     ) -> None:
-        if state_editor is None or state_editor.collect_sql:
+        if state_editor is None:
+            return
+        if state_editor.collect_sql:
+            state_editor.collected_sql.append(
+                KEY_SERIES_SYNCHRONIZATION_PREVIEW.format(model=f"{app_label}.{self.model_name}")
+            )
             return
         await state_editor.client.synchronize_key_series(self._model(new_state, app_label))
-
-    async def database_backward(
-        self,
-        app_label: str,
-        old_state: State,
-        new_state: State,
-        state_editor: BaseSchemaEditor | None = None,
-    ) -> None:
-        return None

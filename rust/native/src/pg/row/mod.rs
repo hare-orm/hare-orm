@@ -1,4 +1,4 @@
-//! `PgRow` - the row `fetch_all`/`fetch_one` return, readable by position and by column name at once
+//! `PgRow` - a query or stream result row, readable by position and by column name at once
 //! (`Features.supports_positional_rows`), as `asyncpg.Record` and `sqlite3.Row` are.
 
 use crate::pg::value::Value;
@@ -18,10 +18,6 @@ pub struct PgRow {
 }
 
 impl PgRow {
-    pub fn new(names: Arc<RowNames>, values: Vec<Py<PyAny>>) -> Self {
-        PgRow { names, values }
-    }
-
     /// The row of decoded `values`, each made a Python object.
     pub fn from_values(py: Python<'_>, names: Arc<RowNames>, values: &[Value]) -> PyResult<Self> {
         let values = values.iter().map(|value| value.into_pyobject(py).map(Bound::unbind)).collect::<PyResult<_>>()?;

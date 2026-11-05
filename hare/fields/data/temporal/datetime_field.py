@@ -23,8 +23,6 @@ from hare.fields.data.temporal.parse_datetime import parse_datetime
 from hare.fields.data.temporal.temporal_values import TemporalValues
 
 TDatetime = TypeVar("TDatetime", datetime.datetime, datetime.datetime | None)
-# A `__year`/`__month`/`__day` filter value may be an int, float or str.
-DatetimeFieldQueryValueType = TypeVar("DatetimeFieldQueryValueType", datetime.datetime, int, float, str)
 
 
 class DatetimeField(Field[TDatetime]):
@@ -33,6 +31,7 @@ class DatetimeField(Field[TDatetime]):
     """
 
     field_type = datetime.datetime
+    accepted_value_types = (datetime.date, str)
     date_function_source = DateTruncSource.DATETIME
 
     SQL_TYPE = "TIMESTAMP"
@@ -263,14 +262,10 @@ class DatetimeField(Field[TDatetime]):
         # The zone a value is converted to depends on the timezone configuration at the time.
         return frozenset()
 
-    def to_db_value(
-        self, value: DatetimeFieldQueryValueType | None, instance: type[Model] | Model | None
-    ) -> DatetimeFieldQueryValueType | None:
-        return self.get_storage_value(value, instance, stores_utc_instants=False)
+    def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> datetime.datetime | None:
+        return self.get_storage_value(value, stores_utc_instants=False)
 
-    def to_db_instant_value(
-        self, value: DatetimeFieldQueryValueType | None, instance: type[Model] | Model | None
-    ) -> DatetimeFieldQueryValueType | None:
+    def to_db_instant_value(self, value: Any, instance: type[Model] | Model | None) -> datetime.datetime | None:
         """Like ``to_db_value()``, for a column that stores UTC instants: under ``use_timezone=False`` a
         naive value is bound as the instant of its system-local wall clock.
 
@@ -281,33 +276,29 @@ class DatetimeField(Field[TDatetime]):
         Returns:
             The value to bind.
         """
-        return self.get_storage_value(value, instance, stores_utc_instants=True)
+        return self.get_storage_value(value, stores_utc_instants=True)
 
     def get_storage_value(
         self,
-        value: DatetimeFieldQueryValueType | None,
-        instance: type[Model] | Model | None,
+        value: Any,
         *,
         stores_utc_instants: bool,
-    ) -> DatetimeFieldQueryValueType | None:
-        """The value bound for a column of this field, auto_now/auto_now_add applied.
+    ) -> datetime.datetime | None:
+        """Converts and validates the value for the column's instant or wall-clock storage.
 
         Args:
             value: The value.
-            instance: The model (class) the value is written or compared for.
             stores_utc_instants: Whether the column stores UTC instants rather than wall clocks.
 
         Returns:
             The value to bind.
         """
-        if value is not None:
-            if isinstance(value, int):
-                self.raise_if_number(value)
-            # Every accepted input becomes a datetime here, whatever the write path - a bare `date`
-            # becomes its first moment.
-            value = self.get_db_datetime_value(value, stores_utc_instants)  # type: ignore[assignment]
-        self.validate(value)
-        return value
+        if isinstance(value, int):
+            self.raise_if_number(value)
+        # Every accepted input becomes a datetime here; a bare date becomes its first moment.
+        result = self.get_db_datetime_value(value, stores_utc_instants) if value is not None else None
+        self.validate(result)
+        return result
 
     def get_db_datetime_value(self, value: Any, stores_utc_instants: bool) -> datetime.datetime:
         """An accepted input as the datetime bound for a column of this field.

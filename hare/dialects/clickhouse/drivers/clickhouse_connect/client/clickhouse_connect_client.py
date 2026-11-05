@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any, ClassVar
 
 import clickhouse_connect
@@ -16,8 +17,10 @@ from clickhouse_connect.driver.exceptions import (
     OperationalError as ClickHouseOperationalError,
 )
 from clickhouse_connect.driver.external import ExternalData
+from clickhouse_connect.driver.insert import InsertContext
 
 from hare.core.caching.cache import Cache
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.clickhouse.client.clickhouse_client import ClickhouseClient
@@ -31,21 +34,17 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_WITH_TOTALS_PATTERN,
 )
 from hare.dialects.clickhouse.client.declarations import ClickhouseDriverErrors, ClickhouseExternalSet
-from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_dynamic_type import (
-    ClickhouseConnectDynamicType,
-)
 from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_totals_query import (
     ClickhouseConnectTotalsQuery,
 )
-from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_whole_response_query import (
-    ClickhouseConnectWholeResponseQuery,
+from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_connect_transform import (
+    ClickhouseConnectTransform,
 )
 from hare.dialects.clickhouse.drivers.clickhouse_connect.constants import (
     CLICKHOUSE_CONNECT_COMMAND_SETTINGS,
     CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE,
     CLICKHOUSE_CONNECT_MOMENT_COLUMN_TYPES,
     CLICKHOUSE_CONNECT_REPEATED_QUERY_ERROR_CODE,
-    CLICKHOUSE_CONNECT_SCHEMA_CHANGE_PATTERN,
     CLICKHOUSE_CONNECT_UNREADABLE_SERVER_ERROR_MARK,
 )
 from hare.dialects.clickhouse.drivers.constants import (
@@ -75,7 +74,7 @@ class ClickhouseConnectClient(ClickhouseClient):
     #: it before the first insert - the library asks the server before every insert. Emptied by every
     #: change of a schema made through any connection.
     inserted_column_types: ClassVar[Cache[list[Any]]] = Cache(
-        CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE, holds_sql=False, keyed_by_model=False
+        CLICKHOUSE_CONNECT_INSERTED_COLUMN_TYPES_CACHE_SIZE, holds_sql=False
     )
 
     def get_hare_error(self, error: Exception, sql: Any, parameters: Any) -> Exception:
@@ -101,7 +100,6 @@ class ClickhouseConnectClient(ClickhouseClient):
         Returns:
             The client.
         """
-        ClickhouseConnectDynamicType.install()
         library_client = await clickhouse_connect.get_async_client(
             session_id=session_id,
             host=self.host,
@@ -117,6 +115,7 @@ class ClickhouseConnectClient(ClickhouseClient):
             send_receive_timeout=self.options["send_receive_timeout"] + CLICKHOUSE_HTTP_RECEIVE_TIMEOUT_MARGIN_SECONDS,
             settings=self.get_session_settings(),
         )
+        library_client._transform = ClickhouseConnectTransform()
         return library_client
 
     async def check_transactions(self) -> None:
@@ -164,7 +163,7 @@ class ClickhouseConnectClient(ClickhouseClient):
     async def run_command_without_database(self, statement: str) -> None:
         await self.send_command(self._connection, statement)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SQL)
     async def execute(
         self,
         query: str,
@@ -172,6 +171,7 @@ class ClickhouseConnectClient(ClickhouseClient):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
     ) -> StatementResult:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
@@ -182,9 +182,7 @@ class ClickhouseConnectClient(ClickhouseClient):
                     return await ClickhouseConnectTotalsQuery.run(
                         connection, sql, self.get_external_data(external_sets), rows_by_position
                     )
-                result = await ClickhouseConnectWholeResponseQuery.run(
-                    connection, sql, self.get_external_data(external_sets)
-                )
+                result = await connection.query(sql, external_data=self.get_external_data(external_sets))
             column_names = result.column_names
             if rows_by_position:
                 # The rows as read - no mapping built per row; the names in the description.
@@ -197,35 +195,12 @@ class ClickhouseConnectClient(ClickhouseClient):
             rows = [dict(zip(column_names, row, strict=True)) for row in result.result_rows]
             return StatementResult(len(rows), rows)
         sql = self.get_inlined_query(query, values)
-        row_write_sql = await self.get_row_write_sql(sql)
+        changes_rows = self.is_row_write_sql(sql)
         async with self.acquire_connection() as connection:
-            if row_write_sql is not None:
-                try:
-                    await self.send_command(connection, row_write_sql)
-                except self.driver_errors.driver as error:
-                    await self.kill_failed_mutations(row_write_sql, error, connection.command)
-                    raise
+            if changes_rows:
+                await self.send_command(connection, sql)
                 return StatementResult(None, [])
-            if returns_rows:
-                result = await ClickhouseConnectWholeResponseQuery.run(connection, sql)
-                column_names = result.column_names
-                if rows_by_position:
-                    # The rows as read - no mapping built per row; the names in the description.
-                    position_rows = result.result_rows
-                    return StatementResult(
-                        len(position_rows),
-                        position_rows,
-                        description=tuple(zip(column_names, result.column_types, strict=True)),
-                    )
-                rows = [dict(zip(column_names, row, strict=True)) for row in result.result_rows]
-                return StatementResult(len(rows), rows)
-            try:
-                summary = await self.send_command(connection, sql)
-            except self.driver_errors.driver as error:
-                await self.kill_failed_mutations(sql, error, connection.command)
-                raise
-            finally:
-                self.forget_inserted_column_types(sql)
+            summary = await self.send_command(connection, sql)
         written_rows = getattr(summary, "written_rows", None)
         return StatementResult(written_rows, [])
 
@@ -254,34 +229,29 @@ class ClickhouseConnectClient(ClickhouseClient):
             )
         return external_data
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query: str, values: list[Any] | None = None) -> DescribedResult:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
         if not self.returns_rows(query):
             sql = self.get_inlined_query(query, values)
             async with self.acquire_connection() as connection:
-                try:
-                    summary = await self.send_command(connection, sql)
-                finally:
-                    self.forget_inserted_column_types(sql)
+                summary = await self.send_command(connection, sql)
             return DescribedResult(columns=(), rows=(), row_count=getattr(summary, "written_rows", 0) or 0)
         sql, external_sets = self.get_read_query(query, values)
         async with self.acquire_connection() as connection:
-            result = await ClickhouseConnectWholeResponseQuery.run(
-                connection, sql, self.get_external_data(external_sets)
-            )
+            result = await connection.query(sql, external_data=self.get_external_data(external_sets))
             columns = tuple(result.column_names)
             if not columns:
                 # An empty result sends no block, so no column of it - the server describes them.
-                described = await ClickhouseConnectWholeResponseQuery.run(
-                    connection, f"DESCRIBE ({sql})", self.get_external_data(external_sets)
+                described = await connection.query(
+                    f"DESCRIBE ({sql})", external_data=self.get_external_data(external_sets)
                 )
                 columns = tuple(row[0] for row in described.result_rows)
         rows = tuple(tuple(row) for row in result.result_rows)
         return DescribedResult(columns=columns, rows=rows, row_count=len(rows))
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[list[Any]]) -> None:
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
@@ -294,7 +264,7 @@ class ClickhouseConnectClient(ClickhouseClient):
         # The library's own value of a type, which its Variant (and the replaced Dynamic) writes.
         return typed_variant(value, column_type)
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.BULK_LOAD)
     async def copy(
         self,
         table: str,
@@ -305,43 +275,59 @@ class ClickhouseConnectClient(ClickhouseClient):
     ) -> None:
         """Loads ``records`` into ``table`` in one binary insert (ClickHouse's Native format) - no SQL
         text is built from the values and the server parses none. ``column_types`` is unused: the
-        server names the table's column types to clickhouse-connect, once per table.
+        insert context obtains the server's declared types, cached outside transactions. Transaction
+        contexts read them through their parent connection without querying the transaction's session.
         """
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("INSERT %s(%s): %d record(s)", table, columns, len(records))
         inserted_columns = self._get_inserted_columns(records)
-        key = (self.host, self.port, schema or self.database, table, tuple(columns))
-        server_column_types: list[Any] | None = ClickhouseConnectClient.inserted_column_types.get(key)
         async with self.acquire_connection() as connection:
-            # What the library's insert() does - asking the server for the column types only the
-            # first time.
-            context = await connection.create_insert_context(
-                self.dialect.literals.qualify_table_name(table, schema),
-                columns,
-                column_types=server_column_types,
-                column_oriented=True,
-            )
-            context.data = self._get_moment_tick_columns(inserted_columns, context.column_types)
-            try:
+            async with self.insert_context(connection, table, columns, schema) as context:
+                connection._transform.prepare_insert(context)
+                context.data = self._get_moment_tick_columns(inserted_columns, context.column_types)
                 await connection.data_insert(context)
-            except BaseException:
-                # The table may have changed since the types were read - they are read again.
-                if key in ClickhouseConnectClient.inserted_column_types:
-                    del ClickhouseConnectClient.inserted_column_types[key]
-                raise
-        if server_column_types is None:
-            ClickhouseConnectClient.inserted_column_types[key] = list(context.column_types)
 
-    @staticmethod
-    def forget_inserted_column_types(sql: str) -> None:
-        """Has the column types of every table read again by its next insert when a statement may
-        have changed a schema.
+    @asynccontextmanager
+    async def insert_context(
+        self, connection: AsyncClient, table: str, columns: list[str], schema: str | None
+    ) -> AsyncGenerator[InsertContext]:
+        """Provide an empty insert context and commit its declared types to the cache on success.
+
+        The caller selects local codecs before assigning data. Codec preparation, insertion errors and
+        cancellation invalidate the cached declaration; a failed insert never publishes new types.
 
         Args:
-            sql: The statement run.
+            connection: The acquired library client used for the insert.
+            table: The target table's name.
+            columns: The inserted column names in wire order.
+            schema: The database name, or None for the connection's default.
+
+        Yields:
+            The library context without input data, ready for local codec preparation.
         """
-        if CLICKHOUSE_CONNECT_SCHEMA_CHANGE_PATTERN.match(sql):
-            ClickhouseConnectClient.inserted_column_types.clear()
+        key = (self.host, self.port, schema or self.database, table, tuple(columns))
+        server_column_types: list[Any] | None = ClickhouseConnectClient.inserted_column_types.get(key)
+        context = await connection.create_insert_context(
+            self.dialect.literals.qualify_table_name(table, schema),
+            columns,
+            column_types=server_column_types,
+            column_oriented=True,
+        )
+        declared_column_types = list(context.column_types)
+        try:
+            yield context
+        except BaseException:
+            # The table may have changed since the types were read - they are read again.
+            if key in ClickhouseConnectClient.inserted_column_types:
+                del ClickhouseConnectClient.inserted_column_types[key]
+            raise
+        if server_column_types is None:
+            ClickhouseConnectClient.inserted_column_types[key] = declared_column_types
+
+    async def invalidate_schema_cache(self) -> None:
+        """Refresh binary insert types and placement at the explicit schema boundary."""
+        ClickhouseConnectClient.inserted_column_types.clear()
+        await super().invalidate_schema_cache()
 
     @classmethod
     def _get_moment_tick_columns(
@@ -384,18 +370,10 @@ class ClickhouseConnectClient(ClickhouseClient):
                 async for block in stream:
                     yield list(map(row_class, block))
 
-    @ClickhouseClient.translate_exceptions
+    @ClickhouseClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         self.log.debug(query)
         statements = self.split_script(query)
         async with self.acquire_connection() as connection:
-            try:
-                for statement in statements:
-                    try:
-                        await self.send_command(connection, statement)
-                    except self.driver_errors.driver as error:
-                        await self.kill_failed_mutations(statement, error, connection.command)
-                        raise
-            finally:
-                # A script changes schemas.
-                ClickhouseConnectClient.inserted_column_types.clear()
+            for statement in statements:
+                await self.send_command(connection, statement)

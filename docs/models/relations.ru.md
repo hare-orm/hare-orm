@@ -72,9 +72,9 @@ class Book(Model):
 class OnDelete(StrEnum):
     CASCADE = "CASCADE"
     RESTRICT = "RESTRICT"
-    SET_NULL = "SET_NULL"     # требует null=True
-    SET_DEFAULT = "SET_DEFAULT"  # требует db_default (или default при db_constraint=False) — см. ниже
-    NO_ACTION = "NO_ACTION"
+    SET_NULL = "SET NULL"     # требует null=True
+    SET_DEFAULT = "SET DEFAULT"  # требует db_default (или default при db_constraint=False) — см. ниже
+    NO_ACTION = "NO ACTION"
     PROTECT = "PROTECT"       # проверяется в Python; в базе — отложенное ограничение NO ACTION как страховка
 ```
 
@@ -94,8 +94,8 @@ class OnDelete(StrEnum):
 Удаление, которое запрещает `RESTRICT` или `NO_ACTION`, на любой базе даёт `IntegrityError`. Текст
 сообщения — самой базы там, где ограничение проверяет база (PostgreSQL называет ограничение и таблицу,
 SQLite пишет только `FOREIGN KEY constraint failed`), и hare
-(`Cannot delete P because C.p has on_delete=RESTRICT and live rows point at it`) там, где проверяет сам
-hare: у связи с `db_constraint=False` и у любой связи на ClickHouse.
+(`Cannot delete P because C.p has on_delete=RESTRICT and rows point at it (including soft-deleted rows)`)
+там, где проверяет сам hare: у связи с `db_constraint=False` и у любой связи на ClickHouse.
 
 Сокращения `CASCADE`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `NO_ACTION`, `PROTECT` можно импортировать
 прямо из `hare.fields`.
@@ -177,9 +177,8 @@ class Review(Model):
 - Отдельный индекс не создаётся, если индекс, уже объявленный в модели, начинается с колонок ключа (в
   любом порядке): обычная запись `Meta.indexes` (`Index(fields=...)`, уникальный или нет), безусловное
   `UniqueConstraint` или составной первичный ключ. Частичный индекс, индекс по выражению и индекс не вида
-  «дерево» (btree) не считаются — кроме безымянного индекса ровно по колонкам ключа: он получает то же
-  сгенерированное имя, что и собственный индекс связи, поэтому индекс связи не создаётся. Задайте одному
-  из них `name=`, чтобы получить оба.
+  «дерево» (btree) не считаются. Сгенерированное имя учитывает объявление индекса, поэтому он может
+  существовать вместе с индексом связи.
 - Связь с [составным первичным ключом](#targeting-a-composite-primary-key) получает один индекс по всем
   своим колонкам ключа.
 - С `db_constraint=False` индекс остаётся: каскад hare ищет строки по этой колонке.
@@ -263,7 +262,7 @@ class Book(Model):
 ### <a id="on-delete-row"></a>`on_delete`
 
 Допустимы `CASCADE`/`RESTRICT`/`NO_ACTION`/`PROTECT`/`SET_NULL`. `SET_DEFAULT` недопустим: колонки
-промежуточной таблицы всегда `NOT NULL` и без значения по умолчанию, сбрасывать не во что, — он даёт
+промежуточной таблицы без значения по умолчанию, сбрасывать не во что, — он даёт
 `ConfigurationError`. Если `through` — это `Model`, `on_delete` поля переносится на собственные внешние
 ключи промежуточной модели (если у них оставлен `CASCADE`), а `SET_DEFAULT` принимается, только если оба
 этих внешних ключа выполняют [правило `SET_DEFAULT`](#set-default-needs-db-default).
@@ -287,6 +286,10 @@ class Book(Model):
   по-прежнему подходит. Фильтр, которому нужно поле `Tag` (`tags__name=...`) или запрос к нему
   (`tags__in=Tag.objects.filter(...)`), и `Tag.objects.filter(books=...)` дают `QueryError`.
 - `prefetch_related("tags")` запрашивает каждое подключение отдельно.
+
+Связанные ключи загружаются один раз на выполнение, включая все страницы итератора.
+Пустой запрос пропускает чтение; другая непустая часть той же операции всё равно загружает ключи.
+Повторные и параллельные выполнения получают независимые входные значения.
 
 ### <a id="a-model-as-through"></a>Промежуточная таблица-модель
 
@@ -328,6 +331,10 @@ await book.contributors.add(author, through_defaults={"role": "translator"})
 `ValidationError` до записи, как `create()`. Промежуточная модель, ключи которой база выдаёт из серии до
 записи строк (ClickHouse), берёт из неё ключи новых строк, как `create()`.
 
+Python-значения по умолчанию, включая вызываемые и асинхронные функции, заполняют и blind index
+зашифрованного поля. Чувствительные значения по умолчанию и ключи скрыты в журналируемых параметрах,
+включая SELECT, которые проверяют видимость и арендатора связи перед записью.
+
 Если у промежуточной модели есть
 [`Meta.tenant_field`](../soft-delete-versions-tenants/multi-tenancy.ru.md), `add()` заполняет его
 значением области промежуточной модели из `Tenancy.scope()`, если его не задаёт `through_defaults`, — при
@@ -335,6 +342,9 @@ await book.contributors.add(author, through_defaults={"role": "translator"})
 этой области даёт `QueryError`.
 
 ### <a id="relation-operations"></a>Операции со связью
+
+Описанные ниже операции из нескольких команд выполняются атомарно только на базе с поддержкой
+транзакций. На базе без транзакций команды выполняются последовательно без гарантии общего отката.
 
 `ManyToManyField` читает и пишет свои ссылки через эти методы связи:
 
@@ -422,7 +432,7 @@ tag, created = await book.tags.get_or_create(name="science")
 умолчанию: связь с мягко удалённой строкой, со строкой другого арендатора (`Meta.tenant_field`) или со
 строкой, которую скрывает свой `Meta.manager`, остаётся. `clear(all_tenants=True)` удаляет связи со
 строками всех арендаторов, без выбора текущего арендатора (см. [Разделение данных по
-арендаторам](../soft-delete-versions-tenants/multi-tenancy.ru.md)). `remove()` называет строки явно,
+арендаторам](../soft-delete-versions-tenants/multi-tenancy.ru.md)). `remove(instance)` называет строку явно,
 поэтому отвязывает и мягко удалённую строку, и скрытую `Meta.manager` (строка другого арендатора всё
 равно отклоняется).
 
@@ -653,6 +663,12 @@ await author.books.set([book_b, book_c])                 # аргументы, �
 `create()`, `get_or_create()` и `update_or_create()`, как и объект с таким внешним ключом в
 `bulk_create()`.
 
+Записи через связь сбрасывают предзагруженный список при выполнении. В частности, создание
+запроса `bulk_create()` не сбрасывает связь до ожидания запроса. Откат транзакции снова сбрасывает
+список через клиент, выполнивший запись; переназначение алиаса соединения не переносит callback
+в другую транзакцию. Откат переназначения связи восстанавливает внешние ключи перед ранее
+загруженными связанными объектами.
+
 ```python
 class Book(Model):
     author: fields.ForeignKeyRelation["Author"] = fields.ForeignKeyField("models.Author", related_name="books")
@@ -675,11 +691,12 @@ ForeignKeyRelation = ForeignKeyFieldInstance[TModel]
 `book.author` возвращает загруженного `Author`, если связь загружена (`select_related()`,
 `prefetch_related()`, `prefetch_related_objects()`, `lazy=` или присваивание), а иначе — запрос, который
 можно ждать через `await`: `await book.author` работает в обоих случаях, если связанная строка
-существует. Связь без связанной строки (внешний ключ `NULL`, обратный `OneToOneField`, на который никто
-не ссылается, или строка, не прошедшая `Select(extra_condition=...)`) читается по-разному в зависимости
-от того, загружена ли она. Незагруженная, она возвращает ложный объект `NoneAwaitable` (импортируется из
-`hare.models`), а `await book.author` возвращает `None`. Загруженная, она равна обычному `None` —
-проверяйте её через `book.author is None` (или смотрите `book.author_id`) и не используйте `await`.
+существует. Незагруженная связь возвращает awaitable, который может вернуть `None`, если связанной
+строки нет. Когда пустой ключ уже известен (например, внешний ключ равен `NULL`), это ложный объект
+`NoneAwaitable` (импортируется из `hare.models`). Для обратного `OneToOneField` с непустым ключом
+отсутствие строки определяется запросом. Загруженная пустая связь равна обычному `None`, в том числе
+если строка не прошла `Select(extra_condition=...)`: проверяйте `book.author is None` и не используйте
+`await` для этого значения.
 
 Фильтр или присваивание по объекту читают поле (поля), на которое ссылается связь (`to_field`, по
 умолчанию первичный ключ); объект, загруженный через `.only()`/`.defer()` без них, даёт `QueryError` —
@@ -744,7 +761,7 @@ class Shelf(Model):
 
 
 class Book(Model):
-    # ссылается на пару (id, version) настоящим составным FOREIGN KEY на уровне таблицы
+    # ссылается на пару (store, number) настоящим составным FOREIGN KEY на уровне таблицы
     shelf = fields.ForeignKeyField("models.Shelf", related_name="books")
 ```
 

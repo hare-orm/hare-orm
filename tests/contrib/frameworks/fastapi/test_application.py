@@ -31,7 +31,6 @@ from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
 
 # FastAPI's test client runs on httpx.
-REQUIRES = ("fastapi", "http")
 
 pytestmark = pytest.mark.sqlite_only
 

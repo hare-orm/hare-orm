@@ -121,9 +121,10 @@ class TaskiqDelivery(OutboxDelivery, Generic[TOutboxEvent]):
         """The relay sending the tasks - run it with ``async with``, or ``start()``/``stop()``.
 
         Args:
-            relay_options: ``OutboxRelay`` options.
+            relay_options: ``OutboxRelay`` options. ``using`` defaults to this delivery's connection.
 
         Returns:
             The relay, delivering only this delivery's topic, woken by its wakeup.
         """
+        relay_options.setdefault("using", self.using)
         return OutboxRelay(self.model_reference, self, topics=[self.topic], wakeup=self.wakeup, **relay_options)

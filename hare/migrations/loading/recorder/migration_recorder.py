@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from hare import fields
 from hare.core.log import logger
+from hare.migrations.constants import DEFAULT_MIGRATION_TABLE_NAME
 from hare.migrations.loading.graph.migration_key import MigrationKey
 from hare.models import Model
 from hare.sql import Table
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 class MigrationRecorder:
     """The journal of the applied migrations, kept in a table of the database."""
 
-    def __init__(self, connection: DatabaseClient, *, table_name: str = "hare_migrations") -> None:
+    def __init__(self, connection: DatabaseClient, *, table_name: str = DEFAULT_MIGRATION_TABLE_NAME) -> None:
         self.connection = connection
         self.table_name = table_name
 

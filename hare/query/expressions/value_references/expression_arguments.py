@@ -98,7 +98,7 @@ class ExpressionArguments:
             if encoder is not None and isinstance(value, value_class):
                 return value.get_encoded_result(expression_context, encoder)
             return value.get_result(expression_context)
-        if isinstance(value, Term) and not isinstance(value, ValueWrapper):
+        if isinstance(value, Term):
             # A SQL term built by hand binds its values as its description lists them.
             TermPlanDescriptions.record(value, expression_context.value_wrapper_references)
             return ExpressionResult(term=value)

@@ -56,35 +56,6 @@ class SqlDefault:
         """
         return self.sql
 
-    @staticmethod
-    def is_parenthesized(sql: str) -> bool:
-        """Whether one pair of parentheses encloses the whole expression.
-
-        Args:
-            sql: The expression.
-
-        Returns:
-            True for ``(a + b)``, False for ``(a) + (b)``.
-        """
-        text = sql.strip()
-        if not text.startswith("("):
-            return False
-        depth = 0
-        quote = None
-        for index, character in enumerate(text):
-            if quote is not None:
-                if character == quote:
-                    quote = None
-            elif character in "'\"":
-                quote = character
-            elif character == "(":
-                depth += 1
-            elif character == ")":
-                depth -= 1
-                if depth == 0:
-                    return index == len(text) - 1
-        return False
-
     def __repr__(self) -> str:
         return f"SqlDefault({self.sql!r})"
 

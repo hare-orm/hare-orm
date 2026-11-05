@@ -9,8 +9,8 @@ Max = DeclaredSubclass.make(
     Aggregate,
     "Max",
     __package__,
-    """The largest value of a group, read by the argument's field - NULL for a group of none:
-    ``Max("created_at")``.""",
+    """The largest value of a group, read by the argument's field: ``Max("created_at")``.
+    The database determines the result for an empty group.""",
     function_name="MAX",
     keyed_function_name=KEYED_MAX_FUNCTION_NAME,
     keeps_argument_collation=True,
@@ -23,8 +23,8 @@ Min = DeclaredSubclass.make(
     Aggregate,
     "Min",
     __package__,
-    """The smallest value of a group, read by the argument's field - NULL for a group of none:
-    ``Min("created_at")``.""",
+    """The smallest value of a group, read by the argument's field: ``Min("created_at")``.
+    The database determines the result for an empty group.""",
     function_name="MIN",
     keyed_function_name=KEYED_MIN_FUNCTION_NAME,
     keeps_argument_collation=True,

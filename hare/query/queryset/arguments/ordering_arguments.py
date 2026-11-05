@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.core.caching.cache import Cache
@@ -12,6 +13,7 @@ from hare.query.expressions import Expression, F, Ordering
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_info_builder import LookupInfoBuilder
 from hare.query.queryset.arguments.annotation_arguments import AnnotationArguments
+from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.queryset.constants import EXPRESSION_ORDERING_ALIAS_PREFIX, PLAIN_ORDERINGS_CACHE_SIZE
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitable
 from hare.sql import Order
@@ -56,19 +58,19 @@ class OrderingArguments:
             if type(ordering) is not str:
                 return None
         model = queryset.model
-        parsed = OrderingArguments.plain_orderings.get_for_model(model, (orderings,), CACHE_MISS)
+        parsed = OrderingArguments.plain_orderings.get_model_bucket(model).get((orderings,), CACHE_MISS)
         if parsed is CACHE_MISS:
             names = [queryset._get_ordering_name(ordering)[0] for ordering in orderings]
             if AnnotationArguments.get_path_annotations(queryset, names):
                 parsed = None
             else:
                 parsed = tuple(OrderingArguments.parse_orderings(queryset, orderings))
-            OrderingArguments.plain_orderings[(model, orderings)] = parsed
+            OrderingArguments.plain_orderings.get_model_bucket(model)[(orderings,)] = parsed
         return parsed
 
     @staticmethod
     def get_expression_aliases(
-        orderings: tuple[str | Expression | Ordering, ...],
+        orderings: Sequence[str | Expression | Ordering],
     ) -> tuple[dict[str, Expression], tuple[str | Expression | Ordering, ...]]:
         """The aliases the expressions among ``orderings`` are ordered by, and the orderings naming
         them instead.
@@ -133,7 +135,16 @@ class OrderingArguments:
                 )
             else:
                 ordering_info = queryset.model._meta.get_ordering_info(field_name)
-            for ordering_field_name in ordering_info.paths:
+            concrete_paths = (
+                path
+                for name in ordering_info.paths
+                for path in (
+                    (name,)
+                    if name in queryset._annotations or name.partition("__")[0] in queryset._annotations
+                    else ConcreteFieldPaths.get_paths(queryset.model, name)
+                )
+            )
+            for ordering_field_name in concrete_paths:
                 ordering_type = order_type
                 if (
                     nulls_last_by_default

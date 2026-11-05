@@ -17,6 +17,7 @@ from hare.query.expressions.value_references.list_parameter_value_reference impo
 from hare.query.expressions.value_references.list_value_reference import ListValueReference
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.filters.resolution.filter_values import FilterValues
+from hare.sql.terms.criteria.basic_criterion import BasicCriterion
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -48,11 +49,18 @@ class AnnotationFilters:
         if isinstance(value, Term):
             if parameter_converter is None or not any(node is value for node in criterion.find_(Term)):
                 return None
-            if len(value.find_(ValueWrapper)) != 1:
+            value_wrappers = value.find_(ValueWrapper)
+            if len(value_wrappers) != 1:
                 return None
             return LiteralValueReference(
-                value.find_(ValueWrapper)[0], partial(FilterValues.get_converted_term_parameter, parameter_converter)
+                value_wrappers[0], partial(FilterValues.get_converted_term_parameter, parameter_converter)
             )
+        if (
+            isinstance(criterion, BasicCriterion)
+            and isinstance(criterion.right, ValueWrapper)
+            and criterion.right.value is value
+        ):
+            return LiteralValueReference(criterion.right, parameter_converter)
         value_wrappers = [node for node in criterion.find_(ValueWrapper) if node.value is value]
         if len(value_wrappers) != 1:
             return None
@@ -148,8 +156,7 @@ class AnnotationFilters:
                 "and SQL does not allow filtering on window functions directly. Filter a "
                 ".values()/.values_list() query instead, which applies the filter to the query "
                 "wrapped in a subquery, e.g. "
-                # <pk field>, not 'pk': .values() doesn't take the `pk` alias.
-                f"Model.objects.filter(pk__in=Subquery(queryset.filter({key}=...).values(<pk field>)))."
+                f'Model.objects.filter(pk__in=Subquery(queryset.filter({key}=...).values("pk"))).'
             )
 
     @staticmethod
@@ -224,11 +231,7 @@ class AnnotationFilters:
             # A comparison operator with no value_encoder of its own binds the raw value - a
             # timedelta is stored as whole microseconds, and no driver accepts it as a parameter
             # for that column type (`.annotate(span=F("end") - F("start")).filter(span__gt=...)`).
-            return partial(
-                expression_context.dialect.types.get_db_value,
-                TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD,
-                instance=None,
-            ), None
+            return expression_context.dialect.types.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD), None
         if value is not None:
             # A comparison operator with no value_encoder of its own binds the value as the
             # annotation's field takes a value of a filter on it - an int of an integer, a naive

@@ -12,6 +12,7 @@ from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_PRIVILEGE_KEYWORDS,
     POSTGRESQL_REVOKE_TEMPLATE,
 )
+from hare.dialects.postgresql.schema.schema_objects.postgresql_function_arguments import PostgresqlFunctionArguments
 from hare.exceptions import ConfigurationError
 from hare.models import Model
 
@@ -75,7 +76,7 @@ class PostgresqlGrants(Grants):
             )
         qualified_object = self.editor.qualify_object_name(model, declared_object.name)
         if isinstance(declared_object, DatabaseFunction):
-            return f"{qualified_object}({', '.join(declared_object.arguments)})"
+            return f"{qualified_object}({PostgresqlFunctionArguments.get_identity_sql(declared_object.arguments)})"
         return qualified_object
 
     def get_privileges_sql(self, model: type[Model], grant: Grant) -> str:

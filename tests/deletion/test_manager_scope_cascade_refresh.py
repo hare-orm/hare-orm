@@ -14,22 +14,21 @@ from hare.exceptions import DoesNotExist, IntegrityError, ProtectedError
 from hare.fields.enums import OnDelete
 from hare.models import Model
 from hare.models.tenancy.tenancy import Tenancy
+from hare.query.expressions import Q
 from hare.query.managers.manager import Manager
 
 
-class ActiveOnlyManager(Manager):
-    def get_queryset(self, **kwargs):
-        return super().get_queryset(**kwargs).filter(active=True)
+class ActiveOnlyRows:
+    def get_condition(self, model, visibility):
+        return Q(active=True)
 
 
-class FlagManager(Manager):
-    def __init__(self, flag=None, model=None):
-        super().__init__(model)
+class FlagRows:
+    def __init__(self, flag):
         self.flag = flag
 
-    def get_queryset(self, **kwargs):
-        queryset = super().get_queryset(**kwargs)
-        return queryset.filter(type=self.flag) if self.flag else queryset
+    def get_condition(self, model, visibility):
+        return Q(type=self.flag) if self.flag else None
 
 
 class ScopeParent(Model):
@@ -48,7 +47,7 @@ class ScopeProtectChild(Model):
 
     class Meta:
         table = "scope_protect_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeRestrictParent(Model):
@@ -67,7 +66,7 @@ class ScopeRestrictChild(Model):
 
     class Meta:
         table = "scope_restrict_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeLooseParent(Model):
@@ -87,7 +86,7 @@ class ScopeCascadeChild(Model):
 
     class Meta:
         table = "scope_cascade_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeSetNullChild(Model):
@@ -104,7 +103,7 @@ class ScopeSetNullChild(Model):
 
     class Meta:
         table = "scope_set_null_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeSetDefaultChild(Model):
@@ -121,7 +120,7 @@ class ScopeSetDefaultChild(Model):
 
     class Meta:
         table = "scope_set_default_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeSoftParent(Model):
@@ -142,7 +141,7 @@ class ScopeSoftChild(Model):
 
     class Meta:
         table = "scope_soft_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
         soft_delete_field = "deleted_at"
 
 
@@ -166,7 +165,7 @@ class ScopeTenantChild(Model):
 
     class Meta:
         table = "scope_tenant_child"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
         tenant_field = "company_id"
 
 
@@ -178,7 +177,7 @@ class ScopeArticle(Model):
 
     class Meta:
         table = "scope_article"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
 
 
 class ScopeTenantArticle(Model):
@@ -189,14 +188,14 @@ class ScopeTenantArticle(Model):
 
     class Meta:
         table = "scope_tenant_article"
-        manager = ActiveOnlyManager()
+        manager = Manager(scope=ActiveOnlyRows())
         tenant_field = "company_id"
 
 
 class TypeBase(Model):
     id = fields.IntField(primary_key=True)
     type = fields.CharField(max_length=10)
-    reds = FlagManager("red")
+    reds = Manager(scope=FlagRows("red"))
 
     class Meta:
         abstract = True
@@ -213,11 +212,11 @@ class TypeFromAbstractSibling(TypeBase):
 
 
 class BlueManagerMixin:
-    blues = FlagManager("blue")
+    blues = Manager(scope=FlagRows("blue"))
 
 
 class GreenManagerMixin(BlueManagerMixin):
-    greens = FlagManager("green")
+    greens = Manager(scope=FlagRows("green"))
 
 
 class TypeFromMixin(BlueManagerMixin, Model):
@@ -399,8 +398,8 @@ def get_manager(owner: type, name: str):
 
 @pytest.mark.database_independent
 def test_manager_from_abstract_base_keeps_constructor_state():
-    assert get_manager(TypeFromAbstract, "reds").flag == "red"
-    assert get_manager(TypeFromAbstractSibling, "reds").flag == "red"
+    assert get_manager(TypeFromAbstract, "reds").scope.flag == "red"
+    assert get_manager(TypeFromAbstractSibling, "reds").scope.flag == "red"
     assert get_manager(TypeFromAbstract, "reds") is not get_manager(TypeFromAbstractSibling, "reds")
     assert get_manager(TypeFromAbstract, "reds")._model is TypeFromAbstract
     assert get_manager(TypeFromAbstractSibling, "reds")._model is TypeFromAbstractSibling
@@ -414,7 +413,7 @@ def test_manager_from_plain_mixin_is_bound_per_model():
     assert get_manager(TypeFromNestedMixin, "greens")._model is TypeFromNestedMixin
     assert get_manager(TypeFromMixin, "blues") is not get_manager(TypeFromNestedMixin, "blues")
     assert get_manager(BlueManagerMixin, "blues")._model is None
-    assert get_manager(TypeFromNestedMixin, "greens").flag == "green"
+    assert get_manager(TypeFromNestedMixin, "greens").scope.flag == "green"
 
 
 @pytest.mark.asyncio

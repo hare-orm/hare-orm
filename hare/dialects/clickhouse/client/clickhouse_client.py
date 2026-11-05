@@ -7,10 +7,10 @@ import datetime
 import ipaddress
 import json
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -20,6 +20,7 @@ from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_V
 from hare.dialects.clickhouse.client.clickhouse_connection import ClickhouseConnection
 from hare.dialects.clickhouse.client.clickhouse_error_codes import ClickhouseErrorCodes
 from hare.dialects.clickhouse.client.clickhouse_external_sets import ClickhouseExternalSets
+from hare.dialects.clickhouse.client.clickhouse_mutation_recovery import ClickhouseMutationRecovery
 from hare.dialects.clickhouse.client.clickhouse_query_templates import ClickhouseQueryTemplates
 from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_AUTHENTICATION_ERROR_CODES,
@@ -33,7 +34,6 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_DEFAULT_DATABASE,
     CLICKHOUSE_DEFAULT_USER,
     CLICKHOUSE_DISCARDED_CLIENT_MESSAGE,
-    CLICKHOUSE_FAILED_MUTATIONS_PATTERN,
     CLICKHOUSE_INSERTED_AS_IS_TYPES,
     CLICKHOUSE_INSERTED_MOMENT_COLUMN_TYPES,
     CLICKHOUSE_INSERTED_TEXT_COLUMN_TYPES,
@@ -46,7 +46,6 @@ from hare.dialects.clickhouse.client.constants import (
     CLICKHOUSE_KEY_SERIES_NEXT_SQL,
     CLICKHOUSE_KEY_SERIES_SKIP_SQL,
     CLICKHOUSE_KEY_SERIES_TAKE_SQL,
-    CLICKHOUSE_KILL_MUTATIONS_TEMPLATE,
     CLICKHOUSE_MAX_EXECUTION_TIME_SETTING,
     CLICKHOUSE_MISSING_DATABASE_MESSAGE,
     CLICKHOUSE_NOT_IMPLEMENTED_ERROR_CODE,
@@ -70,10 +69,11 @@ from hare.dialects.clickhouse.client.declarations import (
     ClickhouseValueSet,
 )
 from hare.dialects.clickhouse.cluster.clickhouse_cluster import ClickhouseCluster
-from hare.dialects.clickhouse.cluster.clickhouse_cluster_statements import ClickhouseClusterStatements
+from hare.dialects.clickhouse.cluster.clickhouse_placement_plan import ClickhousePlacementPlan
 from hare.dialects.clickhouse.cluster.constants import (
     CLICKHOUSE_CLUSTER_SESSION_SETTINGS,
-    CLICKHOUSE_CLUSTER_STATEMENT_PATTERN,
+    CLICKHOUSE_DATABASE_CREATE_TEMPLATE,
+    CLICKHOUSE_DATABASE_DROP_TEMPLATE,
 )
 from hare.dialects.clickhouse.constants import (
     CLICKHOUSE_COMMENT_STARTS,
@@ -87,10 +87,10 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_SESSION_SETTINGS,
     CLICKHOUSE_UNKNOWN_DATABASE_ERROR_CODES,
 )
-from hare.dialects.clickhouse.introspection.constants import CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
 from hare.dialects.clickhouse.keeper.clickhouse_database_keeper_nodes import ClickhouseDatabaseKeeperNodes
 from hare.dialects.clickhouse.keeper.clickhouse_migration_lock import ClickhouseMigrationLock
 from hare.dialects.clickhouse.literals.clickhouse_literals import ClickhouseLiterals
+from hare.dialects.clickhouse.query.clickhouse_sql_context import ClickhouseSqlContext
 from hare.dialects.clickhouse.query.declarations import ClickhouseQuery
 from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 from hare.exceptions import (
@@ -107,9 +107,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
     from hare.models import Model
-
-ResultType = TypeVar("ResultType")
-CoroutineFunction = Callable[..., Coroutine[Any, Any, ResultType]]
+    from hare.sql.builder.tables.table import Table
 
 
 class ClickhouseClient(DatabaseClient):
@@ -125,6 +123,8 @@ class ClickhouseClient(DatabaseClient):
 
     async def _post_connect(self) -> None:
         await super()._post_connect()
+        if self.cluster is not None and not self.is_transaction_client:
+            await self.cluster.refresh_databases()
         # What a connection of its own learns of the server, read in one statement.
         server_facts = (
             None if self.is_transaction_client else (await self.execute_dicts(CLICKHOUSE_SERVER_FACTS_SQL))[0]
@@ -166,8 +166,8 @@ class ClickhouseClient(DatabaseClient):
         database: str | None = None,
         **kwargs: Any,
     ) -> None:
+        super().__init__(host=host, port=port, user=user, password=password, database=database, **kwargs)
         settings = {name: kwargs.pop(name) for name in list(kwargs) if name not in CLICKHOUSE_CLIENT_BASE_SETTINGS}
-        super().__init__(**kwargs)
         if not isinstance(host, str) or not host:
             raise ConfigurationError(f"A ClickHouse connection needs a host, got {host!r}")
         if port is None:
@@ -253,11 +253,7 @@ class ClickhouseClient(DatabaseClient):
     async def db_create(self) -> None:
         await self.create_connection(with_db=False)
         try:
-            await self.run_command_without_database(
-                self.get_database_statement(
-                    f"CREATE DATABASE IF NOT EXISTS {self.dialect.literals.quote_identifier(self.database or '')}"
-                )
-            )
+            await self.run_command_without_database(self.get_database_create_sql(self.database or ""))
         finally:
             await self.close()
 
@@ -267,11 +263,7 @@ class ClickhouseClient(DatabaseClient):
         await self.close()
         await self.create_connection(with_db=False)
         try:
-            await self.run_command_without_database(
-                self.get_database_statement(
-                    f"DROP DATABASE IF EXISTS {self.dialect.literals.quote_identifier(self.database or '')}"
-                )
-            )
+            await self.run_command_without_database(self.get_database_drop_sql(self.database or ""))
         except self.driver_errors.server as error:
             if self.get_error_code(error) not in CLICKHOUSE_UNKNOWN_DATABASE_ERROR_CODES:
                 raise
@@ -286,85 +278,54 @@ class ClickhouseClient(DatabaseClient):
         finally:
             await self.close()
 
-    def get_database_statement(self, statement: str) -> str:
-        """A statement creating or dropping the connection's database - on every server of its
-        cluster.
-
-        Args:
-            statement: The statement.
-
-        Returns:
-            The statement to send.
-        """
-        return statement if self.cluster is None else self.cluster.get_database_statement(statement)
-
-    async def execute_built_script(self, query: str) -> None:
-        """Executes a script hare built - over the connection's cluster, where it belongs to one: each
-        statement ``ON CLUSTER``, a distributed table's rows changed in its local table.
-
-        Args:
-            query: The script.
-        """
-        if self.cluster is None:
-            await self.execute_script(query)
-            return
-        try:
-            await self.execute_script(";\n".join(await self.cluster.get_statements(self.split_script(query))))
-        finally:
-            # The script may create and drop distributed tables.
-            self.cluster.forget_tables()
-
-    async def kill_failed_mutations(
-        self, write_sql: str, error: Exception, run_command: Callable[[str], Coroutine[Any, Any, Any]]
-    ) -> None:
-        """Stops the mutations a failed write names - the server keeps retrying a failed mutation, and
-        every later mutation of the table fails behind it.
-
-        Args:
-            write_sql: The write.
-            error: What the driver raised.
-            run_command: Runs a statement on the connection the write ran on.
-        """
-        mutation_match = CLICKHOUSE_FAILED_MUTATIONS_PATTERN.search(str(error))
-        statement_match = CLICKHOUSE_CLUSTER_STATEMENT_PATTERN.fullmatch(write_sql)
-        if mutation_match is None or statement_match is None:
-            return
-        literals = self.dialect.literals
-        database_name, table_name = ClickhouseClusterStatements.get_table_key(statement_match["name"])
-        ids_sql = ", ".join(
-            literals.get_string_literal_sql(mutation_id.strip()) for mutation_id in mutation_match.group(1).split(",")
+    def get_database_create_sql(self, database: str, *, safe: bool = True, engine_sql: str = "") -> str:
+        """Render an explicit database creation target; engine SQL is a catalog/declaration fragment."""
+        context = self.sql_context
+        return CLICKHOUSE_DATABASE_CREATE_TEMPLATE.format(
+            if_not_exists="IF NOT EXISTS " if safe else "",
+            database=context.quote(database),
+            on_cluster=ClickhousePlacementPlan.get_cluster_sql(context.cluster_name, context),
+            engine=f" ENGINE = {engine_sql}" if engine_sql else "",
         )
-        on_cluster_sql = "" if self.cluster is None else f" ON CLUSTER {self.cluster.name}"
-        try:
-            await run_command(
-                CLICKHOUSE_KILL_MUTATIONS_TEMPLATE.format(
-                    on_cluster=on_cluster_sql,
-                    database=CLICKHOUSE_CURRENT_DATABASE_SQL_FUNCTION
-                    if database_name is None
-                    else literals.get_string_literal_sql(database_name),
-                    table=literals.get_string_literal_sql(table_name),
-                    ids=ids_sql,
-                )
-            )
-        except self.driver_errors.driver:
-            # The write's own error is the one raised - a mutation already gone is no error of it.
-            pass
 
-    async def get_row_write_sql(self, sql: str) -> str | None:
-        """A write of stored rows - an UPDATE or a DELETE - as the connection runs it: on a cluster, the
-        rows of a distributed table changed in its local table on every server.
+    def get_database_drop_sql(self, database: str, *, safe: bool = True, sync: bool = False) -> str:
+        """Render an explicit database removal target without parsing a statement."""
+        context = self.sql_context
+        return CLICKHOUSE_DATABASE_DROP_TEMPLATE.format(
+            if_exists="IF EXISTS " if safe else "",
+            database=context.quote(database),
+            on_cluster=ClickhousePlacementPlan.get_cluster_sql(context.cluster_name, context),
+            sync=" SYNC" if sync else "",
+        )
 
-        Args:
-            sql: The statement, inlined.
-
-        Returns:
-            The write; None for any other statement.
-        """
-        if CLICKHOUSE_ROW_WRITE_PATTERN.match(sql) is None:
-            return None
+    async def invalidate_schema_cache(self) -> None:
+        """Refresh placement facts at the explicit schema boundary, including failed raw DDL."""
         if self.cluster is not None:
-            return await self.cluster.get_write_sql(sql)
-        return sql
+            await self.cluster.refresh_databases()
+
+    def get_write_recovery(self, table: Table) -> ClickhouseMutationRecovery | None:
+        """Keep the same explicit storage placement for execution failure handling."""
+        placement = ClickhousePlacementPlan.for_table(table, self.sql_context)
+        return ClickhouseMutationRecovery.for_mutation(placement, self.database or CLICKHOUSE_DEFAULT_DATABASE)
+
+    @property
+    def sql_context(self) -> ClickhouseSqlContext:
+        return ClickhouseSqlContext.from_context(super().sql_context).copy(
+            cluster_name=self.cluster.name if self.cluster is not None else None
+        )
+
+    @property
+    def sql_context_key(self) -> object:
+        return self.cluster.name if self.cluster is not None else None
+
+    @staticmethod
+    def is_row_write_sql(sql: str) -> bool:
+        """Classify a driver command without changing its target or cluster.
+
+        ORM mutations already carry their placement from compilation. User SQL is
+        literal, including writes; the driver may choose its command/result path.
+        """
+        return CLICKHOUSE_ROW_WRITE_PATTERN.match(sql) is not None
 
     async def _driver_stream_batches(
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0
@@ -372,14 +333,9 @@ class ClickhouseClient(DatabaseClient):
         """The rows of a query as the server sends them, a batch at a time - outside a transaction
         too: the server computes the rows while they are read, no cursor holds them."""
         sql = self.get_inlined_query(query, values)
-        try:
-            async with contextlib.aclosing(
-                self.read_batches(sql, chunk_size or CLICKHOUSE_STREAM_BATCH_SIZE)
-            ) as batches:
-                async for batch in batches:
-                    yield batch
-        except self.driver_errors.driver as error:
-            raise self.get_hare_error(error, sql, values) from error
+        async with contextlib.aclosing(self.read_batches(sql, chunk_size or CLICKHOUSE_STREAM_BATCH_SIZE)) as batches:
+            async for batch in batches:
+                yield batch
 
     @abc.abstractmethod
     def read_batches(self, sql: str, batch_size: int) -> AsyncGenerator[list[Any]]:
@@ -400,7 +356,7 @@ class ClickhouseClient(DatabaseClient):
         # The tables a migration would refuse are refused here too, before any of them is created.
         table_creation = cast("ClickhouseSchemaEditor", self.dialect.schema_editor_class(self)).table_creation
         for model in table_creation.get_models_to_create():
-            await table_creation.raise_if_replicas_keep_rows_apart(model)
+            await table_creation.get_replica_check_plan(model).execute(table_creation.editor)
         await super().generate_schema(safe)
 
     def acquire_connection(self) -> Any:
@@ -560,8 +516,7 @@ class ClickhouseClient(DatabaseClient):
             return contextlib.nullcontext()
         return self.hold_keeper_migration_lock()
 
-    @contextlib.asynccontextmanager
-    async def hold_keeper_migration_lock(self) -> AsyncGenerator[None]:
+    def hold_keeper_migration_lock(self) -> contextlib.AbstractAsyncContextManager[None]:
         """Holds the database's migration lock in the ClickHouse Keeper of ``keeper_hosts``, waiting while
         another ``migrate`` holds it."""
         migration_lock = ClickhouseMigrationLock(
@@ -569,11 +524,7 @@ class ClickhouseClient(DatabaseClient):
             self.database or CLICKHOUSE_DEFAULT_DATABASE,
             self.options["connect_timeout"],
         )
-        try:
-            await migration_lock.take()
-            yield
-        finally:
-            await migration_lock.close()
+        return migration_lock.hold()
 
     async def close_opened_connection(self) -> None:
         """Closes the connection a failed setup of it opened - no close of the client, which the opening
@@ -586,7 +537,7 @@ class ClickhouseClient(DatabaseClient):
         """Checks that a Keeper server of ``keeper_hosts`` opens a session.
 
         Raises:
-            ConfigurationError: None did, or the setting is not a list of addresses.
+            ConfigurationError: No server accepted the session, addresses are invalid, or the extra is missing.
         """
         migration_lock = ClickhouseMigrationLock(
             ClickhouseMigrationLock.get_addresses(self.options["keeper_hosts"]),
@@ -595,6 +546,9 @@ class ClickhouseClient(DatabaseClient):
         )
         try:
             await migration_lock.check()
+        except ConfigurationError:
+            await self.close_opened_connection()
+            raise
         except DBConnectionError as error:
             await self.close_opened_connection()
             raise ConfigurationError(
@@ -750,8 +704,8 @@ class ClickhouseClient(DatabaseClient):
                 inserted_columns.append(inserted_values)
         return inserted_columns
 
-    @classmethod
-    def _check_date_column_range(cls, column: Sequence[Any]) -> None:
+    @staticmethod
+    def _check_date_column_range(column: Sequence[Any]) -> None:
         """Refuses a column of dates holding one ClickHouse doesn't store - only its earliest
         and its latest date are checked.
 
@@ -766,8 +720,8 @@ class ClickhouseClient(DatabaseClient):
             ClickhouseLiterals.check_date_range(min(dates))
             ClickhouseLiterals.check_date_range(max(dates))
 
-    @classmethod
-    def _check_moment_column_range(cls, column: Sequence[Any]) -> None:
+    @staticmethod
+    def _check_moment_column_range(column: Sequence[Any]) -> None:
         """Refuses a column of moments holding one ClickHouse doesn't store - only its earliest
         and its latest moment are checked.
 

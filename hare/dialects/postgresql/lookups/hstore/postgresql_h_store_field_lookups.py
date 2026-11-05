@@ -19,7 +19,7 @@ class PostgresqlHStoreFieldLookups:
 
     #: The whole-value lookups kept from the generic set.
     GENERIC_LOOKUPS: ClassVar[frozenset[str]] = frozenset({"", "not", "in", "not_in", "isnull", "not_isnull"})
-    #: Shared output and element fields - the statement plans hold output fields weakly.
+    #: Shared fields describing lookup inputs and outputs.
     #: The field a list of whole values is bound as.
     ELEMENT_FIELD: ClassVar[Field[Any]] = HStoreField()
     #: The field of one key's value (``attributes__color``).

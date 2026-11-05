@@ -266,6 +266,7 @@ async def test_execute_hare_sql_explicit_connection_with_multiple_configured() -
 
     class DummyClient:
         query_class = type("QueryClass", (), {"SQL_CONTEXT": None})
+        sql_context = Query.SQL_CONTEXT
         _bound_loop = None
         tenant_schema_template = None
         tenant_row_level_security = False

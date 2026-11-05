@@ -16,9 +16,8 @@ class LargeInList:
     are compared apart. A list the container can't carry exactly keeps the plain ``IN (...)`` form.
     """
 
-    @classmethod
     def get_membership_criterion(
-        cls, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
+        self, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
     ) -> Criterion | None:
         """``term`` among the non-None values, bound as one parameter.
 
@@ -33,9 +32,8 @@ class LargeInList:
         """
         raise NotImplementedError
 
-    @classmethod
     def get_row_container(
-        cls, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None
+        self, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None
     ) -> Term | None:
         """The one-parameter container a row-value membership check reads.
 
@@ -48,8 +46,7 @@ class LargeInList:
         """
         raise NotImplementedError
 
-    @classmethod
-    def get_criterion(cls, term: Term, value: Any, element_type: str | None) -> tuple[Criterion, bool] | None:
+    def get_criterion(self, term: Term, value: Any, element_type: str | None) -> tuple[Criterion, bool] | None:
         """The membership criterion of a list and whether the list holds a None.
 
         Args:
@@ -66,13 +63,12 @@ class LargeInList:
         non_null_values = [element for element in values if element is not None]
         if not non_null_values:
             return None
-        criterion = cls.get_membership_criterion(term, values, non_null_values, element_type)
+        criterion = self.get_membership_criterion(term, values, non_null_values, element_type)
         if criterion is None:
             return None
         return criterion, len(non_null_values) != len(values)
 
-    @classmethod
-    def is_in(cls, term: Term, value: Any, element_type: str | None = None) -> Criterion:
+    def is_in(self, term: Term, value: Any, element_type: str | None = None) -> Criterion:
         """``field__in=value``.
 
         Args:
@@ -83,14 +79,13 @@ class LargeInList:
         Returns:
             The criterion.
         """
-        membership = cls.get_criterion(term, value, element_type)
+        membership = self.get_criterion(term, value, element_type)
         if membership is None:
             return Lookups.is_in(term, value)
         criterion, has_none = membership
         return criterion | term.isnull() if has_none else criterion
 
-    @classmethod
-    def not_in(cls, term: Term, value: Any, element_type: str | None = None) -> Criterion:
+    def not_in(self, term: Term, value: Any, element_type: str | None = None) -> Criterion:
         """``field__not_in=value``.
 
         Args:
@@ -101,16 +96,15 @@ class LargeInList:
         Returns:
             The criterion.
         """
-        membership = cls.get_criterion(term, value, element_type)
+        membership = self.get_criterion(term, value, element_type)
         if membership is None:
             return Lookups.not_in(term, value)
         criterion, has_none = membership
         negated_criterion: Criterion = Not(criterion)
         return negated_criterion if has_none else negated_criterion | term.isnull()
 
-    @classmethod
     def row_is_in(
-        cls, field: Tuple, value: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
+        self, field: Tuple, value: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
     ) -> Criterion:
         """Row-value ``__in``.
 
@@ -122,14 +116,13 @@ class LargeInList:
         Returns:
             The criterion.
         """
-        container = cls.get_row_container(value, element_types) if value else None
+        container = self.get_row_container(value, element_types) if value else None
         if container is None:
             return Lookups.row_is_in(field, value)
         return field.isin(container)
 
-    @classmethod
     def row_not_in(
-        cls, field: Tuple, value: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
+        self, field: Tuple, value: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
     ) -> Criterion:
         """Row-value ``__not_in``.
 
@@ -141,7 +134,7 @@ class LargeInList:
         Returns:
             The criterion.
         """
-        container = cls.get_row_container(value, element_types) if value else None
+        container = self.get_row_container(value, element_types) if value else None
         if container is None:
             return Lookups.row_not_in(field, value)
         return ~field.isin(container) | field.values[0].isnull()

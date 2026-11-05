@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-import operator
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any, cast
@@ -28,6 +26,9 @@ from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.write_steps import WriteSteps
 from hare.query.constants import MERGE_SOURCE_ALIAS, MERGE_SOURCE_KEY
 from hare.query.enums import RowShape
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.query_execution import QueryExecution
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
@@ -55,6 +56,8 @@ from hare.sql.terms.values.value_wrapper import ValueWrapper
 from hare.time import Timezone
 
 if TYPE_CHECKING:
+    import datetime
+
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.fields.field import Field
     from hare.fields.relations.fields.relational_field import RelationalField
@@ -289,7 +292,8 @@ class MergeQuery:
         return self.get_copy(returned_rows=ReturnedRows(self.target.model, field_names, old))
 
     def __await__(self) -> Generator[Any, None, Any]:
-        return self._execute().__await__()
+        specifications = (self.target,) if isinstance(self.source, tuple) else (self.target, self.source)
+        return QueryExecution.run_operation(specifications, self._execute).__await__()
 
     def raise_if_unmergeable(self, connection: DatabaseClient) -> None:
         """Rejects what the merge can't run - before any SQL.
@@ -387,7 +391,7 @@ class MergeQuery:
         meta = model._meta
         execution_query = self.target._get_execution_query(for_write=True)
         WrittenTargetChecks.raise_if_refused_calls(execution_query)
-        connection = execution_query._connection
+        connection = cast("DatabaseClient", execution_query._connection)
         self.raise_if_unmergeable(connection)
         if not self.source and all(when.match is not MergeMatch.NOT_MATCHED_BY_SOURCE for when in self.whens):
             # No source row - a branch of matched or new rows writes nothing.
@@ -407,7 +411,10 @@ class MergeQuery:
         )
         on_sql = self.get_on_criterion(expression_context).get_sql(sql_context)
         relation_rows: list[dict[str, Any]] = []
-        whens_sql = [self.get_when_sql(when, expression_context, sql_context, relation_rows) for when in self.whens]
+        now = Timezone.now()
+        whens_sql = [
+            self.get_when_sql(when, expression_context, sql_context, relation_rows, now) for when in self.whens
+        ]
         # On the target's all_tenants() the relations are written as given, as by .all_tenants().update().
         if relation_rows and not self.target._visibility.all_tenants:
             await Tenancy.check_relation_targets(model, relation_rows, connection)
@@ -455,17 +462,14 @@ class MergeQuery:
             action_alias_sql=sql_context.quote(action_column),
         )
         parameters = cast("Parameterizer", sql_context.parameterizer).values
+        command = WriteStatement(
+            sql, parameters, returns_rows=capture_needs is not None or self.returned_rows is not None
+        )
         if capture_needs is not None:
-            return await self.execute_captured(connection, sql, parameters, capture_needs)
-        if self.returned_rows is None:
-            count = (await connection.execute(sql, parameters, returns_rows=False))[0]
-            result: Any = count
-        else:
-            count, raw_rows = await connection.execute(sql, parameters, returns_rows=True)
-            result = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
-            for row, raw_row in zip(result, raw_rows, strict=True):
-                row[MERGE_ACTION_KEY] = str(dict(raw_row)[action_column]).lower()
-        if count:
+            return await self.execute_captured(connection, command, capture_needs)
+        count, raw_rows = await BoundWrite.execute_command(connection, command)
+        result = self._get_result(connection, count, raw_rows, action_column)
+        if count != 0:
             for operation in dict.fromkeys(
                 ROW_OPERATION_BY_MERGE_ACTION[when.action]
                 for when in self.whens
@@ -502,15 +506,14 @@ class MergeQuery:
         return next(iter(field_names)) if len(field_names) == 1 else None
 
     async def execute_captured(
-        self, connection: DatabaseClient, sql: str, parameters: list[Any], capture_needs: CaptureNeeds
+        self, connection: DatabaseClient, command: WriteStatement, capture_needs: CaptureNeeds
     ) -> Any:
         """Runs the ``MERGE`` of a model with ``Meta.change_capture`` and captures the rows it wrote,
         by the action of each, in one transaction.
 
         Args:
             connection: The connection.
-            sql: The ``MERGE``, returning the captured columns and the action.
-            parameters: Its parameters.
+            command: The bound ``MERGE``, returning the captured columns and the action.
             capture_needs: The model's needs.
 
         Returns:
@@ -522,7 +525,7 @@ class MergeQuery:
             model, capture_needs, connection, RowOperation.UPDATE, changed=self.get_updated_field_names()
         )
         async with captured.transaction() as transaction_connection:
-            count, raw_rows = await transaction_connection.execute(sql, parameters, returns_rows=True)
+            count, raw_rows = await BoundWrite.execute_command(transaction_connection, command)
             rows_by_operation: dict[RowOperation, list[Any]] = {}
             for raw_row in raw_rows:
                 operation = RowOperation(str(dict(raw_row)[action_column]).lower())
@@ -545,6 +548,19 @@ class MergeQuery:
                 pks=[change.pk for change in changes if change.operation is operation],
                 fields=captured.changed if operation is RowOperation.UPDATE else None,
             )
+        return self._get_result(connection, count, raw_rows, action_column)
+
+    def _get_result(
+        self, connection: DatabaseClient, count: int | None, raw_rows: Sequence[Any], action_column: str
+    ) -> int | None | list[dict[str, Any]]:
+        """Read the MERGE result, adding the action to each explicitly requested row.
+
+        Args:
+            connection: The connection whose field readers decode the returned values.
+            count: The affected row count, or None when the driver does not report it.
+            raw_rows: The rows returned by the statement.
+            action_column: The internal column carrying the database's action name.
+        """
         if self.returned_rows is None:
             return count
         result = self.returned_rows.get_rows(connection.dialect.types, raw_rows)
@@ -662,7 +678,8 @@ class MergeQuery:
         parts: list[Criterion] = [
             table[target_column] == source_table[source_column] for target_column, source_column in self.on_columns
         ]
-        return self.get_criterion([*parts, *self.get_target_criteria(expression_context)])
+        parts.extend(self.get_target_criteria(expression_context))
+        return Criterion.all(part for part in parts if not isinstance(part, EmptyCriterion))
 
     def get_target_criteria(self, expression_context: ExpressionContext) -> list[Criterion]:
         """The conditions of the model's rows the merge reads - the default scope and the target
@@ -673,7 +690,7 @@ class MergeQuery:
         """
         criteria: list[Criterion] = []
         if self.target._is_none:
-            # A none() target shows no row - SQL has no literal FALSE, so 1 = 0 stands in for it.
+            # A none() target uses a portable false criterion to match no row.
             criteria.append(BasicCriterion.always_false())
         model = self.target.model
         visibility = self.target._visibility
@@ -696,12 +713,6 @@ class MergeQuery:
         return criteria
 
     @staticmethod
-    def get_criterion(parts: list[Criterion]) -> Criterion:
-        """``parts`` joined by ``AND`` - an empty one left out; ``EmptyCriterion`` for none."""
-        parts = [part for part in parts if not isinstance(part, EmptyCriterion)]
-        return functools.reduce(operator.and_, parts) if parts else EmptyCriterion()
-
-    @staticmethod
     def get_condition_criterion(condition: Q, expression_context: ExpressionContext, what: str) -> Criterion:
         """A condition over the target row and the source row.
 
@@ -719,6 +730,7 @@ class MergeQuery:
         expression_context: ExpressionContext,
         sql_context: SqlContext,
         relation_rows: list[dict[str, Any]],
+        now: datetime.datetime,
     ) -> MergeWhenSql:
         """A branch rendered - its condition, then the columns it writes and their values.
 
@@ -727,6 +739,7 @@ class MergeQuery:
             expression_context: The context of the target model.
             sql_context: The context the statement renders in.
             relation_rows: Where the plain relation values written are put for the tenant check.
+            now: The single timestamp shared by every branch of this execution.
 
         Returns:
             The branch.
@@ -739,11 +752,11 @@ class MergeQuery:
         if when.match is MergeMatch.NOT_MATCHED_BY_SOURCE:
             # The rows no source row matches are those of the whole table - limited to the target's here.
             conditions = [*self.get_target_criteria(expression_context), *conditions]
-        condition = self.get_criterion(conditions)
+        condition = Criterion.all(part for part in conditions if not isinstance(part, EmptyCriterion))
         condition_sql = None if isinstance(condition, EmptyCriterion) else condition.get_sql(sql_context)
         if when.action not in {MergeAction.UPDATE, MergeAction.INSERT}:
             return MergeWhenSql(when.match, when.action, condition_sql)
-        assignments = self.get_assignments(when, expression_context, relation_rows)
+        assignments = self.get_assignments(when, expression_context, relation_rows, now)
         return MergeWhenSql(
             when.match,
             when.action,
@@ -753,7 +766,11 @@ class MergeQuery:
         )
 
     def get_assignments(
-        self, when: MergeWhen, expression_context: ExpressionContext, relation_rows: list[dict[str, Any]]
+        self,
+        when: MergeWhen,
+        expression_context: ExpressionContext,
+        relation_rows: list[dict[str, Any]],
+        now: datetime.datetime,
     ) -> list[tuple[str, Term]]:
         """The columns a branch writes and their values - the given ones with their blind indexes, the
         ``auto_now`` moment, the version bump of an update, the active tenant of an insert.
@@ -824,7 +841,7 @@ class MergeQuery:
                     if isinstance(value_wrapper, ValueWrapper):
                         value_wrapper.sensitive = True
             assignments.append((column, term))
-        for name, field, value in rules.get_stamp_values(Timezone.now()):
+        for name, field, value in rules.get_stamp_values(now):
             assignments.append(
                 (meta.fields_db_projection[name], ValueWrapper(dialect.types.get_db_value(field, value, None)))
             )

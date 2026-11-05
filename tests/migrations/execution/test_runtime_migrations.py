@@ -9,8 +9,10 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import requires_features
+from hare.core.connections.connection_handler import ConnectionHandler
 from hare.core.hare_context import HareContext
 from hare.dialects.base.client import DatabaseClient
+from hare.dialects.base.client.statement_recovery import StatementRecovery
 from hare.dialects.base.features import Features
 from hare.dialects.base.results import StatementResult
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
@@ -34,6 +36,7 @@ class FakeConnection:
         self.query_class = SqliteQuery
         self.features = Features(inline_comments=True)
         self.connection_alias = "default"
+        self.connection_handler = ConnectionHandler()
         self._applied = applied or []
         self.executed_scripts: list[str] = []
         self.inserts: list[tuple[str, list]] = []
@@ -47,7 +50,7 @@ class FakeConnection:
         rows = [{"app": key.app_label, "name": key.name} for key in self._applied]
         return StatementResult(0, rows)
 
-    async def execute_script(self, query: str) -> None:
+    async def execute_script(self, query: str, *, recovery: StatementRecovery | None = None) -> None:
         self.executed_scripts.append(query)
 
 
@@ -605,6 +608,7 @@ async def test_migration_apply_and_unapply_flags() -> None:
 
         def state_forward(self, app_label: str, state: State) -> None:
             self.calls.append("state_forward")
+            state.schemas.add("prepared")
 
         async def database_forward(self, app_label, old_state, new_state, state_editor):
             self.calls.append("database_forward")
@@ -618,13 +622,16 @@ async def test_migration_apply_and_unapply_flags() -> None:
     migration = TestMigration("0001_initial", "models")
     state = State()
 
-    await migration.apply(state, dry_run=True, schema_editor=None)
+    after = await migration.apply(state, dry_run=True, schema_editor=None)
     marker = cast(MarkerOperation, migration.operations[0])
-    assert marker.calls == ["state_forward"]
+    assert marker.calls == []
+    assert after.schemas == {"prepared"}
+    assert state.schemas == set()
 
-    await migration.unapply(state, dry_run=True, schema_editor=None)
+    before = await migration.unapply(state, dry_run=True, schema_editor=None)
     marker = cast(MarkerOperation, migration.operations[0])
-    assert marker.calls == ["state_forward", "state_forward"]
+    assert marker.calls == []
+    assert before.schemas == state.schemas == set()
 
 
 @pytest.mark.database_independent

@@ -79,6 +79,8 @@ class InstanceInitialization:
         """Gives the fields ``Model.construct()`` got no value for their defaults, without a
         database or an event loop: an async default is left as None.
 
+        Synchronous defaults use the constructor's normalization and copying rules.
+
         Args:
             obj: The obj being constructed.
             field_names: The fields left out.
@@ -86,20 +88,10 @@ class InstanceInitialization:
         fields_map = obj._meta.fields_map
         _setattr = object.__setattr__
         for key in field_names:
-            default_field = fields_map[key]
-            field_default = default_field.default
-            if default_field._default_is_coroutine:
+            if fields_map[key]._default_is_coroutine:
                 _setattr(obj, key, None)
-            elif callable(field_default):
-                _setattr(obj, key, default_field.get_default_value_on_assign(field_default()))
-            elif field_default is not None:
-                # Copied and normalized as in __init__ - a shared literal default
-                # (JSONField(default={"a": 1})) would otherwise be one object across every obj.
-                _setattr(obj, key, default_field.get_static_default_value())
-            elif default_field.has_db_default():
-                _setattr(obj, key, default_field.get_db_default_value())
             else:
-                _setattr(obj, key, None)
+                InstanceInitialization.assign_default(obj, key, _setattr)
 
     @staticmethod
     def check_relation_kwargs_agree(

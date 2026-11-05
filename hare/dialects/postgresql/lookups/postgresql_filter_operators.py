@@ -5,14 +5,14 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.lookups.filter_operators import FilterOperators
-from hare.dialects.dialect_registry import DialectRegistry
-from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.lookups.in_list.postgresql_large_in_list import PostgresqlLargeInList
 from hare.dialects.postgresql.lookups.json.postgresql_json_lookups import PostgresqlJsonLookups
 from hare.dialects.postgresql.lookups.postgresql_regex_lookups import PostgresqlRegexLookups
 from hare.dialects.postgresql.lookups.trigram.postgresql_trigram_lookups import PostgresqlTrigramLookups
 from hare.dialects.postgresql.search.criterion.search_criterion import SearchCriterion
 from hare.dialects.postgresql.search.functions.plain_to_ts_query import PlainToTsQuery
+from hare.dialects.postgresql.search.messages import SEARCH_QUERY_CONFIG_REQUIRED
+from hare.exceptions import QueryError
 from hare.query.filters import JsonLookups, Lookups
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
@@ -56,18 +56,25 @@ class PostgresqlFilterOperators(FilterOperators):
 
     @staticmethod
     def get_search_criterion(
-        term: Term, value: Term | str, field_is_vector: bool = False, config: str | None = None
+        term: Term,
+        value: Term | str,
+        field_is_vector: bool = False,
+        config: str | None = None,
+        requires_search_query_config: bool = False,
     ) -> SearchCriterion:
         """A full-text ``__search`` of ``term``."""
+        if requires_search_query_config and (
+            not isinstance(value, Term) or not SearchCriterion.has_explicit_query_config(value)
+        ):
+            raise QueryError(SEARCH_QUERY_CONFIG_REQUIRED)
         query = value if isinstance(value, Term) else PlainToTsQuery(ValueWrapper(value), config=config)
         return SearchCriterion(term, expression=query, vectorize=not field_is_vector, config=config)
 
-    @staticmethod
-    def get_column_type(field: Field[Any] | None) -> str | None:
+    def get_column_type(self, field: Field[Any] | None) -> str | None:
         """The PostgreSQL type of a list's elements, None to type them by their values."""
         if field is None:
             return None
-        return field.get_column_type(DialectRegistry.get_dialect(PostgresqlDialectName.POSTGRESQL))
+        return field.get_column_type(self.dialect)
 
     def get_overridden_operator(
         self, operator: Callable[..., Any], field_lookup: FieldLookup | None
@@ -75,15 +82,20 @@ class PostgresqlFilterOperators(FilterOperators):
         if operator is Lookups.search:
             field_is_vector = field_lookup is not None and field_lookup.is_tsvector
             search_config = field_lookup.search_config if field_lookup is not None else None
-            return partial(self.get_search_criterion, field_is_vector=field_is_vector, config=search_config)
+            return partial(
+                self.get_search_criterion,
+                field_is_vector=field_is_vector,
+                config=search_config,
+                requires_search_query_config=field_lookup is not None and field_lookup.requires_search_query_config,
+            )
         if operator in (Lookups.is_in, Lookups.not_in, JsonLookups.is_in, JsonLookups.not_in):
             array_element_type = self.get_column_type(
                 field_lookup.array_element_field if field_lookup is not None else None
             )
             target = (
-                PostgresqlLargeInList.is_in
+                PostgresqlLargeInList().is_in
                 if operator in (Lookups.is_in, JsonLookups.is_in)
-                else PostgresqlLargeInList.not_in
+                else PostgresqlLargeInList().not_in
             )
             return partial(target, element_type=array_element_type)
         if operator in (Lookups.row_is_in, Lookups.row_not_in):
@@ -92,7 +104,9 @@ class PostgresqlFilterOperators(FilterOperators):
                 None if element_fields is None else [self.get_column_type(field) for field in element_fields]
             )
             row_target = (
-                PostgresqlLargeInList.row_is_in if operator is Lookups.row_is_in else PostgresqlLargeInList.row_not_in
+                PostgresqlLargeInList().row_is_in
+                if operator is Lookups.row_is_in
+                else PostgresqlLargeInList().row_not_in
             )
             return partial(row_target, element_types=array_element_types)
         return super().get_overridden_operator(operator, field_lookup)

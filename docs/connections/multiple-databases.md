@@ -1,5 +1,10 @@
 # Several databases
 
+Read-after-write history and primary-read scopes belong to the active application, even when
+applications use identical connection aliases. Write history uses monotonic time and immutable
+task snapshots: a child sees its parent’s previous writes, while its new writes remain local.
+Timezone overrides are also scoped to the application in which they were entered.
+
 An application with several connections picks one per query: by `using=` at the call, or by a router that
 decides for every query of a model, reads and writes apart.
 
@@ -105,8 +110,9 @@ model's `default_connection` where `db_for_write` returns `None`. Asking
 which connection a model is written through (`Model.get_connection(for_write=True)`) writes nothing and
 changes no read.
 
-The config's `read_your_writes_seconds` ends that this long after the task's last write, when the replica
-has caught up:
+The config's `read_your_writes_seconds` ends that this long after the task's last write to the
+connection in the current application. Expiration does not establish that the replica has caught up;
+choose the window for the application's consistency requirements:
 
 ```python
 await Hare.init(
@@ -125,6 +131,7 @@ async with Routing.using_primary():
     loan = await Loan.objects.get(pk=loan_id)
 ```
 
-`Routing.forget_writes()` lets the current task read from the replicas again — for a task that serves
-several requests one after another. A queryset's `.using()` and a transaction choose their connection
-themselves and aren't affected. Without routers nothing of this runs.
+`Routing.forget_writes()` forgets the current application's writes in this task, allowing replica reads
+again — for a task that serves several requests one after another. Other applications and already
+started child tasks retain their write histories. A queryset's `.using()` and a transaction choose their
+connection themselves and aren't affected. Without routers nothing of this runs.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.exceptions import FieldError
 from hare.query.expressions import ConditionValue, Expression, F, Q, RawSQL
 from hare.query.expressions.term_expression import TermExpression
@@ -121,7 +122,7 @@ class AnnotationArguments:
         return paths
 
     @staticmethod
-    def get_annotation_descriptions(queryset: QuerySet[Any, Any]) -> dict[tuple[str, str, Dialect], Any]:
+    def get_annotation_descriptions(queryset: QuerySet[Any, Any]) -> CacheBucket[Any]:
         """The queryset's cached descriptions of keys starting with an annotation - by (description type, key,
         dialect), the dialect the annotations' types were resolved with. Emptied once a
         model's fields, lookups or relations change (``LookupInfoBuilder.forget_descriptions()``).

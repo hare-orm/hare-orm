@@ -22,8 +22,8 @@ class QuerySpans(QueryWrapper):
 
     Args:
         tracer_provider: The TracerProvider to get a tracer from - the global one by default.
-        record_sql_statement: Whether the ``db.query.text`` span attribute holds the (parameter-bound,
-            never literal-holding) SQL text.
+        record_sql_statement: Whether ``db.query.text`` holds the SQL exactly as submitted. Bind
+            values are not recorded separately; literals already present in raw SQL or DDL remain.
     """
 
     def __init__(self, tracer_provider: TracerProvider | None = None, *, record_sql_statement: bool = True) -> None:

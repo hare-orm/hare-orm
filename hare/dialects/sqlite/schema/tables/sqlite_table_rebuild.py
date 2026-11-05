@@ -3,20 +3,23 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.base.schema.tables.table_rebuild import TableRebuild
 from hare.dialects.sqlite.schema.constants import (
     SQLITE_COPY_REBUILT_TABLE_SEQUENCE_SQL,
     SQLITE_DATE_TO_AWARE_DATETIME_SQL,
     SQLITE_DATE_TO_NAIVE_DATETIME_SQL,
     SQLITE_DATETIME_TO_DATE_SQL,
-    SQLITE_DISABLE_LEGACY_ALTER_TABLE_SQL,
-    SQLITE_ENABLE_LEGACY_ALTER_TABLE_SQL,
     SQLITE_NUMBER_TO_BOOLEAN_SQL,
     SQLITE_NUMBER_TO_INTEGER_SQL,
     SQLITE_RAISE_REBUILT_TABLE_SEQUENCE_SQL,
     SQLITE_TEXT_TO_BOOLEAN_SQL,
     SQLITE_TEXT_TO_DATE_SQL,
 )
+from hare.dialects.sqlite.schema.tables.sqlite_legacy_rename import SqliteLegacyRename
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.numeric.float_field import FloatField
 from hare.fields.data.numeric.int_field import IntField
@@ -56,7 +59,6 @@ class SqliteTableRebuild(TableRebuild):
         number_field_classes = (IntField, FloatField)
         text_field_classes = (CharField, TextField)
         template = None
-        template_arguments: dict[str, Any] = {}
         if isinstance(new_field, BooleanField) and not isinstance(old_field, BooleanField):
             if isinstance(old_field, number_field_classes):
                 template = SQLITE_NUMBER_TO_BOOLEAN_SQL
@@ -74,11 +76,11 @@ class SqliteTableRebuild(TableRebuild):
             )
         if template is None:
             return quoted_column
-        return template.format(column=quoted_column, **template_arguments)
+        return template.format(column=quoted_column)
 
-    async def replace_table(
+    def get_replace_plan(
         self, table_name: str, rebuilt_table_name: str, schema: str | None, fields: Iterable[Field[Any]]
-    ) -> None:
+    ) -> SchemaChangePlan:
         """Drops a table and renames its rebuilt copy into its place - an AUTOINCREMENT primary
         key goes on from the highest id the replaced table ever issued, and the rename leaves
         other tables' references to the table as they are (``legacy_alter_table``).
@@ -92,47 +94,31 @@ class SqliteTableRebuild(TableRebuild):
         keeps_sequence = self.uses_autoincrement(fields)
         qualified_table = self.editor.qualify_table_name(table_name, schema)
         qualified_rebuilt_table = self.editor.qualify_table_name(rebuilt_table_name, schema)
+        steps: list[SchemaStep] = []
         if keeps_sequence:
             sequence_table_names = {
                 "old_table": self.editor.client.dialect.literals.get_string_literal_sql(table_name),
                 "new_table": self.editor.client.dialect.literals.get_string_literal_sql(rebuilt_table_name),
             }
-            await self.editor.run_sql(SQLITE_RAISE_REBUILT_TABLE_SEQUENCE_SQL.format(**sequence_table_names))
-            await self.editor.run_sql(SQLITE_COPY_REBUILT_TABLE_SEQUENCE_SQL.format(**sequence_table_names))
-        await self.editor.run_sql(f"DROP TABLE {qualified_table}")
-        await self.editor.run_sql(SQLITE_ENABLE_LEGACY_ALTER_TABLE_SQL)
-        try:
-            await self.editor.run_sql(
-                f"ALTER TABLE {qualified_rebuilt_table} RENAME TO {self.editor.quote(table_name)}"
-            )
-        finally:
-            await self.editor.run_sql(SQLITE_DISABLE_LEGACY_ALTER_TABLE_SQL)
+            steps.append(SchemaStatement(SQLITE_RAISE_REBUILT_TABLE_SEQUENCE_SQL.format(**sequence_table_names)))
+            steps.append(SchemaStatement(SQLITE_COPY_REBUILT_TABLE_SEQUENCE_SQL.format(**sequence_table_names)))
+        steps.append(SchemaStatement(f"DROP TABLE {qualified_table}", frozenset({SchemaEffect.REPLACE_TABLE})))
+        steps.append(
+            SqliteLegacyRename(f"ALTER TABLE {qualified_rebuilt_table} RENAME TO {self.editor.quote(table_name)}")
+        )
+        return SchemaChangePlan(tuple(steps))
 
-    def get_body_comment_sql(self, model: type[Model], qualified_table: str) -> str:
-        """The table's description - SQLite keeps it only inside the parentheses of ``CREATE TABLE``.
-
-        Args:
-            model: The model.
-            qualified_table: The rebuilt table's quoted name.
-
-        Returns:
-            The comment's SQL, none without a description.
-        """
-        description = model._meta.table_description
-        if not description:
-            return ""
-        return self.editor.table_comments.get_table_comment_sql(qualified_table, description)
-
-    async def remake_table(
+    def get_rebuild_plan(
         self,
         old_model: type[Model],
         new_model: type[Model],
         altered_fields: Sequence[tuple[Field[Any], Field[Any]]] = (),
-    ) -> None:
+    ) -> SchemaChangePlan:
         """Rebuilds the table - an index kept in a table of its own is dropped first and created
         again with the indexes, filled from the rebuilt table: its triggers go with the old table."""
-        await self.editor.drop_separate_table_indexes(old_model, self.editor.get_separate_table_indexes(old_model))
-        await super().remake_table(old_model, new_model, altered_fields)
+        plan = super().get_rebuild_plan(old_model, new_model, altered_fields)
+        drops = self.editor.get_separate_index_drop_plan(old_model, self.editor.get_separate_table_indexes(old_model))
+        return SchemaChangePlan((*drops.steps, *plan.steps), before=plan.before, after=plan.after)
 
     def uses_autoincrement(self, fields: Iterable[Field[Any]]) -> bool:
         """Whether a table built from ``fields`` has an AUTOINCREMENT primary key.

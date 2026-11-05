@@ -3,10 +3,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from hare.dialects.base.constants import PREFETCH_MAX_COMPOSITE_ROWS
 from hare.query.enums import Connector
 from hare.query.expressions import Q
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
+from hare.query.relation_loading.prefetching.prefetch_keys import PrefetchKeys
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -32,13 +32,7 @@ class RelatedRowsFetch:
         Returns:
             The condition; None when no parent has a key.
         """
-        keys = list(
-            dict.fromkeys(
-                key
-                for key in (tuple(getattr(instance, name) for name in key_field_names) for instance in objs)
-                if None not in key
-            )
-        )
+        keys = PrefetchKeys.get_distinct_values(objs, key_field_names)
         if not keys:
             return None
         if len(relation_fields) == 1:
@@ -65,7 +59,9 @@ class RelatedRowsFetch:
         return {relation_field: values}
 
     @staticmethod
-    async def fetch_matching_any_group(related_queryset: QuerySet[Any], groups: list[Q]) -> list[Model]:
+    async def fetch_matching_any_group(
+        related_queryset: QuerySet[Any], groups: list[Q], *, key_width: int
+    ) -> list[Model]:
         """Fetches every row of ``related_queryset`` matching any of ``groups``, OR-ing at most
         ``PREFETCH_MAX_COMPOSITE_ROWS`` of them per query.
 
@@ -77,8 +73,9 @@ class RelatedRowsFetch:
             The fetched rows of every batch, in batch order.
         """
         fetched: list[Model] = []
-        for start in range(0, len(groups), PREFETCH_MAX_COMPOSITE_ROWS):
-            batch = groups[start : start + PREFETCH_MAX_COMPOSITE_ROWS]
+        batch_size = PrefetchKeys.get_batch_size(related_queryset.get_connection(), key_width)
+        for start in range(0, len(groups), batch_size):
+            batch = groups[start : start + batch_size]
             fetched.extend(await related_queryset.filter(Q.with_connector(Connector.OR, *batch)))
         return fetched
 
@@ -102,15 +99,11 @@ class RelatedRowsFetch:
         Returns:
             The related rows.
         """
-        keys: list[tuple[Any, ...]] = []
-        seen_keys: set[tuple[Any, ...]] = set()
-        for instance in objs:
-            key = tuple(getattr(instance, name) for name in key_field_names)
-            if None not in key and key not in seen_keys:
-                seen_keys.add(key)
-                keys.append(key)
+        keys = PrefetchKeys.get_distinct_values(objs, key_field_names)
         if not keys:
             return []
         related_queryset = PrefetchChecks.ensure_only_includes_fields(related_queryset, *relation_fields)
         groups = [Q(**dict(zip(relation_fields, key, strict=True))) for key in keys]
-        return await RelatedRowsFetch.fetch_matching_any_group(related_queryset, groups)
+        return await RelatedRowsFetch.fetch_matching_any_group(
+            related_queryset, groups, key_width=len(relation_fields)
+        )

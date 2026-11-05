@@ -20,8 +20,6 @@ from hare.query.expressions import F
 from hare.transactions import Transactions
 from tests.fields.encryption.models_blind_index import BlindIndexedCustomer
 
-REQUIRES = ("encryption",)
-
 SECRET = "blind-index-test-secret"
 
 
@@ -142,6 +140,7 @@ async def test_an_upsert_through_the_index_reports_the_row_it_updates():
         app_label="models",
         connection_label="models",
     ):
+        FieldEncryption.configure(SECRET)
         if not Connections.get("models").features.supports_unique_constraints:
             pytest.skip("the database keeps no unique index to upsert by")
         await create_customers()

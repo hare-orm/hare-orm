@@ -38,8 +38,7 @@ class Extract(Function):
 
     populate_field_object = True
 
-    #: Shared, long-lived instance - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     DATE_PART_OUTPUT_FIELD = IntField()
 
     def __init__(
@@ -62,7 +61,7 @@ class Extract(Function):
         if part_name not in DATETIME_DATE_PART_LOOKUPS:
             known = ", ".join(DATETIME_DATE_PART_LOOKUPS)
             raise FieldError(f"Extract() part must be one of {known}, got {part_name!r}")
-        super().__init__(field)  # type: ignore[arg-type]
+        super().__init__(field)
         self.date_part: DatePart = DATETIME_DATE_PART_LOOKUPS[part_name]
         self.part_name = part_name
         self.zone_name = None if tzinfo is None else Timezone.get_zone_name(tzinfo)

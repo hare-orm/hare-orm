@@ -211,7 +211,7 @@ async def test_a_moment_and_a_decimal_in_one_tuple(clickhouse_db):
     field = TupleField([DatetimeField(), DecimalField(max_digits=10, decimal_places=2), IntField()])
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(

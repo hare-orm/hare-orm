@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 
-from hare.exceptions import ConfigurationError
 from hare.fields.db_defaults.sql_default import SqlDefault
 from hare.fields.enums import NowValueType
 from hare.time import Timezone
@@ -27,8 +26,6 @@ class Now(SqlDefault):
     """
 
     def __init__(self, value_type: NowValueType = NowValueType.DATETIME) -> None:
-        if not isinstance(value_type, str) or value_type not in set(NowValueType):
-            raise ConfigurationError(f"Now() takes a NowValueType, got {value_type!r}")
         super().__init__("CURRENT_TIMESTAMP")
         self.value_type = NowValueType(value_type)
 

@@ -12,9 +12,13 @@ class Book(Model):
         soft_delete_field = "deleted_at"
 ```
 
-The field must exist on the model and allow `None`.
+The field must be a `DatetimeField(null=True)` on the model.
 
 ## <a id="deleting"></a>Deleting: `delete()`
+
+The transaction and row-lock guarantees below apply only when the database and driver support them.
+Without transactions, cascading commands have no shared rollback; without row locks, concurrent
+changes are not protected by those locks.
 
 - **`delete()`** becomes an `UPDATE` setting `deleted_at = now()`, run in the same transaction as
   cascading that same soft-delete decision to related rows — instead of a real `DELETE`. This applies to
@@ -31,7 +35,9 @@ The field must exist on the model and allow `None`.
   row while it is deleted (see [What queries see](#reading)) and point at it again once it is restored.
   `Meta.soft_delete_hard_cascade = True` on the model being soft-deleted makes its soft delete really
   delete them instead, as a hard delete would — `restore()` can't bring them back then. Either way
-  `SET_NULL`/`SET_DEFAULT` relations are updated and `PROTECT`/`RESTRICT` ones block the delete.
+  `SET_NULL`/`SET_DEFAULT` relations are updated. Referencing rows with `PROTECT`, `RESTRICT` or
+  `NO_ACTION` block the delete, including rows already soft-deleted, unless the cascade removes
+  the blocking reference itself.
 - `.delete()` of a queryset soft-deletes only the rows that are still live: a row that is already deleted
   keeps its original `deleted_at` and isn't counted, exactly as `instance.delete()` leaves an
   already-deleted instance alone (so `only_deleted().delete()` returns `0`). The instance check reads
@@ -151,7 +157,7 @@ row reached.
 ## <a id="failed-write"></a>The instance after a failed write
 
 `save()`/`delete()`/`restore()` update `auto_now`/`auto_now_add` and `soft_delete_field` on the Python
-instance eagerly, before the write's outcome is known. If the write then fails — a `StaleObjectError`
-from an `optimistic_lock_field` conflict, or any other exception mid-write — those in-memory values are
-rolled back to match what's actually in the database, so the instance never ends up looking saved or
-deleted when it wasn't.
+instance during preparation. If SQL fails or the write is known not to have happened, the prepared
+values are restored to their previous values on the instance; this does not reread database state.
+An error decoding or publishing an already successful write does not undo that SQL. A subsequent
+transaction rollback separately restores the registered instance snapshots.

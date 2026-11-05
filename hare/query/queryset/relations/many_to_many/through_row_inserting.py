@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.core.connections.connections import Connections
 from hare.core.routing.written_connections import WrittenConnections
@@ -12,8 +12,11 @@ from hare.instrumentation.enums import RowOperation
 from hare.models.uniqueness.declared_uniqueness import DeclaredUniqueness
 from hare.models.write.generated_keys import GeneratedKeys
 from hare.models.write.rules.relation_key_values import RelationKeyValues
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.write_statements import WriteCopy, WriteStatement
 from hare.query.key_columns import KeyColumns
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
 from hare.query.queryset.relations.many_to_many.many_to_many_scope_checks import ManyToManyScopeChecks
 from hare.query.queryset.relations.many_to_many.through_defaults import ThroughDefaults
@@ -21,8 +24,6 @@ from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.builder.tables.table import Table
 from hare.sql.terms.parameters.query_parameters import QueryParameters
-
-TModel = TypeVar("TModel", bound="Model")
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -105,18 +106,28 @@ class ThroughRowInserting:
                 # The single-row statement of .add(one_instance) is the same on every call -
                 # rendered once per field and dialect.
                 statement_key = (relation.field.model, relation.field.model_field_name, connection.query_class)
-                cached_sql = StatementPlans.many_to_many_add_statements.get(statement_key)
+                cached_sql = StatementPlans.many_to_many_add_statements.get_model_bucket(relation.field.model).get(
+                    statement_key
+                )
                 if cached_sql is None:
                     query = connection.query_class.into(through_table).columns(*forward_columns, *backward_columns)
                     placeholder_row = (0,) * (len(forward_columns) + len(backward_columns))
                     query = query.insert(*placeholder_row)  # placeholder values - only the SQL text is kept
                     query = query.on_conflict(*backward_columns, *forward_columns).do_nothing()
                     cached_sql, _ = query.get_parameterized_sql()
-                    StatementPlans.many_to_many_add_statements[statement_key] = cached_sql
+                    StatementPlans.many_to_many_add_statements.get_model_bucket(relation.field.model)[
+                        statement_key
+                    ] = cached_sql
                 (single_forward_key_value,) = unique_forward_key_values
-                inserted_count, _ = await connection.execute(
-                    cached_sql, ThroughRows.hide_values(relation, [*single_forward_key_value, *backward_key_values])
+                inserted_count, _ = await BoundWrite.execute_command(
+                    connection,
+                    WriteStatement(
+                        cached_sql,
+                        ThroughRows.hide_values(relation, [*single_forward_key_value, *backward_key_values]),
+                    ),
                 )
+                if inserted_count is None:
+                    return None, True
                 # The pair linked already adds no link.
                 return ([instances[0]], True) if inserted_count else ([], False)
             rows = [(*forward_key_value, *backward_key_values) for forward_key_value in unique_forward_key_values]
@@ -136,27 +147,23 @@ class ThroughRowInserting:
                 return ThroughRowInserting.get_distinct_instances(instances), True
             return None, True
 
-        select_query = connection.query_class.from_(through_table).where(
-            KeyColumns.row_equality(backward_columns, backward_key_values)
-        )
-        select_query = select_query.select(*relation.field.forward_keys)
         criterion = (
             KeyColumns.row_equality(forward_columns, forward_key_values[0])
             if len(forward_key_values) == 1
             else connection.dialect.filter_operators.get_row_membership_criterion(
-                forward_columns, forward_key_values, ManyToManyMembers.get_forward_key_fields(relation)
+                forward_columns,
+                forward_key_values,
+                ManyToManyMembers.get_forward_key_fields(relation),
+                connection=connection,
             )
         )
-        select_query = select_query.where(criterion)
+        select_query = LinkedKeys.get_links_query(
+            relation, connection, through_table, backward_key_values=backward_key_values
+        ).where(criterion)
         through_model = relation.field.through_model_class
-        soft_delete_field = through_model._meta.soft_delete_field if through_model is not None else None
-        if through_model is not None and soft_delete_field is not None:
-            # A soft-deleted through row is no active link - the pair is added again.
-            soft_delete_column = through_model._meta.fields_map[soft_delete_field].source_field or soft_delete_field
-            select_query = select_query.where(through_table[soft_delete_column].isnull())
 
         _, already_existing_relations_raw = await connection.execute(
-            *ThroughRows.get_statement(relation, select_query)
+            *ThroughRows.get_statement(relation, select_query, connection)
         )
         # The related model's key fields convert a related instance's values - instances[0], not
         # relation.instance.
@@ -211,18 +218,16 @@ class ThroughRowInserting:
                 *default_columns,
                 *key_columns,
             ]
+            column_fields = ThroughRows.get_column_fields(relation, inserted_columns)
             await ThroughRowInserting.insert_through_rows(
                 connection,
                 through_table,
                 inserted_columns,
                 rows,
                 captured_model=through_model,
-                hides_values=ThroughRows.holds_sensitive_values(relation, through_defaults),
-                column_fields=(
-                    ThroughRows.get_column_fields(relation, inserted_columns)
-                    if connection.features.copies_bulk_inserts
-                    else None
-                ),
+                hides_values=ThroughRows.holds_sensitive_keys(relation)
+                or any(field.sensitive for field in column_fields or ()),
+                column_fields=column_fields if connection.features.copies_bulk_inserts else None,
             )
         linked = [
             instance
@@ -281,13 +286,14 @@ class ThroughRowInserting:
             capture_needs = None
         if column_fields is not None and conflict_target_columns is None and capture_needs is None:
             parameters = connection.dialect.parameters
-            await connection.copy(
+            command = WriteCopy(
                 through_table.get_table_name(),
                 [column.name for column in columns],
                 rows,
                 [parameters.get_copy_column_type(field) for field in column_fields],
                 through_table.get_schema_name(),
             )
+            await BoundWrite.execute_command(connection, command)
             return len(rows)
         rows_per_statement = max(
             1, (connection.features.max_bind_parameters - MANY_TO_MANY_WRITE_BIND_PARAMETERS_HEADROOM) // len(columns)
@@ -305,35 +311,34 @@ class ThroughRowInserting:
             if capture_needs is not None and connection.features.supports_returning:
                 query = query.returning(*capture_needs.columns)
             sql, values = query.get_parameterized_sql()
-            statements.append((sql, QueryParameters(values, range(len(values))) if hides_values else values))
+            statements.append(
+                WriteStatement(
+                    sql,
+                    QueryParameters(values, range(len(values))) if hides_values else values,
+                    returns_rows=capture_needs is not None and connection.features.supports_returning,
+                )
+            )
+        bound = BoundWrite(statements)
+        written_count: int | None = 0
         if capture_needs is not None:
             captured_model = cast("type[Model]", captured_model)
             captured = CapturedWrite(captured_model, capture_needs, connection, RowOperation.INSERT)
+            async for result in bound.execute(connection):
+                written_count = ThroughRowInserting.get_count_sum(written_count, result.row_count)
+                if connection.features.supports_returning:
+                    await captured.capture_returned(result.rows)
             if not connection.features.supports_returning:
-                # The rows written are read by their keys - the database returns none of them.
-                written_count: int | None = 0
-                for sql, values in statements:
-                    written_count = ThroughRowInserting.get_count_sum(
-                        written_count, (await connection.execute(sql, values, returns_rows=False))[0]
-                    )
                 await captured.capture_read(
                     {}, ThroughRowInserting.get_row_keys(captured_model, columns, rows, connection.dialect.types)
                 )
-                return written_count
-            written_count = 0
-            for sql, values in statements:
-                count, returned_rows = await connection.execute(sql, values, returns_rows=True)
-                written_count = ThroughRowInserting.get_count_sum(written_count, count)
-                await captured.capture_returned(returned_rows)
             return written_count
-        if len(statements) == 1:
-            return (await connection.execute(*statements[0]))[0]
-        written_count = 0
+        if not bound.requires_transaction:
+            async for result in bound.execute(connection):
+                written_count = ThroughRowInserting.get_count_sum(written_count, result.row_count)
+            return written_count
         async with connection._in_transaction() as transaction_connection:
-            for sql, values in statements:
-                written_count = ThroughRowInserting.get_count_sum(
-                    written_count, (await transaction_connection.execute(sql, values))[0]
-                )
+            async for result in bound.execute(transaction_connection):
+                written_count = ThroughRowInserting.get_count_sum(written_count, result.row_count)
         return written_count
 
     @staticmethod
@@ -508,7 +513,7 @@ class ThroughRowInserting:
             .where(deleted_links_condition)
             .select(*dict.fromkeys((*relation.field.forward_keys, *key_columns)))
         )
-        _, rows = await connection.execute(*ThroughRows.get_statement(relation, deleted_links_query))
+        _, rows = await connection.execute(*ThroughRows.get_statement(relation, deleted_links_query, connection))
         if not rows:
             return set()
         types = connection.dialect.types

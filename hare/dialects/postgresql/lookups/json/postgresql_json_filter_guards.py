@@ -28,44 +28,37 @@ class PostgresqlJsonFilterGuards(JsonFilterGuards):
         """The jsonb value at the path (``->``), or the column itself for an empty path."""
         return JsonFilterParser.get_field_path(field_term, key_parts, as_text=False) if key_parts else field_term
 
-    @classmethod
-    def get_text_term(cls, field_term: Term, key_parts: list[str | int]) -> Term:
+    def get_text_term(self, field_term: Term, key_parts: list[str | int]) -> Term:
         return JsonFilterParser.get_field_path(field_term, key_parts) if key_parts else field_term
 
-    @classmethod
-    def get_container_term(cls, field_term: Term, key_parts: list[str | int]) -> Term:
-        return cls.get_json_term(field_term, key_parts)
+    def get_container_term(self, field_term: Term, key_parts: list[str | int]) -> Term:
+        return self.get_json_term(field_term, key_parts)
 
-    @classmethod
-    def get_container_value(cls, value: Any) -> Any:
+    def get_container_value(self, value: Any) -> Any:
         return Cast(ValueWrapper(json.dumps(value)), "JSONB")
 
-    @classmethod
-    def get_container_in_list(cls, container_term: Term, values: list[Any]) -> Criterion:
+    def get_container_in_list(self, container_term: Term, values: list[Any]) -> Criterion:
         # Bound as ONE jsonb[] parameter, however long the list.
         json_texts = [json.dumps(item) for item in values]
         return BasicCriterion(
-            Equality.EQ, container_term, AnyValue(PostgresqlLargeInList.get_array_term(json_texts, "jsonb"))
+            Equality.EQ, container_term, AnyValue(PostgresqlLargeInList().get_array_term(json_texts, "jsonb"))
         )
 
-    @classmethod
-    def get_scalar_in_list(cls, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
-        return PostgresqlLargeInList.is_in(guarded_term, values, element_type=sql_type)
+    def get_scalar_in_list(self, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
+        return PostgresqlLargeInList().is_in(guarded_term, values, element_type=sql_type)
 
-    @classmethod
-    def get_scalar_not_in_list(cls, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
-        return PostgresqlLargeInList.not_in(guarded_term, values, element_type=sql_type)
+    def get_scalar_not_in_list(self, guarded_term: Term, values: list[Any], sql_type: str) -> Criterion:
+        return PostgresqlLargeInList().not_in(guarded_term, values, element_type=sql_type)
 
-    @classmethod
     def key_existence_criterion(
-        cls, field_term: Term, key_parts: list[str | int], operator_: Any, value: Any
+        self, field_term: Term, key_parts: list[str | int], operator_: Any, value: Any
     ) -> Criterion:
         # has_key/has_keys/has_any_keys test the object AT the path, so they need the JSON-typed
         # extraction (`->`), not the text one (`->>`).
         # Imported here: the modules import each other.
         from hare.dialects.postgresql.lookups.json.postgresql_json_lookups import PostgresqlJsonLookups
 
-        path_term = cls.get_json_term(field_term, key_parts)
+        path_term = self.get_json_term(field_term, key_parts)
         if operator_ is JsonLookups.has_key:
             return PostgresqlJsonLookups.has_key(path_term, value)
         if operator_ is JsonLookups.has_keys:
@@ -82,9 +75,8 @@ class PostgresqlJsonFilterGuards(JsonFilterGuards):
         normalized_date = Function("MAKE_DATE", year, month, 1) + Cast(day - 1, "INT")
         return Case().when(Function("DATE_PART", "month", normalized_date).eq(month), Cast(text_term, sql_cast_type))
 
-    @classmethod
     def type_guarded_term(
-        cls, field_term: Term, key_parts: list[str | int], json_type: str, sql_cast_type: str | None
+        self, field_term: Term, key_parts: list[str | int], json_type: str, sql_cast_type: str | None
     ) -> Term:
         """Wraps the JSON path's value in ``CASE WHEN jsonb_typeof(...) = json_type THEN ... END``: a
         stored value of another type gives NULL instead of a failed cast, and the number ``3``
@@ -105,7 +97,7 @@ class PostgresqlJsonFilterGuards(JsonFilterGuards):
         if sql_cast_type in {"timestamp", "timestamptz"}:
             return Case().when(
                 type_guard & PostgresqlRegexLookups.posix_regex(text_term, JSON_ISO_DATETIME_PATTERN),
-                cls.calendar_checked_cast(text_term, sql_cast_type),
+                self.calendar_checked_cast(text_term, sql_cast_type),
             )
         branch_term = Cast(text_term, sql_cast_type) if sql_cast_type else text_term
         return Case().when(type_guard, branch_term)

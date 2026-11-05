@@ -447,6 +447,21 @@ def test_to_db_value_wraps_encoder_failure():
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize("error_type", [TypeError, ConfigurationError])
+def test_custom_encoder_errors_do_not_disclose_sensitive_values(error_type):
+    def failing_encoder(value):
+        raise error_type(f"cannot encode private value: {value}")
+
+    field = JSONField(encoder=failing_encoder, sensitive=True)
+    field.model_field_name = "document"
+    with pytest.raises(ValidationError) as raised:
+        field.to_db_value({"secret": "private-value"}, None)
+    assert "document" in str(raised.value)
+    assert "private-value" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+@pytest.mark.database_independent
 def test_to_db_value_runs_custom_encoder_on_str_input():
     """A str/bytes value runs through `self.encoder()` exactly as given - a custom encoder (e.g.
     one that encrypts) sees the same raw value regardless of its Python type."""

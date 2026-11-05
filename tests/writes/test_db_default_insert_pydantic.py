@@ -8,8 +8,6 @@ from hare.contrib.pydantic import pydantic_model_creator
 from tests.shared_models.testmodels import NoFetchDefaultModel
 from tests.shared_models.testmodels_postgres import DefaultModel
 
-REQUIRES = ("pydantic",)
-
 
 class TestPydanticDbDefault:
     @pytest.mark.asyncio

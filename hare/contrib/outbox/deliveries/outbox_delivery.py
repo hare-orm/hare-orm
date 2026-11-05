@@ -7,7 +7,10 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, EVENT_TOPIC_HEADER
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
+from hare.contrib.outbox.deliveries.messages import INVALID_DELIVERY_CONCURRENCY
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
+from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -25,7 +28,7 @@ class OutboxDelivery(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def deliver(self, event: OutboxEvent) -> None:
+    async def deliver(self, event: OutboxEvent) -> DeliveryResult | None:
         """Sends one event.
 
         Args:
@@ -37,7 +40,7 @@ class OutboxDelivery(abc.ABC):
 
     async def deliver_batch(
         self, events: Sequence[OutboxEvent], *, concurrency: int, timeout_seconds: float
-    ) -> list[BaseException | None]:
+    ) -> list[DeliveryResult]:
         """Sends several events - of distinct ordering keys, so in any order. By default each through
         ``deliver()``, up to ``concurrency`` at a time, each within ``timeout_seconds``.
 
@@ -48,16 +51,24 @@ class OutboxDelivery(abc.ABC):
                 sending batches - may take.
 
         Returns:
-            Per event, None when it was sent, else what failed it.
+            One result per event, identified by its ID rather than its position.
+
+        Raises:
+            ConfigurationError: Nonpositive concurrency would leave deliveries blocked.
         """
+        if concurrency <= 0:
+            raise ConfigurationError(INVALID_DELIVERY_CONCURRENCY)
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def deliver_one(event: OutboxEvent) -> None:
+        async def deliver_one(event: OutboxEvent) -> DeliveryResult | None:
             async with semaphore:
-                await asyncio.wait_for(self.deliver(event), timeout_seconds)
+                return await asyncio.wait_for(self.deliver(event), timeout_seconds)
 
         results = await asyncio.gather(*(deliver_one(event) for event in events), return_exceptions=True)
-        return [result if isinstance(result, BaseException) else None for result in results]
+        return [
+            result if isinstance(result, DeliveryResult) else DeliveryResult(event.id, result)
+            for event, result in zip(events, results, strict=True)
+        ]
 
     async def close(self) -> None:
         """Releases the connections the delivery opened - nothing by default."""

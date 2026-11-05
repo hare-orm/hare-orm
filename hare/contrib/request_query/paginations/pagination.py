@@ -13,7 +13,6 @@ from hare.contrib.request_query.paginations.constants import (
     DEFAULT_LIMIT_PARAMETER,
     DEFAULT_MAX_PAGE_LIMIT,
     DEFAULT_PAGE_LIMIT,
-    MAX_PAGE_LIMIT_CEILING,
 )
 from hare.exceptions import ConfigurationError
 
@@ -34,8 +33,7 @@ class Pagination(RequestOption):
         limit_parameter: The name of the page size parameter.
 
     Raises:
-        ConfigurationError: A size isn't an int or isn't in ``1 <= default_limit <= max_limit <=
-            MAX_PAGE_LIMIT_CEILING``.
+        ConfigurationError: A size isn't an int or doesn't satisfy ``1 <= default_limit <= max_limit``.
     """
 
     default_limit: int = DEFAULT_PAGE_LIMIT
@@ -47,9 +45,9 @@ class Pagination(RequestOption):
         for name, value in (("default_limit", self.default_limit), ("max_limit", self.max_limit)):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ConfigurationError(f"{option_name}.{name} must be an int, got {value!r}")
-        if not 1 <= self.default_limit <= self.max_limit <= MAX_PAGE_LIMIT_CEILING:
+        if not 1 <= self.default_limit <= self.max_limit:
             raise ConfigurationError(
-                f"{option_name} needs 1 <= default_limit <= max_limit <= {MAX_PAGE_LIMIT_CEILING}, "
+                f"{option_name} needs 1 <= default_limit <= max_limit, "
                 f"got default_limit={self.default_limit}, max_limit={self.max_limit}"
             )
 

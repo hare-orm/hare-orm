@@ -8,5 +8,8 @@ from hare.sql.terms.functions.function import Function
 class Upper(Function):
     """``UPPER(text)``."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, term: Any, alias: str | None = None) -> None:
         super().__init__("UPPER", term, alias=alias)

@@ -16,8 +16,8 @@ class ModelGenerationOptions:
         dialect: The dialect the table was read from.
         app_label: The app label relations are qualified with.
         foreign_key_target_overrides: Per target table, the ``"<app>.<Class>"`` a relation points at.
-        skip_many_to_many_through_tables: Whether a ManyToManyField through table gets a note instead
-            of a class.
+        skip_many_to_many_through_tables: Whether a table with a possible many-to-many junction
+            shape gets a note instead of a class; its constraints still need review.
         class_name: The class name - ``ModelNaming.get_class_name()`` by default.
         connection_dialect: The dialect of the connection the table was read on - a field's column
             type may depend on its driver; the dialect's own by default.

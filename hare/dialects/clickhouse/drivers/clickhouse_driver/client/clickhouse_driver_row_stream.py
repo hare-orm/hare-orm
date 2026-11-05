@@ -4,10 +4,10 @@ import asyncio
 import concurrent.futures
 import threading
 from collections.abc import AsyncGenerator
-from typing import Any
 
 from clickhouse_driver import Client
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.clickhouse.client.clickhouse_streamed_row import ClickhouseStreamedRow
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_connections import (
     ClickhouseDriverConnections,
@@ -31,9 +31,6 @@ class ClickhouseDriverRowStream:
 
     __slots__ = ("connections", "sql", "batch_size", "stopped")
 
-    #: What the thread puts after the last batch.
-    END: object = object()
-
     def __init__(self, connections: ClickhouseDriverConnections, sql: str, batch_size: int) -> None:
         self.connections = connections
         self.sql = sql
@@ -51,24 +48,60 @@ class ClickhouseDriverRowStream:
             Exception: The driver's error the query failed with.
         """
         loop = asyncio.get_running_loop()
-        batches: asyncio.Queue[Any] = asyncio.Queue(maxsize=CLICKHOUSE_DRIVER_STREAM_QUEUE_SIZE)
-        reading = self.connections.run(self.read_on_thread, loop, batches)
+        batches: asyncio.Queue[list[ClickhouseStreamedRow]] = asyncio.Queue(
+            maxsize=CLICKHOUSE_DRIVER_STREAM_QUEUE_SIZE
+        )
+        submitted = self.connections.submit(self.read_on_thread, loop, batches)
+        reading = asyncio.wrap_future(submitted)
+        receiving: asyncio.Task[list[ClickhouseStreamedRow]] | None = None
         try:
             while True:
-                item = await batches.get()
-                if item is self.END:
-                    break
-                if isinstance(item, BaseException):
-                    raise item
-                yield item
+                if not batches.empty():
+                    yield batches.get_nowait()
+                    continue
+                if reading.done():
+                    reading.result()
+                    return
+                receiving = asyncio.create_task(batches.get())
+                await asyncio.wait((receiving, reading), return_when=asyncio.FIRST_COMPLETED)
+                if receiving.done():
+                    yield receiving.result()
+                    receiving = None
+                else:
+                    receiving.cancel()
+                    await asyncio.gather(receiving, return_exceptions=True)
+                    receiving = None
+                    # A connection/producer failure may occur before the first batch.
+                    # Completion is carried by the Future, never a queue sentinel.
+                    reading.result()
         finally:
             self.stopped.set()
-            while not batches.empty():
-                batches.get_nowait()
+            cancelled_before_start = submitted.cancel()
+            await ResourceCompletion.wait(self.finish_reading(reading, receiving, batches, cancelled_before_start))
+
+    @staticmethod
+    async def finish_reading(
+        reading: asyncio.Future[None],
+        receiving: asyncio.Task[list[ClickhouseStreamedRow]] | None,
+        batches: asyncio.Queue[list[ClickhouseStreamedRow]],
+        cancelled_before_start: bool,
+    ) -> None:
+        """Release the bounded queue and wait until the worker releases its connection."""
+        if receiving is not None:
+            receiving.cancel()
+            await asyncio.gather(receiving, return_exceptions=True)
+        while not batches.empty():
+            batches.get_nowait()
+        if cancelled_before_start:
+            await asyncio.gather(reading, return_exceptions=True)
+        else:
             await reading
 
     def read_on_thread(
-        self, library_client: Client, loop: asyncio.AbstractEventLoop, batches: asyncio.Queue[Any]
+        self,
+        library_client: Client,
+        loop: asyncio.AbstractEventLoop,
+        batches: asyncio.Queue[list[ClickhouseStreamedRow]],
     ) -> None:
         """Reads the rows on the worker thread holding a connection, putting them in batches.
 
@@ -93,23 +126,24 @@ class ClickhouseDriverRowStream:
             reads_to_end = True
             if batch and not self.put(loop, batches, batch):
                 return
-            self.put(loop, batches, self.END)
-        except Exception as error:
-            reads_to_end = True
-            self.put(loop, batches, error)
         finally:
             if not reads_to_end:
                 # The server is still sending the rows - the connection is dropped, the next statement
                 # of the thread opens another.
                 library_client.disconnect()
 
-    def put(self, loop: asyncio.AbstractEventLoop, batches: asyncio.Queue[Any], item: Any) -> bool:
+    def put(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        batches: asyncio.Queue[list[ClickhouseStreamedRow]],
+        item: list[ClickhouseStreamedRow],
+    ) -> bool:
         """Hands a batch to the reader, waiting while it holds as many as it may.
 
         Args:
             loop: The reader's event loop.
             batches: The batches the reader takes.
-            item: The batch, the end, or an error.
+            item: The batch of rows. Completion and errors belong to the producer's Future.
 
         Returns:
             Whether the reader took it - False once it stopped reading.

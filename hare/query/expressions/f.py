@@ -13,8 +13,11 @@ from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult, TableCriterionTuple
 from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.ordering import Ordering
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.filters.lookups.json.json_filter_parser import JsonFilterParser
 from hare.query.key_columns import KeyColumns
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.lookup_info.value_paths import ValuePaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -36,6 +39,8 @@ class F(CombinableExpression):
     Args:
         name: The name of the field to reference.
     """
+
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("name", ArgumentRole.FIELD),))
 
     # A bare reference to a model column has that column's own type - its value is decoded
     # through the field's from_db_value(), exactly like the same column in .values().
@@ -175,29 +180,15 @@ class F(CombinableExpression):
                 tracker.record_lookup(
                     expression_context.model, self.name, expression_context.select_related_path_prefix
                 )
-            term, joins, output_field = LookupPaths.get_nested_field(
-                expression_context.model,
-                expression_context.table,
-                self.name,
-                visibility=expression_context.visibility,
-                select_related_extra_conditions=expression_context.select_related_extra_conditions,
-                dialect=expression_context.dialect,
-                connection=expression_context.connection,
-            )
+            bound_path = BoundLookupPath.bind(expression_context, self.name)
+            term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         elif (
             rest_name_parts
             and not names_annotation
-            and (path_split := ValuePaths.get_value_path_split(expression_context.model, self.name))
+            and ValuePaths.get_value_path_split(expression_context.model, self.name) is not None
         ):
-            # A path inside a JSON, array or range field's value, e.g. F("data__a__b"), F("tags__0")
-            # or F("during__startswith") - a JSON path reads the JSON value itself, not its text,
-            # so it's decoded, compared and ordered as JSON.
-            __, path_field, path_segments = path_split
-            column = expression_context.table[expression_context.model._meta.fields_db_projection[main_name_part]]
-            term, output_field = ValuePaths.get_value_path_term(
-                column, path_field, path_segments, self.name, expression_context.dialect
-            )
-            LookupPaths.mark_sensitive_column(term, path_field)
+            bound_path = BoundLookupPath.bind(expression_context, self.name)
+            term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         elif (
             rest_name_parts
             and main_name_part in expression_context.annotations
@@ -231,6 +222,7 @@ class F(CombinableExpression):
                 else:
                     referenced_result = annotation.get_result(expression_context)
                     term = referenced_result.term
+                    joins = referenced_result.joins
                     # The referenced annotation's own value type - e.g. Length("name") is an
                     # integer, not its argument's CharField.
                     output_field = annotation.get_value_field(referenced_result)
@@ -247,24 +239,7 @@ class F(CombinableExpression):
                 table = expression_context.table
                 term = Tuple(*(table[column] for column in KeyColumns.get_source_columns(meta)))
                 return ExpressionResult(term=term, output_field=None, joins=joins)
-            try:
-                field_name = (
-                    meta.primary_key_attribute
-                    if self.name == "pk" and isinstance(meta.primary_key_attribute, str)
-                    else self.name
-                )
-                # Table-qualified, not a bare HareSqlField(column) - unqualified is ambiguous SQL
-                # the moment any OTHER join in the same query happens to have a same-named
-                # column, even though this F() always meant this specific model's own field.
-                term = expression_context.table[meta.fields_db_projection[field_name]]
-
-                if (output_field := meta.fields_map.get(field_name, None)) and (
-                    function_cast := output_field.get_function_cast(expression_context.dialect)
-                ):
-                    term = function_cast(output_field, term)
-            except KeyError:
-                raise FieldError(
-                    f"There is no non-virtual field {self.name} on Model {expression_context.model.__name__}"
-                ) from None
+            bound_path = BoundLookupPath.bind(expression_context, self.name)
+            term, joins, output_field = bound_path.term, list(bound_path.joins), bound_path.field
         LookupPaths.mark_sensitive_column(term, output_field)
         return ExpressionResult(term=term, output_field=output_field, joins=joins)

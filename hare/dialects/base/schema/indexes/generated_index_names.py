@@ -8,6 +8,9 @@ from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.enums import GeneratedNamePrefix
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes.index import Index
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.models import Model
@@ -82,9 +85,7 @@ class GeneratedIndexNames(SchemaEditorPart):
         return Index(
             fields=field_names,
             unique=True,
-            name=self.editor.constraint_names.constraint_name_for_model(
-                model, UniqueConstraint(fields=tuple(column_names))
-            ),
+            name=GeneratedNames.get_index_name(GeneratedNamePrefix.UNIQUE_CONSTRAINT, model, column_names),
         )
 
     def get_generated_constraint_names(
@@ -122,17 +123,18 @@ class GeneratedIndexNames(SchemaEditorPart):
             )
         return names
 
-    async def rename_generated_index_names(
+    def get_generated_index_names_change_plan(
         self, old_model: type[Model], new_model: type[Model], renamed_field_names: Mapping[str, str] | None = None
-    ) -> None:
-        """Renames the indexes and constraints named after a table or columns that were just renamed, so
+    ) -> SchemaChangePlan:
+        """Prepares renaming indexes and constraints after their table or columns, so
         they keep the names a later migration computes for them.
 
         Args:
             old_model: The model under its old table and column names.
-            new_model: The model under the new ones - its table and columns already renamed.
+            new_model: The model under the new names, used when the plan executes.
             renamed_field_names: The new name of each field of `old_model` the rename gave another name.
         """
+        steps: list[SchemaStep] = []
         new_generated = self.get_generated_index_names(new_model)
         # A field's own index can be listed twice - by the field and as a Meta.indexes entry.
         renamed_names: set[str | None] = set()
@@ -141,27 +143,30 @@ class GeneratedIndexNames(SchemaEditorPart):
             if new_entry is None or new_entry[0].name == old_index.name or old_index.name in renamed_names:
                 continue
             renamed_names.add(old_index.name)
-            await self.rename_generated_index(new_model, old_index, new_entry[0], is_constraint)
+            steps.extend(self.get_generated_index_rename_plan(new_model, old_index, new_entry[0], is_constraint).steps)
         if self.editor.RENAME_CONSTRAINT_TEMPLATE is None:
             # The constraints keep the names they were made with where the database renames none.
-            return
+            return SchemaChangePlan(tuple(steps))
         new_constraint_names = self.get_generated_constraint_names(new_model)
         for key, old_name in self.get_generated_constraint_names(old_model, renamed_field_names).items():
             new_name = new_constraint_names.get(key)
             if new_name is None or new_name == old_name:
                 continue
-            await self.editor.run_sql(
-                self.editor.RENAME_CONSTRAINT_TEMPLATE.format(
-                    table=self.editor.qualify_table_name(new_model._meta.db_table, new_model._meta.schema),
-                    old_name=self.editor.quote(old_name),
-                    new_name=self.editor.quote(new_name),
+            steps.append(
+                SchemaStatement(
+                    self.editor.RENAME_CONSTRAINT_TEMPLATE.format(
+                        table=self.editor.qualify_table_name(new_model._meta.db_table, new_model._meta.schema),
+                        old_name=self.editor.quote(old_name),
+                        new_name=self.editor.quote(new_name),
+                    )
                 )
             )
+        return SchemaChangePlan(tuple(steps))
 
-    async def rename_generated_index(
+    def get_generated_index_rename_plan(
         self, model: type[Model], old_index: Index, new_index: Index, is_constraint: bool
-    ) -> None:
-        """Renames one index with a generated name; a missing one is left alone.
+    ) -> SchemaChangePlan:
+        """Prepares renaming one generated index, leaving a missing one alone where supported.
 
         Args:
             model: The model under its new table name.
@@ -170,11 +175,14 @@ class GeneratedIndexNames(SchemaEditorPart):
             is_constraint: Whether the index backs a unique constraint.
         """
         if self.editor.RENAME_INDEX_IF_EXISTS_TEMPLATE is None:
-            await self.editor.rename_index(model, old_index, new_index)
-            return
-        await self.editor.run_sql(
-            self.editor.RENAME_INDEX_IF_EXISTS_TEMPLATE.format(
-                old_name=self.editor.qualify_table_name(cast("str", old_index.name), model._meta.schema),
-                new_name=self.editor.quote(cast("str", new_index.name)),
+            return self.editor.get_rename_index_plan(model, old_index, new_index)
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.RENAME_INDEX_IF_EXISTS_TEMPLATE.format(
+                        old_name=self.editor.qualify_table_name(cast("str", old_index.name), model._meta.schema),
+                        new_name=self.editor.quote(cast("str", new_index.name)),
+                    )
+                ),
             )
         )

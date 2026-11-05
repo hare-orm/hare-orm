@@ -7,8 +7,6 @@ import pytest
 from hare import Connections
 from hare.exceptions import UnSupportedError
 
-REQUIRES = ("clickhouse-connect",)
-
 
 @pytest.fixture
 def connect_db(clickhouse_db):

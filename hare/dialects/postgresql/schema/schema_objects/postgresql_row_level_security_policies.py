@@ -85,8 +85,9 @@ class PostgresqlRowLevelSecurityPolicies(RowLevelSecurityPolicies):
             or (old_policy.using is not None and new_policy.using is None)
             or (old_policy.with_check is not None and new_policy.with_check is None)
         ):
+            statements = self.get_policy_create_sqls(model, new_policy)
             await self.drop_policy(model, old_policy)
-            await self.create_policy(model, new_policy)
+            await self.editor.run_sqls(statements)
             return
         using, with_check = self.get_policy_conditions_sql(model, new_policy)
         await self.editor.run_sql(

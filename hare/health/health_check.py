@@ -25,6 +25,7 @@ from hare.health.enums import HealthStatus
 from hare.health.health_report import HealthReport
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
 from hare.instrumentation.pools.pool_registry import PoolRegistry
+from hare.instrumentation.pools.sample_window import SampleWindow
 
 if TYPE_CHECKING:
     from hare.core.connections.connection_handler import ConnectionHandler
@@ -217,7 +218,8 @@ class HealthCheck:
             if status is None:
                 continue
             previous_taken, previous_timeouts, previous_failures, wait_cursor = self.readings.get(client, (0, 0, 0, 0))
-            wait_cursor, waits, _ = client.pool_statistics.get_waits_since(wait_cursor)
+            waits = SampleWindow.from_records(wait_cursor, client.pool_statistics.get_waits_since(wait_cursor))
+            wait_cursor = waits.end_cursor
             self.readings[client] = (
                 status.acquire_count,
                 status.acquire_timeouts,
@@ -230,7 +232,7 @@ class HealthCheck:
                     max(0, status.acquire_count - previous_taken),
                     max(0, status.acquire_timeouts - previous_timeouts),
                     max(0, status.connect_failures - previous_failures),
-                    tuple(waits),
+                    waits,
                 )
             )
         return tuple(sorted(changes, key=lambda change: (change.status.role, change.status.schema or "")))

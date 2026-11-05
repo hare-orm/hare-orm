@@ -13,6 +13,7 @@ from hare.dialects.base.client.constants import (
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
+from hare.dialects.base.client.transaction_lifecycle.transaction_state import TransactionState
 from hare.dialects.base.transactions.contexts.joined_transaction_context import JoinedTransactionContext
 from hare.dialects.base.transactions.contexts.nested_transaction_context import NestedTransactionContext
 from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
@@ -26,7 +27,7 @@ from hare.exceptions import (
     UnSupportedError,
 )
 from hare.instrumentation.declarations import PoolStatus
-from hare.transactions.enums import TransactionEventType
+from hare.transactions.enums import TransactionEventType, TransactionOutcome, TransactionPhase
 from hare.transactions.transaction_options import TransactionOptions
 
 
@@ -36,14 +37,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
     is_transaction_client: ClassVar[bool] = True
     #: The driver only initializes deferred state in _driver_begin(), without suspending.
     begins_without_suspending: ClassVar[bool] = False
-    _finalized: bool = False
-    #: True once this top-level transaction's COMMIT landed - `_finalized` is set by a rejected COMMIT
-    #: and a lost connection too.
-    _commit_landed: bool = False
-    #: True when the connection broke while the COMMIT was in flight - it may have landed.
-    _commit_outcome_unknown: bool = False
     #: True between a successful prepare of a two-phase commit and the release of the connection to the pool -
-    #: `_finalized` alone doesn't tell that the release is still due.
+    #: ``transaction_state.finished`` alone doesn't tell that the release is still due.
     _prepared_without_release: bool = False
     #: Set when a shielded COMMIT/ROLLBACK or savepoint statement hit its wait bound with its task
     #: still running - the connection may still be in use and isn't given back to the pool.
@@ -63,11 +58,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: later released) was cancelled while in flight - whether it landed is unknown, so the
     #: transaction can't commit.
     _statement_interrupted: bool = False
-    #: Set on the top-level wrapper once its real COMMIT/ROLLBACK has started - from then on no
-    #: other statement or savepoint may start on the transaction.
-    _ending: bool = False
     #: The span the running top-level COMMIT/ROLLBACK holds - statements it issues itself run
-    #: under it and stay allowed while ``_ending`` is set. None while no COMMIT/ROLLBACK runs.
+    #: under it and stay allowed while ``transaction_state.ending`` is set. None while no ending runs.
     _ending_span: SavepointSpan | None = None
     #: Serializes this transaction's statements and savepoints across tasks - one instance per
     #: top-level transaction, shared by every nested wrapper (created by each backend's wrapper).
@@ -107,6 +99,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
         )
         self.log = connection.log
         self.connection_alias = connection.connection_alias
+        self.connection_handler = connection.connection_handler
+        self.connection_config = connection.connection_config
         self.features = connection.features
         self.tenant_schema_template = connection.tenant_schema_template
         self.tenant_schema = connection.tenant_schema
@@ -118,9 +112,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
         self._savepoint_lock = savepoint_lock if savepoint_lock is not None else NestedSavepointLock()
         #: This wrapper's own savepoint name - set only on a nested wrapper, by savepoint().
         self._savepoint_name: str | None = None
-        self._finalized = False
-        self._commit_landed = False
-        self._commit_outcome_unknown = False
+        self.transaction_state = TransactionState()
         self._on_commit_callbacks = []
         self._on_rollback_callbacks = []
         self._pending_savepoints = []
@@ -255,13 +247,21 @@ class TransactionClient(DatabaseClient, abc.ABC):
 
     def _is_transaction_finished(self) -> bool:
         """Whether this wrapper's own savepoint or the whole transaction has already ended."""
-        return self._finalized or self._get_top_level_transaction()._finalized
+        return self.transaction_state.finished or self._get_top_level_transaction().transaction_state.finished
 
     def _is_inside_ending_operation(self) -> bool:
         """Whether the calling context runs inside this transaction's own COMMIT/ROLLBACK."""
         ending_span = self._get_top_level_transaction()._ending_span
         current_span = current_savepoint_span.get()
         return ending_span is not None and current_span is not None and current_span.is_within(ending_span)
+
+    def _is_transaction_aborted(self) -> bool:
+        """Whether the driver recorded an implicit database rollback.
+
+        Clients enabling checks_aborted_transactions override this hook to prevent
+        subsequent statements from silently running outside their transaction.
+        """
+        return False
 
     def _check_statement_allowed(self) -> None:
         """Refuses a new statement on a transaction that ended or is ending.
@@ -274,9 +274,9 @@ class TransactionClient(DatabaseClient, abc.ABC):
         # runs on every statement of a transaction.
         outer_transaction = self._outer_transaction
         top_level_transaction = self if outer_transaction is None else outer_transaction
-        if self._finalized or top_level_transaction._finalized:
+        if self.transaction_state.finished or top_level_transaction.transaction_state.finished:
             raise TransactionManagementError("Cannot execute query: transaction already finalised")
-        if top_level_transaction._ending and not self._is_inside_ending_operation():
+        if top_level_transaction.transaction_state.ending and not self._is_inside_ending_operation():
             raise TransactionManagementError(
                 "Cannot execute query: the transaction is already being committed or rolled back"
             )
@@ -294,9 +294,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: time.perf_counter() at the top-level BEGIN - the transaction's duration is computed from it.
     #: None on a savepoint's client.
     _transaction_started_at: float | None = None
-    #: on_commit() callbacks of the whole transaction, kept on the top-level wrapper. Each backend
-    #: creates a real list in its own transaction client's __init__ - this is just the type
-    #: annotation (a mutable class-level default would be shared across all instances).
+    #: on_commit() callbacks of the whole transaction, kept on the top-level wrapper. The common
+    #: constructor creates a separate list for each transaction client.
     _on_commit_callbacks: list[TransactionCallback]
     #: on_rollback() callbacks of the whole transaction, kept on the top-level wrapper - fired by a
     #: real top-level rollback, or by the rollback of the savepoint they were registered in.
@@ -371,10 +370,6 @@ class TransactionClient(DatabaseClient, abc.ABC):
 
     #: This wrapper's own savepoint - set only on a nested wrapper, by savepoint().
     _savepoint_name: str | None = None
-    #: The real COMMIT/ROLLBACK about to be sent, kept until its callbacks have run - a later call
-    #: that finds the transaction already ended by an interrupted earlier one fires the callbacks
-    #: of that operation.
-    _pending_top_level_operation: TransactionEventType | None = None
 
     @abc.abstractmethod
     async def _driver_begin(self) -> None:
@@ -426,8 +421,9 @@ class TransactionClient(DatabaseClient, abc.ABC):
         return True
 
     def _is_connection_lost(self, error: BaseException) -> bool:
-        """Whether a driver error of a COMMIT/ROLLBACK means the connection is gone - the server
-        rolls such a transaction back.
+        """Whether a driver error of a COMMIT/ROLLBACK means the connection is gone.
+
+        The transaction outcome is determined separately; an in-flight COMMIT may be unknown.
 
         Args:
             error: The error the driver raised.
@@ -483,8 +479,8 @@ class TransactionClient(DatabaseClient, abc.ABC):
             commit_error: The error the COMMIT raised.
         """
 
-    def _mark_finalized(self) -> None:
-        self._finalized = True
+    def _mark_savepoint_released(self) -> None:
+        self.transaction_state.finish(TransactionOutcome.RELEASED)
 
     def _mark_top_level_operation_abandoned(self, task: asyncio.Future[Any]) -> None:
         self._shielded_operation_abandoned = True
@@ -492,7 +488,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
     def _mark_begin_operation_abandoned(self, task: asyncio.Future[Any]) -> None:
         self._shielded_operation_abandoned = True
         self._shielded_begin_abandoned_task = task
-        self._ending = True
+        self.transaction_state.phase = TransactionPhase.ENDING
         self._commit_refusal = TRANSACTION_BEGIN_ABANDONED_MESSAGE
 
     @staticmethod
@@ -507,11 +503,14 @@ class TransactionClient(DatabaseClient, abc.ABC):
             self._event_loop = asyncio.get_running_loop()
         if self.begins_without_suspending:
             await self._driver_begin()
+            self.transaction_state.start()
             return
         # Shielded: the BEGIN can land after the awaiting task was cancelled, and the connection
         # would then go back to the pool mid-transaction.
         await TransactionEnding.run_shielded_from_cancellation(
-            self._driver_begin(), on_landed=self._do_nothing, on_timeout=self._mark_begin_operation_abandoned
+            self._driver_begin(),
+            on_landed=self.transaction_state.start,
+            on_timeout=self._mark_begin_operation_abandoned,
         )
 
     async def savepoint(self) -> None:
@@ -520,6 +519,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
         # The SAVEPOINT goes out ahead of the first statement run under it
         # (PendingStatements.send_pending_savepoints()).
         self._savepoint_pending = True
+        self.transaction_state.start()
         self._get_top_level_transaction()._pending_savepoints.append(self)
 
     def _mark_begin_sent(self) -> None:
@@ -547,12 +547,12 @@ class TransactionClient(DatabaseClient, abc.ABC):
         if self._savepoint_pending:
             # No statement ran under it - nothing was sent, nothing is released.
             self._drop_pending_savepoint()
-            self._mark_finalized()
+            self._mark_savepoint_released()
             return
         # Not a real commit - the on_commit() callbacks only run once the outermost level commits.
         await TransactionEnding.run_shielded_from_cancellation(
             self._driver_release_savepoint(savepoint_name),
-            on_landed=self._mark_finalized,
+            on_landed=self._mark_savepoint_released,
             on_timeout=self._mark_savepoint_operation_abandoned,
         )
 
@@ -576,7 +576,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
                 self._drop_pending_savepoint()
             else:
                 await self._driver_rollback_to_savepoint(savepoint_name)
-            self._finalized = True
+            self.transaction_state.finish(TransactionOutcome.ROLLED_BACK)
             await TransactionCallbacks.discard_rolled_back_savepoint_callbacks(self)
 
         await TransactionEnding.run_shielded_from_cancellation(
@@ -624,7 +624,11 @@ class TransactionClient(DatabaseClient, abc.ABC):
             TransactionManagementError: The transaction ended or is ending.
         """
         top_level_transaction = self._get_top_level_transaction()
-        if self._finalized or top_level_transaction._finalized or top_level_transaction._ending:
+        if (
+            self.transaction_state.finished
+            or top_level_transaction.transaction_state.finished
+            or top_level_transaction.transaction_state.ending
+        ):
             self._check_statement_allowed()
 
     async def _prepare_transaction(self, xid: str) -> None:
@@ -637,7 +641,7 @@ class TransactionClient(DatabaseClient, abc.ABC):
             TransactionManagementError: The transaction is already finished.
             UnSupportedError: The dialect has no two-phase commit.
         """
-        if self._finalized:
+        if self.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
         two_phase_commit = self.dialect.two_phase_commit
         if two_phase_commit is None:
@@ -651,5 +655,5 @@ class TransactionClient(DatabaseClient, abc.ABC):
         )
 
     def _mark_prepared(self) -> None:
-        self._finalized = True
+        self.transaction_state.finish(TransactionOutcome.PREPARED)
         self._prepared_without_release = True

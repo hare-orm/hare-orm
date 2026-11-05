@@ -6,6 +6,7 @@ from hare.dialects.base.parameters.sql_parameters import SqlParameters
 from hare.dialects.clickhouse.lookups.constants import CLICKHOUSE_VALUE_SET_MINIMUM
 from hare.dialects.clickhouse.types.clickhouse_nullable_types import ClickhouseNullableTypes
 from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 
 if TYPE_CHECKING:
     from hare.fields.field import Field
@@ -18,6 +19,11 @@ class ClickhouseParameters(SqlParameters):
     placeholder_template = "${}"
     # A long list of values of one plain type is one parameter, an external table of a read.
     single_parameter_in_list_min_length = CLICKHOUSE_VALUE_SET_MINIMUM
+
+    def get_parameter_plan_options(self, value: Any) -> Any:
+        if isinstance(value, ClickhouseTypedValue):
+            return value.column_type, value.held_type
+        return None
 
     def get_field_parameter_cast_type(self, field: Field[Any]) -> str | None:
         # A bare literal takes the narrowest type holding it - the rows of a bulk update or of a

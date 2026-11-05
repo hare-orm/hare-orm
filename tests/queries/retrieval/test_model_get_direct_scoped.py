@@ -13,7 +13,10 @@ from tests.shared_models import testmodels
 
 def get_direct_plan(query):
     signature_key = CallSignaturePlans.get_key(ModelRowsQuery, query, query.get_connection(), ())
-    return None if signature_key is None else CallSignaturePlans.find(query.model, signature_key[0])
+    if signature_key is None:
+        return None
+    found = CallSignaturePlans.find_with_value_positions(query.model, signature_key[0])
+    return None if found is None else found[0]
 
 
 @requires_features(supports_positional_rows=True)

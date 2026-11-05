@@ -31,8 +31,7 @@ class ScopeValueSource:
     structure: Any
     value_count: int
 
-    @staticmethod
-    def get_condition_values(condition: Q | None, structure: Any) -> list[Any] | None:
+    def get_condition_values(self, condition: Q | None, structure: Any) -> list[Any] | None:
         """The values of a condition of the structure it was recorded with.
 
         Args:
@@ -44,7 +43,7 @@ class ScopeValueSource:
         """
         if condition is None:
             return [] if structure is None else None
-        description = condition.get_plan_description(PlanContext.EMPTY)
+        description = condition.get_plan_description(PlanContext(model=self.model))
         if description is None or description.structure != structure:
             return None
         return description.values

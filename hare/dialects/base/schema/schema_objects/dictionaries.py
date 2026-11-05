@@ -35,13 +35,9 @@ class Dictionaries(SchemaEditorPart):
         """
         raise self.get_unsupported_error("Dictionaries")
 
-    async def drop_model_dictionaries(self, model: type[Model]) -> None:
-        """Drops the dictionaries a model declares, before its table is dropped - nothing by default:
-        a dialect without dictionaries has none.
-
-        Args:
-            model: The model.
-        """
+    def get_model_drop_sqls(self, model: type[Model]) -> list[str]:
+        """Dependent-object removal statements; empty for a dialect without these objects."""
+        return []
 
     async def alter_dictionary(
         self, model: type[Model], old_dictionary: Dictionary, new_dictionary: Dictionary

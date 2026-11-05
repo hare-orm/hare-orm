@@ -197,7 +197,7 @@ class TupleField(ContainerField):
         return None
 
     def get_python_type(self) -> Any:
-        element_types = [self.get_child_python_type(field) for field in self.fields_in_order]
+        element_types = [field.get_annotation() for field in self.fields_in_order]
         if self.element_names is not None:
             # A dict of exactly the named elements, each of its type.
             return TypedDict(  # type: ignore[operator]

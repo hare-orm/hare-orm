@@ -11,8 +11,9 @@ from hare.query.expressions.compatibility.output_field_compatibility import Outp
 from hare.query.expressions.compatibility.result_branch import ResultBranch
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.numeric.numeric_type import NumericType
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.sql.functions.greatest_least import GreatestLeast as GreatestLeastTerm
 from hare.sql.terms.functions.function import Function as HareSqlFunction
@@ -22,6 +23,8 @@ from hare.sql.terms.term import Term
 class GreatestLeastFunction(Function):
     """``GREATEST``/``LEAST`` of two or more values, a NULL among them as the database takes it -
     skipped, or the result NULL. A string is a field name."""
+
+    structure = ExpressionStructure(positional_role=ArgumentRole.FIELD)
 
     #: ``GREATEST`` or ``LEAST``.
     function_name: ClassVar[str]
@@ -42,17 +45,6 @@ class GreatestLeastFunction(Function):
             raise QueryError(f"{type(self).__name__}() takes at least two values, got {len(expressions)}")
         converted = [FunctionArguments.get_expression(expression) for expression in expressions]
         super().__init__(converted[0], *converted[1:])
-
-    @staticmethod
-    def get_numeric_types(results: list[ExpressionResult]) -> list[NumericType] | None:
-        """Every value's numeric type, or None when one isn't a number."""
-        numeric_types = []
-        for result in results:
-            numeric_type = NumericTyping.get_field_type(result.output_field)
-            if numeric_type is None:
-                return None
-            numeric_types.append(numeric_type)
-        return numeric_types
 
     def _get_default_terms(
         self,
@@ -127,7 +119,7 @@ class GreatestLeastFunction(Function):
             f"{type(self).__name__}()",
         )
         fields = [result.output_field for result in results if result.output_field is not None]
-        numeric_types = self.get_numeric_types(results)
+        numeric_types = NumericTyping.get_field_types(result.output_field for result in results)
         if numeric_types is not None:
             return NumericTyping.get_common_output_field(numeric_types, fields)
         return fields[0] if fields else None

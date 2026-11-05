@@ -19,7 +19,7 @@ class PlanContext:
             binds as one parameter (``Dialect``) - the description of such a list holds no length.
             None to describe every list by its length.
         model: The model the part's field paths start from, None where unknown - a filter key
-            then can't tell a generic foreign key from a field of the same name on another model.
+            then cannot be planned because its field semantics are unknown.
     """
 
     annotations: Mapping[str, Any] | None = None

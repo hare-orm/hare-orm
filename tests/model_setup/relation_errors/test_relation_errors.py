@@ -3,44 +3,6 @@ import pytest
 from hare import Hare, fields
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError
-from tests.utils.context_apps_reset import ContextAppsReset
-
-# Save the original classproperty before any test can shadow it
-_original_apps_prop = Hare.__dict__["apps"]
-
-
-async def _reset_hare():
-    """Helper to reset Hare state before each test.
-
-    Note: We MUST NOT set Hare.apps = None
-    because it is a classproperty and setting it shadows the property
-    with a class attribute, breaking future access.
-    """
-    # Restore the original classproperty if it was shadowed
-    if not isinstance(Hare.__dict__.get("apps"), type(_original_apps_prop)):
-        type.__setattr__(Hare, "apps", _original_apps_prop)
-
-    # Get the current context and properly reset it
-    ctx = HareContext.get_current()
-    if ctx is not None:
-        # Clear db_config first to prevent close_all from trying to import bad backends
-        if ctx._connections is not None:
-            # Clear storage without closing (to avoid importing bad backends)
-            ctx._connections._get_storage().clear()
-            ctx._connections._db_config = None
-            ctx._connections = None
-        ctx._apps = None
-        ctx._inited = False
-        ctx._default_connection = None
-    else:
-        # No context exists - create one for the test
-        ctx = HareContext()
-        ctx.__enter__()
-
-
-async def _teardown_hare():
-    """Helper to teardown Hare state after each test."""
-    ContextAppsReset.reset_apps()
 
 
 @pytest.mark.database_independent
@@ -171,8 +133,7 @@ async def _teardown_hare():
 )
 @pytest.mark.asyncio
 async def test_bad_relation_reference_fails_init(models_module, error_match):
-    await _reset_hare()
-    try:
+    async with HareContext():
         with pytest.raises(ConfigurationError, match=error_match):
             await Hare.init(
                 {
@@ -190,15 +151,12 @@ async def test_bad_relation_reference_fails_init(models_module, error_match):
                     },
                 }
             )
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 async def test_m2m_through_on_delete_set_default_with_db_default_init():
-    await _reset_hare()
-    try:
+    async with HareContext():
         await Hare.init(
             {
                 "connections": {
@@ -219,8 +177,6 @@ async def test_m2m_through_on_delete_set_default_with_db_default_init():
         )
         membership = Hare.apps.get_model("models.DbDefaultMembership")
         assert membership._meta.fields_map["parent"].on_delete == "SET DEFAULT"
-    finally:
-        await _teardown_hare()
 
 
 @pytest.mark.parametrize(

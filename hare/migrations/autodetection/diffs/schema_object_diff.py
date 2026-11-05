@@ -4,7 +4,7 @@ import abc
 from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any
 
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
 from hare.migrations.state.model_state import ModelState
 
 if TYPE_CHECKING:
@@ -46,8 +46,8 @@ class SchemaObjectDiff(abc.ABC):
 
     def get_signature(self, schema_object: Any) -> Hashable:
         """Everything about an object but its name - the call a migration file writes it as, without
-        the name (``ComparableValues``)."""
-        return ComparableValues.get_declaration_key(schema_object, without_name=True)
+        the name (``DeclarationValues``)."""
+        return DeclarationValues.get_declaration_key(schema_object, without_name=True)
 
     def get_name(self, schema_object: Any) -> str | None:
         """An object's declared name, None for an unnamed one."""
@@ -144,6 +144,8 @@ class SchemaObjectDiff(abc.ABC):
             for old_position, old_object in list(unmatched_old.items()):
                 if (
                     self.can_be_renamed(old_object)
+                    and not self.reads_changed_columns(old_object)
+                    and not self.reads_changed_columns(new_object)
                     and self.get_name(old_object) != self.get_name(new_object)
                     and self.get_signature(old_object) == new_signature
                 ):

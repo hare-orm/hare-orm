@@ -6,7 +6,6 @@ from hare.dialects.clickhouse.connection.clickhouse_driver import ClickhouseDriv
 from hare.dialects.clickhouse.constants import CLICKHOUSE_DEFAULT_NATIVE_PORT
 from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import CLICKHOUSE_DRIVER_CONNECTION_OPTIONS
 from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_DRIVER_DRIVER_NAME
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
@@ -45,4 +44,4 @@ class ClickhouseDriverDriver(ClickhouseDriver):
         return (ClickhouseDriverClient,)
 
 
-DialectRegistry.register_driver(ClickhouseDriverDriver())
+extension = ClickhouseDriverDriver.get_contribution

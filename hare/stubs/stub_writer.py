@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 class StubWriter:
     """Writes the stub of every module of models into a directory - ``typings/<package>/<module>.pyi``,
-    where pyright looks first.
+    where pyright looks first. Package modules keep their ``__init__.pyi`` path.
 
     Args:
         bound_models: The models.
@@ -35,8 +35,8 @@ class StubWriter:
                 models_by_module.setdefault(model.__module__, []).append((model, dialect))
         texts: dict[Path, str] = {}
         for module_name, models in sorted(models_by_module.items()):
-            path = self.output_directory.joinpath(*module_name.split(".")).with_suffix(".pyi")
-            texts[path] = ModuleStub(module_name, models, self.relation_depth).get_text()
+            relative_path, text = ModuleStub(module_name, models, self.relation_depth).get_stub()
+            texts[self.output_directory / relative_path] = text
         return texts
 
     def get_outdated(self) -> list[Path]:

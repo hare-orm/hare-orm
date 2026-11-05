@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -16,13 +17,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class RangeValueReference:
-    """A plan value reference of ``__range`` with both bounds given: the two ``ValueWrapper`` objects
+    """A plan value reference of ``__range`` with both bounds given: the two parameter slots
     of the ``BETWEEN``, the field converting a new bound, and the lookup's own encoder when it has
     one (``__year__range`` encodes ints).
+    Preparation holds the source wrappers; the published plan holds immutable slots.
     """
 
-    lower: ValueWrapper
-    upper: ValueWrapper
+    lower: ParameterSlot | ValueWrapper
+    upper: ParameterSlot | ValueWrapper
     field: Field[Any]
     value_encoder: Callable[..., list[Any]] | None = None
 
@@ -46,4 +48,4 @@ class RangeValueReference:
             lower, upper = (dialect.types.get_lookup_value(self.field, bound, model) for bound in value)
         if isinstance(lower, Term) or isinstance(upper, Term):
             return None
-        return [(id(self.lower), lower, False), (id(self.upper), upper, False)]
+        return [(self.lower, lower, False), (self.upper, upper, False)]

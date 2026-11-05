@@ -5,7 +5,7 @@ import pytest
 
 from hare.contrib.test import requires_features
 from hare.exceptions import ConfigurationError, IntegrityError, ValidationError
-from hare.fields import CharEnumField, IntEnumField
+from hare.fields import CharEnumField, IntEnumField, IntField
 from hare.query.expressions import F
 from hare.transactions.transactions import Transactions
 from tests.shared_models import testmodels
@@ -113,6 +113,22 @@ def test_int_enum_range2_fails():
 def test_int_enum_range3_generated_fails():
     with pytest.raises(ConfigurationError, match="IntEnumField values are 1 to 32767"):
         IntEnumField(BadIntEnumIfGenerated, generated=True)
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("generated", [None, False, True])
+@pytest.mark.parametrize("enum_field", [False, True])
+def test_integer_primary_key_generation_survives_deconstruction(generated, enum_field):
+    options = {"primary_key": True}
+    if generated is not None:
+        options["generated"] = generated
+    field = IntEnumField(testmodels.Service, **options) if enum_field else IntField(**options)
+    expected = not enum_field if generated is None else generated
+    assert field.generated is expected
+    _, args, kwargs = field.deconstruct()
+    restored = type(field)(*args, **kwargs)
+    assert restored.generated is expected
+    assert restored.pk
 
 
 @pytest.mark.database_independent

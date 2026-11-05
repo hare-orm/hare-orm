@@ -19,7 +19,9 @@ async def test_a_bulk_update_refuses_a_sample(rules_db):
 @pytest.mark.asyncio
 async def test_showing_a_bulk_create_changes_no_object(rules_db):
     document = RuleDocument(id=1, title="a", email="a@example.com")
-    RuleDocument.objects.bulk_create([document]).sql()
+    preview = RuleDocument.objects.bulk_create([document]).preview()
+    assert set(preview.deferred_fields) == {"created_at", "updated_at", "email_blind_index"}
+    assert preview.commands is None
     assert document.created_at is None
     assert document.updated_at is None
     assert document.email_blind_index is None

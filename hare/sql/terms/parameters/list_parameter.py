@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -12,22 +13,14 @@ class ListParameter:
 
     __slots__ = ()
 
+    def get_parameter_encoder(self) -> Callable[[list[Any]], Any]:
+        """Return a converter retaining only type/shape settings, never this SQL term or its values."""
+        raise NotImplementedError
+
     def get_parameter_source(self) -> Term:
         """The term whose parameter holds the list.
 
         Returns:
             The term.
-        """
-        raise NotImplementedError
-
-    def get_parameter(self, values: list[Any], *, holds_no_term: bool = False) -> Any:
-        """The parameter standing for another list, carried the way this term carries its own.
-
-        Args:
-            values: The list's encoded values, None left out.
-            holds_no_term: Whether none of ``values`` is known to be a SQL term.
-
-        Returns:
-            The parameter, None when this term can't carry the list that way.
         """
         raise NotImplementedError

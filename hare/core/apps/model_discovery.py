@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.core.apps.cross_connection_checks import CrossConnectionChecks
 from hare.core.apps.enum_member_checks import EnumMemberChecks
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.core.apps.swappable_models import SwappableModels
 from hare.core.constants import DEFAULT_CONNECTION_NAME
 from hare.exceptions import ConfigurationError, HareError
@@ -83,6 +84,8 @@ class ModelDiscovery:
                 if attribute._meta.app and attribute._meta.app != app_label:
                     models_excluded_for_other_app.append(attribute)
                     continue
+                if graph := ModelBindingGraph.current.get():
+                    graph.include((attribute,))
                 attribute._meta.app = app_label
                 discovered_models.append(attribute)
         if not discovered_models:
@@ -124,11 +127,8 @@ class ModelDiscovery:
             apps: The registry.
 
         Raises:
-            ConfigurationError: The registry has no connections, an app names an unknown connection, or a
-                check fails.
+            ConfigurationError: An app names an unknown connection or a model configuration check fails.
         """
-        if apps._connections is None:
-            raise ConfigurationError("ConnectionHandler is required to load from config")
         for name, info in apps._config.items():
             default_connection = info.get("default_connection", DEFAULT_CONNECTION_NAME)
             if default_connection not in apps._connections.db_config:

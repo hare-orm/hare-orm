@@ -4,6 +4,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
+from hare.core.resource_completion import ResourceCompletion
+
 try:
     import aio_pika
 except ImportError:
@@ -40,9 +43,14 @@ class RabbitMQConnection:
                 connection = await self.aio_pika.connect_robust(self.url)
                 try:
                     exchange = await self.open_exchange(connection)
-                except BaseException:
+                except BaseException as error:
                     # A robust connection reconnects for ever - one whose exchange wasn't opened is closed.
-                    await connection.close()
+                    try:
+                        await ResourceCompletion.wait(connection.close())
+                    except BaseException as release_error:
+                        if release_error is error:
+                            raise
+                        raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
                     raise
                 self.connection, self.exchange = connection, exchange
             return self.exchange
@@ -52,4 +60,4 @@ class RabbitMQConnection:
         async with self.connection_lock:
             if self.connection is not None:
                 connection, self.connection, self.exchange = self.connection, None, None
-                await connection.close()
+                await ResourceCompletion.wait(connection.close())

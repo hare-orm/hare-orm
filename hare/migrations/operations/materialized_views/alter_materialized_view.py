@@ -12,9 +12,9 @@ if TYPE_CHECKING:
 
 
 class AlterMaterializedView(AlterSchemaObject):
-    """Replaces a materialized view of a model with a new version of the same name - dropped and
-    created again, filled anew, the model's grants on it granted again; going back restores the old
-    version.
+    """Replaces a model's materialized view according to its dialect, preserving model grants.
+    Storage belonging to the view may be rebuilt and refilled; an explicitly declared target
+    table keeps its rows. Going back restores the previous declaration.
 
     Args:
         model_name: The model.

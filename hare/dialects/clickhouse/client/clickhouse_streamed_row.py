@@ -15,9 +15,7 @@ class ClickhouseStreamedRow(tuple[Any, ...]):
     #: The position of each column by its name - of the subclass of a set of columns.
     column_positions: ClassVar[dict[str, int]] = {}
     #: The subclass of each set of columns met, filled as they are met.
-    row_classes: ClassVar[Cache[type[ClickhouseStreamedRow]]] = Cache(
-        ROW_CLASS_CACHE_SIZE, holds_sql=False, keyed_by_model=False
-    )
+    row_classes: ClassVar[Cache[type[ClickhouseStreamedRow]]] = Cache(ROW_CLASS_CACHE_SIZE, holds_sql=False)
 
     @classmethod
     def get_row_class(cls, column_names: tuple[str, ...]) -> type[Self]:

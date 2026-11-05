@@ -10,7 +10,5 @@ class MathResultType(StrEnum):
     SAME = "same"
     #: A Decimal stays a Decimal; anything else is a float.
     NUMERIC = "numeric"
-    #: As ``NUMERIC``, and integers stay integers.
-    REMAINDER = "remainder"
     #: Always a float.
     FLOAT = "float"

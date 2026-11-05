@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.application_lifecycle import ApplicationLifecycle
@@ -11,6 +11,7 @@ from hare.core.hare import Hare
 
 if TYPE_CHECKING:
     from hare.core.config import HareConfig
+    from hare.core.hare_context import HareContext
 
 
 class HareLifecycle(ApplicationLifecycle):
@@ -19,17 +20,22 @@ class HareLifecycle(ApplicationLifecycle):
 
     Args:
         config: The Hare configuration, as for ``Hare.init(config=...)``.
-        atomic_requests: True for a transaction per request on the default connection, the
+        context: An initialized context to borrow, without rebinding models or closing connections.
+        atomic_requests: True for a transaction per request on the automatically selected connection, the
             connection aliases for one on each of them, False for none.
 
     Raises:
-        ConfigurationError: ``atomic_requests`` is neither a bool nor a sequence of names.
+        ConfigurationError: ``atomic_requests`` is neither a bool nor an iterable of names.
     """
 
     def __init__(
-        self, config: Mapping[str, Any] | HareConfig | str, *, atomic_requests: bool | Sequence[str] = False
+        self,
+        config: Mapping[str, Any] | HareConfig | str,
+        *,
+        atomic_requests: bool | Iterable[str] = False,
+        context: HareContext | None = None,
     ) -> None:
-        super().__init__(config, transactions=atomic_requests, transactions_option="atomic_requests")
+        super().__init__(config, transactions=atomic_requests, transactions_option="atomic_requests", context=context)
 
     def bind_models(self) -> None:
         """Binds the configuration's models without connections - a framework building its
@@ -39,7 +45,8 @@ class HareLifecycle(ApplicationLifecycle):
         Raises:
             ConfigurationError: The configuration is wrong.
         """
-        Hare.bind_models(self.config)
+        if self.provided_context is None:
+            Hare.bind_models(self.config)
 
     def check_application(self) -> None:
         """Checks every request query.

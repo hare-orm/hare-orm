@@ -1,104 +1,105 @@
-"""Builds CPython's ``_sqlite3`` module against one prepared ``libsqlite3``.
-
-A Python whose own ``_sqlite3`` keeps its SQLite whatever the library search path says - SQLite
-linked in statically (the python.org macOS builds, which ``actions/setup-python`` installs on macOS),
-or found through the module's own ``RPATH`` (the manylinux builds) - gets the module compiled from
-the CPython sources of the running version and linked to the prepared library;
-``tests/sqlite_versions/<version>/cp<major><minor>/`` put first on ``PYTHONPATH`` loads it instead
-of the Python's own one.
-"""
+"""Build CPython's SQLite extension against a prepared immutable SQLite library."""
 
 from __future__ import annotations
 
-import io
 import platform
 import shutil
 import subprocess
 import sys
 import sysconfig
 import tarfile
-import urllib.request
+import tempfile
 from pathlib import Path
 
+from tests.artifacts.artifact_cache import ArtifactCache
+from tests.artifacts.build_spec import BuildSpec
+from tests.artifacts.source_archive import SourceArchive
 from tests.sqlite_versions.constants import (
     CPYTHON_SOURCE_URL,
     CPYTHON_SQLITE_MODULE_DIRECTORY,
     SQLITE_VERSIONS_DIRECTORY,
 )
+from tests.sqlite_versions.environment import SqliteVersionEnvironment
 
 
 class SqliteModuleBuilder:
-    """Builds ``_sqlite3`` for the running Python against one prepared ``libsqlite3``."""
+    """Prepare an ABI-specific extension without trusting a minor-version directory name."""
 
-    def __init__(self, version_directory: Path, library_path: Path, compiler: str) -> None:
-        """
-        Args:
-            version_directory: The directory of the prepared SQLite version, holding its
-                ``sqlite3.h``.
-            library_path: The prepared ``libsqlite3``.
-            compiler: The C compiler's executable.
-        """
-        self.version_directory = version_directory
+    def __init__(self, version: str, library_path: Path, compiler: tuple[str, ...]) -> None:
+        self.version = version
         self.library_path = library_path
         self.compiler = compiler
 
     @staticmethod
     def get_module_directory() -> Path:
-        """The directory of ``Modules/_sqlite`` of the running Python's CPython sources, downloaded once.
-
-        Returns:
-            The directory.
-        """
+        """Extract the running Python's C sources through the same verified artifact cache."""
         python_version = platform.python_version()
-        module_directory = SQLITE_VERSIONS_DIRECTORY / f"cpython-{python_version}" / "_sqlite"
-        if module_directory.is_dir():
-            return module_directory
         release = ".".join(str(part) for part in sys.version_info[:3])
-        source_url = CPYTHON_SOURCE_URL.format(release=release, version=python_version)
-        with urllib.request.urlopen(source_url, timeout=300) as response:  # noqa: S310
-            archive_bytes = response.read()
-        member_prefix = f"Python-{python_version}/{CPYTHON_SQLITE_MODULE_DIRECTORY}/"
-        extract_directory = module_directory.parent / "extract"
-        shutil.rmtree(extract_directory, ignore_errors=True)
-        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
-            members = [member for member in archive.getmembers() if member.name.startswith(member_prefix)]
-            if not members:
-                raise SystemExit(f"{source_url} has no {CPYTHON_SQLITE_MODULE_DIRECTORY}")
-            archive.extractall(extract_directory, members=members, filter="data")
-        (extract_directory / member_prefix).rename(module_directory)
-        shutil.rmtree(extract_directory)
-        return module_directory
+        url = CPYTHON_SOURCE_URL.format(release=release, version=python_version)
+        archive_path = SourceArchive.get(url, SQLITE_VERSIONS_DIRECTORY / "sources")
+        spec = BuildSpec.create(f"cpython-{python_version}-sqlite-sources", {url: archive_path})
+        prefix = f"Python-{python_version}/{CPYTHON_SQLITE_MODULE_DIRECTORY}/"
+
+        def build(stage: Path) -> None:
+            with tempfile.TemporaryDirectory(dir=stage.parent) as temporary:
+                with tarfile.open(archive_path, mode="r:gz") as archive:
+                    members = [member for member in archive.getmembers() if member.name.startswith(prefix)]
+                    if not members:
+                        raise SystemExit(f"{url} has no {CPYTHON_SQLITE_MODULE_DIRECTORY}")
+                    archive.extractall(temporary, members=members, filter="data")
+                shutil.copytree(Path(temporary) / prefix, stage, dirs_exist_ok=True)
+
+        def verify(stage: Path) -> None:
+            if not (stage / "module.c").is_file():
+                raise SystemExit(f"{url} has no SQLite module source")
+
+        return ArtifactCache(SQLITE_VERSIONS_DIRECTORY / "cpython-sources").prepare(spec, build, verify)
 
     def build(self) -> Path:
-        """Compiles the module into ``cp<major><minor>/`` of the version directory.
-
-        Returns:
-            The compiled module.
-        """
-        python_directory = self.version_directory / f"cp{sys.version_info.major}{sys.version_info.minor}"
-        python_directory.mkdir(exist_ok=True)
-        module_path = python_directory / f"_sqlite3{sysconfig.get_config_var('EXT_SUFFIX')}"
-        if module_path.exists():
-            return module_path
+        """Compile in staging, check import and version, then publish the extension directory."""
         module_directory = self.get_module_directory()
         include_directory = Path(sysconfig.get_paths()["include"])
-        # Built for this machine's architecture only - the prepared library has no other one, while
-        # a universal2 Python's own link flags ask for both.
+        library_directory = self.library_path.parent
+        extension_name = f"_sqlite3{sysconfig.get_config_var('EXT_SUFFIX')}"
         link_options = ["-bundle", "-undefined", "dynamic_lookup"] if sys.platform == "darwin" else ["-shared"]
-        command = [
-            self.compiler,
+        options = [
             *link_options,
             "-fPIC",
             "-O2",
             "-DPy_BUILD_CORE_MODULE",
             f"-I{include_directory}",
             f"-I{include_directory / 'internal'}",
-            f"-I{self.version_directory}",
-            *(str(source_path) for source_path in sorted(module_directory.glob("*.c"))),
-            str(self.library_path),
-            f"-Wl,-rpath,{self.version_directory}",
-            "-o",
-            str(module_path),
+            f"-I{library_directory}",
+            f"-Wl,-rpath,{library_directory}",
         ]
-        subprocess.run(command, check=True)
-        return module_path
+        sources = {
+            path.relative_to(module_directory).as_posix(): path
+            for path in module_directory.rglob("*")
+            if path.is_file()
+        }
+        sources.update({"library": self.library_path, "sqlite3.h": library_directory / "sqlite3.h"})
+        config_header = include_directory / "pyconfig.h"
+        if config_header.is_file():
+            sources["pyconfig.h"] = config_header
+        spec = BuildSpec.create(
+            f"sqlite-{self.version}-python", sources, compiler=self.compiler, options=options, python_abi=True
+        )
+
+        def build(stage: Path) -> None:
+            subprocess.run(
+                [
+                    *self.compiler,
+                    *options,
+                    *(str(path) for path in sorted(module_directory.glob("*.c"))),
+                    str(self.library_path),
+                    "-o",
+                    str(stage / extension_name),
+                ],
+                check=True,
+            )
+
+        environment = SqliteVersionEnvironment(self.version)
+        directory = ArtifactCache(SQLITE_VERSIONS_DIRECTORY / self.version / "artifacts").prepare(
+            spec, build, lambda stage: environment.verify(library_directory, stage)
+        )
+        return directory / extension_name

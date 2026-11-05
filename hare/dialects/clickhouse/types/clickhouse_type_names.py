@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.dialects.clickhouse.types.constants import (
     CLICKHOUSE_ISO_TYPE_NAME_PATTERN,
     CLICKHOUSE_ISO_TYPE_NAMES,
@@ -43,15 +43,11 @@ class ClickhouseTypeNames:
         Returns:
             The name and the arguments - none for a type without them.
         """
-        open_index = type_text.find("(")
-        if open_index < 0:
-            return type_text.strip(), []
-        return type_text[:open_index].strip(), ClickhouseSqlParts.split(
-            type_text[open_index + 1 : type_text.rindex(")")]
-        )
+        physical_type = ClickhousePhysicalType.from_sql(type_text)
+        return physical_type.name, list(physical_type.arguments)
 
-    @classmethod
-    def get_type_without_nullable(cls, type_sql: str) -> str:
+    @staticmethod
+    def get_type_without_nullable(type_sql: str) -> str:
         """A column's type without the ``Nullable`` a nullable column has - around it, or inside its
         ``LowCardinality``.
 
@@ -61,13 +57,13 @@ class ClickhouseTypeNames:
         Returns:
             The type.
         """
-        name, arguments = cls.get_type_parts(type_sql)
-        if name == CLICKHOUSE_NULLABLE_TYPE and len(arguments) == 1:
-            return arguments[0]
-        if name == "LowCardinality" and len(arguments) == 1:
-            inner_name, inner_arguments = cls.get_type_parts(arguments[0])
-            if inner_name == CLICKHOUSE_NULLABLE_TYPE and len(inner_arguments) == 1:
-                return f"LowCardinality({inner_arguments[0]})"
+        physical_type = ClickhousePhysicalType.from_sql(type_sql)
+        if physical_type.name == CLICKHOUSE_NULLABLE_TYPE and len(physical_type.elements) == 1:
+            return physical_type.elements[0].sql
+        if physical_type.name == "LowCardinality" and len(physical_type.elements) == 1:
+            inner = physical_type.elements[0]
+            if inner.name == CLICKHOUSE_NULLABLE_TYPE and len(inner.elements) == 1:
+                return f"LowCardinality({inner.elements[0].sql})"
         return type_sql
 
     @classmethod
@@ -120,9 +116,8 @@ class ClickhouseTypeNames:
         Returns:
             The Python types - none for a type of no known one.
         """
+        physical_type = ClickhousePhysicalType.from_sql(server_type).unwrapped
         for prefix, python_types in CLICKHOUSE_READ_PYTHON_TYPES:
-            if server_type.startswith(prefix):
-                if python_types is None:
-                    return ClickhouseTypeNames.get_read_python_types(server_type[len(prefix) : -1])
+            if physical_type.name.startswith(prefix):
                 return python_types
         return ()

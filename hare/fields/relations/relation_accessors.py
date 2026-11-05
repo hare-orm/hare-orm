@@ -105,9 +105,7 @@ class RelationAccessors:
                 setattr(obj, _key, relation_rows)
                 relation = None
             else:
-                relation = relation_rows.held_relation  # type: ignore[assignment]
-                if relation is None and (relation_reference := relation_rows.relation_reference) is not None:
-                    relation = relation_reference()  # type: ignore[assignment]
+                relation = relation_rows.get_relation()  # type: ignore[assignment]
             if relation is None:
                 # The relation class itself for a manager of plain querysets - get_class_for() answers
                 # the same, one call later.
@@ -179,9 +177,7 @@ class RelationAccessors:
                 setattr(obj, _key, relation_rows)
                 relation = None
             else:
-                relation = relation_rows.held_relation  # type: ignore[assignment]
-                if relation is None and (relation_reference := relation_rows.relation_reference) is not None:
-                    relation = relation_reference()  # type: ignore[assignment]
+                relation = relation_rows.get_relation()  # type: ignore[assignment]
             if relation is None:
                 # The relation class itself for a manager of plain querysets - get_class_for() answers
                 # the same, one call later.
@@ -244,7 +240,7 @@ class RelationAccessors:
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", model._meta.manager.get_queryset())
+        queryset = cast("QuerySet[TModel]", model._meta.manager.create_queryset())
         queryset._append_filters(False, (), filters)
         queryset._set_instance_connection(obj)
         return queryset

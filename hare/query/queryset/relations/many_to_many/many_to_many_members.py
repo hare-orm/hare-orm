@@ -103,7 +103,7 @@ class ManyToManyMembers:
         }
         related_meta = relation.model._meta
         fetched_instances = await (
-            relation.model._meta.manager.get_queryset()
+            relation.model._meta.manager.create_queryset()
             .filter(pk__in=list(requested_values.values()))
             .using(connection)
         )

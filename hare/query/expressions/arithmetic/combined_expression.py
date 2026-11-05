@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from decimal import Decimal
 from typing import Any, ClassVar, cast
 
 from hare.dialects.enums import ParameterPosition
@@ -311,11 +310,7 @@ class CombinedExpression(CombinableExpression):
         """
         if field is not None and isinstance(GeneratedField.get_effective_field(field), JSONField):
             raise FieldError(JSON_ARITHMETIC_MESSAGE)
-        branch = (
-            ResultBranch(operand.value, None, is_literal=True)
-            if isinstance(operand, Value)
-            else ResultBranch(None, field, is_literal=False)
-        )
+        branch = ResultBranch.of(operand, field)
         value_type = OutputFieldCompatibility.get_value_type(branch)
         if value_type in ARITHMETIC_REFUSED_VALUE_TYPES:
             raise FieldError(f"Cannot use arithmetic on {value_type} - convert it to a number with Cast()")
@@ -412,7 +407,7 @@ class CombinedExpression(CombinableExpression):
             True for a number.
         """
         if isinstance(operand, Value):
-            return isinstance(operand.value, (int, float, Decimal)) and not isinstance(operand.value, bool)
+            return NumericTyping.get_literal_type(operand.value) is not None
         return NumericTyping.get_field_type(field) is not None
 
     def raise_if_text_literal_beside_number(
@@ -477,9 +472,7 @@ class CombinedExpression(CombinableExpression):
         if temporal_type is None:
             return literal.get_result(expression_context)
         if temporal_type is TemporalType.TIMEDELTA and interval_field is not None:
-            encoder: Callable[[Any], Any] | None = TemporalArithmetic.get_field_encoder(
-                interval_field, expression_context.dialect
-            )
+            encoder: Callable[[Any], Any] | None = expression_context.dialect.types.get_field_encoder(interval_field)
         else:
             encoder = TemporalArithmetic.get_literal_encoder(temporal_type, expression_context.dialect)
         return literal.get_encoded_result(expression_context, encoder)

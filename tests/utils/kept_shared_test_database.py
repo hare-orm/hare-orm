@@ -8,8 +8,8 @@ from typing import Any
 
 from hare.contrib.test import hare_test_context
 from hare.contrib.test.constants import REUSABLE_DATABASE_SLOT_NAMESPACE
+from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
 from hare.core.hare_context import HareContext
-from hare.dialects.postgresql.client.reusable_test_schemas import ReusableTestSchemas
 from hare.exceptions import ConfigurationError
 from tests.utils.constants import PYDANTIC_REQUIREMENT
 

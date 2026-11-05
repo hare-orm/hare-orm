@@ -4,6 +4,7 @@ from hare.sql import SqlContext
 from hare.sql.constants import DEFAULT_LIKE_ESCAPE_CLAUSE, LIKE_ESCAPE_MAP
 from hare.sql.enums import Matching
 from hare.sql.terms.criteria.basic_criterion import BasicCriterion
+from hare.sql.terms.criteria.declarations import LikePatternParameter
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -19,15 +20,20 @@ class Like(BasicCriterion):
         escape: The escape clause to use. Defaults to DEFAULT_LIKE_ESCAPE_CLAUSE.
     """
 
+    structure_attributes = ("escape",)
+
     def __init__(
         self,
         left: Term,
         right: Term,
         alias: str | None = None,
         escape: str = DEFAULT_LIKE_ESCAPE_CLAUSE,
+        *,
+        pattern_parameter: LikePatternParameter | None = None,
     ) -> None:
         super().__init__(Matching.LIKE, left, right, alias=alias)
         self.escape = escape
+        self.pattern_parameter = pattern_parameter
 
     def get_sql(self, sql_context: SqlContext) -> str:
         if sql_context.native_functions_only and (

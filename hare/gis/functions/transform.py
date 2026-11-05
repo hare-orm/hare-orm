@@ -26,8 +26,7 @@ class Transform(SpatialFunction):
     function_type: ClassVar[SpatialFunctionType] = SpatialFunctionType.TRANSFORM
     default_value_counts = (1, 1)
 
-    #: The field the result is read through - a planar geometry carrying its own SRID. Shared: the
-    #: statement plans hold output fields weakly.
+    #: Reusable result codec for a planar geometry carrying its own SRID.
     OUTPUT_FIELD: ClassVar[GeometryField] = GeometryField()
 
     def __init__(self, expression: Any, srid: int) -> None:

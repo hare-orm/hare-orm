@@ -16,9 +16,10 @@ from hare import fields
 from hare.contrib.test import RollbackIsolation
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.hare_context import HareContext
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.exceptions import ConfigurationError, FieldError
 from hare.migrations.operations import AddField, CreateModel
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
 from hare.query.expressions import F, Q
 from hare.query.functions import Count, Sum
@@ -333,7 +334,7 @@ async def test_migrations_create_and_change_a_table_without_primary_key(db_isola
     (create_model,) = await round_trip.migrate_to(first)
     assert isinstance(create_model, CreateModel)
     assert create_model.options["primary_key"] is None
-    rendered = MigrationWriter.render_value(create_model.options, ImportManager())
+    rendered = DeclarationValueSerializer.render_value(create_model.options, ImportManager())
     assert "ModelOption.PRIMARY_KEY: None" in rendered
     await round_trip.connection.execute_script("INSERT INTO pk_less_reading (sensor, value) VALUES ('a', 1)")
     assert round_trip.get_pending_operations(first) == []

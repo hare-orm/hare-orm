@@ -15,8 +15,9 @@ from hare.time.constants import (
 
 
 class SystemClock:
-    """The system's wall clock at full precision - the one source of every moment hare stamps, so
-    a stamp taken after another never comes out before it.
+    """The system's wall clock at full precision, shared by the moments hare stamps.
+
+    System clock adjustments can move timestamps backwards; use a monotonic clock for durations.
 
     Where ``datetime.now()`` reads a coarser clock (Windows before Python 3.13) the precise one is
     read by ``rust.native.clock``, or by ``kernel32.GetSystemTimePreciseAsFileTime`` without the

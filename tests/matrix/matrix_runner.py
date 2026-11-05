@@ -19,11 +19,8 @@ import argparse
 import fnmatch
 import io
 import os
-import re
-import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from tests.matrix.constants import (
@@ -38,34 +35,34 @@ from tests.matrix.constants import (
     MATRIX_CLICKHOUSE_URLS,
     MATRIX_CLICKHOUSE_VERSIONS,
     MATRIX_DATABASES_BY_DRIVER,
-    MATRIX_LOG_DIRECTORY,
     MATRIX_PGBOUNCER_URL_QUERY,
     MATRIX_PGBOUNCER_VERSIONS,
     MATRIX_POSTGRES_URLS,
     MATRIX_POSTGRES_VERSIONS,
     MATRIX_PYTEST_OPTIONS,
     MATRIX_PYTHON_VERSIONS,
-    PYTEST_COUNT_PATTERN,
-    PYTEST_DURATION_PATTERN,
-    PYTEST_NO_TESTS_EXIT_CODE,
-    REPOSITORY_DIRECTORY,
+    RUN_REPORT_ENVIRONMENT_VARIABLE,
     SQLITE_REGEXP_TEST_PATHS,
     SQLITE_SUITE_PREFIX,
     SUITE_ENVIRONMENT_OPTION,
     SUITE_ENVIRONMENTS,
     WITHOUT_NATIVE_PLUGIN,
 )
-from tests.matrix.extra_test_modules import ExtraTestModules
 from tests.matrix.matrix_ports import MatrixPorts
-from tests.matrix.matrix_run import MatrixRun
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
+from tests.matrix.paths import MATRIX_LOG_DIRECTORY, REPOSITORY_DIRECTORY
+from tests.matrix.process_groups import ProcessGroups
+from tests.matrix.run_result import RunResult
+from tests.matrix.run_scheduler import RunScheduler
+from tests.matrix.run_spec import RunSpec
 from tests.matrix.suite_environment import SuiteEnvironment
+from tests.matrix.suite_requirements import SuiteRequirements
 from tests.sqlite_versions.constants import SQLITE_RELEASES
 from tests.sqlite_versions.environment import SqliteVersionEnvironment
 
 
 class MatrixRunner:
-    """Runs the test matrix, one run after another, and reports it."""
+    """Runs the test matrix with bounded concurrency and exclusive shared resources, then reports it."""
 
     def __init__(
         self,
@@ -90,8 +87,8 @@ class MatrixRunner:
             print_failed_logs: Whether the pytest output of every failed run is printed after the
                 table.
             newest: Whether only the newest version of each server of the matrix runs.
-            jobs: How many runs go at once - each a pytest of its own with ``workers`` workers; runs on
-                one server share it safely, every test process naming its databases apart.
+            jobs: How many runs may execute at once, each with ``workers`` pytest workers. Runs sharing
+                a physical server are serialized; independent resources can run concurrently.
 
         Raises:
             SystemExit: A Python version, a suite or an environment isn't part of the matrix.
@@ -130,14 +127,16 @@ class MatrixRunner:
             raise SystemExit(f"--jobs is a number of runs at once, 1 or more - not {jobs}")
         self.jobs = jobs
         self.print_failed_logs = print_failed_logs
+        self.processes = ProcessGroups()
 
-    def get_runs(self) -> list[MatrixRun]:
+    def get_runs(self) -> list[RunSpec]:
         """The runs of the matrix, filtered by the requested suites and environments.
 
         Raises:
             SystemExit: A requested suite isn't part of the matrix.
         """
-        runs: list[MatrixRun] = []
+        SuiteRequirements.manifest.check_inventory()
+        runs: list[RunSpec] = []
         for python_version in self.python_versions:
             for suite_environment in self.suite_environments:
                 runs.extend(self.get_environment_runs(python_version, suite_environment))
@@ -149,16 +148,16 @@ class MatrixRunner:
             runs = [run for run in runs if any(fnmatch.fnmatchcase(run.suite, pattern) for pattern in self.suites)]
         return runs
 
-    def get_environment_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[MatrixRun]:
+    def get_environment_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[RunSpec]:
         """The runs of an environment's tests on one Python: the tests reading no database, and the suite of
         each database the environment runs on - an environment of a broker's extra on that broker's servers.
         """
         # The tests reading no test database - once per Python and environment, not on every database; an
         # environment of extras collects only the modules that may hold its tests.
-        test_paths = () if suite_environment.whole_suite else ExtraTestModules.get_test_paths(suite_environment)
+        test_paths = () if suite_environment.whole_suite else SuiteRequirements.get_test_paths(suite_environment)
         runs = (
             [
-                MatrixRun(
+                RunSpec(
                     python_version,
                     DATABASE_INDEPENDENT_SUITE,
                     suite_environment,
@@ -179,28 +178,26 @@ class MatrixRunner:
         databases = suite_environment.databases
         if "sqlite" in databases:
             for sqlite_version in self.sqlite_versions[-1:] if newest_only else self.sqlite_versions:
-                environment = SqliteVersionEnvironment(sqlite_version, python_version).get_variables()
-                environment["HARE_TEST_DB"] = "sqlite+aiosqlite://:memory:"
                 runs.append(
-                    MatrixRun(
+                    RunSpec(
                         python_version,
                         f"{SQLITE_SUITE_PREFIX}{sqlite_version}",
                         suite_environment,
                         "sqlite",
-                        environment,
+                        {"HARE_TEST_DB": "sqlite+aiosqlite://:memory:"},
+                        sqlite_version=sqlite_version,
                     )
                 )
             newest_sqlite_version = list(SQLITE_RELEASES)[-1]
-            regexp_environment = SqliteVersionEnvironment(newest_sqlite_version, python_version).get_variables()
-            regexp_environment["HARE_TEST_DB"] = "sqlite+aiosqlite://:memory:?install_regexp_functions=True"
             runs.append(
-                MatrixRun(
+                RunSpec(
                     python_version,
                     f"{SQLITE_SUITE_PREFIX}regexp",
                     suite_environment,
                     "sqlite",
-                    regexp_environment,
+                    {"HARE_TEST_DB": "sqlite+aiosqlite://:memory:?install_regexp_functions=True"},
                     SQLITE_REGEXP_TEST_PATHS,
+                    sqlite_version=newest_sqlite_version,
                 )
             )
         for driver, url_template in MATRIX_POSTGRES_URLS.items():
@@ -210,12 +207,13 @@ class MatrixRunner:
             for postgres_version in self.postgres_versions[-1:] if newest_only else self.postgres_versions:
                 url = url_template.format(port=MatrixPorts.get_postgres_port(postgres_version))
                 runs.append(
-                    MatrixRun(
+                    RunSpec(
                         python_version,
                         f"{driver}-{postgres_version}",
                         suite_environment,
                         database,
                         {"HARE_TEST_DB": url},
+                        resources=frozenset({f"postgresql:{postgres_version}"}),
                     )
                 )
         if not newest_only:
@@ -223,13 +221,13 @@ class MatrixRunner:
         runs.extend(self.get_clickhouse_runs(python_version, suite_environment))
         return runs
 
-    def get_pgbouncer_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[MatrixRun]:
+    def get_pgbouncer_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[RunSpec]:
         """The PostgreSQL suite through PgBouncer, by each driver the environment runs on: each PgBouncer in
         front of the newest PostgreSQL, and the newest PgBouncer in front of the oldest one - the PostgreSQL
         versions have a suite of their own each (the pairs of the Makefile's matrix_pgbouncer_pairs)."""
         pairs = [(pgbouncer_version, self.postgres_versions[-1]) for pgbouncer_version in self.pgbouncer_versions]
         pairs.append((self.pgbouncer_versions[-1], self.postgres_versions[0]))
-        runs: list[MatrixRun] = []
+        runs: list[RunSpec] = []
         for pgbouncer_version, postgres_version in dict.fromkeys(pairs):
             query = MATRIX_PGBOUNCER_URL_QUERY.format(direct_port=MatrixPorts.get_postgres_port(postgres_version))
             port = MatrixPorts.get_pgbouncer_port(pgbouncer_version, postgres_version)
@@ -239,13 +237,24 @@ class MatrixRunner:
                     continue
                 url = url_template.format(port=port) + query
                 suite = f"pgbouncer-{driver}-{pgbouncer_version}-{postgres_version}"
-                runs.append(MatrixRun(python_version, suite, suite_environment, database, {"HARE_TEST_DB": url}))
+                runs.append(
+                    RunSpec(
+                        python_version,
+                        suite,
+                        suite_environment,
+                        database,
+                        {"HARE_TEST_DB": url},
+                        resources=frozenset(
+                            {f"postgresql:{postgres_version}", f"pgbouncer:{pgbouncer_version}:{postgres_version}"}
+                        ),
+                    )
+                )
         return runs
 
-    def get_clickhouse_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[MatrixRun]:
+    def get_clickhouse_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[RunSpec]:
         """The ClickHouse suite on each server and the cluster suite on each test cluster, by each driver the
         environment runs on."""
-        runs: list[MatrixRun] = []
+        runs: list[RunSpec] = []
         clickhouse_versions = (
             self.clickhouse_versions[-1:] if suite_environment.on_newest_servers_only else self.clickhouse_versions
         )
@@ -259,58 +268,70 @@ class MatrixRunner:
                     port=MatrixPorts.get_clickhouse_port(clickhouse_version, driver, False), database="test_{}"
                 ) + MATRIX_CLICKHOUSE_URL_QUERY.format(keeper_hosts=keeper_hosts)
                 runs.append(
-                    MatrixRun(
+                    RunSpec(
                         python_version,
                         f"{driver}-{clickhouse_version}",
                         suite_environment,
                         database,
                         {"HARE_TEST_DB": url, "HARE_TEST_CLICKHOUSE_KEEPER_HOSTS": keeper_hosts},
                         MATRIX_CLICKHOUSE_TEST_PATHS,
+                        resources=frozenset({f"clickhouse:{clickhouse_version}"}),
                     )
                 )
                 cluster_port = MatrixPorts.get_clickhouse_port(clickhouse_version, driver, True)
                 cluster_url = url_template.format(port=cluster_port, database="test_cluster_{}")
                 runs.append(
-                    MatrixRun(
+                    RunSpec(
                         python_version,
                         f"{driver}-cluster-{clickhouse_version}",
                         suite_environment,
                         database,
                         {"HARE_TEST_CLICKHOUSE_CLUSTER_DB": cluster_url + MATRIX_CLICKHOUSE_CLUSTER_URL_QUERY},
                         MATRIX_CLICKHOUSE_CLUSTER_TEST_PATHS,
+                        resources=frozenset({f"clickhouse-cluster:{clickhouse_version}"}),
                     )
                 )
         return runs
 
-    def get_broker_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[MatrixRun]:
+    def get_broker_runs(self, python_version: str, suite_environment: SuiteEnvironment) -> list[RunSpec]:
         """The tests of a broker's environment on each version of that broker."""
-        runs: list[MatrixRun] = []
+        runs: list[RunSpec] = []
         for broker in suite_environment.extras:
             _, variable, value_template, port_prefix = MATRIX_BROKERS[broker]
             for broker_version in self.broker_versions[broker]:
                 value = value_template.format(port=MatrixPorts.get_broker_port(port_prefix, broker_version))
                 environment = {"HARE_TEST_DB": "sqlite+aiosqlite://:memory:", variable: value}
                 runs.append(
-                    MatrixRun(python_version, f"{broker}-{broker_version}", suite_environment, "sqlite", environment)
+                    RunSpec(
+                        python_version,
+                        f"{broker}-{broker_version}",
+                        suite_environment,
+                        "sqlite",
+                        environment,
+                        resources=frozenset({f"{broker}:{broker_version}"}),
+                    )
                 )
         return runs
 
     @staticmethod
-    def get_log_path(run: MatrixRun) -> Path:
+    def get_log_path(run: RunSpec) -> Path:
         """The file the pytest output of a run is written to."""
         return MATRIX_LOG_DIRECTORY / f"{run.python_version}-{run.suite_environment.name}-{run.suite}.log"
 
-    def execute(self, run: MatrixRun) -> None:
-        """Runs one cell and records its outcome on it - one choosing no test of its environment passes."""
+    def execute(self, run: RunSpec) -> RunResult:
+        """Execute a profile in a clean test environment and retain its actual pytest status."""
         MATRIX_LOG_DIRECTORY.mkdir(exist_ok=True)
         log_path = self.get_log_path(run)
+        report_path = log_path.with_suffix(".json")
+        report_path.unlink(missing_ok=True)
         command = [
             str(MatrixVirtualenv.get(run).get_python_executable()),
             "-m",
             "pytest",
+            "-p",
+            "tests.matrix.run_report",
             *([] if run.suite_environment.native else ["-p", WITHOUT_NATIVE_PLUGIN]),
             "-n",
-            # A run of an environment of extras holds a few tests - one process collects the suite once.
             self.workers if run.suite_environment.whole_suite else "0",
             *MATRIX_PYTEST_OPTIONS,
             f"{SUITE_ENVIRONMENT_OPTION}={run.suite_environment.name}",
@@ -318,42 +339,32 @@ class MatrixRunner:
             run.marker_expression,
             *run.test_paths,
         ]
-        environment = {**os.environ, **run.environment}
+        environment = {name: value for name, value in os.environ.items() if not name.startswith("HARE_TEST_")}
+        environment.update(run.environment)
+        if run.sqlite_version is not None:
+            environment.update(SqliteVersionEnvironment(run.sqlite_version, run.python_version).get_variables())
+        environment[RUN_REPORT_ENVIRONMENT_VARIABLE] = str(report_path)
         started = time.perf_counter()
         with log_path.open("w", encoding="utf-8") as log_file:
-            completed = subprocess.run(
-                command,
-                cwd=REPOSITORY_DIRECTORY,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        run.exit_code = 0 if completed.returncode == PYTEST_NO_TESTS_EXIT_CODE else completed.returncode
-        summary = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1:]
-        summary_line = summary[0] if summary else ""
-        run.counts = {
-            ("errors" if outcome.startswith("error") else outcome): int(count)
-            for count, outcome in re.findall(PYTEST_COUNT_PATTERN, summary_line)
-        }
-        duration = re.search(PYTEST_DURATION_PATTERN, summary_line)
-        run.duration_seconds = float(duration.group(1)) if duration else time.perf_counter() - started
+            exit_code = self.processes.run(command, cwd=REPOSITORY_DIRECTORY, environment=environment, output=log_file)
+        duration = time.perf_counter() - started
+        return RunResult.read(run, exit_code, duration, log_path)
 
     @staticmethod
-    def format_table(runs: list[MatrixRun]) -> str:
-        """The outcomes as a Markdown table."""
+    def format_table(results: list[RunResult]) -> str:
+        """Render observed outcomes without modifying their run specifications."""
         lines = [
             "| Python | Environment | Suite | Result | Passed | Failed | Errors | Skipped | Time, s |",
             "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
-        for run in runs:
-            result = "passed" if run.exit_code == 0 else f"FAILED ({run.exit_code})"
-            counts = run.counts
+        for result in results:
+            run = result.spec
+            status = "passed" if result.passed else f"FAILED ({result.report_error or result.exit_code})"
+            counts = result.counts
             lines.append(
-                f"| {run.python_version} | {run.suite_environment.name} | {run.suite} | {result} | "
+                f"| {run.python_version} | {run.suite_environment.name} | {run.suite} | {status} | "
                 f"{counts.get('passed', 0)} | {counts.get('failed', 0)} | {counts.get('errors', 0)} | "
-                f"{counts.get('skipped', 0)} | {run.duration_seconds or 0:.0f} |"
+                f"{counts.get('skipped', 0)} | {result.duration_seconds:.0f} |"
             )
         return "\n".join(lines)
 
@@ -373,49 +384,41 @@ class MatrixRunner:
             print(f"{virtualenv.name}: {', '.join(virtualenv.extras) or 'no extras'}", flush=True)
             virtualenv.create(interpreter)
 
-    def run(self) -> int:
-        """Runs every cell and prints the table.
-
-        Returns:
-            0 when every run passed, 1 otherwise.
-        """
-        runs = self.get_runs()
-        # A few tests of an environment of extras reaching no server - several such runs at once.
-        few_test_runs = [run for run in runs if not run.suite_environment.whole_suite and not run.reaches_a_server()]
-        other_runs = [run for run in runs if run not in few_test_runs]
+    @staticmethod
+    def report_progress(completed: int, total: int, result: RunResult) -> None:
+        run = result.spec
         print(
-            f"{len(runs)} runs: {len(other_runs)} {self.jobs} at once, {len(few_test_runs)} of a few tests reaching "
-            f"no server {FEW_TEST_RUNS_AT_ONCE} at once",
+            f"[{completed}/{total}] Python {run.python_version} {run.suite_environment.name} {run.suite}: "
+            f"exit {result.exit_code}, {result.counts}, {result.duration_seconds:.0f} s"
+            f"{'; ' + result.report_error if result.report_error else ''}",
             flush=True,
         )
-        with (
-            ThreadPoolExecutor(max_workers=self.jobs) as other_executor,
-            ThreadPoolExecutor(max_workers=FEW_TEST_RUNS_AT_ONCE) as few_test_executor,
-        ):
-            futures = {other_executor.submit(self.execute, run): run for run in other_runs} | {
-                few_test_executor.submit(self.execute, run): run for run in few_test_runs
-            }
-            for index, future in enumerate(as_completed(futures), start=1):
-                future.result()
-                run = futures[future]
-                print(
-                    f"[{index}/{len(runs)}] Python {run.python_version} {run.suite_environment.name} {run.suite}: "
-                    f"exit {run.exit_code}, {run.counts}, {run.duration_seconds:.0f} s",
-                    flush=True,
-                )
-        print(self.format_table(runs))
-        failed_runs = [run for run in runs if run.exit_code != 0]
+
+    def run(self) -> int:
+        """Execute every cell while serializing conflicting server and cleanup resources."""
+        runs = self.get_runs()
+        self.processes = ProcessGroups()
+        print(
+            f"{len(runs)} runs: up to {self.jobs} full runs and {FEW_TEST_RUNS_AT_ONCE} small runs; "
+            "shared resources serialized",
+            flush=True,
+        )
+        results = RunScheduler(self.jobs, FEW_TEST_RUNS_AT_ONCE).run(
+            runs,
+            self.execute,
+            self.processes.stop,
+            self.report_progress,
+        )
+        print(self.format_table(results))
+        failed = [result for result in results if not result.passed]
         if self.print_failed_logs:
-            # A log holds text the console's encoding may lack (cp1251 on Windows) - printed replaced, not raised.
             if isinstance(sys.stdout, io.TextIOWrapper):
                 sys.stdout.reconfigure(errors="replace")
-            for run in failed_runs:
-                print(
-                    f"\n===== Python {run.python_version} {run.suite_environment.name} {run.suite}: "
-                    f"{self.get_log_path(run)} ====="
-                )
-                print(self.get_log_path(run).read_text(encoding="utf-8", errors="replace"), flush=True)
-        return 1 if failed_runs else 0
+            for result in failed:
+                run = result.spec
+                print(f"Python {run.python_version} {run.suite_environment.name} {run.suite}: {result.log_path}")
+                print(result.log_path.read_text(encoding="utf-8", errors="replace"), flush=True)
+        return 1 if failed else 0
 
 
 if __name__ == "__main__":

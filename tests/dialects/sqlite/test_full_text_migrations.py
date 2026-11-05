@@ -43,7 +43,7 @@ class MigrationRunner:
         self.editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=collect_sql)
 
     async def run(self, operation) -> None:
-        await apply_operations(APP_LABEL, self.state, operation, schema_editor=self.editor)
+        self.state = await apply_operations(APP_LABEL, self.state, operation, schema_editor=self.editor)
 
     async def get_schema_names(self) -> set[str]:
         rows = await self.client.execute_dicts("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")

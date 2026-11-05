@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hare.health.constants import ACQUIRE_WAIT_TIME_REASON
+from hare.health.constants import ACQUIRE_WAIT_SAMPLES_MISSING_REASON, ACQUIRE_WAIT_TIME_REASON
 from hare.health.criteria.health_criterion import HealthCriterion
 
 if TYPE_CHECKING:
@@ -24,10 +24,16 @@ class AcquireWaitTime(HealthCriterion):
 
     def check(self, connection_check: ConnectionCheck) -> str | None:
         for pool in connection_check.pools:
-            longest_wait = max(pool.waits, default=0.0)
-            if longest_wait > self.max_seconds:
+            longest_wait = max(pool.waits.values, default=None)
+            if longest_wait is not None and longest_wait > self.max_seconds:
                 return ACQUIRE_WAIT_TIME_REASON.format(
                     pool=HealthCriterion.describe_pool(pool.status), seconds=longest_wait, max_seconds=self.max_seconds
+                )
+            if not pool.waits.complete:
+                return ACQUIRE_WAIT_SAMPLES_MISSING_REASON.format(
+                    pool=HealthCriterion.describe_pool(pool.status),
+                    missed=pool.waits.missed,
+                    observations=pool.waits.observations,
                 )
         return None
 

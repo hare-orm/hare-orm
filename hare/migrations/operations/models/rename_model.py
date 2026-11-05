@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -13,12 +12,14 @@ from hare.migrations.operations.dependencies.relation_dependencies import Relati
 from hare.migrations.operations.enums import DependencyType
 from hare.migrations.operations.models.table_renaming_operation import TableRenamingOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.state import State
 from hare.migrations.state.state_apps import StateApps
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
+    from hare.models import Model
 
 
 class RenameModel(TableRenamingOperation):
@@ -35,13 +36,13 @@ class RenameModel(TableRenamingOperation):
             {self.get_model_label(self.old_name, app_label), self.get_model_label(self.new_name, app_label)}
         )
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """Renames in a row become one rename - none when it ends at the first name."""
         if isinstance(other, RenameModel) and self.is_same_model_name(self.new_name, other.old_name):
             if self.is_same_model_name(self.old_name, other.new_name):
-                return []
-            return [RenameModel(self.old_name, other.new_name)]
-        return super().reduce(other, app_label)
+                return OperationRewrite(())
+            return OperationRewrite((RenameModel(self.old_name, other.new_name),))
+        return super().get_rewrite(other, app_label)
 
     def get_table_model_names(self) -> tuple[str, ...]:
         return (self.old_name, self.new_name)
@@ -63,13 +64,14 @@ class RenameModel(TableRenamingOperation):
             table_is_explicit = table != self.old_name.lower()
         return table if table_is_explicit else self.new_name.lower()
 
-    def get_field_relating_to_new_name(self, field: Any, app_label: str) -> Any:
+    def get_field_relating_to_new_name(self, field: Any, app_label: str, state: State | None = None) -> Any:
         """A relation to the renamed model, or a many-to-many relation through it, as it is after
         the rename.
 
         Args:
             field: A field of any model.
             app_label: The migration's app.
+            state: The state selecting swappable targets; omitted for already concrete model references.
 
         Returns:
             A copy naming the model by its new name; the field itself when it doesn't name the model.
@@ -79,15 +81,24 @@ class RenameModel(TableRenamingOperation):
         old_model_key = (app_label, self.old_name)
         new_reference = f"{app_label}.{self.new_name}"
         # A label, a model class or a swappable reference alike.
-        relates_to_model = StateApps.split_reference(field.model_name) == old_model_key
+        relates_to_model = (
+            state.get_model_key(field.model_name)
+            if state is not None
+            else StateApps.split_reference(cast("str | type[Model]", field.model_name))
+        ) == old_model_key
         goes_through_model = (
             isinstance(field, ManyToManyFieldInstance)
             and field.through_model is not None
-            and StateApps.split_reference(field.through_model) == old_model_key
+            and (
+                state.get_model_key(field.through_model)
+                if state is not None
+                else StateApps.split_reference(cast("str | type[Model]", field.through_model))
+            )
+            == old_model_key
         )
         if not relates_to_model and not goes_through_model:
             return field
-        renamed_field = deepcopy(field)
+        renamed_field = field.snapshot()
         if relates_to_model:
             renamed_field.model_name = new_reference
         if isinstance(renamed_field, ManyToManyFieldInstance) and goes_through_model:
@@ -136,9 +147,9 @@ class RenameModel(TableRenamingOperation):
 
         for model_key, model_state in state.models.items():
             for field_name, field in model_state.fields.items():
-                renamed_field = self.get_field_relating_to_new_name(field, app_label)
+                renamed_field = self.get_field_relating_to_new_name(field, app_label, state)
                 if renamed_field is not field:
-                    model_state.fields[field_name] = renamed_field
+                    model_state.set_field(field_name, renamed_field)
                     changed_model_keys.add(model_key)
 
         # Every model whose relation now points at the new name is rendered again too - its

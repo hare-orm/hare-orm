@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.classes.class_path import ClassPath
 from hare.ddl.conditions.constraint_condition import ConstraintCondition
+from hare.ddl.declared_names import DeclaredNames
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.exceptions import ConfigurationError, UnSupportedError
 
@@ -22,7 +23,7 @@ class UniqueConstraint:
     ``fields`` to check per tenant.
 
     Args:
-        deferrable: Check at transaction end (or after ``SET CONSTRAINTS ... DEFERRED``) - needs
+        deferrable: Allow postponing the check with ``SET CONSTRAINTS ... DEFERRED`` - needs
             ``Features.supports_deferrable_constraints``.
         initially_deferred: Only with ``deferrable=True`` - every transaction starts deferred.
         include: Fields stored in the index as non-key columns - left out where the dialect has
@@ -51,8 +52,7 @@ class UniqueConstraint:
     without_overlaps: bool = False
 
     def __post_init__(self) -> None:
-        if self.name is not None and (not isinstance(self.name, str) or not self.name):
-            raise ConfigurationError(f"UniqueConstraint.name takes a name or None, got {self.name!r}")
+        DeclaredNames.raise_if_not_name(self.name, "UniqueConstraint.name", optional=True)
         if not self.fields:
             raise ConfigurationError("UniqueConstraint.fields names no field - a unique constraint needs one or more")
         if len(set(self.fields)) != len(self.fields):

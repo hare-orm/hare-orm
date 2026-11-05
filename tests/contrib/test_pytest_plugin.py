@@ -4,8 +4,6 @@ back or emptied, and the ``hare_requires`` marker."""
 
 import pytest
 
-REQUIRES = ("pytest",)
-
 pytestmark = pytest.mark.database_independent
 
 pytest_plugins = ["pytester"]

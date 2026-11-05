@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import keyword
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar, overload
 
 from hare.classes.class_path import ClassPath
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, NoValuesFetched, QueryError, ValidationError
 from hare.fields.constants import CASCADE, GENERIC_FOREIGN_KEY_TYPE_FIELD
+from hare.fields.declaration_snapshot import DeclarationSnapshot
 from hare.fields.enums import OnDelete, RelationLoadStrategy
 from hare.fields.field import Field
 from hare.fields.relations.constants import GENERIC_FOREIGN_KEY_CHECK_SUFFIX
@@ -60,10 +61,6 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
             ``default``.
     """
 
-    #: The names of the generic foreign keys of every concrete model - a filter key without one of
-    #: them is no business of theirs.
-    declared_names: ClassVar[set[str]] = set()
-
     def __init__(
         self,
         to: dict[str, BranchTarget] | SwappableModelReference,
@@ -109,6 +106,19 @@ class GenericForeignKeyFieldInstance(Generic[TModel]):
         self.branch_names: tuple[str, ...] = tuple(to) if isinstance(to, dict) else ()
         #: The branch of each target model - set once the relations are initialized.
         self.branch_by_model: dict[type[Model], str] = {}
+
+    def snapshot(self) -> Self:
+        """Copy a generic relation declaration without its generated model branches."""
+        values = vars(self).copy()
+        values.update(
+            model=None,
+            model_field_name="",
+            branch_by_model={},
+            branch_names=tuple(self.to) if isinstance(self.to, dict) else (),
+        )
+        result = object.__new__(type(self))
+        result.__dict__.update(DeclarationSnapshot.copy_values(values, {id(self): result}))
+        return result
 
     @staticmethod
     def check_targets(targets: dict[Any, Any]) -> None:

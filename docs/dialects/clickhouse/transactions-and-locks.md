@@ -70,4 +70,10 @@ wait for another one to end — two `update()`s of one row both apply, the later
 
 ClickHouse Keeper (`keeper_hosts`) holds `migrate`'s [migration lock](../../migrations/migrations.md#migration-lock),
 and deleting a database (`db_delete()`) deletes its nodes there — the [series of its keys](models.md#keys) and
-the node of its lock; hare speaks ZooKeeper's protocol to it itself — no library is installed for it.
+the node of its lock. Install `hare-orm[clickhouse-keeper]` for these direct Keeper sessions, provided by
+Kazoo. Ordinary ClickHouse queries and server-side `generateSerialID` do not need that extra.
+
+The lock remains the fixed ephemeral node `/hare/migrations/<escaped database>/migrate`. A suspended
+or lost Keeper session interrupts the migration scope with `DBConnectionError`; reconnecting does not
+restore ownership or resume that migration. Session cleanup completes before cancellation returns.
+Already accepted ClickHouse DDL is not rolled back by losing the Keeper session.

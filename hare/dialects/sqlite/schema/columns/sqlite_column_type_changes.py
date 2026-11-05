@@ -9,7 +9,6 @@ from hare.fields.constants import DB_DEFAULT_NOT_SET
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.models import Model
 
 if TYPE_CHECKING:
     from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
@@ -21,31 +20,6 @@ class SqliteColumnTypeChanges(ColumnTypeChanges):
     __slots__ = ()
 
     editor: SqliteSchemaEditor
-
-    @classmethod
-    def rewrites_table_on_alter(
-        cls, old_model: type[Model], new_model: type[Model], field_name: str, dialect: Dialect
-    ) -> bool:
-        """SQLite alters a column only by rebuilding its table - everything but a pure rename of a
-        plain column, and a many-to-many relation, whose through table holds its columns.
-
-        Args:
-            old_model: The model rendered from the state before the change.
-            new_model: The model rendered from the state after it.
-            field_name: The altered field's name.
-            dialect: The database's dialect.
-
-        Returns:
-            True when the table is rebuilt.
-        """
-        altered_columns = cls.get_altered_columns(old_model, new_model, field_name)
-        if not altered_columns:
-            return False
-        old_field = old_model._meta.fields_map[field_name]
-        new_field = new_model._meta.fields_map[field_name]
-        return not cls.only_renames_column(old_field, new_field, dialect) and not cls.keeps_table(
-            old_field, new_field, dialect
-        )
 
     @classmethod
     def keeps_table(cls, old_field: Field[Any], new_field: Field[Any], dialect: Dialect) -> bool:

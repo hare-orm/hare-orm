@@ -1,24 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
 
 from hare.exceptions import UnSupportedError
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.criteria.criterion import Criterion
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
 from hare.sql.terms.term_identity_text import TermIdentityText
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 
 
 class JSONAttributeCriterion(Criterion):
     """A path into a JSON column - written by each dialect's renderer in its own form."""
+
+    structure_attributes = ("as_text", "json_column", "path")
 
     def __init__(
         self,
@@ -42,9 +37,8 @@ class JSONAttributeCriterion(Criterion):
         self.path = path
         self.as_text = as_text
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.json_column.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.json_column
 
     def get_text_term(self) -> JSONAttributeCriterion:
         """The same path, extracting its value as the text a text lookup matches."""
@@ -61,8 +55,3 @@ class JSONAttributeCriterion(Criterion):
         if sql_context.with_alias:
             return sql_context.format_alias_sql(sql, self.alias)
         return sql
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        self.json_column = self.json_column.replace_table(current_table, new_table)
-        return self

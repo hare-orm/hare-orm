@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import asyncpg
 
+from hare.core.caching.cache import Cache
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.connect_failure_reports import ConnectFailureReports
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.results.described_result import DescribedResult
 from hare.dialects.base.results.statement_result import StatementResult
 from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
@@ -97,6 +100,7 @@ class AsyncpgClient(PostgresqlClient):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self.schema_generation = 0
         unknown_parameters = sorted(
             set(self.extra) - ASYNCPG_CONNECTION_PARAMETERS - {ASYNCPG_ROOT_CERTIFICATE_SETTING}
         )
@@ -212,8 +216,6 @@ class AsyncpgClient(PostgresqlClient):
 
     async def create_connection(self, with_db: bool) -> None:
         self.raise_if_root_certificate_unusable(self.ssl_root_cert)
-        if self.schema:
-            self.server_settings["search_path"] = self.schema
 
         if self.application_name:
             self.server_settings["application_name"] = self.application_name
@@ -278,10 +280,18 @@ class AsyncpgClient(PostgresqlClient):
         configured_init = kwargs.pop("init", None)
         configured_connect = kwargs.pop("connect", None) or asyncpg.connect
         pool_failed = asyncio.Event()
+
+        async def initialize(connection: asyncpg.Connection) -> None:
+            generation = self.schema_generation
+            installed_oids = await self._init_connection(configured_init, pool_failed, connection)
+            self.schema_connections.get_bucket(self).store(
+                (id(pool), connection.get_server_pid()), (generation, installed_oids)
+            )
+
         pool = asyncpg.create_pool(
             self.root_certificate_dsn,
             reset=self._skip_default_reset,
-            init=functools.partial(self._init_connection, configured_init, pool_failed),
+            init=initialize,
             connect=functools.partial(self._connect_counted, configured_connect, pool_failed),
             **kwargs,
         )
@@ -356,7 +366,7 @@ class AsyncpgClient(PostgresqlClient):
         configured_init: Callable[[asyncpg.Connection], Any] | None,
         pool_failed: asyncio.Event,
         connection: asyncpg.Connection,
-    ) -> None:
+    ) -> frozenset[int]:
         """Prepares a new pool connection: hare's codecs, then the configured ``init`` callback.
 
         Args:
@@ -373,13 +383,14 @@ class AsyncpgClient(PostgresqlClient):
         await AsyncpgTimestamptzCodec.install(connection)
         await AsyncpgDateCodec.install(connection)
         await AsyncpgIntervalCodec.install(connection)
-        await AsyncpgExtensionTypeCodecs.install(connection)
+        installed_oids = await AsyncpgExtensionTypeCodecs.install(connection)
         if configured_init is not None:
             await configured_init(connection)
         if pool_failed.is_set():
             raise DBConnectionError(
                 "The connection pool failed to open or was closed while this connection was prepared"
             )
+        return installed_oids
 
     async def listen(
         self, channel: str, callback: Callable[[asyncpg.Connection, int, str, str], None]
@@ -392,9 +403,6 @@ class AsyncpgClient(PostgresqlClient):
         if self.transaction_pooling:
             # A LISTEN holds its session - on the server itself, past the transaction pooler.
             return await TransactionPooler.get_direct_client(self).listen(channel, callback)
-        if self.schema:
-            # listen() may run before the pool exists - the schema's search_path is set here too.
-            self.server_settings["search_path"] = self.schema
         self.raise_if_root_certificate_unusable(self.ssl_root_cert)
         connect_parameters = {
             key: value for key, value in self.extra.items() if key not in ASYNCPG_POOL_ONLY_PARAMETERS
@@ -450,6 +458,11 @@ class AsyncpgClient(PostgresqlClient):
         statistics.acquire_count += 1
         if start_time:
             statistics.add_wait(time.perf_counter() - start_time)
+        try:
+            await self.refresh_schema_codecs(connection, pool)
+        except BaseException:
+            await ResourceCompletion.wait(self._pool_release(pool, connection))
+            raise
         return connection
 
     def get_pool_occupancy(self) -> tuple[int, int, int, int, int] | None:
@@ -501,6 +514,7 @@ class AsyncpgClient(PostgresqlClient):
         they are collected right away: the server ends the sessions now, not at some later collection."""
         if self._pool is None:
             return
+        self.forget_schema_connections(self._pool)
         self._pool = None
         gc.collect()
 
@@ -522,6 +536,8 @@ class AsyncpgClient(PostgresqlClient):
             await asyncio.wait_for(pool.close(), POOL_CLOSE_TIMEOUT_SECONDS)
         except TimeoutError:
             pool.terminate()
+        finally:
+            self.forget_schema_connections(pool)
 
     @staticmethod
     def is_missing_database_error(error: BaseException) -> bool:
@@ -620,9 +636,8 @@ class AsyncpgClient(PostgresqlClient):
         except asyncpg.InvalidCatalogNameError:
             pass
         except OperationalError as error:
-            # A missing database arrives wrapped in OperationalError - the original exception is its
-            # __context__.
-            if not isinstance(error.__context__, asyncpg.InvalidCatalogNameError):
+            # Statement execution preserves the driver error as the explicit cause.
+            if not isinstance(error.__cause__, asyncpg.InvalidCatalogNameError):
                 raise
         await self.close()
 
@@ -636,7 +651,7 @@ class AsyncpgClient(PostgresqlClient):
 
         return AsyncpgTransactionClient(self)
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SCRIPT)
     async def execute_script(self, query: str) -> None:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
@@ -648,15 +663,8 @@ class AsyncpgClient(PostgresqlClient):
                     raise
                 # A script of no statement - comments only: the server ran nothing.
                 return
-            if AsyncpgExtensionTypeCodecs.changes_extensions(query):
-                # The codecs of the extension's types - on this connection now, on the pool's other
-                # connections once they are opened again.
-                await AsyncpgExtensionTypeCodecs.install(connection)
-                pool = self.get_connection_pool()
-                if pool is not None:
-                    await pool.expire_connections()
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.MANY)
     async def execute_many(self, query: str, values: list[Any]) -> None:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
@@ -700,7 +708,7 @@ class AsyncpgClient(PostgresqlClient):
             raise
         return call_task.result()
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.BULK_LOAD)
     async def copy(
         self,
         table: str,
@@ -726,7 +734,7 @@ class AsyncpgClient(PostgresqlClient):
                 where=f"TRUE{tags_comment}" if tags_comment else None,
             )
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute(
         self,
         query: str,
@@ -734,35 +742,98 @@ class AsyncpgClient(PostgresqlClient):
         *,
         returns_rows: bool | None = None,
         rows_by_position: bool = False,
+        retry_read: bool = False,
     ) -> StatementResult:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
             parameters = [query, *self._asyncpg_bind_values(values)] if values else [query]
             if returns_rows is None:
-                returns_rows = not self._is_write_without_returning(query)
+                return await self._fetch_with_description(connection, query, parameters[1:])
             if not returns_rows:
                 status = await connection.execute(*parameters)
-                try:
-                    rows_affected = int(status.split(" ")[-1])
-                except ValueError:
-                    rows_affected = 0
-                return StatementResult(rows_affected, [])
+                return StatementResult(self._get_command_row_count(status), [])
 
             rows = await connection.fetch(*parameters)
             return StatementResult(len(rows), rows)
 
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.SQL)
     async def execute_described(self, query: str, values: list[Any] | None = None) -> DescribedResult:
         async with self.acquire_connection() as connection:
             if self.log.isEnabledFor(logging.DEBUG):
                 self.log.debug("%s: %s", query, values)
             bind_values = self._asyncpg_bind_values(values) if values else []
-            if self._is_write_without_returning(query):
-                status = await connection.execute(query, *bind_values)
-                last_token = status.split(" ")[-1]
-                return DescribedResult(columns=(), rows=(), row_count=int(last_token) if last_token.isdigit() else 0)
-            statement = await connection.prepare(query)
-            columns = tuple(attribute.name for attribute in statement.get_attributes())
-            rows = await statement.fetch(*bind_values)
-            return DescribedResult(columns=columns, rows=tuple(tuple(row) for row in rows), row_count=len(rows))
+            result = await self._fetch_with_description(connection, query, bind_values)
+            return DescribedResult(
+                columns=result.column_names,
+                rows=tuple(tuple(row) for row in result.rows),
+                row_count=result.row_count,
+            )
+
+    #: Public-driver codec state, bounded and retained only by the client owning its pools.
+    schema_connections: ClassVar[Cache[tuple[int, frozenset[int]]]] = Cache(holds_sql=False)
+    schema_retirements: ClassVar[Cache[int]] = Cache(holds_sql=False)
+
+    def forget_schema_connections(self, pool: asyncpg.Pool) -> None:
+        """Drop a retired pool's snapshots without retaining pools in cache keys.
+
+        asyncpg pools cannot be weakly referenced. Initialization replaces each physical
+        connection's entry before checkout; close and abandon remove its pool identity.
+        """
+        pool_id = id(pool)
+        snapshots = self.schema_connections.get_bucket(self)
+        for key in tuple(snapshots):
+            if key[0] == pool_id:
+                snapshots.pop(key, None)
+        self.schema_retirements.get_bucket(self).pop((pool_id,), None)
+
+    async def refresh_schema_codecs(self, connection: Any, pool: asyncpg.Pool) -> None:
+        """Refresh one checked-out connection before use when its schema generation changed.
+
+        The caller holds the physical connection's statement lock. Cache eviction is safe:
+        a missing snapshot refreshes metadata and retires connections with unknown old codecs.
+        Only removal of an installed OID requires retiring a known connection; ordinary DDL
+        and newly installed extensions do not reconnect the pool.
+        """
+        key = (id(pool), connection.get_server_pid())
+        snapshots = self.schema_connections.get_bucket(self)
+        while True:
+            generation = self.schema_generation
+            previous = snapshots.get(key)
+            if previous is not None and previous[0] == generation:
+                return
+            # A failed installation may already have registered new OIDs. Its partial
+            # registry must remain unknown, so the next refresh retires it conservatively.
+            snapshots.pop(key, None)
+            await connection.reload_schema_state()
+            installed_oids = await AsyncpgExtensionTypeCodecs.install(connection)
+            if previous is None or previous[1] - installed_oids:
+                retirements = self.schema_retirements.get_bucket(self)
+                if retirements.get((id(pool),)) != generation:
+                    await pool.expire_connections()
+                    retirements.store((id(pool),), generation)
+            snapshots.store(key, (generation, installed_oids))
+            # Concurrent DDL must be visible before handing this connection to the
+            # statement that requested it, rather than only on its next acquisition.
+
+    async def invalidate_schema_cache(self) -> None:
+        """Mark all connections stale without borrowing a slot held by a prepared transaction."""
+        self.schema_generation += 1
+
+    @classmethod
+    async def _fetch_with_description(
+        cls, connection: asyncpg.Connection, query: str, values: Sequence[Any]
+    ) -> StatementResult:
+        """Read statement metadata and completion from asyncpg without inspecting SQL text."""
+        statement = await connection.prepare(query)
+        rows = await statement.fetch(*values)
+        description = tuple((attribute.name,) for attribute in statement.get_attributes())
+        return StatementResult(cls._get_command_row_count(statement.get_statusmsg()), rows, description=description)
+
+    @staticmethod
+    def _get_command_row_count(status: str | None) -> int | None:
+        """The server's command count, or zero for a command without a count; None without completion."""
+        if status is None:
+            return None
+        token = status.rsplit(" ", 1)[-1]
+        return int(token) if token.isdecimal() else 0

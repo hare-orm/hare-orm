@@ -10,6 +10,9 @@ class CastTo(Function):
     """A conversion to the type of ``target_field`` as its database converts - see ``Cast``. A naive
     timestamp (``is_aware=False``) converts as its wall clock."""
 
+    structure_attributes = ("is_aware", "source", "target", "target_field")
+    has_repeatable_value = True
+
     requires_dialect_renderer = True
 
     def __init__(

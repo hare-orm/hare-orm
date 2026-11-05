@@ -17,7 +17,7 @@ class TransactionNow(ConstantExpression):
     Example: ``Event.objects.filter(created_at__lt=TransactionNow())``
     """
 
-    #: Shared, long-lived instance - the statement plans hold output fields weakly.
+    #: Shared output descriptor reused by expression results.
     OUTPUT_FIELD: ClassVar[DatetimeField[Any]] = DatetimeField()
 
     populate_field_object = True

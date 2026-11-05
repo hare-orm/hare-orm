@@ -69,49 +69,43 @@ class ConnectionWrapper(Generic[TConnection]):
         client = self.client
         is_transaction_client = client.is_transaction_client
         savepoint_lock = getattr(client, "_savepoint_lock", None) if is_transaction_client else None
-        if savepoint_lock is not None:
-            await self._acquire_savepoint_span(savepoint_lock)
-        if is_transaction_client:
-            await self._lock.acquire()
-        else:
-            # The client's one connection, taken like a pool's - counted in place, without a call.
-            statistics = client.pool_statistics
-            statistics.acquiring += 1
-            start_time = time.perf_counter() if PoolMetrics.enabled else 0.0
-            try:
-                await self._lock.acquire()
-            finally:
-                statistics.acquiring -= 1
-            statistics.acquire_count += 1
-            if start_time:
-                statistics.add_wait(time.perf_counter() - start_time)
+        acquired = False
         try:
+            if savepoint_lock is not None:
+                await self._acquire_savepoint_span(savepoint_lock)
+            if is_transaction_client:
+                await self._lock.acquire()
+                acquired = True
+            else:
+                # The client's one connection is counted like an acquired pool connection.
+                statistics = client.pool_statistics
+                statistics.acquiring += 1
+                start_time = time.perf_counter() if PoolMetrics.enabled else 0.0
+                try:
+                    await self._lock.acquire()
+                    acquired = True
+                finally:
+                    statistics.acquiring -= 1
+                statistics.acquire_count += 1
+                if start_time:
+                    statistics.add_wait(time.perf_counter() - start_time)
             await self.ensure_connection()
+            if is_transaction_client:
+                # Pending BEGIN and SAVEPOINT statements precede the user's statement.
+                transaction_client: TransactionClient = client  # type: ignore[assignment]
+                transaction = transaction_client._outer_transaction or transaction_client
+                if transaction._begin_pending or transaction._pending_savepoints:
+                    await PendingStatements.send_pending_transaction_statements(transaction_client)
         except BaseException:
-            # __aexit__ never runs if __aenter__ itself raises (async-context-manager
-            # protocol) - without this, a failed create_connection() would permanently hold
-            # the lock, wedging every future acquire_connection() on this client.
-            self._lock.release()
+            # __aexit__ does not run when entry fails, including cancellation while waiting
+            # for the physical lock after taking a savepoint span.
+            if acquired:
+                self._lock.release()
             if savepoint_lock is not None and self._span is not None:
                 savepoint_lock.release(self._span)
                 self._span = None
             raise
-        if is_transaction_client:
-            # The transaction's BEGIN and the SAVEPOINTs still pending go ahead of the statement.
-            transaction_client: TransactionClient = client  # type: ignore[assignment]  # cast() is a call per statement
-            transaction = transaction_client._outer_transaction or transaction_client
-            if transaction._begin_pending or transaction._pending_savepoints:
-                await self._send_pending_statements()
         return self.connection
-
-    async def _send_pending_statements(self) -> None:
-        """Sends the BEGIN and the SAVEPOINTs the transaction still holds back, ahead of the
-        statement this connection was taken for - the connection is given back when that fails."""
-        try:
-            await PendingStatements.send_pending_transaction_statements(cast("TransactionClient", self.client))
-        except BaseException as error:
-            await self.__aexit__(type(error), error, error.__traceback__)
-            raise
 
     async def __aexit__(
         self,

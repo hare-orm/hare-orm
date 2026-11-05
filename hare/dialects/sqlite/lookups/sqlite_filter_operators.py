@@ -8,13 +8,16 @@ from hare.dialects.base.lookups.filter_operators import FilterOperators
 from hare.dialects.sqlite.functions.regex.sqlite_posix_regex import SqlitePosixRegex
 from hare.dialects.sqlite.lookups.constants import SQLITE_FULL_TEXT_SEARCH_UNSUPPORTED_REASON
 from hare.dialects.sqlite.lookups.in_list.sqlite_large_in_list import SqliteLargeInList
+from hare.dialects.sqlite.lookups.json.sqlite_json_filter_guards import SqliteJsonFilterGuards
 from hare.dialects.sqlite.lookups.json.sqlite_json_lookups import SqliteJsonLookups
 from hare.dialects.sqlite.lookups.json.sqlite_json_path_lookups import SqliteJsonPathLookups
 from hare.query.filters import JsonLookups, Lookups
 from hare.query.filters.lookups.json.json_path_lookups import JsonPathLookups
 
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
+    from hare.dialects.sqlite.client.sqlite_client import SqliteClient
     from hare.dialects.sqlite.search.sqlite_text_search import SqliteTextSearch
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.query.lookup_info.lookup_info import LookupInfo
@@ -50,12 +53,31 @@ class SqliteFilterOperators(FilterOperators):
                 JsonPathLookups.less_than: SqliteJsonPathLookups.less_than,
                 JsonPathLookups.less_equal: SqliteJsonPathLookups.less_equal,
                 JsonPathLookups.between: SqliteJsonPathLookups.between,
-                Lookups.is_in: SqliteLargeInList.is_in,
-                Lookups.not_in: SqliteLargeInList.not_in,
-                Lookups.row_is_in: SqliteLargeInList.row_is_in,
-                Lookups.row_not_in: SqliteLargeInList.row_not_in,
+                Lookups.is_in: SqliteLargeInList().is_in,
+                Lookups.not_in: SqliteLargeInList().not_in,
+                Lookups.row_is_in: SqliteLargeInList().row_is_in,
+                Lookups.row_not_in: SqliteLargeInList().row_not_in,
             },
         )
+
+    def get_operator(self, field_lookup: FieldLookup, connection: DatabaseClient | None = None) -> Callable[..., Any]:
+        """Bind membership conversion to the selected client's immutable adapter snapshot."""
+        if connection is None:
+            return super().get_operator(field_lookup, connection)
+        client = cast("SqliteClient", connection)
+        membership = SqliteLargeInList(client.parameter_adapters, supports_unhex=client.features.supports_unhex)
+        operator = field_lookup.operator
+        if operator is Lookups.is_in:
+            return membership.is_in
+        if operator is Lookups.not_in:
+            return membership.not_in
+        if operator is Lookups.row_is_in:
+            return membership.row_is_in
+        if operator is Lookups.row_not_in:
+            return membership.row_not_in
+        if operator is JsonLookups.filter:
+            return SqliteJsonFilterGuards(membership).build
+        return super().get_operator(field_lookup, connection)
 
     def supports_operator(self, field_lookup: FieldLookup) -> bool:
         """Whether SQLite runs a lookup - ``__search`` only on a field a ``FullTextIndex`` covers."""

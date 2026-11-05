@@ -41,7 +41,7 @@ __all__ = [
 ]
 
 # The functions only ClickHouse has - a query on another database refuses each before any SQL.
-DialectExpressions.register(
+DialectExpressions.declare(
     ClickhouseDialect,
     (
         AnyLast,

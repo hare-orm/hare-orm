@@ -22,6 +22,8 @@ class DeletePreview:
             name.
         protected_by: Rows blocking the delete through ``on_delete=PROTECT``.
         restricted_by: Rows blocking the delete through ``on_delete=RESTRICT``/``NO_ACTION``.
+        unknown_actions: Primary keys whose model overrides deletion. Their effects and
+            descendants cannot be predicted without running application code.
     """
 
     deleted: dict[type[Model], int] = field(default_factory=dict)
@@ -32,11 +34,14 @@ class DeletePreview:
     many_to_many_through_nulled: dict[str, int] = field(default_factory=dict)
     protected_by: list[Model] = field(default_factory=list)
     restricted_by: list[Model] = field(default_factory=list)
+    unknown_actions: dict[type[Model], list[Any]] = field(default_factory=dict)
 
     @property
-    def can_delete(self) -> bool:
-        """Whether ``delete()`` would go through - nothing protects or restricts it."""
-        return not self.protected_by and not self.restricted_by
+    def can_delete(self) -> bool | None:
+        """False for known blockers, None for arbitrary overrides, True otherwise."""
+        if self.protected_by or self.restricted_by:
+            return False
+        return None if self.unknown_actions else True
 
     def add_blocking_rows(self, blocking_rows: list[Model], rows: list[Any]) -> None:
         """Appends ``rows`` to ``blocking_rows``, skipping ones already listed.
@@ -75,6 +80,8 @@ class DeletePreview:
                 table_counts[table] = table_counts.get(table, 0) + count
         self.protected_by.extend(other.protected_by)
         self.restricted_by.extend(other.restricted_by)
+        for model, keys in other.unknown_actions.items():
+            self.unknown_actions.setdefault(model, []).extend(keys)
 
     def keep_tenant_schema_rows(self, tenant_schema_tables: set[str]) -> None:
         """Leaves out every row but those of ``Meta.tenant_schema`` models and of their relations'
@@ -91,3 +98,6 @@ class DeletePreview:
                 del table_counts[table]
         self.protected_by[:] = [row for row in self.protected_by if row._meta.tenant_schema]
         self.restricted_by[:] = [row for row in self.restricted_by if row._meta.tenant_schema]
+        self.unknown_actions = {
+            model: keys for model, keys in self.unknown_actions.items() if model._meta.tenant_schema
+        }

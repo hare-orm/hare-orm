@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import Self
 
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class OuterAggregateTerm(Term):
@@ -19,6 +19,8 @@ class OuterAggregateTerm(Term):
     query it is a constant and never groups it.
     """
 
+    structure_attributes = ("term",)
+
     is_aggregate = None
     is_subquery = True
 
@@ -26,9 +28,8 @@ class OuterAggregateTerm(Term):
         super().__init__()
         self.term = term
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.term.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.term
 
     @BuilderMethods.builder
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:

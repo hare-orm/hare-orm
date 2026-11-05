@@ -20,16 +20,11 @@ POOL_CLOSE_TIMEOUT_SECONDS = 10
 #: The connection kwargs `pg.connect()` takes besides those every Postgres client reads - anything
 #: else is rejected with ConfigurationError.
 RUST_PG_EXTRA_KEYS = ("statement_cache_size", "ssl_mode", "ssl_root_cert", "max_inactive_connection_lifetime")
-#: The longest ``max_inactive_connection_lifetime`` - a day, as asyncpg's options take.
-RUST_PG_MAX_LIFETIME_SECONDS = 86400.0
-
 #: The settings the rust driver takes besides POSTGRES_CONNECTION_OPTIONS.
 RUST_PG_CONNECTION_OPTIONS = ConnectionOptions(
     ConnectionOption("ssl_mode", ConnectionOptionType.TEXT),
     ConnectionOption("ssl_root_cert", ConnectionOptionType.TEXT),
-    ConnectionOption(
-        "max_inactive_connection_lifetime", ConnectionOptionType.SECONDS, maximum=RUST_PG_MAX_LIFETIME_SECONDS
-    ),
+    ConnectionOption("max_inactive_connection_lifetime", ConnectionOptionType.SECONDS),
 )
 
 #: libpq's environment variables for connection settings left unset in the configuration, and the

@@ -4,19 +4,24 @@ import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Iterable
 from functools import partial
+from threading import RLock
 from typing import TYPE_CHECKING, cast
 from weakref import WeakKeyDictionary
 
+from hare.contrib.outbox.constants import OUTBOX_RELEASE_FAILED
 from hare.contrib.outbox.wakeups.constants import (
     WAKEUP_HEALTHY_SECONDS,
     WAKEUP_MAX_RECONNECT_ATTEMPTS,
     WAKEUP_RECONNECT_BACKOFF_SECONDS,
 )
 from hare.core.log import logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.dialects.base.transactions.savepoints.savepoint_span import SavepointSpan
@@ -49,6 +54,8 @@ class OutboxWakeup:
         self.subscriptions: list[tuple[WakeupCallback, asyncio.AbstractEventLoop]] = []
         #: The task listening for signals while a relay is subscribed.
         self.listen_task: asyncio.Task[None] | None = None
+        self._subscriptions_lock = RLock()
+        self._stop_future: Future[None] | None = None
 
     def raise_if_unsupported(self, connection: DatabaseClient) -> None:
         """Refuses a connection the wakeup can't signal the events of - checked before they are written.
@@ -126,18 +133,24 @@ class OutboxWakeup:
         """
         raise NotImplementedError
 
-    async def subscribe(self, callback: WakeupCallback, connection_alias: str) -> None:
+    async def subscribe(self, callback: WakeupCallback, connection: str | DatabaseClient) -> None:
         """Calls ``callback`` on every signal from now on - a relay's subscription.
 
         Args:
             callback: The relay's callback - called on the event loop's thread, never awaited.
-            connection_alias: The connection of the relay's outbox model.
+            connection: The relay's selected client, or a connection alias for standalone use.
         """
-        self.subscriptions.append((callback, asyncio.get_running_loop()))
-        if self.listen_task is None:
-            self.listen_task = asyncio.get_running_loop().create_task(
-                self.keep_listening(partial(self.listen, connection_alias))
-            )
+        loop = asyncio.get_running_loop()
+        while True:
+            with self._subscriptions_lock:
+                stopping = self._stop_future
+                if stopping is None:
+                    self.subscriptions.append((callback, loop))
+                    if self.listen_task is None:
+                        self.listen_task = loop.create_task(self.keep_listening(partial(self.listen, connection)))
+                    return
+            # A new listener must not reuse a transport whose previous listener is closing it.
+            await ResourceCompletion.wait(asyncio.wrap_future(stopping))
 
     async def unsubscribe(self, callback: WakeupCallback) -> None:
         """Stops calling ``callback`` - the listening stops with the last subscription.
@@ -145,26 +158,46 @@ class OutboxWakeup:
         Args:
             callback: The relay's callback.
         """
-        for index, (subscribed_callback, _loop) in enumerate(self.subscriptions):
-            if subscribed_callback == callback:
-                del self.subscriptions[index]
-                break
-        if not self.subscriptions and self.listen_task is not None:
-            listen_task, self.listen_task = self.listen_task, None
-            listening_loop = listen_task.get_loop()
-            if listening_loop is asyncio.get_running_loop() or not listening_loop.is_running():
-                await self._stop_listening(listen_task)
-            else:
-                # The listener and its transport belong to the loop that opened them.
-                stopped = asyncio.run_coroutine_threadsafe(self._stop_listening(listen_task), listening_loop)
-                await asyncio.wrap_future(stopped)
+        with self._subscriptions_lock:
+            for index, (subscribed_callback, _loop) in enumerate(self.subscriptions):
+                if subscribed_callback == callback:
+                    del self.subscriptions[index]
+                    break
+            stopping = self._stop_future
+            if not self.subscriptions and self.listen_task is not None and stopping is None:
+                listening_loop = self.listen_task.get_loop()
+                if not listening_loop.is_running():
+                    listening_loop = asyncio.get_running_loop()
+                # A concurrent Future lets subscribers on any event loop await the same release.
+                stopping = asyncio.run_coroutine_threadsafe(self._stop_listening(self.listen_task), listening_loop)
+                self._stop_future = stopping
+                stopping.add_done_callback(self._forget_stopped_listener)
+        if stopping is not None:
+            await ResourceCompletion.wait(asyncio.wrap_future(stopping))
+
+    def _forget_stopped_listener(self, stopped: Future[None]) -> None:
+        """Publish an empty listener slot only after its transport has finished closing."""
+        with self._subscriptions_lock:
+            if self._stop_future is stopped:
+                self.listen_task = None
+                self._stop_future = None
 
     async def _stop_listening(self, listen_task: asyncio.Task[None]) -> None:
         """Stops the listener and closes its transport on the listener's event loop."""
         listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listen_task
-        await self.close()
+        try:
+            with contextlib.suppress(asyncio.CancelledError):
+                await listen_task
+        except BaseException as error:
+            try:
+                await ResourceCompletion.wait(self.close())
+            except BaseException as release_error:
+                if release_error is error:
+                    raise
+                raise BaseExceptionGroup(OUTBOX_RELEASE_FAILED, [error, release_error]) from None
+            raise
+        else:
+            await ResourceCompletion.wait(self.close())
 
     def dispatch(self, topics: frozenset[str]) -> None:
         """Gives a received signal to every subscribed relay - on the event loop of its subscription, also
@@ -177,7 +210,9 @@ class OutboxWakeup:
             running_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
-        for callback, loop in list(self.subscriptions):
+        with self._subscriptions_lock:
+            subscriptions = tuple(self.subscriptions)
+        for callback, loop in subscriptions:
             if loop is running_loop:
                 self.call_callback(callback, topics)
                 continue
@@ -199,12 +234,12 @@ class OutboxWakeup:
         except Exception:
             logger.exception("%s: a relay's wakeup callback raised", type(self).__name__)
 
-    async def listen(self, connection_alias: str) -> None:
+    async def listen(self, connection: str | DatabaseClient) -> None:
         """Listens for signals, giving each to ``dispatch()``, until cancelled - raises when the
         subscription is lost, to be retried; returns once it gives up for good.
 
         Args:
-            connection_alias: The connection of the relays' outbox model.
+            connection: The relay's selected client, or a connection alias for standalone use.
         """
         raise NotImplementedError
 

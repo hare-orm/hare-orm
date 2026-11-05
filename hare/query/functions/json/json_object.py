@@ -14,6 +14,8 @@ from hare.query.expressions import Function
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value import Value
 from hare.query.functions.comparison.function_arguments import FunctionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -34,6 +36,8 @@ class JSONObject(Function):
     ``JSONObject(name="name", total=F("price") * 2)`` - a string is a field name. Each database
     writes a value into it as it writes that value into JSON."""
 
+    structure = ExpressionStructure(keyword_role=ArgumentRole.FIELD)
+
     #: Its options are part of the key (``get_plan_options()``).
     plan_parts: ClassVar[DeclaredPlanParts] = (
         *Function.plan_parts,
@@ -42,7 +46,7 @@ class JSONObject(Function):
 
     populate_field_object = True
 
-    #: Shared, long-lived output field - the statement plans hold it weakly.
+    #: Shared result descriptor avoids allocating a field for each expression build.
     OUTPUT_FIELD: JSONField[Any] = JSONField()
 
     #: Field class to how its value is written into the object, most specific first.
@@ -122,9 +126,15 @@ class JSONObject(Function):
         values = [] if self.field is None else [self.field, *self.default_values]
         terms: list[Any] = []
         joins: list[Any] = []
-        for value in values:
+        for index, value in enumerate(values):
             result = self._get_collation_argument(
-                self._get_argument(expression_context, value, treat_str_as_field=True)
+                self._prepare_argument(
+                    expression_context,
+                    value,
+                    attribute="field" if index == 0 else "default_values",
+                    index=None if index == 0 else index - 1,
+                    field_name=True,
+                ).lower(expression_context)
             )
             self._raise_if_encrypted_argument(value, result)
             term, value_type = self.get_json_value(
@@ -143,7 +153,6 @@ class JSONObject(Function):
         arguments: list[Any] = []
         for key, value_term in zip(self.keys, value_terms, strict=True):
             arguments += [ValueWrapper(key, allow_parametrize=False), value_term]
-        self.field_object = self.OUTPUT_FIELD
         return ExpressionResult(term=JsonObjectTerm(*arguments), joins=joins, output_field=self.OUTPUT_FIELD)
 
     @classmethod

@@ -16,6 +16,7 @@ from hare.exceptions import (
 from hare.query.expressions import F, Q, RawSQL
 from hare.query.functions import Count
 from hare.query.plans.statement.statement_plans import StatementPlans
+from hare.time import Timezone
 from tests.shared_models import testmodels
 from tests.shared_models.testmodels import DatetimeFields, Event, IntFields, Reporter, Tournament, VersionedThing
 from tests.shared_models.testmodels_postgres import DecimalFields
@@ -72,16 +73,16 @@ async def test_update_of_an_int_with_an_expression(db):
 
 
 @pytest.mark.asyncio
-async def test_update_sets_every_auto_now_field_to_its_own_moment(db):
+async def test_update_sets_every_auto_now_field_to_its_own_moment(db, monkeypatch):
     tournament = await Tournament.objects.create(name="t")
     event = await Event.objects.create(name="e", tournament=tournament)
-    moments = []
-    for name in ("first", "second", "third"):
+    for index, name in enumerate(("first", "second", "third"), start=1):
+        moment = datetime.datetime(2026, 1, index, tzinfo=datetime.UTC)
+        monkeypatch.setattr(Timezone, "now", lambda value=moment: value)
         await Event.objects.filter(event_id=event.event_id).update(name=name)
         fetched = await Event.objects.get(event_id=event.event_id)
         assert fetched.name == name
-        moments.append(fetched.modified)
-    assert moments[0] < moments[1] < moments[2]
+        assert fetched.modified == moment
 
 
 @pytest.mark.asyncio

@@ -3,16 +3,13 @@ aggregates and subqueries - repeatable by a seed - and the arguments, writes and
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from hare.contrib.test import capture_queries, requires_features
-from hare.exceptions import ConfigurationError, QueryError, UnSupportedError
+from hare.exceptions import QueryError, UnSupportedError
 from hare.query.enums import TableSampleMethod
 from hare.query.functions import Count, Sum
 from hare.query.queryset.constants import MAX_TABLE_SAMPLE_PERCENT, MAX_TABLE_SAMPLE_SEED
-from hare.query.scopes.manager_scope import ManagerScope
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
 from tests.shared_models.testmodels import Event, IntFields, OwnerScopedSecret, Tournament
@@ -162,12 +159,18 @@ async def test_a_wrong_argument_is_refused(db, make, message):
         (lambda: OwnerScopedSecret.objects.with_cte("picked", OwnerScopedSecret.objects.values("id")), "with_cte()"),
     ],
 )
-async def test_a_manager_scope_with_a_sample_is_refused_as_a_join_condition(
+async def test_queryset_factory_options_are_not_used_to_infer_join_scope(
     db, monkeypatch, make_scope_queryset, named_call
 ):
-    monkeypatch.setattr(RowScopes, "get_queryset", staticmethod(lambda model, visibility=None: make_scope_queryset()))
-    with pytest.raises(ConfigurationError, match=f"applies {re.escape(named_call)}, which can't be expressed"):
-        ManagerScope(OwnerScopedSecret).get_condition(RowVisibility.DEFAULT)
+    calls = []
+
+    def factory():
+        calls.append(named_call)
+        return make_scope_queryset()
+
+    monkeypatch.setattr(OwnerScopedSecret._meta.manager, "get_queryset", factory)
+    assert RowScopes.of(OwnerScopedSecret).get_condition(RowVisibility.DEFAULT) is not None
+    assert calls == []
 
 
 @pytest.mark.asyncio

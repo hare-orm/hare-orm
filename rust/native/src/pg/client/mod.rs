@@ -7,20 +7,17 @@
 //! with libpq's `sslmode` semantics - and `unified_param_types()`/`widen_pg_type()`. The rest is
 //! hare-orm's own.
 
-use crate::asyncio::completion::future_into_py;
 use crate::pg::closing_connect::ClosingConnect;
+use crate::pg::connection_opening::open_connection;
 use crate::pg::described_rows::DescribedRows;
 use crate::pg::error::{to_pyerr, DriverError};
-use crate::pg::first_row::FirstRow;
-use crate::pg::one_round_trip::{binds_in_one_round_trip, get_result_columns, typed_parameters};
 use crate::pg::parameter_value_rows::ParameterValueRows;
 use crate::pg::parameter_values::ParameterValues;
 use crate::pg::result::PgResult;
-use crate::pg::result_columns::ResultColumns;
-use crate::pg::result_data::ResultData;
-use crate::pg::timed_manager::{Object, Pool, TimedManager};
+use crate::pg::timed_manager::{Pool, TimedManager};
+use crate::pg::tls::{CertCheck, PgTls, SslParams};
 use crate::pg::transaction::Transaction;
-use crate::pg::value::{decode_pg_row_values, RawWireValue, ServerTextForms, Value, SERVER_TEXT_FORMS_PER_QUERY};
+use crate::pg::value::Value;
 use crate::pool::pool_checkout::PoolCheckout;
 use crate::pool::pool_counters::PoolCounters;
 use crate::pool::pool_metrics_switch::POOL_METRICS_ENABLED;
@@ -32,25 +29,17 @@ use futures_util::stream::poll_fn;
 use futures_util::StreamExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyWeakrefMethods, PyWeakrefReference};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::WebPkiServerVerifier;
-use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, RootCertStore, SignatureScheme};
+use pyo3_async_runtimes::tokio::future_into_py;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
-use tokio_postgres::types::{Kind as TypeShape, ToSql, Type};
-use tokio_postgres::{AsyncMessage, NoTls, Socket, Statement};
-use tokio_postgres_rustls::MakeRustlsConnect;
+use tokio_postgres::{AsyncMessage, NoTls, Socket};
 
 mod cancel_query_on_drop;
 mod cancel_target;
@@ -65,288 +54,6 @@ pub use listener::Listener;
 pub(crate) use pending_cancels::PendingCancels;
 pub use pooled_connection::PooledConnection;
 pub(crate) use statement_caching::StatementCaching;
-
-/// How far the server's certificate is checked, per libpq's `sslmode` semantics (the semantics
-/// callers coming from asyncpg/psycopg were written against): `prefer`/`require` encrypt without
-/// authenticating; `verify-ca`/`verify-full` are the modes that actually check the certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum CertCheck {
-    #[default]
-    None,
-    Chain,
-    Full,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct SslParams {
-    check: CertCheck,
-    root_cert: Option<String>,
-}
-
-static TLS_NO_VERIFY: OnceLock<MakeRustlsConnect> = OnceLock::new();
-
-static TLS_VERIFY_CHAIN: OnceLock<MakeRustlsConnect> = OnceLock::new();
-
-static TLS_VERIFY_FULL: OnceLock<MakeRustlsConnect> = OnceLock::new();
-
-fn make_tls_connector(params: &SslParams) -> Result<MakeRustlsConnect, DriverError> {
-    if params.root_cert.is_some() {
-        return build_tls_connector(params);
-    }
-    let cache = match params.check {
-        CertCheck::None => &TLS_NO_VERIFY,
-        CertCheck::Chain => &TLS_VERIFY_CHAIN,
-        CertCheck::Full => &TLS_VERIFY_FULL,
-    };
-    if let Some(connector) = cache.get() {
-        return Ok(connector.clone());
-    }
-    let connector = build_tls_connector(params)?;
-    Ok(cache.get_or_init(|| connector).clone())
-}
-
-fn root_store(extra_ca: Option<&str>) -> Result<RootCertStore, DriverError> {
-    let mut roots = RootCertStore::empty();
-    for cert in rustls_native_certs::load_native_certs().certs {
-        let _ = roots.add(cert);
-    }
-    let Some(path) = extra_ca else {
-        return Ok(roots);
-    };
-    let file = File::open(path)
-        .map_err(|error| DriverError::Config(format!("ssl_root_cert {path:?} cannot be read: {error}")))?;
-    let mut added = 0usize;
-    for cert in rustls_pemfile::certs(&mut BufReader::new(file)) {
-        let cert = cert.map_err(|error| DriverError::Config(format!("ssl_root_cert {path:?} is not PEM: {error}")))?;
-        roots.add(cert).map_err(|error| DriverError::Config(format!("ssl_root_cert {path:?} is unusable: {error}")))?;
-        added += 1;
-    }
-    if added == 0 {
-        return Err(DriverError::Config(format!("ssl_root_cert {path:?} holds no certificates")));
-    }
-    Ok(roots)
-}
-
-fn build_tls_connector(params: &SslParams) -> Result<MakeRustlsConnect, DriverError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| DriverError::Config(error.to_string()))?;
-    let verifier: Arc<dyn ServerCertVerifier> = match params.check {
-        CertCheck::None => Arc::new(AcceptAnyCert(provider)),
-        check => {
-            let roots = root_store(params.root_cert.as_deref())?;
-            let webpki = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
-                .build()
-                .map_err(|error| DriverError::Config(error.to_string()))?;
-            if check == CertCheck::Full {
-                webpki
-            } else {
-                Arc::new(ChainOnly(webpki))
-            }
-        }
-    };
-    let config = builder.dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth();
-    Ok(MakeRustlsConnect::new(config))
-}
-
-/// Accepts any server certificate - the verifier behind libpq's `prefer`/`require`.
-#[derive(Debug)]
-struct AcceptAnyCert(Arc<CryptoProvider>);
-
-impl ServerCertVerifier for AcceptAnyCert {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, RustlsError> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
-
-/// libpq's `verify-ca`: the chain is verified, the hostname is not.
-#[derive(Debug)]
-struct ChainOnly(Arc<WebPkiServerVerifier>);
-
-impl ServerCertVerifier for ChainOnly {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> Result<ServerCertVerified, RustlsError> {
-        match self.0.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
-            Err(RustlsError::InvalidCertificate(
-                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
-            )) => Ok(ServerCertVerified::assertion()),
-            other => other,
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        self.0.verify_tls12_signature(message, cert, dss)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, RustlsError> {
-        self.0.verify_tls13_signature(message, cert, dss)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.supported_verify_schemes()
-    }
-}
-
-/// The unspecified parameter type (OID 0) - the server infers the parameter's type from context.
-/// Built once: `Type::new()` allocates, and most bind parameters need this type.
-pub(crate) fn unspecified_type() -> Type {
-    static UNSPECIFIED: OnceLock<Type> = OnceLock::new();
-    UNSPECIFIED.get_or_init(|| Type::new(String::new(), 0, TypeShape::Simple, String::new())).clone()
-}
-
-pub(crate) async fn prepare_for(
-    client: &Object,
-    sql: &str,
-    params: &[Value],
-    caching: &StatementCaching,
-) -> Result<Statement, DriverError> {
-    let types: Vec<Type> = params.iter().map(|value| value.pg_type().unwrap_or_else(unspecified_type)).collect();
-    Ok(caching.prepare(client, sql, &types).await?)
-}
-
-/// SQLSTATE 0A000 (`feature_not_supported`) covers more than this one case - narrow the match to
-/// the exact server message text plancache.c raises this specific error with, so an unrelated
-/// feature-not-supported failure never gets silently retried as if it were this one.
-fn is_stale_cached_plan_error(error: &tokio_postgres::Error) -> bool {
-    error.as_db_error().is_some_and(|db| {
-        db.code().code() == "0A000" && db.message().contains("cached plan must not change result type")
-    })
-}
-
-/// Prepares `sql` through the statement cache and runs `run` on it; when the cached plan is stale
-/// (a DDL change since it was prepared), evicts it and runs once more on a fresh one. Not used inside
-/// a transaction: the failed statement has already aborted it.
-pub(crate) async fn prepare_and_run_with_stale_plan_retry<T, F, Fut>(
-    client: &Object,
-    sql: &str,
-    params: &[Value],
-    caching: &StatementCaching,
-    run: F,
-) -> Result<(Statement, T), DriverError>
-where
-    F: Fn(Statement) -> Fut,
-    Fut: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
-{
-    let types: Vec<Type> = params.iter().map(|value| value.pg_type().unwrap_or_else(unspecified_type)).collect();
-    let statement = caching.prepare(client, sql, &types).await?;
-    match run(statement.clone()).await {
-        Ok(value) => Ok((statement, value)),
-        Err(error) if caching.enabled && is_stale_cached_plan_error(&error) => {
-            client.statement_cache.remove(sql, &types);
-            let fresh_stmt = client.prepare_typed(sql, &types).await?;
-            let value = run(fresh_stmt.clone()).await?;
-            Ok((fresh_stmt, value))
-        }
-        Err(error) => Err(DriverError::from(error)),
-    }
-}
-
-pub(crate) fn as_sql_params(params: &[Value]) -> Vec<&(dyn ToSql + Sync)> {
-    params.iter().map(|value| value as &(dyn ToSql + Sync)).collect()
-}
-
-/// Decodes result rows, asking the server (on the same connection) for the text form of every
-/// value of a type this driver has no binary decoder for - see `ServerTextForms`.
-pub(crate) async fn decode_rows(
-    client: &tokio_postgres::Client,
-    rows: &[tokio_postgres::Row],
-) -> Result<Vec<Vec<Value>>, DriverError> {
-    let mut forms = ServerTextForms::collecting();
-    let decoded = rows.iter().map(|row| decode_pg_row_values(row, &mut forms)).collect::<Result<Vec<_>, _>>()?;
-    let requests = forms.take_requests();
-    if requests.is_empty() {
-        return Ok(decoded);
-    }
-    let texts = fetch_server_text_forms(client, &requests).await?;
-    let mut forms = ServerTextForms::supplying(texts);
-    rows.iter().map(|row| decode_pg_row_values(row, &mut forms)).collect()
-}
-
-/// Sends raw binary values back as parameters of their own type cast to text - the type's own
-/// output function, exactly what a text-format result would have carried.
-async fn fetch_server_text_forms(
-    client: &tokio_postgres::Client,
-    requests: &[(Type, &[u8])],
-) -> Result<Vec<String>, DriverError> {
-    let mut texts = Vec::with_capacity(requests.len());
-    for chunk in requests.chunks(SERVER_TEXT_FORMS_PER_QUERY) {
-        let placeholders = (1..=chunk.len()).map(|index| format!("${index}::text")).collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT ARRAY[{placeholders}]::text[]");
-        let raw_values: Vec<RawWireValue> = chunk.iter().map(|(_, raw)| RawWireValue(raw)).collect();
-        let params: Vec<(&(dyn ToSql + Sync), Type)> = raw_values
-            .iter()
-            .zip(chunk)
-            .map(|(raw_value, (postgres_type, _))| (raw_value as &(dyn ToSql + Sync), postgres_type.clone()))
-            .collect();
-        let rows = client.query_typed(&sql, &params).await?;
-        let row = rows.first().ok_or_else(|| DriverError::Conversion("text-form query returned no row".to_string()))?;
-        match decode_pg_row_values(row, &mut ServerTextForms::collecting())?.into_iter().next() {
-            Some(Value::Array(items)) => {
-                for item in items {
-                    match item {
-                        Value::Text(text) => texts.push(text),
-                        other => return Err(DriverError::Conversion(format!("unexpected text-form value {other:?}"))),
-                    }
-                }
-            }
-            other => return Err(DriverError::Conversion(format!("unexpected text-form result {other:?}"))),
-        }
-    }
-    Ok(texts)
-}
-
-/// The TLS settings of the pool, kept for the dedicated connection `Client::listen()` opens.
-#[derive(Clone)]
-pub(crate) enum PgTls {
-    Disabled,
-    Rustls(MakeRustlsConnect),
-}
 
 /// How long delivering one `CancelRequest` may take before the statements waiting for it (see
 /// `PendingCancels`) go ahead anyway - the connection is then never returned to the pool.
@@ -486,15 +193,6 @@ pub fn connect(
         // `Config::options()` replaces its value, so all `-c` options go in one string. Every
         // connection is pinned to UTC in the startup packet (no extra round trip); that option goes
         // last, so a caller's `server_settings` can't override it - the last `-c` of a setting wins.
-        // `Config::options()` REPLACES its stored string on every call, it does not append -
-        // build one combined `-c k=v -c k=v ...` string and set it ONCE. Pin every connection to
-        // UTC via a startup-packet option instead of a post-connect `SET TIME ZONE` query -
-        // applies within the handshake tokio-postgres already pays for, no extra round trip per
-        // connection. Ours goes LAST so it stays a hard hare correctness requirement (hare
-        // stores/returns aware timestamps in UTC, so a non-UTC server TimeZone would make
-        // server-side EXTRACT/CURRENT_TIMESTAMP depend on the server's locale) rather than
-        // something a caller's own `server_settings` could override - Postgres applies repeated
-        // `-c` options for the same GUC in order, last one winning.
         let mut options_parts: Vec<String> = Vec::new();
         if let Some(settings) = &server_settings {
             for (key, value) in settings {
@@ -529,7 +227,7 @@ pub fn connect(
         let tls = if driver_mode == SslMode::Disable {
             PgTls::Disabled
         } else {
-            PgTls::Rustls(make_tls_connector(&ssl_params).map_err(to_pyerr)?)
+            PgTls::Rustls(ssl_params.connector().map_err(to_pyerr)?)
         };
         // Cloned, not moved: the pool's manager (build_manager()) takes its own copy of both, and the
         // Client keeps its own - listen() reconnects later with the exact same settings.
@@ -537,8 +235,7 @@ pub fn connect(
         let mgr = build_manager(&pg_config, &tls, closed_receiver);
 
         let max_size = max_size.max(1);
-        // Validated on the Python side too - a negative/NaN value must never reach
-        // Duration::from_secs_f64(), which panics on it.
+        // Fallible conversion rejects negative/NaN durations without panicking across the Python boundary.
         let acquire_wait = match pool_acquire_timeout {
             None => None,
             Some(seconds) => Some(Duration::try_from_secs_f64(seconds).map_err(|_| {
@@ -556,7 +253,7 @@ pub fn connect(
                 )))
             })?),
         };
-        let pool = Pool::builder(TimedManager::new(mgr, counters.clone()))
+        let pool = Pool::builder(TimedManager::new(mgr, counters.clone(), statement_cache_size))
             .max_size(max_size)
             // LIFO, as asyncpg's pool: prepared statements are cached per connection, and FIFO
             // would rotate a caller across every idle connection, so a statement run a few times
@@ -603,6 +300,11 @@ pub fn connect(
 
 #[pymethods]
 impl Client {
+    /// Invalidate statement and physical-type metadata without executing a command.
+    fn invalidate_schema_cache(&self) {
+        self.statement_caching.invalidate();
+    }
+
     /// Opens the pool's connections from now on with `password` - a rotated credential. The open
     /// connections stay; a `listen()` reconnects with it too.
     fn set_password(&mut self, password: &str) {
@@ -618,26 +320,14 @@ impl Client {
         let tls = self.tls.clone();
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
-            let client = cancel_guard.connection();
-            let bound = as_sql_params(&params);
-            let result = if binds_in_one_round_trip(&caching, &params) {
-                client.execute_typed(&sql, &typed_parameters(&params)).await.map_err(DriverError::from)
-            } else {
-                prepare_and_run_with_stale_plan_retry(client, &sql, &params, &caching, |statement| {
-                    let bound = &bound;
-                    async move { client.execute(&statement, bound).await }
-                })
-                .await
-                .map(|(_, affected)| affected)
-            };
-            // Disarm the drop-time cancel the instant the query finishes, successfully or not - a
-            // guard still armed after this point only ever means the surrounding future was
-            // dropped (Python-side cancellation) while the query was in flight, and a stray
-            // CancelRequest could otherwise land on a later, unrelated query on this backend.
-            let affected = cancel_guard.finish(result).map_err(to_pyerr)?;
-            Ok(affected)
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching, tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
+            let result = lease.execute(&sql, &params, &executor.caching).await.map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
@@ -649,33 +339,21 @@ impl Client {
         let tls = self.tls.clone();
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
-            let client = cancel_guard.connection();
-            let bound = as_sql_params(&params);
-            let result = async {
-                if binds_in_one_round_trip(&caching, &params) {
-                    let rows = client.query_typed(&sql, &typed_parameters(&params)).await?;
-                    let columns = get_result_columns(client, &sql, &params, &rows).await?;
-                    return Ok((columns, ResultData::read(client, rows).await?));
-                }
-                let (statement, rows) =
-                    prepare_and_run_with_stale_plan_retry(client, &sql, &params, &caching, |statement| {
-                        let bound = &bound;
-                        async move { client.query(&statement, bound).await }
-                    })
-                    .await?;
-                Ok((ResultColumns::of_statement(&statement), ResultData::read(client, rows).await?))
-            }
-            .await;
-            // See execute()'s own identical guard above.
-            let (columns, rows) = cancel_guard.finish(result).map_err(to_pyerr)?;
-            Ok(PgResult::new(columns, rows))
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching, tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
+            let result = lease
+                .fetch(&sql, &params, &executor.caching)
+                .await
+                .map(|(columns, data)| PgResult::new(columns, data))
+                .map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
-    /// `fetch_all()` with the statement's column names first - `(names, rows)`, the names there for
-    /// an empty result too.
     fn fetch_all_described<'py>(
         &self,
         py: Python<'py>,
@@ -689,61 +367,18 @@ impl Client {
         let tls = self.tls.clone();
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
-            let client = cancel_guard.connection();
-            let bound = as_sql_params(&params);
-            let result = async {
-                if binds_in_one_round_trip(&caching, &params) {
-                    let rows = client.query_typed(&sql, &typed_parameters(&params)).await?;
-                    let columns = get_result_columns(client, &sql, &params, &rows).await?;
-                    return Ok((columns, ResultData::read(client, rows).await?));
-                }
-                let (statement, rows) =
-                    prepare_and_run_with_stale_plan_retry(client, &sql, &params, &caching, |statement| {
-                        let bound = &bound;
-                        async move { client.query(&statement, bound).await }
-                    })
-                    .await?;
-                Ok((ResultColumns::of_statement(&statement), ResultData::read(client, rows).await?))
-            }
-            .await;
-            // See execute()'s own identical guard above.
-            let (columns, rows) = cancel_guard.finish(result).map_err(to_pyerr)?;
-            Ok(DescribedRows { columns, data: rows })
-        })
-    }
-
-    fn fetch_one<'py>(&self, py: Python<'py>, sql: String, parameters: ParameterValues) -> PyResult<Bound<'py, PyAny>> {
-        let params = parameters.0;
-        let pool = self.pool.clone();
-        let counters = self.counters.clone();
-        let caching = self.statement_caching.clone();
-        let tls = self.tls.clone();
-        let cancel_target = self.cancel_target.clone();
-        future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
-            let client = cancel_guard.connection();
-            let bound = as_sql_params(&params);
-            let result = async {
-                if binds_in_one_round_trip(&caching, &params) {
-                    let rows = client.query_typed(&sql, &typed_parameters(&params)).await?;
-                    let columns = get_result_columns(client, &sql, &params, &rows).await?;
-                    return Ok((columns, decode_rows(client, &rows[..rows.len().min(1)]).await?));
-                }
-                let (statement, rows) =
-                    prepare_and_run_with_stale_plan_retry(client, &sql, &params, &caching, |statement| {
-                        let bound = &bound;
-                        async move { client.query(&statement, bound).await }
-                    })
-                    .await?;
-                Ok((ResultColumns::of_statement(&statement), decode_rows(client, &rows[..rows.len().min(1)]).await?))
-            }
-            .await;
-            // See execute()'s own identical guard above.
-            let (columns, rows) = cancel_guard.finish(result).map_err(to_pyerr)?;
-            Ok(FirstRow { columns, values: rows.into_iter().next() })
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching, tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
+            let result = lease
+                .fetch(&sql, &params, &executor.caching)
+                .await
+                .map(|(columns, data)| DescribedRows { columns, data })
+                .map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
@@ -763,13 +398,13 @@ impl Client {
             if rows.is_empty() {
                 return Ok(());
             }
-            let types = crate::pg::client::unified_param_types(&rows).map_err(to_pyerr)?;
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            // A batch cancelled from Python stops on the server too - its connection never goes back
-            // to the pool busy with it (see execute()).
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
+            let types = ParameterValues::batch_types(&rows).map_err(to_pyerr)?;
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching.clone(), tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let outcome: Result<(), DriverError> = async {
-                let client = cancel_guard.connection_mut();
+                let client = lease.client_mut();
                 let statement = caching.prepare(client, &sql, &types).await?;
                 // execute_many's own transaction wraps just this batch, like asyncpg's
                 // executemany() - not the caller's ambient transaction (if any).
@@ -782,7 +417,10 @@ impl Client {
                 Ok(())
             }
             .await;
-            cancel_guard.finish(outcome).map_err(to_pyerr)
+            let result = lease.finish(outcome).map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
@@ -803,14 +441,16 @@ impl Client {
     ) -> PyResult<Bound<'py, PyAny>> {
         let pool = self.pool.clone();
         let counters = self.counters.clone();
+        let caching = self.statement_caching.clone();
         let tls = self.tls.clone();
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            // See execute(): a COPY cancelled from Python stops on the server too.
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching.clone(), tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
             let outcome = crate::pg::copy::copy_in_records(
-                cancel_guard.connection(),
+                lease.client(),
                 &table,
                 schema.as_deref(),
                 &columns,
@@ -819,7 +459,10 @@ impl Client {
                 &tags_comment,
             )
             .await;
-            cancel_guard.finish(outcome).map_err(to_pyerr)
+            let result = lease.finish(outcome).map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
@@ -828,15 +471,19 @@ impl Client {
     fn execute_script<'py>(&self, py: Python<'py>, sql: String) -> PyResult<Bound<'py, PyAny>> {
         let pool = self.pool.clone();
         let counters = self.counters.clone();
+        let caching = self.statement_caching.clone();
         let tls = self.tls.clone();
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
-            let pooled_connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            // See execute(): a script cancelled from Python stops on the server too, its connection
-            // never back in the pool still running it.
-            let mut cancel_guard = CancelQueryOnDrop::for_pooled_connection(pooled_connection, tls, cancel_target);
-            let outcome = cancel_guard.connection().batch_execute(&sql).await.map_err(DriverError::from);
-            cancel_guard.finish(outcome).map_err(to_pyerr)
+            let connection = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
+            let pooled = PooledConnection::new(connection, caching.clone(), tls, cancel_target);
+            let executor = &pooled.executor;
+            let mut lease = executor.acquire().await.map_err(to_pyerr)?.ok_or_else(connection_released)?;
+            let outcome = lease.client().batch_execute(&sql).await.map_err(DriverError::from);
+            let result = lease.finish(outcome).map_err(to_pyerr);
+            drop(lease);
+            executor.release().await;
+            result
         })
     }
 
@@ -848,30 +495,34 @@ impl Client {
         let cancel_target = self.cancel_target.clone();
         future_into_py(py, async move {
             let client = PoolCheckout::get(&pool, &counters).await.map_err(to_pyerr)?;
-            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).map_err(to_pyerr)
+            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).await.map_err(to_pyerr)
         })
     }
 
-    /// Starts a transaction on a connection already checked out via `acquire()` - so the caller
-    /// can wait for a free pooled connection as an ordinary cancellable call. The connection is
-    /// moved into the returned `Transaction`, whose BEGIN goes out with its first statement - so
-    /// nothing is sent here and the call returns at once.
-    fn begin_on(
+    /// Takes a checked-out connection and returns a transaction after the server confirms BEGIN.
+    fn begin_on<'py>(
         &self,
+        py: Python<'py>,
         pooled_connection: &Bound<'_, PooledConnection>,
-        isolation: Option<&str>,
-    ) -> PyResult<Transaction> {
-        let inner = pooled_connection.borrow().inner.clone();
-        // Nothing else holds a connection just checked out for a transaction.
-        let client = inner.try_lock().map_err(|_| connection_busy())?.take().ok_or_else(connection_released)?;
-        Transaction::begin(
-            client,
-            isolation,
-            self.statement_caching.clone(),
-            self.tls.clone(),
-            self.cancel_target.clone(),
-        )
-        .map_err(to_pyerr)
+        isolation: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pooled = pooled_connection.borrow();
+        let inner = pooled.executor.connection.clone();
+        let pending_cancels = pooled.executor.state.pending_cancels.clone();
+        let connection_lost = pooled.executor.state.connection_poisoned.clone();
+        let caching = self.statement_caching.clone();
+        let tls = self.tls.clone();
+        let cancel_target = self.cancel_target.clone();
+        future_into_py(py, async move {
+            let mut guard = inner.lock().await;
+            pending_cancels.wait_until_delivered().await;
+            if connection_lost.load(Ordering::Acquire) {
+                return Err(to_pyerr(DriverError::Connection("connection is no longer reusable".to_string())));
+            }
+            let client = guard.take().ok_or_else(connection_released)?;
+            drop(guard);
+            Transaction::begin(client, isolation.as_deref(), caching, tls, cancel_target).await.map_err(to_pyerr)
+        })
     }
 
     /// Closes the pool: the idle connections at once, the ones checked out as they come back -
@@ -973,16 +624,9 @@ impl Client {
     /// right after (a `DROP DATABASE`) never races it.
     #[allow(clippy::unused_self, reason = "a method of the Python pool object")]
     fn release<'py>(&self, pooled_connection: &Bound<'py, PooledConnection>) -> PyResult<Bound<'py, PyAny>> {
-        let (inner, connection_lost, pending_cancels) = {
-            let pooled = pooled_connection.borrow();
-            (pooled.inner.clone(), pooled.connection_lost.clone(), pooled.pending_cancels.clone())
-        };
+        let executor = pooled_connection.borrow().executor.clone();
         future_into_py(pooled_connection.py(), async move {
-            // A CancelRequest still on its way could stop the next caller's query.
-            pending_cancels.wait_until_delivered().await;
-            if let Some(connection) = inner.lock().await.take() {
-                PooledConnection::release_connection(connection, &connection_lost);
-            }
+            executor.release().await;
             Ok(())
         })
     }
@@ -1036,10 +680,7 @@ where
     T::Stream: Send,
     <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
-    let (client, mut connection) = match config.connect(tls.clone()).await {
-        Ok(opened) => opened,
-        Err(error) => return Err(ClosingConnect::get_reported_error(&config, tls, error).await),
-    };
+    let (client, mut connection) = open_connection(&config, tls).await?;
     tokio::spawn(async move {
         // `poll_message()`: only it surfaces the notifications, a plainly spawned connection
         // future drives I/O alone.
@@ -1085,65 +726,15 @@ fn connection_released() -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err("connection already released back to the pool")
 }
 
-fn connection_busy() -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err("connection is in use by another call")
-}
-
-/// The parameter types of an `execute_many` batch, one per column for all rows: that of the first
-/// value with a declared type (`Value::pg_type()`), widened when rows disagree (`widen_pg_type()`); a
-/// batch mixing types that can't widen to one is refused. Adapted from yara-orm's
-/// `unified_param_types` (MIT License).
-pub(crate) fn unified_param_types(rows: &[Vec<Value>]) -> Result<Vec<Type>, DriverError> {
-    let Some(first) = rows.first() else {
-        return Ok(Vec::new());
-    };
-    let mut types: Vec<Option<Type>> = first.iter().map(Value::pg_type).collect();
-    for row in &rows[1..] {
-        for (index, value) in row.iter().enumerate().take(types.len()) {
-            let Some(next) = value.pg_type() else {
-                continue;
-            };
-            match &mut types[index] {
-                slot @ None => *slot = Some(next),
-                Some(current) if *current == next => {}
-                Some(current) => match widen_pg_type(current, &next) {
-                    Some(widened) => *current = widened,
-                    None => {
-                        return Err(DriverError::Query(format!(
-                            "execute_many parameter {} mixes incompatible types across rows ({} vs {})",
-                            index + 1,
-                            current.name(),
-                            next.name(),
-                        )))
-                    }
-                },
-            }
-        }
-    }
-    Ok(types.into_iter().map(|postgres_type| postgres_type.unwrap_or_else(unspecified_type)).collect())
-}
-
-fn widen_pg_type(first_type: &Type, second_type: &Type) -> Option<Type> {
-    match (first_type, second_type) {
-        (&Type::TIMESTAMP, &Type::TIMESTAMPTZ) | (&Type::TIMESTAMPTZ, &Type::TIMESTAMP) => {
-            return Some(Type::TIMESTAMPTZ)
-        }
-        (&Type::TEXT, &Type::UUID) | (&Type::UUID, &Type::TEXT) => return Some(Type::UUID),
-        _ => {}
-    }
-    let numeric = |postgres_type: &Type| matches!(*postgres_type, Type::INT8 | Type::FLOAT8 | Type::NUMERIC);
-    if numeric(first_type) && numeric(second_type) {
-        return Some(Type::NUMERIC);
-    }
-    None
-}
-
 #[cfg(test)]
 mod cancel_delivery_tests {
     use super::cancel_target::CloseAwaitingStream;
     use super::*;
+    use std::future::Future;
     use std::sync::atomic::AtomicUsize;
+    use std::task::Poll;
     use tokio::net::TcpStream;
+    use tokio::sync::oneshot;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a test runtime")
@@ -1154,14 +745,29 @@ mod cancel_delivery_tests {
         runtime().block_on(async {
             let pending_cancels = PendingCancels::default();
             let finished = Arc::new(AtomicUsize::new(0));
-            for delay_milliseconds in [30u64, 10, 20] {
+            let mut releases = Vec::new();
+            for _ in 0..3 {
                 let finished = finished.clone();
+                let (release, gate) = oneshot::channel();
+                let (completed, completion) = oneshot::channel();
+                releases.push((release, completion));
                 pending_cancels.add(tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(delay_milliseconds)).await;
+                    gate.await.expect("delivery released");
                     finished.fetch_add(1, Ordering::SeqCst);
+                    completed.send(()).expect("delivery observed");
                 }));
             }
-            pending_cancels.wait_until_delivered().await;
+            let mut waiter = Box::pin(pending_cancels.wait_until_delivered());
+            for (release, completion) in releases {
+                std::future::poll_fn(|context| {
+                    assert!(matches!(waiter.as_mut().poll(context), Poll::Pending));
+                    Poll::Ready(())
+                })
+                .await;
+                release.send(()).expect("delivery task waiting");
+                completion.await.expect("delivery completed");
+            }
+            waiter.await;
             assert_eq!(finished.load(Ordering::SeqCst), 3);
             // Nothing pending any more - returns at once.
             pending_cancels.wait_until_delivered().await;
@@ -1187,11 +793,14 @@ mod cancel_delivery_tests {
             let address = listener.local_addr().expect("a bound address");
             let server_closed = Arc::new(AtomicBool::new(false));
             let server_closed_by_server = server_closed.clone();
+            let (request_read, request_received) = oneshot::channel();
+            let (release, gate) = oneshot::channel();
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.expect("an accepted connection");
                 let mut request = Vec::new();
                 tokio::io::AsyncReadExt::read_to_end(&mut socket, &mut request).await.expect("the request");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                request_read.send(()).expect("request observed");
+                gate.await.expect("server close released");
                 server_closed_by_server.store(true, Ordering::SeqCst);
                 drop(socket);
                 request
@@ -1199,7 +808,19 @@ mod cancel_delivery_tests {
             let socket = TcpStream::connect(address).await.expect("a client connection");
             let mut stream = CloseAwaitingStream { socket, write_side_closed: false };
             tokio::io::AsyncWriteExt::write_all(&mut stream, b"cancel").await.expect("the write");
-            tokio::io::AsyncWriteExt::shutdown(&mut stream).await.expect("the shutdown");
+            let mut shutdown = Box::pin(tokio::io::AsyncWriteExt::shutdown(&mut stream));
+            match select(&mut shutdown, request_received).await {
+                Either::Left((result, _)) => panic!("shutdown returned before server close: {result:?}"),
+                Either::Right((received, _)) => received.expect("server read the request"),
+            }
+            std::future::poll_fn(|context| {
+                assert!(matches!(shutdown.as_mut().poll(context), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+            assert!(!server_closed.load(Ordering::SeqCst));
+            release.send(()).expect("server waiting to close");
+            shutdown.await.expect("the shutdown");
             assert!(server_closed.load(Ordering::SeqCst), "shutdown returned before the server closed the connection");
             assert_eq!(server.await.expect("the server task"), b"cancel");
         });

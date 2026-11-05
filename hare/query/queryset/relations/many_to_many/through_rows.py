@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.fields.field import Field
 from hare.instrumentation.enums import RowOperation
@@ -9,11 +9,8 @@ from hare.models.instances.instance_connections import InstanceConnections
 from hare.models.write.write_steps import WriteSteps
 from hare.sql.terms.parameters.query_parameters import QueryParameters
 
-TModel = TypeVar("TModel", bound="Model")
-
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
-    from hare.models import Model
     from hare.query.queryset.relations.many_to_many_relation import ManyToManyRelation
     from hare.sql.terms.field import Field as SqlField
 
@@ -54,25 +51,6 @@ class ThroughRows:
         )
 
     @staticmethod
-    def holds_sensitive_values(relation: ManyToManyRelation[Any], through_defaults: dict[str, Any] | None) -> bool:
-        """Whether the through rows written hold a ``sensitive=True`` value - a sensitive key of either model,
-        or a sensitive field of the through model given in ``through_defaults``.
-
-        Args:
-            relation: The many-to-many relation of an instance.
-            through_defaults: The values the caller gives the through rows' own fields, None for none.
-
-        Returns:
-            True when one is written.
-        """
-        if ThroughRows.holds_sensitive_keys(relation):
-            return True
-        through_model = relation.field.through_model_class
-        if not through_defaults or through_model is None:
-            return False
-        return not through_model._meta.sensitive_fields.isdisjoint(through_defaults)
-
-    @staticmethod
     def hide_values(relation: ManyToManyRelation[Any], values: list[Any]) -> list[Any]:
         """The parameters of a through-table statement, none of them shown when the relation holds
         sensitive keys (``QueryParameters``).
@@ -89,17 +67,20 @@ class ThroughRows:
         return values
 
     @staticmethod
-    def get_statement(relation: ManyToManyRelation[Any], query: Any) -> tuple[str, list[Any]]:
+    def get_statement(
+        relation: ManyToManyRelation[Any], query: Any, connection: DatabaseClient
+    ) -> tuple[str, list[Any]]:
         """The SQL and parameters of a through-table statement - see ``hide_values()``.
 
         Args:
             relation: The many-to-many relation of an instance.
             query: The statement.
+            connection: The connection selected for this statement, including its rendering settings.
 
         Returns:
             The SQL and its parameters.
         """
-        sql, values = query.get_parameterized_sql()
+        sql, values = query.get_parameterized_sql(connection.sql_context)
         return sql, ThroughRows.hide_values(relation, values)
 
     @staticmethod

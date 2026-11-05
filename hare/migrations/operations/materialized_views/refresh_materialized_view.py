@@ -19,10 +19,9 @@ class RefreshMaterializedView(ModelBoundOperation):
     Args:
         model_name: The model.
         name: The view's name.
-        concurrently: Keep the view readable while it refreshes - needs its ``unique_columns``.
+        concurrently: Request a refresh that keeps the view readable. Requirements and support
+            belong to the dialect; a ``unique_columns`` declaration may be required.
     """
-
-    reads_old_state = False
 
     def __init__(self, model_name: str, name: str, concurrently: bool = False) -> None:
         self.model_name = model_name
@@ -36,9 +35,6 @@ class RefreshMaterializedView(ModelBoundOperation):
     def reaches_other_models(self) -> bool:
         """The view's query may read any table."""
         return True
-
-    def state_forward(self, app_label: str, state: State) -> None:
-        return None
 
     def raise_if_unsupported(
         self, app_label: str, old_state: State, new_state: State, schema_editor: BaseSchemaEditor

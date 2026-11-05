@@ -37,6 +37,18 @@ class SearchCriterion(BasicCriterion):
         super().__init__(Comp.search, vector, query)
 
     @classmethod
+    def has_explicit_query_config(cls, query: Term) -> bool:
+        """Check every query-building leaf, allowing explicitly configured mixed-language queries."""
+        if isinstance(query, TsQueryFunction):
+            return query.config_term is not None
+        if isinstance(query, TsQueryInvert):
+            return cls.has_explicit_query_config(query.term)
+        if isinstance(query, TsInfixOperator):
+            return cls.has_explicit_query_config(query.left) and cls.has_explicit_query_config(query.right)
+        # A supplied column or raw SQL term is already a query value; its internals are opaque.
+        return True
+
+    @classmethod
     def get_query_config(cls, query: Term) -> Term | None:
         """The text search configuration an already-built tsquery term was built with.
 

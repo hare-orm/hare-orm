@@ -1062,7 +1062,7 @@ async def test_prefetch_m2m_batches_through_lookup_by_bind_param_ceiling(db, mon
     """The M2M through-table lookup binds one parameter per parent - it's split into several
     queries instead of exceeding the backend's bind-parameter ceiling."""
     from hare.contrib.test import capture_queries
-    from hare.query.relation_loading.prefetching import many_to_many_prefetch as many_to_many_prefetch_module
+    from hare.dialects.base.constants import PREFETCH_BIND_PARAMETERS_HEADROOM
 
     tournament = await Tournament.objects.create(name="t")
     team = await Team.objects.create(name="team")
@@ -1070,10 +1070,9 @@ async def test_prefetch_m2m_batches_through_lookup_by_bind_param_ceiling(db, mon
     for event in events[::2]:
         await event.participants.add(team)
     # Leaves room for five parent keys per through-table query.
+    connection = Event.get_connection(for_write=False)
     monkeypatch.setattr(
-        many_to_many_prefetch_module,
-        "PREFETCH_BIND_PARAMETERS_HEADROOM",
-        Event.get_connection(for_write=False).features.max_bind_parameters - 5,
+        connection, "features", connection.features.replace(max_bind_parameters=PREFETCH_BIND_PARAMETERS_HEADROOM + 5)
     )
 
     async with capture_queries() as counter:

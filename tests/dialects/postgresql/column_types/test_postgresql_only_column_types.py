@@ -5,7 +5,6 @@ from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.postgresql.fields.citext_field import CitextField
 from hare.dialects.postgresql.fields.hstore import HStoreField
 from hare.dialects.postgresql.fields.ltree_field import LtreeField
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
 from hare.dialects.postgresql.fields.ranges import (
     BigIntRangeField,
     DateRangeField,
@@ -29,7 +28,6 @@ pytestmark = pytest.mark.database_independent
         pytest.param(DateRangeField, "daterange", id="date_range"),
         pytest.param(DateTimeRangeField, "tstzrange", id="datetime_range"),
         pytest.param(lambda: ArrayField(base_field=fields.TextField()), "TEXT[]", id="array"),
-        pytest.param(PostGISField, "geography(Point,4326)", id="postgis"),
         pytest.param(TSVectorField, "TSVECTOR", id="tsvector"),
         pytest.param(HStoreField, "hstore", id="hstore"),
         pytest.param(CitextField, "CITEXT", id="citext"),

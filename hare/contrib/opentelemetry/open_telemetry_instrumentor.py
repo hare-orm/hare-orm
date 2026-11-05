@@ -24,8 +24,8 @@ class OpenTelemetryInstrumentor:
         meter_provider: The MeterProvider to get a meter from - defaults to the global one
             (``opentelemetry.metrics.get_meter_provider()``).
         record_sql_statement: When ``True`` (the default), sets the ``db.query.text`` span
-            attribute to the (already parameter-bound, never containing literal values) SQL text.
-            Set ``False`` to omit it if even the query structure is sensitive.
+            attribute to the SQL exactly as submitted, including literals already present in raw
+            SQL or DDL. Bind values are not recorded separately. Set ``False`` to omit this attribute.
         query_spans: Whether the queries get spans.
         pool_metrics: Whether the pools are reported - it measures the waits for a connection too
             (``PoolMetrics``).

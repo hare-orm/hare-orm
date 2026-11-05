@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.dialects.base.migration_safety.add_field_without_default_rule import AddFieldWithoutDefaultRule
 from hare.dialects.base.migration_safety.migration_safety_rules import MigrationSafetyRules
 from hare.dialects.clickhouse.migration_safety.constants import (
     CLICKHOUSE_CURRENT_DATABASE_SQL,
@@ -11,11 +12,16 @@ from hare.dialects.clickhouse.migration_safety.constants import (
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.migration_safety.migration_safety_rule import MigrationSafetyRule
 
 
 class ClickhouseMigrationSafetyRules(MigrationSafetyRules):
     """ClickHouse's migration safety rules - the shared ones; a table's rows are read off
     ``system.tables``, where the table engines keep the count without reading the data."""
+
+    def get_rules(self) -> list[MigrationSafetyRule]:
+        """Keep shared checks except the missing-default check: ClickHouse supplies type defaults."""
+        return [rule for rule in super().get_rules() if not isinstance(rule, AddFieldWithoutDefaultRule)]
 
     async def count_table_rows(
         self, client: DatabaseClient, table_name: str, schema: str | None, at_most: int

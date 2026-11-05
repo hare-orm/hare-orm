@@ -10,6 +10,9 @@ class Concat(Function):
     """The texts of its terms joined, a NULL term read as empty text - ISO SQL's ``||`` over
     ``COALESCE(term, '')``; a dialect with a ``CONCAT()`` of the same meaning renders that."""
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, *terms: Any, **kwargs: Any) -> None:
         super().__init__("CONCAT", *terms, **kwargs)
 

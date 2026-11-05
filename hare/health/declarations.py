@@ -6,6 +6,8 @@ import dataclasses
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from hare.instrumentation.pools.sample_window import SampleWindow
+
 if TYPE_CHECKING:
     from hare.dialects.base.client.declarations import PingResult
     from hare.health.criteria.health_criterion import HealthCriterion
@@ -42,7 +44,7 @@ class PoolChange:
     taken: int
     timeouts: int
     connect_failures: int
-    waits: tuple[float, ...]
+    waits: SampleWindow
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

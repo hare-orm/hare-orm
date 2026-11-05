@@ -8,7 +8,7 @@ use pyo3::types::{PyFloat, PyInt, PyString};
 use pyo3::{PyTraverseError, PyVisit};
 use serde_json::Value;
 
-use crate::sqlite_functions::json_string::write_json_string;
+use crate::json_string::write_json_string;
 
 /// A JSON number as SQLite holds it - an integer past 64 bits as a REAL; None for one this doesn't
 /// read.

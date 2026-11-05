@@ -7,6 +7,8 @@ from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_result import ExpressionResult
 from hare.query.expressions.f import F
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.functions.grouping_function import GroupingFunction
@@ -27,6 +29,8 @@ class Grouping(Expression):
     Raises:
         QueryError: No field name is given.
     """
+
+    structure = ExpressionStructure(positional_role=ArgumentRole.FIELD)
 
     populate_field_object = True
     value_field = NumericTyping.INTEGER_OUTPUT_FIELD

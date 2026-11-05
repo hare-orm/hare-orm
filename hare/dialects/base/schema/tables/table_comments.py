@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.fields.field import Field
 from hare.models import Model
@@ -78,15 +79,14 @@ class TableComments(SchemaEditorPart):
                 )
         return statements
 
-    async def alter_column_comment(self, model: type[Model], old_field: Field[Any], new_field: Field[Any]) -> None:
-        """Alter column comment. Override in backends that support column comments."""
-        pass
+    def get_column_comment_change_sqls(self, model: type[Model], new_field: Field[Any]) -> list[str]:
+        """Prepare a separate comment change where the dialect supports one."""
+        return []
 
-    async def alter_table_comment(self, model: type[Model]) -> None:
-        """Sets the table comment to the model's ``table_description`` (removes it when empty).
-        No-op by default - overridden by backends with separately stored table comments.
+    async def alter_table_comment(self, old_model: type[Model], new_model: type[Model]) -> None:
+        """Execute the prepared table comment transition."""
+        await self.get_table_comment_plan(old_model, new_model).execute(self.editor)
 
-        Args:
-            model: The model, rendered with its new description.
-        """
-        return
+    def get_table_comment_plan(self, old_model: type[Model], new_model: type[Model]) -> SchemaChangePlan:
+        """Prepare a separately stored comment change; empty for a dialect without one."""
+        return SchemaChangePlan(())

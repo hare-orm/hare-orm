@@ -6,9 +6,9 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.client.transaction_lifecycle.pending_statements import PendingStatements
-from hare.dialects.base.client.transaction_lifecycle.transaction_ending import TransactionEnding
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
 from hare.dialects.postgresql.client.pool_timeouts import PoolTimeouts
@@ -20,12 +20,8 @@ from hare.dialects.postgresql.drivers.rust_pg.client.rust_pg_transaction_connect
     RustPgTransactionConnectionWrapper,
 )
 from hare.dialects.postgresql.drivers.rust_pg.constants import RUST_PG_DEFAULT_STREAM_BATCH_SIZE
-from hare.exceptions import (
-    IntegrityError,
-    TransactionManagementError,
-)
 from hare.instrumentation.pools.pool_metrics import PoolMetrics
-from hare.instrumentation.queries.query_tags import QueryTags
+from hare.transactions.enums import TransactionOutcome
 from rust.native import pg
 
 
@@ -86,13 +82,15 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         if self._native_transaction is None or self._native_transaction_ended:
             return
         self._native_transaction_ended = True
+        outcome = TransactionOutcome.ROLLED_BACK
         try:
             await self._native_transaction.rollback()
         except (pg.QueryError, pg.TransactionFinishedError, pg.ConnectionError):
             # Finished by the interrupted COMMIT/ROLLBACK itself, or ended with the lost
             # connection - nothing left to roll back.
-            pass
-        self._finalized = True
+            outcome = TransactionOutcome.UNKNOWN
+        if not self.transaction_state.finished:
+            self.transaction_state.finish(outcome)
 
     async def _acquire_transaction_slot(self) -> float:
         """Waits for one of the pool's transaction slots, bounded by ``pool_acquire_timeout``.
@@ -167,76 +165,36 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         self, query: str, values: list[Any] | None = None, chunk_size: int = 0
     ) -> AsyncGenerator[list[Any]]:
         """Streams the rows of ``query`` off a portal, a batch of ``chunk_size`` rows per fetch
-        (``RUST_PG_DEFAULT_STREAM_BATCH_SIZE`` when 0). Driver errors are translated here.
+        (``RUST_PG_DEFAULT_STREAM_BATCH_SIZE`` when 0). The shared statement boundary translates driver errors.
 
-        Opening the stream and each fetch are shielded from cancellation one by one: a cancelled
-        Rust future left the connection wedged for the transaction's own ROLLBACK/COMMIT. However
-        the generator ends, the row stream is closed at once - an unread portal blocks every later
-        statement on the connection.
+        Opening the cursor and each fetch hold their own query span, never across a yield.
+        Native statement leases cancel and drain interrupted wire operations before the
+        connection is reused. The row stream is closed however the generator ends.
         """
         self._check_statement_allowed()
-        if (self._outer_transaction or self)._pending_savepoints:
-            await PendingStatements.send_pending_savepoints(self)
         values = values or []
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("%s: %s", query, values)
         batch_size = chunk_size or RUST_PG_DEFAULT_STREAM_BATCH_SIZE
         row_stream = None
         try:
-            row_stream = await TransactionEnding.run_shielded_from_cancellation(
-                self._active_native_transaction.stream(query, values), on_landed=lambda: None
-            )
+            async with self.acquire_connection() as transaction:
+                row_stream = await transaction.stream(query, values)
             while True:
-                rows = await TransactionEnding.run_shielded_from_cancellation(
-                    row_stream.fetch_many(batch_size), on_landed=lambda: None
-                )
+                async with self.acquire_connection():
+                    rows = await row_stream.fetch_many(batch_size)
                 if not rows:
                     return
                 yield rows
-        except pg.IntegrityViolationError as error:
-            self._mark_statement_failed()
-            raise IntegrityError(error) from error
-        except (pg.InvalidTransactionStateError, pg.TransactionFinishedError) as error:
-            self._mark_statement_failed()
-            raise TransactionManagementError(error) from error
-        except pg.ConnectionError as error:
-            self._mark_statement_failed()
-            raise self.get_connection_error_translation(error, (values,)) from error
-        except (pg.QueryError, pg.ConversionError) as error:
-            self._mark_statement_failed()
-            raise PostgresqlClient.get_statement_error(error) from error
-        except asyncio.CancelledError:
-            self._mark_statement_failed()
-            raise
         finally:
             if row_stream is not None:
                 row_stream.close()
             del row_stream
 
-    @PostgresqlClient.translate_exceptions
-    async def copy(
-        self,
-        table: str,
-        columns: list[str],
-        records: list[tuple[Any, ...]],
-        column_types: list[str],
-        schema: str | None = None,
-    ) -> None:
-        """Loads ``records`` into ``table`` through the COPY protocol on the transaction's own
-        connection - the rows commit or roll back with the transaction (a savepoint's rollback
-        included)."""
-        self.log.debug("COPY %s(%s): %d record(s)", table, columns, len(records))
-        await self._run_statement(
-            lambda executor: executor.copy_in(
-                table, schema, columns, column_types, [list(row) for row in records], QueryTags.append("")
-            )
-        )
-
-    @PostgresqlClient.translate_exceptions
+    @PostgresqlClient.translate_exceptions(StatementForm.CONTROL)
     async def begin(self) -> None:
-        # Waiting for a pool connection is cancellable - nothing is sent. Neither is anything by
-        # begin_on(): the BEGIN goes out with the transaction's first statement, so there is nothing
-        # to shield from a cancellation.
+        # Pool waiting remains cancellable. Native begin_on confirms BEGIN and retains cleanup
+        # ownership if cancellation interrupts its response.
         slot_wait_seconds = await self._acquire_transaction_slot()
         self._begin_connection = None
         try:
@@ -258,24 +216,26 @@ class RustPgTransactionClient(PostgresqlTransactionClient, RustPgClient):
         finally:
             self._begin_pool = self._begin_connection = None
 
+    async def invalidate_schema_cache(self) -> None:
+        """Invalidate the originating pool even while this transaction is failed or finalizing."""
+        if self._native_transaction is not None:
+            self._native_transaction.invalidate_schema_cache()
+
     async def _driver_begin(self) -> None:
-        self._native_transaction = self._begin_pool.begin_on(self._begin_connection, None)
+        self._native_transaction = await self._begin_pool.begin_on(self._begin_connection, None)
 
     def _has_begun(self) -> bool:
         return self._native_transaction is not None
 
     async def _driver_commit(self) -> None:
-        # A transaction no statement ran in ends without suspending - the COMMIT needs no shield.
         transaction = self._active_native_transaction
         self._native_transaction_ended = True
-        if not transaction.end_unbegun():
-            await transaction.commit()
+        await transaction.commit()
 
     async def _driver_rollback(self) -> None:
         transaction = self._active_native_transaction
         self._native_transaction_ended = True
-        if not transaction.end_unbegun():
-            await transaction.rollback()
+        await transaction.rollback()
 
     async def _driver_savepoint(self, name: str) -> None:
         await self._active_native_transaction.savepoint(name)

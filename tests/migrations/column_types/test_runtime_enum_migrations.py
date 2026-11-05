@@ -12,12 +12,14 @@ import pytest
 
 from hare import Hare, fields
 from hare.ddl.constraints import CheckConstraint
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
+from hare.declarations.runtime_enums import RuntimeEnums
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.migration import Migration
 from hare.migrations.operations import AddField, AlterField, CreateModel
-from hare.migrations.runtime_enums import RuntimeEnums
 from hare.migrations.state.state import State
-from hare.migrations.writer import ImportManager, MigrationWriter
+from hare.migrations.writer import MigrationWriter
 from hare.models import Model
 from hare.query.expressions import Q
 from tests.migrations.round_trips.test_round_trip_real_db import (
@@ -101,13 +103,13 @@ def test_an_enum_that_cant_be_imported_is_declared_in_the_migration():
 @pytest.mark.database_independent
 def test_an_importable_enum_is_imported_and_names_never_collide():
     imports = ImportManager()
-    assert MigrationWriter.render_value(ImportedStatus.NEW, imports) == "ImportedStatus.NEW"
+    assert DeclarationValueSerializer.render_value(ImportedStatus.NEW, imports) == "ImportedStatus.NEW"
     assert imports.enum_declarations == []
     first_status = build_status()
     other_status = build_status({"OPEN": "open"})
-    assert MigrationWriter.render_value(first_status.NEW, imports) == "Status.NEW"
-    assert MigrationWriter.render_value(build_status().DONE, imports) == "Status.DONE"
-    assert MigrationWriter.render_value(other_status.OPEN, imports) == "Status2.OPEN"
+    assert DeclarationValueSerializer.render_value(first_status.NEW, imports) == "Status.NEW"
+    assert DeclarationValueSerializer.render_value(build_status().DONE, imports) == "Status.DONE"
+    assert DeclarationValueSerializer.render_value(other_status.OPEN, imports) == "Status2.OPEN"
     assert imports.enum_declarations == [
         "Status = StrEnum('Status', {'NEW': 'new', 'DONE': 'done'})",
         "Status2 = StrEnum('Status', {'OPEN': 'open'})",
@@ -118,7 +120,7 @@ def test_an_importable_enum_is_imported_and_names_never_collide():
 def test_a_mixed_in_data_type_is_kept():
     colour = Enum("Colour", {"RED": "r"}, type=str)
     imports = ImportManager()
-    assert MigrationWriter.render_value(colour.RED, imports) == "Colour.RED"
+    assert DeclarationValueSerializer.render_value(colour.RED, imports) == "Colour.RED"
     assert imports.enum_declarations == ["Colour = Enum('Colour', {'RED': 'r'}, type=str)"]
 
 

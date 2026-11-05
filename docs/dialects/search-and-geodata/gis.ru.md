@@ -200,6 +200,7 @@ await Store.objects.filter(location__x__gte=37.5).values_list("location__y", fla
 | `Area(geometry)` | float — квадратные метры на geography, единицы SRID на geometry |
 | `Length(geometry)`, `Perimeter(geometry)` | float — длина линии, длина колец полигона |
 | `Distance(geometry, other)` | float — кратчайшее расстояние |
+| `DWithin(geometry, other, distance)` | bool — расстояние не больше радиуса; радиус может быть выражением |
 | `Centroid`, `PointOnSurface` | точка — центр масс, точка заведомо на геометрии |
 | `Envelope`, `Boundary`, `ConvexHull` | ограничивающий прямоугольник, граница, выпуклая оболочка |
 | `Buffer(geometry, distance)` | область в пределах `distance` (отрицательное сжимает полигон) |
@@ -233,6 +234,12 @@ from hare.query.expressions import Q
 nearest = City.objects.annotate(km=Distance("center", moscow) / 1000).order_by("km", "id")
 next_page = await nearest.filter(Q(km__gt=last.km) | Q(km=last.km, id__gt=last.id)).limit(20)
 ```
+
+`DWithin` использует тот же пространственный предикат диалекта, что и `__dwithin`.
+На PostgreSQL это `ST_DWithin` с поддержкой пространственного индекса. Для geography
+радиус задаётся в метрах, для geometry — в единицах SRID; километры умножайте на 1000 явно.
+Настройки типа колонки сохраняются: `PointField(geography=True, srid=4326)` и
+`PointField()` объявляют разные физические типы. Координаты существующих колонок не переставляются.
 
 ## <a id="aggregates"></a>Агрегаты
 
@@ -372,7 +379,7 @@ GeoJSON, WKT/EWKT, (E)WKB или `Geometry`, сериализуется объе
 другим SRID отклоняется (GeoJSON, в который она сериализуется, SRID не хранит), а геометрия без SRID
 получает SRID поля. `inspectdb` читает колонку PostGIS с типом и SRID как подходящее поле
 (`geometry(PolygonZ,3857)` -> `PolygonField(srid=3857, dimensions=3)`); колонка `geography(Point,4326)`
-остаётся [`PostGISField`](../postgresql/fields.ru.md#postgisfield) с кортежем `(latitude, longitude)`, а
+читается как `PointField(geography=True)` со значением `Point(longitude, latitude)`, а
 колонка без типа и SRID или с координатами M — неоднозначный `TextField`. Таблицы и представления
 расширения — `spatial_ref_sys`, `geometry_columns`, `geography_columns` из PostGIS — не принадлежат
 моделям: `inspectdb` и проверка расхождений их не видят, как и пространственные метаданные SpatiaLite.

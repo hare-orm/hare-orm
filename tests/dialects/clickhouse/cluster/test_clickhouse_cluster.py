@@ -10,8 +10,8 @@ import pytest
 from hare import fields
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
 from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
-from hare.dialects.clickhouse.cluster.clickhouse_cluster_statements import ClickhouseClusterStatements
 from hare.dialects.clickhouse.functions import DictGet
 from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
 from hare.dialects.clickhouse.schema_objects.clickhouse_dictionary import ClickhouseDictionary
@@ -25,90 +25,6 @@ from hare.query.functions import Count
 from tests.dialects.clickhouse.cluster.models import Click, Label, Site, Visit
 from tests.utils.operations import apply_operations
 
-DISTRIBUTED = {("test", "visit"): "visit_local"}
-
-
-def get_statements(statement, replicates_schema=False):
-    return ClickhouseClusterStatements.get_statements(
-        statement, "hare_sharded", DISTRIBUTED, database="test", replicates_schema=replicates_schema
-    )
-
-
-@pytest.mark.database_independent
-def test_statements_run_on_every_server_and_where_the_rows_are():
-    assert get_statements('CREATE TABLE "site" ("name" String) ENGINE = MergeTree ORDER BY name') == [
-        'CREATE TABLE "site" ON CLUSTER hare_sharded ("name" String) ENGINE = MergeTree ORDER BY name'
-    ]
-    assert get_statements('CREATE TABLE IF NOT EXISTS db."visit_local" ("id" Int64)') == [
-        'CREATE TABLE IF NOT EXISTS db."visit_local" ON CLUSTER hare_sharded ("id" Int64)'
-    ]
-    # A change of columns goes to both tables, the local one first; a change of storage and of rows
-    # to the local table alone.
-    assert get_statements('ALTER TABLE "visit" ADD COLUMN "n" Int32') == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded ADD COLUMN "n" Int32',
-        'ALTER TABLE "visit" ON CLUSTER hare_sharded ADD COLUMN "n" Int32',
-    ]
-    assert get_statements('ALTER TABLE "visit" MODIFY COLUMN "n" Int32 CODEC(ZSTD)') == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded MODIFY COLUMN "n" Int32 CODEC(ZSTD)'
-    ]
-    assert get_statements('ALTER TABLE "visit" ADD INDEX "ix" ("n") TYPE minmax GRANULARITY 1') == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded ADD INDEX "ix" ("n") TYPE minmax GRANULARITY 1'
-    ]
-    assert get_statements('ALTER TABLE "visit" UPDATE "n" = 1 WHERE 1', replicates_schema=True) == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded UPDATE "n" = 1 WHERE 1'
-    ]
-    assert get_statements('DELETE FROM "visit" WHERE "id" = 1') == [
-        'DELETE FROM "visit_local" ON CLUSTER hare_sharded WHERE "id" = 1'
-    ]
-    # The rows of a table of no distributed one change where they are sent - a replicated table
-    # copies the change itself.
-    assert get_statements('DELETE FROM "site" WHERE 1') == ['DELETE FROM "site" WHERE 1']
-    assert get_statements('DROP TABLE "visit"') == ['DROP TABLE "visit" ON CLUSTER hare_sharded']
-    assert get_statements('TRUNCATE TABLE "visit"') == ['TRUNCATE TABLE "visit_local" ON CLUSTER hare_sharded']
-    assert get_statements('RENAME TABLE "a" TO "b";') == ['RENAME TABLE "a" TO "b" ON CLUSTER hare_sharded']
-    assert get_statements('SYSTEM RELOAD DICTIONARY "d"') == ['SYSTEM RELOAD DICTIONARY ON CLUSTER hare_sharded "d"']
-    # A database replicating its schema itself is sent the change alone.
-    assert get_statements('ALTER TABLE "site" ADD COLUMN "n" Int32', replicates_schema=True) == [
-        'ALTER TABLE "site" ADD COLUMN "n" Int32'
-    ]
-    for statement in ("SELECT 1", 'INSERT INTO "visit" VALUES (1)', 'CREATE TABLE "t" ON CLUSTER c ("a" Int8)'):
-        assert get_statements(statement) == [statement]
-
-
-@pytest.mark.database_independent
-def test_a_column_change_rewriting_its_rows_leaves_the_rewrite_out_of_the_distributed_table():
-    """A column made nullable rewrites its rows in the same ALTER - sent to the distributed table too,
-    which takes no mutation (code 48), and the migration stuck."""
-    statement = 'ALTER TABLE "visit" MODIFY COLUMN "n" Nullable(Int32), UPDATE "n" = "n" WHERE 1'
-    assert get_statements(statement) == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded MODIFY COLUMN "n" Nullable(Int32), '
-        'UPDATE "n" = "n" WHERE 1',
-        'ALTER TABLE "visit" ON CLUSTER hare_sharded MODIFY COLUMN "n" Nullable(Int32)',
-    ]
-    # Text that only looks like the rewrite stays.
-    comment = """ALTER TABLE "visit" MODIFY COLUMN "n" Int32 COMMENT 'a, UPDATE b = b WHERE 1 or not'"""
-    assert get_statements(comment)[1] == comment.replace('"visit"', '"visit" ON CLUSTER hare_sharded')
-
-
-@pytest.mark.database_independent
-def test_a_name_holding_its_quote_takes_on_cluster_after_it():
-    """ON CLUSTER went inside a name holding a doubled quote, and the server refused the statement."""
-    assert get_statements('CREATE TABLE "sr""c t" ("id" Int32) ENGINE = Log') == [
-        'CREATE TABLE "sr""c t" ON CLUSTER hare_sharded ("id" Int32) ENGINE = Log'
-    ]
-    assert get_statements('DROP TABLE db."a\\"b"') == ['DROP TABLE db."a\\"b" ON CLUSTER hare_sharded']
-    assert get_statements("ALTER TABLE `a``b` DROP COLUMN x") == [
-        "ALTER TABLE `a``b` ON CLUSTER hare_sharded DROP COLUMN x"
-    ]
-    statement = 'ALTER TABLE "visit" MODIFY COLUMN "c""d" Nullable(Int32), UPDATE "c""d" = "c""d" WHERE 1'
-    assert get_statements(statement) == [
-        'ALTER TABLE "visit_local" ON CLUSTER hare_sharded MODIFY COLUMN "c""d" Nullable(Int32), '
-        'UPDATE "c""d" = "c""d" WHERE 1',
-        'ALTER TABLE "visit" ON CLUSTER hare_sharded MODIFY COLUMN "c""d" Nullable(Int32)',
-    ]
-    assert ClickhouseClusterStatements.get_name_parts('db."sr""c t"') == ("db.", 'sr"c t')
-    assert ClickhouseClusterStatements.get_local_name('"vi""sit"', 'lo"cal') == '"lo""cal"'
-
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize(
@@ -119,20 +35,6 @@ def test_the_local_table_of_a_distributed_one_is_read_in_any_quoting(argument_sq
     """A local table named with a space was taken for none - the distributed table read back as a plain one; a
     backslash in its name stayed escaped, and a change of the table named a table that didn't exist."""
     assert ClickhouseSqlParts.get_name_argument(argument_sql) == name
-    assert ClickhouseClusterStatements.get_local_name('"d"', name).startswith('"')
-
-
-@pytest.mark.database_independent
-def test_words_inside_a_string_neither_name_the_cluster_nor_the_storage():
-    """A comment reading "ON CLUSTER" kept the statement to the server it was sent to - the other servers
-    were left without the change; one reading "TTL" kept a column's comment from the distributed table."""
-    statement = """ALTER TABLE "site" COMMENT COLUMN "n" 'runs ON CLUSTER x here'"""
-    assert get_statements(statement) == [statement.replace('"site"', '"site" ON CLUSTER hare_sharded')]
-    statement = """ALTER TABLE "visit" COMMENT COLUMN "n" 'kept by TTL here'"""
-    assert get_statements(statement) == [
-        statement.replace('"visit"', '"visit_local" ON CLUSTER hare_sharded'),
-        statement.replace('"visit"', '"visit" ON CLUSTER hare_sharded'),
-    ]
 
 
 @pytest.mark.database_independent
@@ -258,7 +160,7 @@ async def test_migrations_change_the_schema_on_every_server(clickhouse_cluster_d
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
     distributed = ClickhouseTableOptions(distributed_over="order_local", sharding_key=RawSQLTerm("id"))
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -279,7 +181,7 @@ async def test_migrations_change_the_schema_on_every_server(clickhouse_cluster_d
     try:
         assert await get_tables() == ([("order", "Distributed"), ("order_local", "MergeTree")], 2)
         await connection.execute_script('INSERT INTO "order" VALUES (1, 10), (2, 20), (3, 30), (4, 40)')
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AddField(model_name="Order", name="note", field=fields.CharField(max_length=10, default="-")),
@@ -293,7 +195,7 @@ async def test_migrations_change_the_schema_on_every_server(clickhouse_cluster_d
             (4, 40, "-"),
         ]
         # Another sort remakes the local tables, the rows copied each to its shard.
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AlterModelOptions(
@@ -327,7 +229,7 @@ async def test_a_table_of_scattered_rows_is_not_remade(clickhouse_cluster_db):
     connection = Visit._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -339,7 +241,7 @@ async def test_a_table_of_scattered_rows_is_not_remade(clickhouse_cluster_db):
     )
     try:
         with pytest.raises(UnSupportedError, match="only the rows of this server"):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterModelOptions(
@@ -360,7 +262,7 @@ async def test_a_replicated_table_of_rows_per_shard_is_not_remade(clickhouse_clu
     connection = Visit._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -372,7 +274,7 @@ async def test_a_replicated_table_of_rows_per_shard_is_not_remade(clickhouse_clu
     )
     try:
         with pytest.raises(UnSupportedError, match="keep rows of their own on each shard"):
-            await apply_operations(
+            state = await apply_operations(
                 "models",
                 state,
                 AlterModelOptions(
@@ -404,7 +306,7 @@ async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse
         (f"/clickhouse/tables/{run}/{{replica}}/{{table}}", False),
         (f"/clickhouse/tables/{run}/{{uuid}}/{{replica}}", True),
     ):
-        engine = f"ReplicatedMergeTree('{replica_path}', '{{replica}}')"
+        engine = ClickhouseEngine("ReplicatedMergeTree", replica_path=replica_path, replica_name="{replica}")
 
         def get_options(*order_by, engine=engine):
             return {
@@ -420,7 +322,7 @@ async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse
             }
 
         state = State()
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -437,10 +339,10 @@ async def test_a_table_of_a_replica_path_naming_no_uuid_is_not_remade(clickhouse
             )
             remake = AlterModelOptions(name="Ledger", options=get_options("id", "text"))
             if remakes:
-                await apply_operations("models", state, remake, schema_editor=editor)
+                state = await apply_operations("models", state, remake, schema_editor=editor)
             else:
                 with pytest.raises(UnSupportedError, match="replica path names no {uuid}"):
-                    await apply_operations("models", state, remake, schema_editor=editor)
+                    state = await apply_operations("models", state, remake, schema_editor=editor)
             assert await connection.execute_dicts("SELECT count() AS rows FROM ledger") == [{"rows": 6}]
         finally:
             await apply_operations("models", state, DeleteModel(name="Ledger"), schema_editor=editor)
@@ -454,7 +356,7 @@ async def test_a_materialized_view_filled_on_a_cluster_reads_distributed_tables(
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     await Visit.objects.bulk_create([Visit(id=number, site="a", duration=number) for number in range(1, 11)])
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -493,7 +395,7 @@ async def test_a_materialized_view_filled_on_a_cluster_reads_distributed_tables(
             to="durations",
             read_columns=[("visit", "id"), ("visit", "duration")],
         )
-        await apply_operations("models", state, AddMaterializedView("Durations", view), schema_editor=editor)
+        state = await apply_operations("models", state, AddMaterializedView("Durations", view), schema_editor=editor)
         assert await connection.execute_dicts("SELECT count() AS rows FROM durations") == [{"rows": 10}]
     finally:
         await apply_operations("models", state, DeleteModel(name="Durations"), schema_editor=editor)
@@ -562,7 +464,7 @@ async def test_a_replicated_database_replicates_the_schema_itself(clickhouse_clu
     try:
         editor = client.dialect.schema_editor_class(client, atomic=True, collect_sql=False)
         state = State()
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -573,7 +475,7 @@ async def test_a_replicated_database_replicates_the_schema_itself(clickhouse_clu
             schema_editor=editor,
         )
         # Sent without ON CLUSTER, which the database refuses - it runs the DDL on its servers itself.
-        assert await client.cluster.fetch_replicates_schema()
+        assert client.cluster.database_engines[database] == "Replicated"
         await apply_operations(
             "models",
             state,

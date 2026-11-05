@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Generator
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import UnSupportedError
@@ -11,7 +10,6 @@ from hare.query.plans.statement.declared_plan_slots import DeclaredPlanSlots
 from hare.query.statements.write.update_query import UpdateQuery
 
 if TYPE_CHECKING:
-    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements.write.returning.returned_rows import ReturnedRows
@@ -58,9 +56,9 @@ class UpdateReturningQuery(UpdateQuery):
         )
         return keeps_plan
 
-    def __await__(self) -> Generator[Any, None, list[Any]]:  # type: ignore[override]
+    async def _execute_bound(self) -> list[Any]:
         if self._is_none:
-            return self._return_none().__await__()
+            return await self._return_none()
         query = self._get_execution_query(True)
         if not query._connection.features.supports_returning:
             raise UnSupportedError(
@@ -72,13 +70,7 @@ class UpdateReturningQuery(UpdateQuery):
                 f"{query._connection.dialect} "
                 "server of this connection doesn't have"
             )
-        return query._execute_returning().__await__()
-
-    def _get_query_on(self, connection: DatabaseClient) -> UpdateReturningQuery:
-        query = UpdateReturningQuery(self, self.given_values, self.returned_rows, self._rules.write_type)
-        query._apply_connection(connection)
-        query._connection_explicitly_chosen = True
-        return query
+        return await query._execute_returning()
 
     async def _return_none(self) -> list[Any]:
         return []

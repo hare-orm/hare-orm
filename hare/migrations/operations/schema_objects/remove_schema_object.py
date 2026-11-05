@@ -25,7 +25,6 @@ class RemoveSchemaObject(ModelBoundOperation):
     """
 
     object_type: ClassVar[type[SchemaObjectType]]
-    backward_reads_state_left = False
 
     def __init__(self, model_name: str, name: str | None = None, fields: list[str] | None = None) -> None:
         if not name and not fields:

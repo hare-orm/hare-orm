@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from hare.classes.comparable_values import ComparableValues
+from hare.declarations.declaration_values import DeclarationValues
 from hare.migrations.exceptions import IncompatibleStateError
 
 if TYPE_CHECKING:
@@ -101,7 +102,7 @@ class SchemaObjectType:
         if name is not None:
             return cls.get_name(entry) == name
         entry_object = cls.as_schema_object(entry)
-        return cls.get_name(entry_object) is None and ComparableValues.are_equal(entry_object, schema_object)
+        return cls.get_name(entry_object) is None and DeclarationValues.are_equal(entry_object, schema_object)
 
     @classmethod
     def get_name(cls, schema_object: Any) -> str | None:
@@ -175,7 +176,7 @@ class SchemaObjectType:
     @classmethod
     def renamed(cls, schema_object: Any, new_name: str) -> Any:
         """A copy of the object under another name."""
-        raise NotImplementedError
+        return replace(schema_object, name=new_name)
 
     @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:

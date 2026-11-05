@@ -3,21 +3,21 @@ or a database of the reusable test database pool when HARE_TEST_DB points at a s
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 import pytest_asyncio
 
 from hare.contrib.test import ReusableTestDatabases
-from hare.core.connections.connections import Connections
+from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
-from hare.exceptions import OperationalError
+from hare.dialects.base.connection.db_url_parts import DbUrlParts
 from tests.utils.cli_project import CliProject, get_probe_config
 from tests.utils.database_under_test import DatabaseUnderTest
 
@@ -37,7 +37,13 @@ async def project_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> As
     (tmp_path / "cli_rt_probe.py").write_text("", encoding="utf-8")
     postgres_template = get_postgres_database_template()
     created_projects: list[CliProject] = []
-    leases: dict[str, int] = {}
+    database_configs: list[DatabaseConfig] = []
+    cleanup = ResourceCleanup()
+
+    async def release_database(database: DatabaseConfig) -> None:
+        async with HareContext() as context:
+            await context.init(config=get_probe_config(database.config))
+            await database.bind(context.get_connection()).release()
 
     async def create_project(*app_labels: str) -> CliProject:
         project_index = len(created_projects)
@@ -48,47 +54,36 @@ async def project_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> As
             scheme = DatabaseUnderTest.get_url().split("://", 1)[0]
             database_url = f"{scheme}://{(project_root / 'db.sqlite3').as_posix()}?synchronous=OFF"
         else:
-            database_template = postgres_template if "{}" in postgres_template else f"{postgres_template}_{{}}"
+            parsed_url = DbUrlParts.parse(postgres_template, has_userinfo=True).parsed
+            if "{}" not in parsed_url.path:
+                parsed_url = parsed_url._replace(path=parsed_url.path + "_{}")
+            database_template = parsed_url.geturl()
             # A database of the reusable test database pool - reset instead of created and dropped.
-            with ReusableTestDatabases.track_new_leases() as new_leases:
-                leased_connection_config = DbUrlConfigGenerator.expand(
-                    database_template, testing=True, reuse_databases=ReusableTestDatabases.is_enabled()
-                )
-            leases.update(new_leases)
+            database = DatabaseConfig.from_url(database_template, reuse=ReusableTestDatabases.is_enabled())
+            database_configs.append(database)
+            leased_connection_config = database.config
             # The leased database's full name in place of the template's database name.
-            base_url, _, database_and_query = database_template.rpartition("/")
-            _, question_mark, query = database_and_query.partition("?")
-            database_url = f"{base_url}/{leased_connection_config['credentials']['database']}{question_mark}{query}"
+            database_name = leased_connection_config["credentials"]["database"]
+            database_url = parsed_url._replace(path="/" + quote(database_name, safe=""), params="").geturl()
             async with HareContext() as context:
-                await context.init(config=get_probe_config(leased_connection_config), _create_db=True)
+                await context.init(config=get_probe_config(leased_connection_config))
+                await database.bind(context.get_connection()).create()
+                cleanup.push(release_database, database)
                 await context.connections.close_all(discard=False)
         project = CliProject(
             project_root, database_url, app_labels or ("app",), f"cli_rt_settings_{tmp_path.name}_{project_index}"
         )
-        if postgres_template is not None:
-            project.leased_connection_config = leased_connection_config
         created_projects.append(project)
+        cleanup.push(project.close_query_context)
         return project
 
-    yield create_project
-
     try:
-        for project in created_projects:
-            await project.close_query_context()
-            if project.leased_connection_config is None:
-                continue
-            async with HareContext() as context:
-                await context.init(config=get_probe_config(project.leased_connection_config))
-                connection = Connections.get("default")
-                await context.connections.close_all(discard=False)
-                for attempt in range(20):
-                    try:
-                        await connection.db_delete()
-                        break
-                    except OperationalError:
-                        if attempt == 19:
-                            raise
-                        await asyncio.sleep(0.5)
+        yield create_project
     finally:
-        # A lease whose database was never reset goes back to the pool marked for a reset.
-        ReusableTestDatabases.release_leases(leases)
+        try:
+            await cleanup.close()
+        finally:
+            ReusableTestDatabases.release_leases(
+                database.lease for database in database_configs if database.lease is not None
+            )
+        cleanup.raise_errors()

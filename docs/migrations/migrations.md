@@ -6,7 +6,7 @@ migration writes the enums of enum fields and swappable models.
 
 ## <a id="migrations-api"></a>The commands as functions (`hare.migrations.api`)
 
-Every migration command is a function — the CLI only parses arguments, calls it and prints the result.
+The migration APIs below are also used by the CLI, which handles interactive prompts and file output.
 Call them from a deploy script, a test or a management endpoint instead of shelling out:
 
 ```python
@@ -41,14 +41,14 @@ async def migrate(
     reporter: Callable[[str, list[PlanStep], bool, bool], object] | None = None,
     progress: Callable[[str, str, str], object] | None = None,
     lock_timeout: float | None = None,
-) -> None: ...
+) -> list[ConnectionMigrationPlan]: ...
 
 async def plan(
     *,
     config: Mapping[str, Any] | HareConfig | str,
     app_labels: Sequence[str] | None = None,
     target: str | None = None,
-) -> list[str]: ...
+) -> list[ConnectionMigrationPlan]: ...
 
 async def sqlmigrate(
     *,
@@ -78,7 +78,8 @@ dict, the path of a `.json`/`.yml` file, or `"module.VARIABLE"`.
   identify it. A field renamed keeping its column is recognized by the column: an added field whose
   `source_field` names a removed field's column (`a2 = IntField(source_field="a")` for `a`), or one taking
   back by its own name the column a removed field held under a `source_field` (`a` again) — a
-  `RenameField`, the column kept. Any other rename is answered by `rename_questions` (see
+  `RenameField`, the column kept. A unique removed/added relation pair with the same type and rename
+  signature is also recognized automatically. Other renames are answered by `rename_questions` (see
   [Renames](#renames)). A key field renamed and changed at once (a component of a composite primary key, a
   partition key field) can't be told from a new field: `makemigrations` raises `ConfigurationError`
   naming `RenameField` — write that rename by hand, then the change. An app without a migrations package
@@ -90,9 +91,9 @@ dict, the path of a `.json`/`.yml` file, or `"module.VARIABLE"`.
   [Squashing migrations](#squashing-migrations)). It returns a `SquashedMigration`: `writer` (the
   migration, not written yet; `None` when the run holds one migration), `replaced_names`,
   `squashed_operation_count` (the operations before they were shortened) and `elided_operation_count`
-  (the `elidable` `RunPython`/`RunSQL` left out). `ConfigurationError` for an unknown app or migration, a
-  start after the end, a prefix naming several migrations, and a name one of the app's migrations already
-  has.
+  (the `elidable` `RunPython`/`RunSQL` left out). `ConfigurationError` for an unknown app, a start after
+  the end, or an output name already used by the app. An unknown migration or an ambiguous prefix raises
+  `UnknownMigrationError`.
 - `migrate()` applies or unapplies migrations to reach `target` — `"app_label"` (that app's latest),
   `"app_label.migration_name"`, or `"app_label.zero"` (unapply everything); without it every app goes to
   its latest. The migrations of every connection make one plan, in the order of their dependencies: a
@@ -100,11 +101,16 @@ dict, the path of a `.json`/`.yml` file, or `"module.VARIABLE"`.
   unapplying runs the other way round; the steps of one connection that follow each other run together,
   under that connection's migration lock. `reporter(connection_alias, plan_steps, fake, dry_run)` is
   called with each such run of steps before it runs, `progress(event, app_label, migration_name)` around
-  each migration; either may be an `async def`.
-- `plan()` returns (and prints) the ordered steps `migrate()` would take; `sqlmigrate()` returns the SQL
-  of one migration (`backward=True` — of unapplying it) without running it — the SQL `migrate()` runs:
-  the DDL follows from the migration state alone, every object under the name hare gives it, nothing
-  read from the database.
+  each migration; either may be an `async def` or return an awaitable. Callbacks complete before
+  execution continues; their errors and cancellation propagate to the caller. Progress events are
+  `apply_start`, `apply_done`, `rollback_start` and `rollback_done`; fake migrations do not emit them.
+- `plan()` returns ordered `ConnectionMigrationPlan` records with `connection_alias` and a tuple of
+  `PlanStep` objects in `steps`; it prints nothing. `migrate()` returns the runs reported under the
+  migration lock (planned runs for a dry run). These records describe the shared schema; tenant
+  migrations execute as part of the request and propagate failures. `sqlmigrate()` previews one
+  migration (`backward=True` — its reversal) without running it. SQL follows from migration state;
+  Python operations and steps requiring the live database catalog are represented by comments.
+  The preview is therefore not necessarily a complete executable migration script.
 - `checkmigrations()` returns the risks of the migrations `migrate()` would apply — see
   [Checking migrations](zero-downtime.md#checking-migrations).
 
@@ -115,9 +121,28 @@ for writer in changes.writers:
 await migrate(config="settings.HARE_ORM")
 ```
 
-`makemigrations()` and `squashmigrations()` bind the models in a context of their own and never connect
-to a database. `migrate()`, `plan()` and `sqlmigrate()` call `Hare.init()` themselves and leave the
-context initialized — call `await Hare.close_connections()` when done.
+Every API request uses its own `MigrationSession`, closes its clients and restores the caller's
+context. It does not replace an application's global fallback. `makemigrations()` and
+`squashmigrations()` bind models without connecting to a database. Definitions are captured once per
+session; each executor copies their declarations and rereads its journal under the migration lock.
+The session also captures its application environment. Executors, tenant-schema executors and
+squashing retain that environment for historical model rendering and use the session's connection
+handler for migration locks; another current application does not supply these resources.
+
+For several operations on the same clients, especially an in-memory database, retain a session:
+
+```python
+from hare.migrations.api import MigrationSession
+
+async with MigrationSession("settings.HARE_ORM") as session:
+    pending = await session.plan()
+    applied = await session.migrate()
+    # Explicit access to these clients is available until the session exits.
+    connection = session.context.get_connection()
+```
+
+A new session reads updated migration files. Editing files while one session is active does not
+replace its captured declarations. User Python callbacks still execute their ordinary Python code.
 
 ## <a id="renames"></a>Renames
 
@@ -170,9 +195,12 @@ hare migrate --lock-timeout 5
 A migration altering a busy table waits for the lock every open transaction on it holds — and while it
 waits, every later query of the table queues behind it. With `lock_timeout` (seconds, `0.001` up to
 `2147483.647`) a statement of the migration that waits longer for a lock another session holds fails: the
-migration is rolled back, isn't recorded, and `migrate` raises the database's error (`OperationalError` —
-"canceling statement due to lock timeout" on PostgreSQL, "database is locked" on SQLite); retry it once
-the table is quieter. `migrate(lock_timeout=...)` and `--lock-timeout` take precedence over the config's
+atomic migration is rolled back, isn't recorded, and `migrate` raises the database's `OperationalError`.
+It can be retried once the table is quieter. A non-atomic migration keeps already applied changes;
+a failure after work has started raises `PartiallyAppliedMigrationError`. Inspect and reconcile that
+partial state before retrying. If no SQL statement ran and the migration contains no `RunPython`,
+the original error is preserved.
+`migrate(lock_timeout=...)` and `--lock-timeout` take precedence over the config's
 `migrations.lock_timeout`; a wrong type or out-of-range value raises `ConfigurationError`. ClickHouse has
 no lock timeout for DDL: a migration run with one there raises `UnSupportedError`.
 
@@ -182,6 +210,19 @@ no lock timeout for DDL: a migration run with one there raises `UnSupportedError
 | Non-atomic | a connection of its own with `SET lock_timeout` for the whole migration (a pooled connection would lose the setting), every query of the connection alias going to it; closed afterwards | the connection's busy timeout for the whole migration, restored after it |
 
 ## <a id="squashing-migrations"></a>Squashing migrations
+
+Optimization uses the actual schema before the selected range, including migrations of other apps
+that it depends on. It prepares independent operation snapshots and accepts a shortening rewrite only
+when the complete resulting state is unchanged, including defaults and relation settings. Sorting and
+cycle splitting preserve the original declarations. Dependencies and opaque SQL can prevent a rewrite
+even when the operations name different models.
+
+For custom operations, `get_rewrite(other, app_label)` returns `OperationRewrite(operations)` or `None`;
+an empty tuple proposes cancellation. This is separate from `can_move_across(other, app_label)`:
+both operations must permit reordering, and their prepared dependencies must allow it. The default
+`Operation` implementation permits neither. State equality does not prove that custom database actions
+are equivalent: a custom rewrite must preserve those actions too. `MigrationOptimizer.optimize()`
+requires the explicit `state_before` argument and leaves it unchanged.
 
 ```text
 hare squashmigrations app 0012                                      # 0001 to 0012
@@ -193,10 +234,8 @@ created and changed later is created changed, a field added and removed cancels 
 deleted too, renames in a row become one rename, later options of a model take the place of earlier ones.
 An operation is moved across another only when the two touch no common model — a `RunPython`/`RunSQL`,
 which may touch any, is never crossed. A field added with `db_index=True` joins its model's `CreateModel`
-with its flag; a one-to-one relation to a composite key joins it together with the `AddConstraint`
-making it unique — where an operation between the two can't be crossed, the squashed migration removes
-that constraint right after `CreateModel` (`RemoveConstraint` by its fields) and adds it where the original
-migrations did. A `RunPython`/`RunSQL` is kept, unless it's
+with its flag; a one-to-one relation to a composite key joins it with the uniqueness declared by that
+relation, without a separate constraint operation. A `RunPython`/`RunSQL` is kept, unless it's
 declared `elidable=True`; a `RunPython` function defined in a replaced migration file is copied into the
 new file with the imports of its module it uses (a function using other names of its module — a constant,
 a helper — is refused: move them into the function or an importable module). The new migration is named
@@ -204,10 +243,16 @@ after the first one it replaces (`0005_accounts_rework`; `0001_squashed_0012_<na
 `--squashed-name`), depends on what the replaced ones depend on outside the run, and is `atomic = False`
 when any of them is. Squashing a run holding a squashed migration replaces that one's originals.
 
-Imports used by a copied function's decorators, defaults and annotations are emitted before its
-declaration. Their references use the generated import aliases, including a default or annotation
-consisting of a single imported name; imports used only by the function body stay inside it.
-Parameters of a lambda in such an expression keep their scope and can shadow an imported name.
+Imports used by a copied function are emitted before its declaration. Its decorators, defaults,
+annotations and body use the generated aliases. Imported names remain at module scope, including
+when a nested function refers to them through an explicit `global` declaration.
+Parameters, nested functions and comprehensions keep their local bindings and can shadow imported
+names. If another declaration already uses the function's name, its recursive calls follow the
+new name; unrelated local names remain unchanged. Generated aliases avoid local bindings as well
+as names already taken in the migration module.
+Copied functions carry their original declaration path in `__hare_declaration_path__`.
+Keep this generated attribute: it lets migration checks recognize the copy while distinguishing
+functions that merely share a name in different modules.
 
 A run can't be squashed into one migration when another app's migration sits inside it — a migration of
 the run depends on it, and it depends on an earlier migration of the run: the squashed migration would
@@ -256,9 +301,11 @@ it unrecorded, and the schema is fixed forward by hand.
 
 ### <a id="migration-lock"></a>One `migrate` at a time
 
-`migrate` holds a migration lock for its whole run: a second `migrate` of the same database — another
-process, another host — waits for it, then finds the first one's migrations applied and
-applies only what is left. PostgreSQL takes a transaction-level advisory lock on a connection of its
+`migrate` holds a migration lock while executing each group of consecutive steps on one connection.
+It releases the lock between groups and acquires it again for that connection's finalization and tenant
+synchronization. A competing `migrate` of the same database waits for the current holder, rereads the
+migration journal after acquiring the lock and applies only the remaining steps. PostgreSQL takes a
+transaction-level advisory lock on a connection of its
 own; SQLite an OS lock on the file `<database>-migrate-lock` beside the database file (none for an
 in-memory database); ClickHouse an ephemeral node of ClickHouse Keeper,
 `/hare/migrations/<database>/migrate` (the name with each byte but a letter, a digit and `_.-~`
@@ -303,8 +350,10 @@ they are off.
 
 ### <a id="loading-and-planning"></a>Loading and planning
 
-When `migrate` is given several targets, each one is planned against the state the earlier ones leave
-behind; targets that would both apply and unapply the same migration raise `QueryError`.
+`MigrationExecutor.migrate()` and `MigrationExecutor.get_migration_plan()` accept several targets.
+Each is planned against the state the earlier ones leave behind; targets that would both apply and
+unapply the same migration raise `QueryError`. The public migration functions and `MigrationSession`
+accept one target string per call.
 
 Migration files are re-read on every load: a file edited after it was first imported is picked up by the
 next `migrate`/`plan` in the same process.
@@ -312,6 +361,13 @@ next `migrate`/`plan` in the same process.
 Generated migration imports use distinct aliases when a custom default or field shares a name with
 another imported object, a module, or a Python builtin. This preserves each serialized value regardless
 of the order the operations introduce it.
+
+Declaration comparison uses constructor arguments and typed standard-library values, not
+arbitrary `str()` or `repr()` output. Mapping key types and `ZoneInfo` zone names are preserved;
+lists and tuples with the same contents are equivalent declaration sequences. Custom values
+must describe their constructor with `deconstruct()` or declare an import reference through
+`migration_import_path`. Unsupported values raise `ConfigurationError` instead of comparing
+equal because their display text happens to match.
 
 ## <a id="runtime-enums"></a>Enums of enum fields
 
@@ -394,8 +450,9 @@ class Migration(migrations.Migration):
   package's `swappable_dependency` on it is left out until that app's first migration exists. A project
   model pointing back at a package model forms a cycle with it; `makemigrations` splits it into two
   migrations the way it does for any two apps migrated together.
-- `makemigrations` and `squashmigrations` sort the imports of and format the files they write with ruff
-  when it's installed, so a written migration passes `ruff check`/`ruff format --check`.
+- The CLI commands `hare makemigrations` and `hare squashmigrations` invoke installed Ruff to sort
+  imports and format written files. Python callers can use `MigrationWriter.format_files(paths)`.
+  This optional formatting does not guarantee that every lint rule passes.
 
 Choose the setting before the package's tables are created. `migrate` refuses to run while a table an
 applied migration created has a `swappable()` foreign key — a relation's own, or one of the automatic

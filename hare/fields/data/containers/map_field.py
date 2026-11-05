@@ -184,4 +184,4 @@ class MapField(ContainerField):
         return None
 
     def get_python_type(self) -> Any:
-        return dict[self.get_child_python_type(self.key_field), self.get_child_python_type(self.value_field)]  # type: ignore[misc]
+        return dict[self.key_field.get_annotation(), self.value_field.get_annotation()]  # type: ignore[misc]

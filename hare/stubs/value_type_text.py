@@ -36,7 +36,9 @@ class ValueTypeText:
             text = f"{self.imports.add('collections.abc', 'Iterable')}[{item_text}]"
         elif value_type.shape is LookupValueShape.RANGE:
             bound_text = self.get_union([item_text, "None"])
-            text = f"tuple[{bound_text}, {bound_text}] | list[{bound_text}]"
+            tuple_name = self.imports.add("builtins", "tuple")
+            list_name = self.imports.add("builtins", "list")
+            text = f"{tuple_name}[{bound_text}, {bound_text}] | {list_name}[{bound_text}]"
         else:
             text = item_text
         if value_type.alternatives:
@@ -64,6 +66,7 @@ class ValueTypeText:
         elif enum_type is not None:
             # A value read from an enum field is its member.
             items = [self.imports.add_class(enum_type)]
+        items.extend(self.get_class_text(cls) for cls in value_type.accepted_classes)
         items.extend(self.imports.add_class(model) for model in value_type.models)
         if value_type.nullable:
             items.append("None")
@@ -80,7 +83,7 @@ class ValueTypeText:
                 return self.imports.add("typing", "Any")
             return self.imports.add_class(cls)
         if isinstance(cls, tuple):
-            return f"tuple[{', '.join(self.get_class_text(item) for item in cls)}]"
+            return f"{self.imports.add('builtins', 'tuple')}[{', '.join(self.get_class_text(item) for item in cls)}]"
         origin = typing.get_origin(cls)
         if origin is not None:
             if origin is typing.Annotated:

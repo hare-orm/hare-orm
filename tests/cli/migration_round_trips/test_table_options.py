@@ -9,6 +9,8 @@ import textwrap
 
 import pytest
 
+from hare.migrations import operations as ops
+
 
 @pytest.mark.asyncio
 async def test_a_model_pointing_at_an_unmanaged_one_is_created_after_what_that_one_points_at(
@@ -30,8 +32,12 @@ async def test_a_model_pointing_at_an_unmanaged_one_is_created_after_what_that_o
         id = fields.IntField(primary_key=True)
     """)
     await project.cli_ok("makemigrations")
-    migration = project.read_latest_migration()
-    assert migration.index('name="Shelf"') < migration.index('name="Order"')
+    created_models = [
+        operation.name
+        for operation in project.get_latest_migration().operations
+        if isinstance(operation, ops.CreateModel)
+    ]
+    assert created_models.index("Shelf") < created_models.index("Order")
     await project.query("CREATE TABLE item (id INTEGER PRIMARY KEY, shelf_id INTEGER)")
     await project.cli_ok("migrate")
     await project.cli_ok("sqlmigrate", "app", project.migration_files()[0])
@@ -56,8 +62,12 @@ async def test_an_unmanaged_model_s_many_to_many_relation_is_known(project_facto
         id = fields.IntField(primary_key=True)
     """)
     await project.cli_ok("makemigrations")
-    migration = project.read_latest_migration()
-    assert migration.index('name="Tag"') < migration.index('name="Order"')
+    created_models = [
+        operation.name
+        for operation in project.get_latest_migration().operations
+        if isinstance(operation, ops.CreateModel)
+    ]
+    assert created_models.index("Tag") < created_models.index("Order")
     await project.query("CREATE TABLE item (id INTEGER PRIMARY KEY)")
     await project.query("CREATE TABLE item_tag (item_id INTEGER NOT NULL, tag_id INTEGER NOT NULL)")
     await project.cli_ok("migrate")
@@ -94,21 +104,24 @@ async def test_switching_managed_off_and_on_never_touches_the_table(project_fact
 
     project.write_models(unmanaged)
     await project.cli_ok("makemigrations")
-    unmanaged_migration = project.read_latest_migration()
+    unmanaged_migration = project.get_latest_migration()
     await project.cli_ok("migrate")
-    assert "ops.AlterModelOptions(" in unmanaged_migration
-    assert '"managed": False' in unmanaged_migration
-    assert "DeleteModel" not in unmanaged_migration
-    assert "AddField" not in unmanaged_migration
+    (options,) = [
+        operation for operation in unmanaged_migration.operations if isinstance(operation, ops.AlterModelOptions)
+    ]
+    assert options.name == "Item" and options.options["managed"] is False
+    assert not any(
+        isinstance(operation, (ops.DeleteModel, ops.AddField)) for operation in unmanaged_migration.operations
+    )
     await project.assert_in_sync()
     assert await project.query("SELECT id, name FROM item") == [{"id": 1, "name": "keep me"}]
 
     project.write_models(managed)
     await project.cli_ok("makemigrations")
-    managed_migration = project.read_latest_migration()
+    managed_migration = project.get_latest_migration()
     await project.cli_ok("migrate")
-    assert "ops.AlterModelOptions(" in managed_migration
-    assert "CreateModel" not in managed_migration
+    assert any(isinstance(operation, ops.AlterModelOptions) for operation in managed_migration.operations)
+    assert not any(isinstance(operation, ops.CreateModel) for operation in managed_migration.operations)
     await project.assert_in_sync()
     assert await project.query("SELECT id, name FROM item") == [{"id": 1, "name": "keep me"}]
 
@@ -131,7 +144,10 @@ async def test_switching_managed_off_and_on_never_touches_the_table(project_fact
         id = fields.IntField(primary_key=True)
     """)
     await project.cli_ok("makemigrations")
-    assert 'ops.DeleteModel(name="Item")' in project.read_latest_migration()
+    assert any(
+        isinstance(operation, ops.DeleteModel) and operation.name == "Item"
+        for operation in project.get_latest_migration().operations
+    )
     await project.cli_ok("migrate")
     assert await project.query("SELECT id, name FROM item") == [{"id": 1, "name": "keep me"}]
 

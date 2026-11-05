@@ -5,6 +5,8 @@ row counting on the database under test."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -12,6 +14,7 @@ from hare import Connections
 from hare.ddl.constraints import CheckConstraint, UniqueConstraint
 from hare.ddl.indexes.index import Index
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
+from hare.dialects.postgresql.migration_safety.volatile_default_rule import VolatileDefaultRule
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.fields import (
     BigIntField,
@@ -21,8 +24,10 @@ from hare.fields import (
     IntField,
     ManyToManyField,
     Now,
+    RandomHex,
     SqlDefault,
     UUIDField,
+    UuidV7,
 )
 from hare.migrations.migration import Migration
 from hare.migrations.operations import (
@@ -45,9 +50,39 @@ from hare.migrations.operations import (
 from hare.migrations.safety import MigrationRisk, MigrationRiskCode, MigrationSafetyChecker
 from hare.migrations.state.state import State
 from hare.query.expressions import Q
+from tests.utils.fake_client import FakeClient
 
 BOOK_TABLE = "safety_book"
 AUTHOR_TABLE = "safety_author"
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        (DatetimeField(db_default=Now()), None),
+        (CharField(max_length=32, db_default=RandomHex()), "is volatile"),
+        (UUIDField(db_default=UuidV7()), "is volatile"),
+        (DatetimeField(db_default=SqlDefault("now()")), "unknown volatility"),
+        (IntField(db_default=SqlDefault("42")), "unknown volatility"),
+    ],
+)
+def test_default_volatility_uses_declarations_without_rendering_sql(monkeypatch, field, message):
+    render = Mock(side_effect=AssertionError("safety classification must not render SQL"))
+    monkeypatch.setattr(field.db_default, "get_sql", render)
+    context = SimpleNamespace(
+        operation=AddField("Book", "added", field),
+        may_be_large=lambda model: True,
+        get_field_after=lambda model, name: field,
+        get_risk=lambda code, message, alternative: SimpleNamespace(code=code, message=message),
+    )
+    risk = VolatileDefaultRule().check_operation(context)
+    if message is None:
+        assert risk is None
+    else:
+        assert risk.code == MigrationRiskCode.ADD_FIELD_VOLATILE_DEFAULT
+        assert message in risk.message
+    render.assert_not_called()
 
 
 def get_initial_operations() -> list[Operation]:
@@ -84,8 +119,14 @@ def make_migration(operations: list[Operation], *, atomic: bool = True, exemptio
 
 
 async def check(dialect, operations: list[Operation], **migration_options) -> list[MigrationRisk]:
+    client = FakeClient(dialect.name)
+    # Safety rules inspect the dialect capabilities, not the recording fake's non-transactional execution mode.
+    client.features = dialect.features
     return await MigrationSafetyChecker().check(
-        make_migration(operations, **migration_options), get_initial_state(), dialect=dialect
+        make_migration(operations, **migration_options),
+        get_initial_state(),
+        client=client,
+        read_catalog=False,
     )
 
 
@@ -144,9 +185,15 @@ OPERATION_CASES: list[tuple[str, Callable[[], list[Operation]], dict, list, list
         lambda: [AddField("Book", "code", UUIDField(db_default=SqlDefault("gen_random_uuid()")))],
         {},
         [R.ADD_FIELD_VOLATILE_DEFAULT],
-        [],
+        [R.ADD_FIELD_BACKFILLS_ROWS],
     ),
-    ("stable database default", lambda: [AddField("Book", "added", DatetimeField(db_default=Now()))], {}, [], []),
+    (
+        "stable database default",
+        lambda: [AddField("Book", "added", DatetimeField(db_default=Now()))],
+        {},
+        [],
+        [R.ADD_FIELD_BACKFILLS_ROWS],
+    ),
     (
         "integer widened to bigint",
         lambda: [AlterField("Book", "pages", BigIntField(null=True))],
@@ -358,6 +405,69 @@ async def test_each_rule_on_each_dialect(make_operations, migration_options, pos
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["renamed", "created", "recreated", "state_only", "populated"])
+async def test_nested_safety_uses_each_physical_table_before_and_after_changes(monkeypatch, scenario):
+    client = FakeClient("postgresql")
+    count = AsyncMock(return_value=10)
+    monkeypatch.setattr(client.dialect.migration_safety_rules, "count_table_rows", count)
+    state = get_initial_state()
+    fields = [("id", IntField(primary_key=True)), ("title", CharField(max_length=50))]
+    if scenario == "renamed":
+        operations = [
+            RenameModel("Book", "Volume"),
+            AlterModelTable("Volume", "volumes"),
+            AddIndex("Volume", Index(fields=("title",), name="volume_title")),
+        ]
+    elif scenario == "recreated":
+        operations = [
+            AddIndex("Book", Index(fields=("title",), name="old_title")),
+            DeleteModel("Book"),
+            CreateModel("Book", fields=fields, options={"table": BOOK_TABLE}),
+            AddIndex("Book", Index(fields=("title",), name="new_title")),
+        ]
+    else:
+        operations = [CreateModel("Note", fields=fields, state_only=scenario == "state_only")]
+        if scenario == "populated":
+            operations.append(RunSQL("INSERT INTO note(id, title) VALUES (1, 'a')"))
+        operations.extend(
+            [
+                RenameModel("Note", "Volume"),
+                AddIndex("Volume", Index(fields=("title",), name="volume_title")),
+            ]
+        )
+    migration = make_migration([SeparateDatabaseAndState(database_operations=operations)])
+    risks = await MigrationSafetyChecker(large_table_rows=10).check(migration, state, client=client)
+    index_risks = [risk for risk in risks if risk.code is R.ADD_INDEX_WITHOUT_CONCURRENTLY]
+    assert len(index_risks) == (0 if scenario == "created" else 1)
+    if scenario in {"renamed", "recreated"}:
+        count.assert_awaited_once_with(client, BOOK_TABLE, None, 10)
+    else:
+        count.assert_not_awaited()
+    assert set(state.models) == {("models", "Author"), ("models", "Book")}
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created", [False, True])
+@pytest.mark.parametrize("nested_code", [False, True])
+async def test_migration_wide_lock_rules_cross_database_container_boundaries(created, nested_code):
+    schema_change = (
+        CreateModel("Note", fields=[("id", IntField(primary_key=True))])
+        if created
+        else AddField("Book", "rating", IntField(null=True))
+    )
+    code = RunPython(run_nothing)
+    operations = (
+        [schema_change, SeparateDatabaseAndState(database_operations=[code])]
+        if nested_code
+        else [SeparateDatabaseAndState(database_operations=[schema_change]), code]
+    )
+    risks = await check(POSTGRESQL_DIALECT, operations)
+    assert [risk.code for risk in risks] == ([] if created else [R.SCHEMA_CHANGE_WITH_RUN_PYTHON])
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
 async def test_a_risk_the_migration_exempts_is_marked():
     risks = await check(
         POSTGRESQL_DIALECT,
@@ -411,7 +521,7 @@ async def test_the_database_tells_a_small_table_from_a_large_one(db_simple):
             (4, [MigrationRiskCode.RENAME_FIELD]),
         ]:
             risks = await MigrationSafetyChecker(large_table_rows=large_table_rows).check(
-                make_migration(operations), state, dialect=connection.dialect, client=connection
+                make_migration(operations), state, client=connection
             )
             assert [risk.code for risk in risks] == expected_codes
         # A model the database has no table for yet holds no rows.
@@ -443,9 +553,7 @@ async def test_a_column_with_no_default_is_a_risk_only_on_a_table_holding_rows(d
         ]:
             if insert_sql is not None:
                 await connection.execute_script(insert_sql)
-            risks = await MigrationSafetyChecker().check(
-                make_migration(operations), state, dialect=connection.dialect, client=connection
-            )
+            risks = await MigrationSafetyChecker().check(make_migration(operations), state, client=connection)
             assert [risk.code for risk in risks] == expected_codes
     finally:
         for table in (BOOK_TABLE, AUTHOR_TABLE):

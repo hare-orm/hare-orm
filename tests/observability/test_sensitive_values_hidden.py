@@ -236,6 +236,8 @@ async def test_a_key_reaching_a_sensitive_field_shows_no_value(accounts, events,
         await trip.passports.add(passport)
         assert [linked.code for linked in await trip.passports.all()] == ["P-300400"]
         await trip.passports.remove(passport)
+        await passport.trips.add(trip)
+        await passport.trips.remove(trip)
         passport.name = "bob"
         await passport.save()
         await passport.delete()

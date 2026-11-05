@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from hare import Hare, __version__  # noqa: F401 - Hare re-exported for `cli_module.Hare` test monkeypatches
+from hare import __version__
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.cli.commands.database_shell_commands import DatabaseShellCommands
 from hare.cli.commands.distributed_recovery_commands import DistributedRecoveryCommands
@@ -12,10 +12,7 @@ from hare.cli.commands.stub_commands import StubCommands
 from hare.cli.plugins.cli_command_registry import CLICommandRegistry
 from hare.cli.plugins.loaded_cli_command import LoadedCLICommand
 from hare.stubs.constants import DEFAULT_RELATION_DEPTH, DEFAULT_STUBS_DIRECTORY
-from hare.transactions.constants import (
-    DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
-    MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS,
-)
+from hare.transactions.constants import DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS
 
 
 class ArgParserBuilder:
@@ -48,19 +45,18 @@ class ArgParserBuilder:
             raw_value: The raw command-line text.
 
         Returns:
-            The number of seconds, within 0..MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS.
+            A nonnegative integer number of seconds.
 
         Raises:
-            argparse.ArgumentTypeError: If the value isn't an integer inside that range.
+            argparse.ArgumentTypeError: The value isn't an integer or is negative.
         """
         try:
             seconds = int(raw_value)
         except ValueError:
             raise argparse.ArgumentTypeError(f"{raw_value!r} is not an integer number of seconds") from None
-        if not 0 <= seconds <= MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS:
+        if seconds < 0:
             raise argparse.ArgumentTypeError(
-                f"must be between 0 and {MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS} seconds, got "
-                f"{ValueDescriptions.get_shown_text(seconds)}"
+                f"must be at least 0 seconds, got {ValueDescriptions.get_shown_text(seconds)}"
             )
         return seconds
 
@@ -125,7 +121,7 @@ class ArgParserBuilder:
         makemigrations_parser.add_argument(
             "--no-input",
             action="store_true",
-            help="Ask no rename question - only the --rename answers rename anything.",
+            help="Ask no rename question; keep automatic field matches and explicit --rename answers.",
         )
         makemigrations_parser.set_defaults(func=MigrationCommands.run_makemigrations)
 

@@ -16,6 +16,7 @@ from hare.contrib.mypy.constants import (
 )
 from hare.contrib.mypy.enums import AnnotationTypeRule
 from hare.contrib.mypy.mypy_types import MypyTypes
+from hare.contrib.mypy.values_selection_types import ValuesSelectionTypes
 from hare.exceptions import HareError
 
 if TYPE_CHECKING:
@@ -94,9 +95,16 @@ class AnnotationTypes:
         annotations = self.get_annotations(method_context.type, queryset_type)
         if annotations is None:
             return method_context.default_return_type
+        selection_metadata = ValuesSelectionTypes.get(method_context.type)
+        selection, implicit_all = selection_metadata if selection_metadata is not None else (None, False)
         if ARG_STAR2 in call.arg_kinds:
             # Names from a mapping aren't known - any name may be an annotation from now on.
-            return self.with_annotations(return_type, queryset_type.args[1], mypy_types.any())
+            row_type = mypy_types.any() if selection is not None else queryset_type.args[1]
+            return ValuesSelectionTypes.store(
+                self.with_annotations(return_type, row_type, mypy_types.any()),
+                None,
+                mypy_types,
+            )
         is_alias = isinstance(call.callee, MemberExpr) and call.callee.name == "alias"
         new_types = {
             name: self.get_expression_type(mypy_types, model, expression)
@@ -109,7 +117,15 @@ class AnnotationTypes:
         new_annotations = TypedDictType(items, required_keys, set(), typed_dict_fallback)
         row_type = queryset_type.args[1]
         row_typed_dict = get_proper_type(row_type)
-        if not is_alias and isinstance(row_typed_dict, TypedDictType):
+        if selection is not None:
+            selection, row_type = ValuesSelectionTypes.annotate(
+                selection,
+                row_type,
+                new_types,
+                is_alias=is_alias,
+                implicit_all=implicit_all,
+            )
+        elif not is_alias and isinstance(row_typed_dict, TypedDictType):
             # A values() row selects the new annotations too.
             row_type = TypedDictType(
                 {**row_typed_dict.items, **new_types},
@@ -117,7 +133,12 @@ class AnnotationTypes:
                 set(),
                 typed_dict_fallback,
             )
-        return self.with_annotations(return_type, row_type, new_annotations)
+        return ValuesSelectionTypes.store(
+            self.with_annotations(return_type, row_type, new_annotations),
+            selection,
+            mypy_types,
+            implicit_all=implicit_all,
+        )
 
     @staticmethod
     def with_annotations(queryset: Instance, row_type: Type, annotations: Type) -> Instance:

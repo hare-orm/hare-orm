@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hare.ddl.conditions.trigger_condition import TriggerCondition
 from hare.ddl.schema_objects.trigger import Trigger
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_editor_part import SchemaEditorPart
 from hare.models import Model
 
@@ -54,8 +55,9 @@ class TriggerStatements(SchemaEditorPart):
         raise self.get_unsupported_error("Triggers")
 
     async def alter_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
+        statements = self.get_trigger_create_sqls(model, new_trigger)
         await self.remove_trigger(model, old_trigger)
-        await self.add_trigger(model, new_trigger)
+        await self.editor.run_sqls(statements)
 
     async def rename_trigger(self, model: type[Model], old_trigger: Trigger, new_trigger: Trigger) -> None:
         """Renames a trigger of a model's table - by dropping and creating it where the database renames no
@@ -68,13 +70,12 @@ class TriggerStatements(SchemaEditorPart):
         """
         if old_trigger.name == new_trigger.name:
             return
-        await self.remove_trigger(model, old_trigger)
-        await self.add_trigger(model, new_trigger)
+        await self.alter_trigger(model, old_trigger, new_trigger)
 
-    async def move_trigger_to_schema(
+    def get_trigger_schema_move_plan(
         self, model: type[Model], trigger: Trigger, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        """Moves what a trigger keeps apart from its table to the schema the table moved to - nothing
+    ) -> SchemaChangePlan:
+        """Prepares moving what a trigger keeps apart from its table to the table's new schema - nothing
         by default: the trigger goes with the table.
 
         Args:
@@ -83,3 +84,4 @@ class TriggerStatements(SchemaEditorPart):
             old_schema: The schema the table was in; None for the connection's current schema.
             new_schema: The schema it moved to; None for the connection's current schema.
         """
+        return SchemaChangePlan(())

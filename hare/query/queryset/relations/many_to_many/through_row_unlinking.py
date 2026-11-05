@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hare.core.connections.connections import Connections
@@ -13,6 +12,8 @@ from hare.models.write.rules.constants import REMOVE_METHOD_NAME
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.key_columns import KeyColumns
 from hare.query.queryset.relations.many_to_many.linked_keys import LinkedKeys
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
@@ -21,8 +22,6 @@ from hare.query.queryset.relations.many_to_many.through_row_inserting import Thr
 from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.builder.tables.table import Table
-from hare.sql.terms.tuple import Tuple
-from hare.sql.terms.values.row_value_list import RowValueList
 from hare.time import Timezone
 
 TModel = TypeVar("TModel", bound="Model")
@@ -51,8 +50,8 @@ class ThroughRowUnlinking:
         visibility: RowVisibility = RowVisibility.DEFAULT,
     ) -> None:
         """Removes the through rows linking ``relation.instance`` to ``instances`` (all of them for
-        ``None``) and reports the change (``ChangeEvents``) - shared by ``remove()``/``clear()``/
-        ``set()`` and the ``on_delete=CASCADE`` cascade of a deleted owner.
+        ``None``) and reports the change (``ChangeEvents``) - shared by ``remove()``, ``clear()``
+        and ``set()``.
 
         Args:
             relation: The many-to-many relation of an instance.
@@ -114,6 +113,9 @@ class ThroughRowUnlinking:
             forward_pk_values: See ``ThroughRowUnlinking.unlink()``.
             visibility: See ``ThroughRowUnlinking.unlink()``.
         """
+        ManyToManyMembers.validate_owner_saved(relation)
+        if instances:
+            ManyToManyMembers.validate_related_instances(relation, instances)
         related_instances = list(instances) if instances else None
         if related_instances and ChangeEvents.is_observed():
             # Only the instances linked before are reported - removing an unlinked one changes nothing.
@@ -153,8 +155,8 @@ class ThroughRowUnlinking:
             relation: The many-to-many relation of an instance.
             instances: The related instances to unlink, or ``None`` to unlink every one.
             using: Connection to use instead of the through table's own.
-            check_tenant_scope: ``False`` for a cascade, which follows the through rows of a row
-                it is deleting regardless of the active tenant scope, and for ``clear(all_tenants=True)``.
+            check_tenant_scope: Whether to enforce the active tenant scope; disabled by
+                ``clear(all_tenants=True)``.
             forward_pk_values: DB-ready primary key values of the related rows to unlink, in
                 place of ``instances``.
             visibility: Which related rows the related model's default scope shows when unlinking
@@ -194,7 +196,10 @@ class ThroughRowUnlinking:
                 KeyColumns.row_equality(forward_columns, forward_pk_values[0])
                 if len(forward_pk_values) == 1
                 else connection.dialect.filter_operators.get_row_membership_criterion(
-                    forward_columns, forward_pk_values, ManyToManyMembers.get_forward_key_fields(relation)
+                    forward_columns,
+                    forward_pk_values,
+                    ManyToManyMembers.get_forward_key_fields(relation),
+                    connection=connection,
                 )
             )
         if (check_tenant_scope or visibility.all_tenants) and not instances:
@@ -217,7 +222,11 @@ class ThroughRowUnlinking:
         now = Timezone.now()
         if through_model is None or capture_needs is None or not capture_needs.captures(operation):
             query = ThroughRowUnlinking.get_unlink_statement(connection, relation, through_table, condition, now)
-            return (await connection.execute(*ThroughRows.get_statement(relation, query)))[0]
+            command = WriteStatement(
+                *ThroughRows.get_statement(relation, query, connection),
+                recovery=connection.get_write_recovery(through_table),
+            )
+            return (await BoundWrite.execute_command(connection, command)).row_count
         captured = CapturedWrite(
             through_model,
             capture_needs,
@@ -232,18 +241,21 @@ class ThroughRowUnlinking:
         before_by_pk = None
         if operation is RowOperation.UPDATE and capture_needs.reads_before:
             before_query = connection.query_class.from_(through_table).where(condition).select(*capture_needs.columns)
-            _, before_rows = await connection.execute(*ThroughRows.get_statement(relation, before_query))
+            _, before_rows = await connection.execute(*ThroughRows.get_statement(relation, before_query, connection))
             types = connection.dialect.types
-            before_by_pk = {
-                ChangeCapturing.get_row_key(through_model, capture_needs, types, dict(row))[0]: (
-                    ChangeCapturing.get_row_values(through_model, capture_needs, types, dict(row))
-                )
-                for row in before_rows
-            }
+            before_by_pk = {}
+            for row in map(dict, before_rows):
+                pk, _tenant = ChangeCapturing.get_row_key(through_model, capture_needs, types, row)
+                before_by_pk[pk] = ChangeCapturing.get_row_values(through_model, capture_needs, types, row)
         query = ThroughRowUnlinking.get_unlink_statement(
             connection, relation, through_table, condition, now
         ).returning(*capture_needs.columns)
-        count, returned_rows = await connection.execute(*ThroughRows.get_statement(relation, query), returns_rows=True)
+        command = WriteStatement(
+            *ThroughRows.get_statement(relation, query, connection),
+            returns_rows=True,
+            recovery=connection.get_write_recovery(through_table),
+        )
+        count, returned_rows = await BoundWrite.execute_command(connection, command)
         await captured.capture_returned(returned_rows, before_by_pk=before_by_pk)
         return count
 
@@ -316,17 +328,20 @@ class ThroughRowUnlinking:
         meta = captured.model._meta
         key_columns = [through_table[meta.fields_db_projection[name]] for name in meta.primary_key_attribute_names]
         key_query = connection.query_class.from_(through_table).where(condition).select(*key_columns)
-        _, key_rows = await connection.execute(*ThroughRows.get_statement(relation, key_query))
-        # A row by column name on some drivers - its values are in the order selected.
-        rows = [tuple(row.values()) if isinstance(row, Mapping) else tuple(row) for row in key_rows]
+        _, key_rows = await connection.execute(*ThroughRows.get_statement(relation, key_query, connection))
+        rows = [tuple(row[column.name] for column in key_columns) for row in key_rows]
         if not rows:
             return 0
         pks = ThroughRowInserting.get_row_keys(captured.model, key_columns, rows, connection.dialect.types)
         read_before = await captured.read(pks, lock=True)
-        key_condition = Tuple(*key_columns).isin(RowValueList(*[Tuple(*row) for row in rows]))
+        key_condition = KeyColumns.row_is_in(key_columns, rows)
         query = ThroughRowUnlinking.get_unlink_statement(
             connection, relation, through_table, condition & key_condition, now
         )
-        count = (await connection.execute(*ThroughRows.get_statement(relation, query)))[0]
+        command = WriteStatement(
+            *ThroughRows.get_statement(relation, query, connection),
+            recovery=connection.get_write_recovery(through_table),
+        )
+        count = (await BoundWrite.execute_command(connection, command)).row_count
         await captured.capture_read(read_before, pks)
         return count

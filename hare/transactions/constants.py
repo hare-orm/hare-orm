@@ -15,9 +15,6 @@ DISTRIBUTED_DECISIONS_TABLE_NAME = "hare_distributed_decisions"
 #: call still running.
 DEFAULT_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS = 300
 
-#: Sanity ceiling (ten years) for the `distributed-recover --older-than` argument.
-MAX_DISTRIBUTED_RECOVERY_OLDER_THAN_SECONDS = 10 * 365 * 24 * 60 * 60
-
 #: Smallest `Transactions.atomic(statement_timeout=...)` value (seconds) - one millisecond, the
 #: unit a dialect is given the timeout in (``TransactionStatements.get_statement_timeout_sql()``);
 #: 0 would read as "no timeout".
@@ -32,7 +29,10 @@ MAX_TRANSACTION_STATEMENT_TIMEOUT_SECONDS = 2_147_483.647
 EXPORTED_MODULES = {
     "Atomic": "hare.transactions.atomic.atomic",
     "DistributedTransactions": "hare.transactions.distributed",
+    "DistributedRecovery": "hare.transactions.distributed.distributed_recovery",
     "IsolationLevel": "hare.transactions.enums",
     "TransactionEventType": "hare.transactions.enums",
+    "TransactionOutcome": "hare.transactions.enums",
+    "TransactionPhase": "hare.transactions.enums",
     "Transactions": "hare.transactions.transactions",
 }

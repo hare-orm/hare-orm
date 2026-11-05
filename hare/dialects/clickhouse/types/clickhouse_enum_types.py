@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 import zlib
+from operator import itemgetter
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.core.caching.cache import Cache
@@ -25,10 +26,11 @@ if TYPE_CHECKING:
 
 class ClickhouseEnumTypes:
     """How ClickHouse stores enums - ``Enum8``/``Enum16`` of labels and their numbers. ClickHouse
-    keeps the numbers and reads the labels off the type, so a label keeps its number for good: an
-    ``IntEnumField``'s labels are its members' names, numbered by their values; a ``CharEnumField``'s
-    are its stored values, numbered from the label itself - a member added, removed or moved changes
-    no other label's number."""
+    keeps the numbers and reads the labels from the type. An ``IntEnumField``'s labels are its
+    members' names, numbered by their values. A ``CharEnumField``'s labels are its stored values,
+    numbered from checksums with collision resolution over sorted labels. Declaration order does
+    not affect those numbers; adding or removing a colliding label can change another label's number.
+    """
 
     #: (enum class,) -> the stored values by the labels the drivers read otherwise.
     DRIVER_LABELS: ClassVar[Cache[dict[str, str]]] = Cache(CLICKHOUSE_ENUM_DRIVER_LABELS_CACHE_SIZE)
@@ -38,7 +40,8 @@ class ClickhouseEnumTypes:
     @staticmethod
     def get_label_numbers(labels: list[str]) -> dict[str, int]:
         """The number of each label of a ``CharEnumField`` - from a checksum of the label, the next free
-        one after a taken one, the labels taken in their order.
+        one after a taken one, processing labels in sorted order. The current label set determines
+        collision resolution, so a membership change can renumber another label.
 
         Args:
             labels: The labels.
@@ -74,7 +77,7 @@ class ClickhouseEnumTypes:
         type_name = "Enum8" if all(lowest <= number <= highest for number in numbers_by_label.values()) else "Enum16"
         members_sql = ", ".join(
             f"{CLICKHOUSE_DIALECT.literals.get_literal_sql(label)} = {number}"
-            for label, number in sorted(numbers_by_label.items(), key=lambda item: item[1])
+            for label, number in sorted(numbers_by_label.items(), key=itemgetter(1))
         )
         return f"{type_name}({members_sql})"
 

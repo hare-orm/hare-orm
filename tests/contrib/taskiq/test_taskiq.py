@@ -32,6 +32,17 @@ def make_broker(**middleware_options: Any) -> InMemoryBroker:
     return broker
 
 
+@pytest.mark.database_independent
+def test_task_transaction_iterators_are_shared_with_the_worker_lifecycle():
+    names = ["default", "reports"]
+    worker = HareTaskiq(InMemoryBroker(), {}, atomic_tasks=(name for name in names))
+    names.append("later")
+    assert worker.lifecycle.transaction_connection_names == ("default", "reports")
+    assert worker.middleware.transaction_connection_names == ("default", "reports")
+    middleware = HareTaskiqMiddleware(lifecycle=worker.lifecycle, atomic_tasks=iter(["other"]))
+    assert middleware.transaction_connection_names == ("other",)
+
+
 @pytest.mark.asyncio
 async def test_a_task_runs_tagged_with_its_name_and_id_in_its_tenant(db_taskiq):
     broker = make_broker()

@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.deliveries.callable_delivery import CallableDelivery
+from hare.contrib.outbox.deliveries.delivery_batch import DeliveryBatch
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.exceptions import DeliveryError
+from hare.core.resource_completion import ResourceCompletion
 
 if TYPE_CHECKING:
     from hare.contrib.outbox.outbox_event import OutboxEvent
@@ -27,9 +31,9 @@ class TopicRouter(OutboxDelivery):
 
     def __init__(
         self,
-        routes: Mapping[str, OutboxDelivery | Callable[[Any], Awaitable[None]]],
+        routes: Mapping[str, OutboxDelivery | Callable[[Any], Awaitable[DeliveryResult | None]]],
         *,
-        default: OutboxDelivery | Callable[[Any], Awaitable[None]] | None = None,
+        default: OutboxDelivery | Callable[[Any], Awaitable[DeliveryResult | None]] | None = None,
     ) -> None:
         self.routes: dict[str, OutboxDelivery] = {
             pattern: CallableDelivery.of(delivery) for pattern, delivery in routes.items()
@@ -58,38 +62,41 @@ class TopicRouter(OutboxDelivery):
             return self.default
         raise DeliveryError(f"no delivery takes topic {topic!r}")
 
-    async def deliver(self, event: OutboxEvent) -> None:
-        await self.get_delivery(event.topic).deliver(event)
+    async def deliver(self, event: OutboxEvent) -> DeliveryResult | None:
+        return await self.get_delivery(event.topic).deliver(event)
 
     async def deliver_batch(
         self, events: Sequence[OutboxEvent], *, concurrency: int, timeout_seconds: float
-    ) -> list[BaseException | None]:
-        outcomes: list[BaseException | None] = [None] * len(events)
-        positions_by_delivery: dict[int, tuple[OutboxDelivery, list[int]]] = {}
-        for position, event in enumerate(events):
+    ) -> list[DeliveryResult]:
+        """Keeps each transport's batching and isolates failures between routes."""
+        outcomes: list[DeliveryResult] = []
+        groups: dict[int, tuple[OutboxDelivery, list[OutboxEvent]]] = {}
+        for event in events:
             try:
                 delivery = self.get_delivery(event.topic)
             except DeliveryError as error:
-                outcomes[position] = error
+                outcomes.append(DeliveryResult(event.id, error))
                 continue
-            positions_by_delivery.setdefault(id(delivery), (delivery, []))[1].append(position)
-        groups = list(positions_by_delivery.values())
+            groups.setdefault(id(delivery), (delivery, []))[1].append(event)
         group_outcomes = await asyncio.gather(
             *(
-                delivery.deliver_batch(
-                    [events[position] for position in positions],
+                DeliveryBatch.deliver(
+                    delivery,
+                    group,
                     concurrency=concurrency,
                     timeout_seconds=timeout_seconds,
                 )
-                for delivery, positions in groups
+                for delivery, group in groups.values()
             )
         )
-        for (_delivery, positions), outcomes_of_group in zip(groups, group_outcomes, strict=True):
-            for position, outcome in zip(positions, outcomes_of_group, strict=True):
-                outcomes[position] = outcome
+        for results in group_outcomes:
+            outcomes.extend(results)
         return outcomes
 
     async def close(self) -> None:
+        """Close every distinct transport, retaining failures without skipping later releases."""
         deliveries = {id(delivery): delivery for delivery in (*self.routes.values(), self.default) if delivery}
-        for delivery in deliveries.values():
-            await delivery.close()
+        releases = AsyncExitStack()
+        for delivery in reversed(tuple(deliveries.values())):
+            releases.push_async_callback(delivery.close)
+        await ResourceCompletion.wait(releases.aclose())

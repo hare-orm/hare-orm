@@ -6,8 +6,8 @@ from hare.sql.constants import IDENTIFIER_LENGTH_LIMIT
 
 #: The slots of a query its copies don't take over: the object a query made again for each
 #: description or build stands for (``PlanOrigins``) - set where it is made, never carried by a clone -
-#: and the weak reference slot of a relation object.
-UNCOPIED_QUERY_SLOTS = frozenset({"_plan_origin", "__weakref__"})
+#: the weak reference slot of a relation object, and dictionary state copied by copy_extension_state().
+UNCOPIED_QUERY_SLOTS = frozenset({"_plan_origin", "__weakref__", "__dict__"})
 
 #: The most calls a queryset's call signature records - a longer chain is built as it goes: each call
 #: would copy the whole signature, making a chain of thousands of calls quadratic.

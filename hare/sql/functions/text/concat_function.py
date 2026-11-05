@@ -14,6 +14,8 @@ class ConcatFunction(functions.Concat):
     ``repr()`` writes it, a Decimal with every digit it has and no exponent, a date/datetime/time as ISO text;
     the dialect types what is left."""
 
+    structure_attributes = ()
+
     @staticmethod
     def format_temporal_literal(value: date) -> str:
         """Text a date/datetime literal is concatenated as - the same on every dialect.

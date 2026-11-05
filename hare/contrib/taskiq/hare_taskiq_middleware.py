@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Sequence
-from contextlib import AsyncExitStack
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from taskiq import TaskiqMiddleware
@@ -18,11 +17,12 @@ from hare.contrib.taskiq.constants import (
 )
 from hare.contrib.taskiq.running_task import RunningTask
 from hare.contrib.taskiq.task_tenant_labels import TaskTenantLabels
+from hare.core.hare_context import HareContext
 from hare.core.log import logger
 from hare.exceptions import TransactionRetryError
 from hare.instrumentation.queries.query_tags import QueryTags
 from hare.models.tenancy.tenancy import Tenancy
-from hare.transactions.transactions import Transactions
+from hare.transactions.transaction_group import TransactionGroup
 
 if TYPE_CHECKING:
     from taskiq import TaskiqMessage, TaskiqResult
@@ -40,7 +40,9 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
     model (``TaskTenantLabels``); the label already set is kept.
 
     Args:
-        atomic_tasks: True for a transaction per task on the default connection, the connection
+        lifecycle: The application's lifecycle, used to activate its context for each task;
+            None uses the caller's active context.
+        atomic_tasks: True for a transaction per task on the automatically selected connection, the connection
             names for one on each of them, False for none.
         tenant_label: The label the tenant goes in; None to leave tenants alone.
         transaction_retries: How many times a task is sent again after a transaction conflict.
@@ -54,11 +56,13 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
     def __init__(
         self,
         *,
-        atomic_tasks: bool | Sequence[str] = False,
+        lifecycle: ApplicationLifecycle | None = None,
+        atomic_tasks: bool | Iterable[str] = False,
         tenant_label: str | None = DEFAULT_TENANT_LABEL,
         transaction_retries: int = 0,
     ) -> None:
         super().__init__()
+        self.lifecycle = lifecycle
         self.transaction_connection_names = ApplicationLifecycle.get_transaction_connection_names(
             atomic_tasks, "atomic_tasks"
         )
@@ -94,17 +98,15 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         running_task = RunningTask(task_id=message.task_id, query_tags_token=QueryTags.set(tags))
         running_task.running_task_token = self.running_task.set(running_task)
         try:
+            if self.lifecycle is not None:
+                running_task.hare_context_token = HareContext.current_context.set(self.lifecycle.get_context())
+                running_task.application_token = ApplicationLifecycle.active.set(self.lifecycle)
             tenant = message.labels.get(self.tenant_label) if self.tenant_label is not None else None
             if tenant is not None:
                 running_task.tenant_token = Tenancy.set(TaskTenantLabels.get_scope(tenant))
             if self.transaction_connection_names:
-                transactions = AsyncExitStack()
-                try:
-                    for connection_alias in self.transaction_connection_names:
-                        await transactions.enter_async_context(Transactions.atomic(using=connection_alias))
-                except BaseException:
-                    await transactions.aclose()
-                    raise
+                transactions = TransactionGroup(self.transaction_connection_names)
+                await transactions.begin()
                 running_task.transactions = transactions
         except BaseException:
             self.finish(running_task)
@@ -124,12 +126,9 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         try:
             if running_task.transactions is not None:
                 try:
-                    if exception is None:
-                        await running_task.transactions.__aexit__(None, None, None)
-                    else:
-                        await running_task.transactions.__aexit__(type(exception), exception, exception.__traceback__)
+                    await running_task.transactions.close(exception)
                 except Exception as transaction_error:
-                    # The commit failed - the task failed with it.
+                    # Completion failed; retain the task error and every release error.
                     exception = transaction_error
                     result.is_err = True
                     result.error = transaction_error
@@ -149,6 +148,10 @@ class HareTaskiqMiddleware(TaskiqMiddleware):
         if running_task.tenant_token is not None:
             Tenancy.reset(running_task.tenant_token)
         QueryTags.reset(running_task.query_tags_token)
+        if running_task.application_token is not None:
+            ApplicationLifecycle.active.reset(running_task.application_token)
+        if running_task.hare_context_token is not None:
+            HareContext.current_context.reset(running_task.hare_context_token)
 
     async def send_again(self, message: TaskiqMessage, result: TaskiqResult[Any]) -> None:
         """Sends a task that hit a transaction conflict again, under its own id - its failed

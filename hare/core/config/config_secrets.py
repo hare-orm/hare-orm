@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import urllib.parse
 from collections.abc import Mapping
 from typing import Any
 
 from hare.core.config.constants import PASSWORD_LOG_MASK, SECRET_CONFIG_KEY_MARKERS
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
+from hare.dialects.base.connection.db_url_parts import DbUrlParts
+from hare.exceptions import ConfigurationError
 
 
 class ConfigSecrets:
@@ -73,29 +73,14 @@ class ConfigSecrets:
         scheme_end = db_url.find("://")
         if scheme_end == -1:
             return db_url
-        url_rest = db_url[scheme_end + 3 :]
-        # A driver whose URL takes no userinfo (a file path may hold an "@") has none to mask; an
-        # unknown scheme is masked as if it had.
-        # Deferred: the dialect registry loads the dialects, which read the configuration.
+        # Deferred: driver registration itself reads configuration.
         from hare.dialects.dialect_registry import DialectRegistry
 
-        driver = DialectRegistry.find_driver_for_url_scheme(db_url[:scheme_end])
-        has_userinfo = driver is None or driver.url_has_userinfo
-        at_position = DbUrlConfigGenerator.userinfo_end_position(url_rest) if has_userinfo else -1
-        userinfo = url_rest[:at_position] if at_position != -1 else ""
-        after_userinfo = url_rest[at_position:] if at_position != -1 else url_rest
-        username, separator, raw_password = userinfo.partition(":")
-        if separator:
-            masked_password = PASSWORD_LOG_MASK if raw_password else ""
-            userinfo = f"{username}:{masked_password}"
-        location, query_separator, query_and_fragment = after_userinfo.partition("?")
-        if query_separator:
-            query, fragment_separator, fragment = query_and_fragment.partition("#")
-            masked_parameters = []
-            for parameter in query.split("&"):
-                name, equals_sign, _ = parameter.partition("=")
-                if equals_sign and ConfigSecrets.is_secret_key(urllib.parse.unquote_plus(name)):
-                    parameter = f"{name}={PASSWORD_LOG_MASK}"
-                masked_parameters.append(parameter)
-            after_userinfo = f"{location}?{'&'.join(masked_parameters)}{fragment_separator}{fragment}"
-        return f"{db_url[: scheme_end + 3]}{userinfo}{after_userinfo}"
+        scheme = db_url[:scheme_end]
+        driver = DialectRegistry.find_driver_for_url_scheme(scheme)
+        try:
+            parts = DbUrlParts.parse(db_url, has_userinfo=driver is None or driver.url_has_userinfo)
+        except ConfigurationError:
+            # A malformed URL has no trustworthy component boundary. Hide its whole location.
+            return f"{scheme}://{PASSWORD_LOG_MASK}"
+        return parts.masked(ConfigSecrets.is_secret_key, PASSWORD_LOG_MASK)

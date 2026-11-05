@@ -4,6 +4,13 @@
 block or a decorator, running a transaction again after a conflict, `autonomous()` for a transaction of
 its own beside the current one, and callbacks after a commit or a rollback.
 
+The client returned by `atomic()` exposes `transaction_state.phase` and `transaction_state.outcome`.
+`TransactionPhase` and `TransactionOutcome` are imported from `hare.transactions`. A finished local
+phase does not imply commit: the outcome distinguishes `COMMITTED`, `ROLLED_BACK`, `PREPARED`,
+`RELEASED` (a savepoint only), and `UNKNOWN`. Before an outcome is known it is `PENDING`.
+Callback failures do not change an acknowledged commit. A lost commit confirmation remains `UNKNOWN`
+and must be reconciled; it is not permission to retry the write or declare a rollback.
+
 ```python
 class Transactions:
     # async with Transactions.atomic(): ... / @Transactions.atomic() / async for attempt in ...
@@ -61,11 +68,11 @@ otherwise the connection every registered app resolves its models to, if they al
 `default_connection`; otherwise a connection literally named `"default"`, if one exists. Otherwise
 `QueryError`, listing the configured connection aliases.
 
-The block takes a connection from the pool when it starts. The `BEGIN` itself goes to the database with
-the block's first statement — on `rust_pg` in the same round trip, on asyncpg and SQLite right before it
-— and a block that runs no statement never reaches the database: its commit or rollback sends nothing.
-PostgreSQL takes a transaction's snapshot at its first statement, not at `BEGIN`, and SQLite's `BEGIN`
-takes no lock before its first statement either, so what the statements see is the same.
+The block takes a connection from the pool when it starts. `rust_pg` sends `BEGIN` and waits for the
+server's acknowledgement before entering the block; even an empty native transaction sends its
+`COMMIT` or `ROLLBACK`. With asyncpg and SQLite, `BEGIN` is deferred until just before the first
+statement, and an empty block sends no transaction commands. PostgreSQL takes a transaction's snapshot
+at its first statement, not at `BEGIN`; SQLite's deferred `BEGIN` takes no lock before its first statement.
 
 ### <a id="nesting-and-concurrent-siblings"></a>Nesting and concurrent siblings
 
@@ -79,7 +86,7 @@ async with Transactions.atomic():
         await Review.objects.create(book=book, rating=5)   # rolling back just this level leaves the outer work intact
 ```
 
-Like the `BEGIN`, a level's `SAVEPOINT` goes to the database with the first statement run in it — every
+A level's `SAVEPOINT` goes to the database with the first statement run in it — every
 enclosing level's first, outermost to innermost — and a level that runs no statement sends nothing:
 neither the `SAVEPOINT` nor its `RELEASE`/`ROLLBACK TO`. Its `on_commit()`/`on_rollback()` callbacks
 behave the same either way.
@@ -106,17 +113,21 @@ rely on regardless of how many levels or siblings are involved.
 A task spawned inside a nested block that is still running after the block has ended is no longer part of
 it: its queries run at the level the block was opened from, without waiting on the finished block.
 
-A task spawned inside a top-level transaction — a request's own under `atomic_requests` included — and
-still running after the transaction has ended runs nothing: each query raises
-`TransactionManagementError` ("transaction already finalised"). Work meant to outlive the transaction is
-started once it has committed, from a callback — the callback runs with no transaction open, so the task
-queries on its own connection, in transactions of its own:
+A task spawned inside a top-level transaction — including `atomic_requests` — may outlive its block.
+Once the block ends, alias lookups use the shared client: the finished transaction binding is ignored.
+Explicitly retained transaction clients, including `.using(client)`, still raise
+`TransactionManagementError` when used after completion. To start work only after a successful commit,
+use a callback; it runs without the completed transaction:
 
 ```python
 async with Transactions.atomic():
     loan = await Loan.objects.create(book=book, reader=reader)
     Transactions.on_commit(lambda: asyncio.create_task(send_due_date_reminder(loan.pk)))
 ```
+
+Opening a stream cursor and fetching each batch follow the same statement ordering: they wait
+outside a sibling's savepoint. Between batches the stream holds no query span, so its consumer
+can issue queries and sibling tasks can enter savepoints.
 
 The transaction's end is synchronized with every task working on it. The top-level `COMMIT` (leaving the
 block, or a manual `commit()`) waits until the statements and savepoints sibling tasks still run on it
@@ -167,7 +178,9 @@ check, so raw SQL is refused too. `statement_timeout` (seconds, `0.001` up to `2
 single statement that runs longer. `lock_timeout` (seconds, the same range) fails any statement that
 waits longer for a lock another session holds, whether it runs or not — a `statement_timeout` alone sets
 it on PostgreSQL too, an explicit `lock_timeout` takes its place. All three are keyword-only, default to
-off, and are also accepted by `autonomous()`; a wrong type or out-of-range value raises `QueryError`.
+off, and are also accepted by `autonomous()`. For `statement_timeout` and `lock_timeout`, a wrong type
+or out-of-range value raises `QueryError`; `read_only` is a flag. On a connection without transactions,
+`autonomous()` refuses non-default transaction options with `UnSupportedError` before entering its block.
 
 | Database | `read_only=True` | `statement_timeout` | `lock_timeout` | Refused write raises |
 |---|---|---|---|---|
@@ -269,10 +282,14 @@ async for attempt in Transactions.atomic(isolation="serializable", retries=3):
         ...
 ```
 
-- A run whose block or `COMMIT` ends with `TransactionRetryError` is rolled back (its `on_commit()`
-  callbacks dropped) and followed by the next one, from the start of the function or block. The first run
-  that commits ends it; when no run is left, the last `TransactionRetryError` is raised.
+- A run whose block or `COMMIT` ends with `TransactionRetryError` is followed by the next one only
+  after rollback is confirmed (its `on_commit()` callbacks dropped), from the start of the function
+  or block. The first run that commits ends it; when no run is left, the last `TransactionRetryError`
+  is raised.
 - Another error is never retried — it leaves at once, as without `retries`.
+- A retry requires a confirmed rollback. An unknown outcome is not proof of rollback, and
+  an error after commit, including `TransactionRetryError` from `on_commit()`, never repeats
+  the committed work. The same rule applies after an explicit `connection.commit()`.
 - Only a transaction that isn't nested runs again: nested in another one (a savepoint) it raises the
   error to the outer transaction, which has to run again as a whole — its own `retries` does that.
 - Code in the block runs once per attempt: keep effects outside the database (a sent email, a call to a
@@ -335,8 +352,8 @@ callbacks registered inside it are discarded (or, for `on_rollback()`, fired) �
 `asyncio.gather()`/`TaskGroup` sibling registered at another level meanwhile are unaffected.
 
 Every callback runs even if an earlier one failed. A single failure is raised as-is; two or more are
-raised together as an `ExceptionGroup`. Observers of `TransactionEvent` still receive the `COMMIT` event
-either way.
+raised together as a `BaseExceptionGroup` (an `ExceptionGroup` when every failure is an `Exception`).
+Observers of `TransactionEvent` still receive the `COMMIT` event either way.
 
 ## <a id="on-rollback"></a>`on_rollback()`
 
@@ -361,14 +378,14 @@ connections/databases.
 
 Unlike `on_commit()`, there is no "run immediately" fallback outside a transaction — a rollback that can
 never happen has nothing sensible to attach to: `on_rollback()` outside a transaction raises
-`QueryError`. On a transaction that has already ended (after a manual `commit()`/`rollback()`, or from a
-task that outlived the block) the callback is never run and a warning is logged — that transaction can no
-longer roll back.
+`QueryError`. A task that outlived the top-level block also has no active transaction for an alias lookup.
+Inside a block whose transaction already ended through manual `commit()`/`rollback()`, the binding
+still names that client: the callback is never run and a warning is logged because it can no longer roll back.
 
 A transaction whose connection is lost before its `COMMIT`/`ROLLBACK` lands is rolled back by the server:
 it is reported as a `ROLLBACK` transaction event and its `on_rollback()` callbacks run. Only when the
 connection breaks while the `COMMIT` itself is in flight is the outcome unknown — then neither
-`on_commit()` nor `on_rollback()` callbacks run, the `ROLLBACK` event carries the connection error in its
+`on_commit()` nor `on_rollback()` callbacks run, the `UNKNOWN` event carries the connection error in its
 `error` attribute, and `DBConnectionError` propagates.
 
 Like `on_commit()` callbacks, these run after the transaction is over and may query and open

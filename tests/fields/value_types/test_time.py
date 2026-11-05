@@ -1,4 +1,3 @@
-import contextlib
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from time import sleep
@@ -197,10 +196,10 @@ async def test_datetime_default_timezone(db):
     with override_timezone(use_timezone=True):
         now = Timezone.now()
         obj = await model.objects.create(datetime=now)
-        assert obj.datetime.tzinfo.zone == "UTC"
+        assert obj.datetime.tzinfo.key == "UTC"
 
         obj_get = await model.objects.get(pk=obj.pk)
-        assert obj_get.datetime.tzinfo.zone == "UTC"
+        assert obj_get.datetime.tzinfo.key == "UTC"
         assert obj_get.datetime == now
 
 
@@ -212,31 +211,16 @@ async def test_datetime_set_timezone(db):
     with override_timezone(use_timezone=True, timezone=tz):
         now = datetime.now(Timezone.parse(tz))
         obj = await model.objects.create(datetime=now)
-        assert obj.datetime.tzinfo.zone == tz
+        assert obj.datetime.tzinfo.key == tz
 
         obj_get = await model.objects.get(pk=obj.pk)
-        assert obj_get.datetime.tzinfo.zone == tz
+        assert obj_get.datetime.tzinfo.key == tz
         assert obj_get.datetime == now
 
 
-@pytest.fixture
-def force_pure_python_hydration():
-    """Forces Model._init_from_db_positional()'s pure-Python path (with its tz_ctx handling) by
-    disabling the Rust hydration accelerator - a dev environment with rust/hydrate/ built would
-    otherwise take the rust.hydrate accelerator's entirely separate code path
-    for every one of these tests, silently never exercising the code being tested here."""
-    from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-
-    with patch.object(HydrateAccelerator, "module", None):
-        yield
-
-
 @pytest.mark.asyncio
-async def test_positional_hydration_tz_ctx_aware_value_matches_to_python_value(db, force_pure_python_hydration):
-    """Model._init_from_db_positional()'s tz_ctx fast path (DatetimeField.get_python_value_with_timezone,
-    called with use_timezone/tz resolved once per query) must read back the exact same value
-    DatetimeField.from_db_value() (resolving Timezone itself, per-row) would - both an
-    already-aware stored value (astimezone branch) and, separately, USE_TZ=False (naive branch)."""
+async def test_positional_hydration_tz_ctx_aware_value_matches_to_python_value(db):
+    """A model query reads an aware datetime in the active zone without changing its instant."""
     model = testmodels.DatetimeFields
     tz = "Asia/Shanghai"
     with override_timezone(use_timezone=True, timezone=tz):
@@ -245,7 +229,7 @@ async def test_positional_hydration_tz_ctx_aware_value_matches_to_python_value(d
 
         fetched = await model.objects.all()
         assert len(fetched) == 1
-        assert fetched[0].datetime.tzinfo.zone == tz
+        assert fetched[0].datetime.tzinfo.key == tz
         assert fetched[0].datetime == now
         assert Timezone.is_aware(fetched[0].datetime)
 
@@ -254,10 +238,8 @@ async def test_positional_hydration_tz_ctx_aware_value_matches_to_python_value(d
 
 
 @pytest.mark.asyncio
-async def test_positional_hydration_tz_ctx_naive_roundtrip_with_use_tz_false(db, force_pure_python_hydration):
-    """Same tz_ctx fast path, USE_TZ=False - must produce a naive datetime, not silently apply a
-    tzinfo the aware branch's shortcut (`tz` resolved once regardless of use_timezone) might otherwise
-    leak in."""
+async def test_positional_hydration_tz_ctx_naive_roundtrip_with_use_tz_false(db):
+    """Reading with timezone conversion disabled returns a naive datetime."""
     model = testmodels.DatetimeFields
     with override_timezone(use_timezone=False):
         naive_dt = datetime(2021, 2, 2, 12, 30, 0)
@@ -1108,7 +1090,7 @@ def test_zoneinfo():
     tz_utc = Timezone.parse("UTC")
     tz_utc2 = Timezone.parse("utc")
     tz_utc3 = Timezone.parse("Utc")
-    assert tz_utc.key == tz_utc2.zone == "UTC"
+    assert tz_utc.key == tz_utc2.key == "UTC"
     assert (
         now.replace(tzinfo=UTC)
         == now.replace(tzinfo=tz_utc)
@@ -1123,11 +1105,7 @@ def test_zoneinfo():
 
 @pytest.mark.database_independent
 def test_timezone_parse_returns_the_same_cached_instance():
-    """Timezone.parse()/default() construct a ZoneInfo subclass, whose stdlib cache is a
-    WeakValueDictionary - without a strong reference held somewhere, that cache never actually
-    caches, and every call re-parses tzdata from disk (measured ~590x slower than the stdlib's
-    own cached ZoneInfo("UTC") lookup). Timezone.ZONES holds that strong reference; this asserts
-    repeated calls return the identical object, not just an equal one."""
+    """Repeated parsing and the configured zone reuse the same cached standard ZoneInfo object."""
     from hare.time import Timezone
 
     assert Timezone.parse("Asia/Shanghai") is Timezone.parse("Asia/Shanghai")
@@ -1188,7 +1166,7 @@ def test_timezone_takes_a_pytz_zone():
         aware_now = Timezone.make_aware(naive_now, pytz.timezone(tz_shanghai.key))
         assert aware_now.utcoffset() == now_shanghai.utcoffset()
         pytz_shanghai = pytz.timezone(tz_shanghai.key)
-        assert pytz_shanghai.zone == tz_shanghai.zone == tz_shanghai.key
+        assert pytz_shanghai.zone == tz_shanghai.key
         assert localtime_shanghai == Timezone.localtime(utcnow, pytz_shanghai)
         assert localtime_shanghai.utcoffset() == Timezone.localtime(timezone=pytz_shanghai).utcoffset()
 
@@ -1442,18 +1420,15 @@ async def test_datetime_field_to_db_value_refuses_an_epoch_with_use_tz_false(db)
         types.get_db_value(field, EPOCH_SECONDS, testmodels.DatetimeFields)
 
 
-@pytest.mark.parametrize("pure_python", [False, True])
 @pytest.mark.asyncio
-async def test_datetime_max_round_trips_in_non_utc_zone(db, pure_python):
+async def test_datetime_max_round_trips_in_non_utc_zone(db):
     """datetime.max (UTC) round-trips as the same instant on every backend - asyncpg reads a
     TIMESTAMPTZ 'infinity' back as a NAIVE datetime.max, which used to be tagged with the
     configured zone instead of being read as UTC."""
-    from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
 
     model = testmodels.DatetimeFields
     value = datetime.max.replace(tzinfo=UTC)
-    hydrate_patch = patch.object(HydrateAccelerator, "module", None) if pure_python else contextlib.nullcontext()
-    with override_timezone(use_timezone=True, timezone="America/New_York"), hydrate_patch:
+    with override_timezone(use_timezone=True, timezone="America/New_York"):
         obj = await model.objects.create(datetime=value)
         fetched = await model.objects.get(id=obj.id)
     assert fetched.datetime == value

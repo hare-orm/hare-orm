@@ -18,7 +18,7 @@ from task cancellation, refusing a statement after the transaction ended, and re
 | `_driver_begin()`, `_driver_commit()`, `_driver_rollback()` | Start the transaction on the connection; send its `COMMIT`; send its `ROLLBACK`. |
 | `_driver_savepoint(name)`, `_driver_release_savepoint(name)`, `_driver_rollback_to_savepoint(name)` | Open, release and roll back to a savepoint. |
 | `_get_new_savepoint_name()` | A savepoint name not used on this connection yet. |
-| `_is_connection_lost(error)` | Whether a driver error of a `COMMIT`/`ROLLBACK` means the connection is gone — the server rolls such a transaction back. `False` by default. |
+| `_is_connection_lost(error)` | Whether a driver error of a `COMMIT`/`ROLLBACK` means the connection is gone; the transaction outcome is determined separately. `False` by default. |
 | `_is_commit_outcome_unknown(error)` | Whether a lost connection leaves it unknown if a `COMMIT` in flight landed. |
 | `_is_commit_rejection(error)` | Whether the database answered the `COMMIT` with an error — the transaction is over. |
 | `_is_transaction_finished_error(error)` | Whether the driver reports that an earlier, interrupted `COMMIT`/`ROLLBACK` already ended the transaction. |

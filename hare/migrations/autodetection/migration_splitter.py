@@ -8,6 +8,7 @@ from hare.fields.relations.swappable_model_reference import SwappableModelRefere
 from hare.migrations.autodetection.operation_sorter import OperationSorter
 from hare.migrations.autodetection.split_migration import SplitMigration
 from hare.migrations.operations import AddField, AlterField, CreateModel
+from hare.migrations.operations.dependencies.prepared_operation_graph import PreparedOperationGraph
 from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.enums import DependencySubject, DependencyType
 
@@ -61,7 +62,7 @@ class MigrationSplitter:
             (app_label, operation) for app_label, operations in operations_by_app.items() for operation in operations
         ]
         ordered = self.sorter.sort(entries)
-        providers = self.sorter.get_providers(ordered)
+        providers = PreparedOperationGraph.get_providers(ordered)
         migrations: list[SplitMigration] = []
         current_by_app: dict[str, int] = {}
         migration_by_position: dict[int, int] = {}
@@ -72,7 +73,7 @@ class MigrationSplitter:
             for requirement in self.sorter.get_required(app_label, operation):
                 provider_positions = [
                     provider_position
-                    for key in self.sorter.get_provider_keys(requirement)
+                    for key in PreparedOperationGraph.get_provider_keys(requirement)
                     for provider_position in providers.get(key, ())
                     if provider_position != position
                 ]
@@ -127,8 +128,7 @@ class MigrationSplitter:
             stack.extend(migrations[position].split_dependencies)
         return False
 
-    @staticmethod
-    def get_swappable_app_labels(app_label: str, operation: Operation) -> set[str]:
+    def get_swappable_app_labels(self, app_label: str, operation: Operation) -> set[str]:
         """The apps the ``swappable()`` relations of an operation point into now - a migration depends on
         their setting, not on a migration of theirs.
 
@@ -145,7 +145,7 @@ class MigrationSplitter:
         for field in fields:
             model_name = getattr(field, "model_name", None)
             if isinstance(model_name, SwappableModelReference):
-                target_key = RelationDependencies.get_target_key(model_name, app_label)
+                target_key = RelationDependencies.get_target_key(model_name, app_label, self.state)
                 if target_key is not None:
                     app_labels.add(target_key[0])
         return app_labels

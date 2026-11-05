@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from hare.fields.field import Field
+from hare.query.plans.statement.parameter_slot import ParameterSlot
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
@@ -17,11 +18,12 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class OpenRangeValueReference:
     """A plan value reference of ``__range`` with one bound given - the plain comparison of the bound
-    (``>=`` without an upper one, ``<=`` without a lower one): its ``ValueWrapper``, which side is
+    (``>=`` without an upper one, ``<=`` without a lower one): its parameter slot, which side is
     open, the field converting a new bound, and the lookup's own encoder when it has one.
+    Preparation holds the source wrapper; the published plan holds an immutable slot.
     """
 
-    bound: ValueWrapper
+    bound: ParameterSlot | ValueWrapper
     lower_is_open: bool
     field: Field[Any]
     value_encoder: Callable[..., list[Any]] | None = None
@@ -50,4 +52,4 @@ class OpenRangeValueReference:
             bound = dialect.types.get_lookup_value(self.field, upper if self.lower_is_open else lower, model)
         if isinstance(bound, Term):
             return None
-        return [(id(self.bound), bound, False)]
+        return [(self.bound, bound, False)]

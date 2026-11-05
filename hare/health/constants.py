@@ -12,6 +12,9 @@ PING_LATENCY_REASON = "the ping took {latency_ms:.1f} ms (over {max_ms:g} ms)"
 POOL_SATURATION_REASON = "{in_use} of {max_size} connections of {pool} in use (at least {ratio:.0%})"
 WAITING_REQUESTS_REASON = "{waiting} tasks wait for a connection of {pool} (at least {at_least})"
 ACQUIRE_WAIT_TIME_REASON = "a wait for a connection of {pool} took {seconds:.3f} s (over {max_seconds:g} s)"
+ACQUIRE_WAIT_SAMPLES_MISSING_REASON = (
+    "{missed} of {observations} wait measurements of {pool} were overwritten; the wait threshold cannot be verified"
+)
 ACQUIRE_TIMEOUTS_REASON = "{count} waits for a connection of {pool} ran out since the last check (at least {at_least})"
 CONNECT_FAILURES_REASON = "{count} connects of {pool} failed since the last check (at least {at_least})"
 #: How a reason names a pool - by its role, and its tenant schema.

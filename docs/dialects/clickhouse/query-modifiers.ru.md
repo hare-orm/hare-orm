@@ -22,8 +22,10 @@ ClickHouse читает таблицу так, как не умеет ни од�
 | [`AsofJoin`](../../querying/filters.ru.md#asof-join) | `ASOF LEFT JOIN` |
 | [`ArrayJoin`](../../querying/filters.ru.md#array-join) | `ARRAY JOIN` |
 
-Заглушки `hare stubs` и [плагин mypy](../../querying/type-checking.ru.md#dialect-methods) объявляют эти
-методы у queryset модели, соединение которой — ClickHouse.
+`hare stubs` объявляет эти методы в сгенерированном queryset каждой модели ClickHouse.
+[Плагин mypy](../../querying/type-checking.ru.md#dialect-methods) добавляет их в общий тип `QuerySet`,
+если ClickHouse есть в конфигурации, поэтому принимает такие вызовы и у моделей другого диалекта.
+Для выполнения запроса по-прежнему требуется соединение ClickHouse.
 
 ## <a id="final"></a>`final()`
 
@@ -34,13 +36,21 @@ ClickHouse читает таблицу так, как не умеет ни од�
 их слило бы слияние частей.
 
 ```python
+from hare import Model, fields
+from hare.ddl import RawSQLTerm
+from hare.dialects.clickhouse.clickhouse_table_options import ClickhouseTableOptions
+from hare.dialects.clickhouse.clickhouse_engine import ClickhouseEngine
+from hare.query.expressions import F, Q
+from hare.query.functions import Count, Sum
+
+
 class Reading(Model):
     id = fields.BigIntField(primary_key=True, generated=False)
     value = fields.IntField()
     version = fields.IntField(default=0)
 
     class Meta:
-        table_options = [ClickhouseTableOptions(engine="ReplacingMergeTree(version)")]
+        table_options = [ClickhouseTableOptions(engine=ClickhouseEngine("ReplacingMergeTree", F("version")))]
 
 
 await Reading.objects.filter(id=1).values_list("value", flat=True)  # [1, 1000] - две версии
@@ -68,6 +78,8 @@ ClickHouse читает выборку таблицы по её ключу вы�
 class PageView(Model):
     id = fields.BigIntField(primary_key=True, generated=False)
     site = fields.CharField(max_length=50)
+    duration_ms = fields.IntField()
+    viewed_at = fields.DatetimeField()
 
     class Meta:
         table_options = [
@@ -86,8 +98,8 @@ second_half = PageView.objects.sample(50).sample_offset(50)  # SAMPLE 0.5 OFFSET
   таблица не меняется, — `seed` ClickHouse не принимает, поэтому `seed=` и `method="system"` дают
   `UnSupportedError`; `sample(0)` тоже: `SAMPLE 0` ClickHouse читает как всю таблицу.
 - `sample_rows(rows)` читает около `rows` строк — не меньше 2: `SAMPLE 1` — это вся таблица.
-- `sample_offset(percent)` читает выборку из части диапазона ключа после `percent` его процентов, поэтому
-  выборки с разными смещениями читают непересекающиеся строки; без выборки даёт `QueryError`.
+- `sample_offset(percent)` начинает выборку с `percent` процентов диапазона ключа. Строки выборок
+  не пересекаются, только если их интервалы не перекрываются; без выборки даёт `QueryError`.
 - Модель без `sample_by` даёт `QueryError`. Первичный ключ таблицы с `sample_by` идёт от ключа модели до
   ключа выборки: ClickHouse делает выборку по ключу из первичного ключа.
 - `sample()` вместе с `sample_rows()`, а также запись queryset с выборкой дают `QueryError`.
@@ -126,7 +138,7 @@ await PageView.objects.order_by("id").limit_by(1, F("duration_ms") % 2, offset=1
 
 - Выражения — имена полей (и через связи), имена вычисляемых значений или выражения; `"pk"` составного
   первичного ключа группирует по каждой его колонке.
-- `count()` и `exists()` считают оставленные строки; `aggregate()` и запись дают `QueryError`.
+- `count()`, `exists()` и `aggregate()` читают оставленные строки; запись даёт `QueryError`.
 - Запрос, который читает свои строки в производной таблице, — с фильтром по оконной функции — даёт
   `UnSupportedError`: `LIMIT BY` оставил бы строки до того, как они пройдут фильтр. `final()`, `sample()` и
   `prewhere()` читают таблицу внутри такого запроса так же, как в любом другом.
@@ -139,7 +151,8 @@ await PageView.objects.order_by("id").limit_by(1, F("duration_ms") % 2, offset=1
 ```python
 await PageView.objects.settings(max_threads=4, max_execution_time=30).count()
 await PageView.objects.filter(site="docs").settings(mutations_sync=2).update(duration_ms=0)
-await PageView.objects.filter(id__global_in=...).settings(distributed_product_mode="global")
+docs_ids = PageView.objects.filter(site="docs").values("id")
+await PageView.objects.filter(id__global_in=docs_ids).settings(distributed_product_mode="global")
 ```
 
 - Значение — `bool` (пишется `1`/`0`), `int` из 64-битного диапазона ClickHouse, конечный `float` или
@@ -162,11 +175,11 @@ rows.totals  # {"site": "", "views": 100, "time": 130000} - все сайты
 ```
 
 - Запрос возвращает `TotalsResult` (`hare.dialects.clickhouse.query.totals_result`): список своих строк и
-  `.totals` — строку своих агрегатов по всем строкам, подходящим под его условия, до `ORDER BY`,
-  `limit_by()` и среза, прочитанную так же, как его строки. Сгруппированные поля в ней держат значение по
-  умолчанию типа своей колонки (`""`, `0`) — так их пишет ClickHouse. Фильтр по агрегату (`HAVING`)
-  оставляет там те же группы. По пустому набору строк `Count` — `0`, остальные агрегаты — значение по
-  умолчанию своего типа.
+  `.totals` — строку итоговых агрегатов до `ORDER BY`, `limit_by()` и среза, прочитанную так же, как
+  его строки. Сгруппированные поля в ней держат значение по умолчанию типа своей колонки (`""`, `0`) —
+  так их пишет ClickHouse. Влияние фильтра по агрегату (`HAVING`) на итоги зависит от настройки
+  [`totals_mode`](https://clickhouse.com/docs/reference/statements/select/group-by#configuring-totals-processing)
+  ClickHouse; hare её не переопределяет. Результат по пустому набору строк зависит от функции агрегации.
 - Строки и итоговая строка приходят из одной команды: через clickhouse-driver hare читает пакет итогов
   протокола отдельно от строк; через clickhouse-connect, в формате `Native` которого сервер итогов не
   шлёт, команда читается в `JSONCompact`.
@@ -179,9 +192,9 @@ rows.totals  # {"site": "", "views": 100, "time": 130000} - все сайты
 таблицы `Distributed`, — с обычным `IN` каждый шард выполняет подзапрос сам.
 
 ```python
-active = Session.objects.filter(active=True).values("user_id")
-await PageView.objects.filter(user_id__global_in=active).count()
-await PageView.objects.filter(team__global_not_in=[team_a, team_b])
+docs_ids = PageView.objects.filter(site="docs").values("id")
+await PageView.objects.filter(id__global_in=docs_ids).count()
+await PageView.objects.filter(id__global_not_in=[1, 2])
 ```
 
 Они принимают то же, что `__in`, — список или queryset — у поля из одной колонки и так же обращаются с

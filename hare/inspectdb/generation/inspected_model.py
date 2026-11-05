@@ -16,14 +16,14 @@ class InspectedModel:
     Attributes:
         class_name: The model class's name.
         table_name: The table.
-        state: The model's state - None for a skipped table: a ManyToManyField through table, or
+        state: The model's state - None for a skipped table: a possible many-to-many junction, or
             one no model can be declared for.
         todo_reasons: Why a field is a best-effort reconstruction, by attribute name - written as
             a TODO comment after it.
         meta_layout: The ``Meta`` body in order: an option of ``state.options``, or a comment line.
         skipped_note: The note a skipped table gets instead of a class.
         unmodelable_reason: Why no model can be declared for a skipped table - None for a skipped
-            ManyToManyField through table.
+            possible many-to-many junction.
     """
 
     class_name: str

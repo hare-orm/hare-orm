@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.declarations import ExtensionContribution
 from hare.dialects.base.clauses.query_clauses import QueryClauses
 from hare.dialects.base.dialect import Dialect
 from hare.dialects.base.literals.sql_literals import SqlLiterals
@@ -14,6 +15,7 @@ from hare.dialects.postgresql.enums import PostgresqlDialectName
 from hare.dialects.postgresql.literals.postgresql_literals import PostgresqlLiterals
 from hare.dialects.postgresql.parameters.constants import POSTGRESQL_MAX_BIND_PARAMETERS
 from hare.dialects.postgresql.parameters.postgresql_parameters import PostgresqlParameters
+from hare.dialects.postgresql.search_feature_constants import POSTGRESQL_TEXT_SEARCH_OPERATIONS
 from hare.dialects.postgresql.server_versions import (
     POSTGRESQL_EXPLAIN_OPTION_SERVER_VERSIONS,
     POSTGRESQL_JSON_TABLE_SERVER_VERSION,
@@ -30,6 +32,7 @@ from hare.dialects.postgresql.server_versions import (
 from hare.dialects.postgresql.transactions.postgresql_transaction_statements import PostgresqlTransactionStatements
 from hare.dialects.postgresql.transactions.postgresql_two_phase_commit import PostgresqlTwoPhaseCommit
 from hare.dialects.postgresql.types.constants import POSTGRESQL_TYPES_WITHOUT_MIN_MAX
+from hare.dialects.postgresql.types.postgresql_physical_type import PostgresqlPhysicalType
 
 if TYPE_CHECKING:
     from hare.ddl.table_options import TableOptions
@@ -50,6 +53,7 @@ class PostgresqlDialect(Dialect):
     name = PostgresqlDialectName.POSTGRESQL
     otel_system_name = "postgresql"
     features = PostgresqlFeatures(
+        text_search_operations=POSTGRESQL_TEXT_SEARCH_OPERATIONS,
         computes_integer_statistics_exactly=True,
         supports_nulls_distinct=True,
         supports_partitioned_exclusion_constraints=True,
@@ -181,17 +185,18 @@ class PostgresqlDialect(Dialect):
 
     def has_min_max_of(self, column_type: str) -> bool:
         # An array is ordered by its elements - min()/max() of anyarray.
-        if column_type.endswith("]"):
-            return True
-        return column_type.partition("(")[0].strip().lower() not in POSTGRESQL_TYPES_WITHOUT_MIN_MAX
+        physical = PostgresqlPhysicalType.from_sql(column_type)
+        return bool(physical.array_dimensions) or physical.name not in POSTGRESQL_TYPES_WITHOUT_MIN_MAX
 
-    def install(self) -> None:
+    def get_contribution(self) -> ExtensionContribution:
         # Local import: the transform names hare's fields, whose modules import this one.
         from hare.dialects.postgresql.lookups.trigram.postgresql_trigram_lookups import PostgresqlTrigramLookups
         from hare.dialects.postgresql.lookups.unaccent_transform import UnaccentTransform
 
-        UnaccentTransform.register()
-        PostgresqlTrigramLookups.register()
+        return ExtensionContribution(
+            transforms=UnaccentTransform.get_registrations(),
+            lookups=PostgresqlTrigramLookups.get_registrations(),
+        )
 
     def build_filter_operators(self) -> FilterOperators:
         # Local import: the operators are hare's lookups, whose modules import this one.

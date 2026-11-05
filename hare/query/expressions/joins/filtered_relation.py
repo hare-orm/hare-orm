@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import copy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
@@ -9,11 +9,13 @@ from hare.fields.relations.fields.relational_field import RelationalField
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
 from hare.query.expressions.conditions.q import Q
 from hare.query.expressions.conditions.query_modifier import QueryModifier
-from hare.query.expressions.expression import Expression
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
-from hare.query.expressions.f import F
 from hare.query.expressions.joins.named_join import NamedJoin
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.expressions.structure.expression_traversal import ExpressionTraversal
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -39,6 +41,10 @@ class FilteredRelation(NamedJoin):
     Raises:
         QueryError: ``relation_name`` isn't a non-empty string, or ``condition`` isn't a ``Q``.
     """
+
+    structure = ExpressionStructure(
+        positions=((0, ArgumentRole.FIELD),), keywords=(("relation_name", ArgumentRole.FIELD),)
+    )
 
     plannable = True
 
@@ -92,14 +98,13 @@ class FilteredRelation(NamedJoin):
         Raises:
             QueryError: See ``get_join_condition()``.
         """
-        if condition.expression is not None:
-            raise QueryError("FilteredRelation(condition=...) can't hold an Exists(...)")
-        relative = copy(condition)
-        relative.children = tuple(self.get_relative_condition(child) for child in condition.children)
-        relative.filters = {
-            self.get_relative_path(key): self.get_relative_value(value) for key, value in condition.filters.items()
-        }
-        return relative
+        for value in ExpressionTraversal.walk(condition):
+            if isinstance(value, Q) and value.expression is not None:
+                raise QueryError("FilteredRelation(condition=...) can't hold an Exists(...)")
+        return ExpressionTraversal.map_fields(
+            condition,
+            lambda reference: reference.path if reference.outer_scopes else self.get_relative_path(reference.path),
+        )
 
     def get_relative_path(self, path: str) -> str:
         """A path over the relation, without the relation's own path.
@@ -114,23 +119,6 @@ class FilteredRelation(NamedJoin):
                 f"start with {prefix!r}"
             )
         return path.removeprefix(prefix)
-
-    def get_relative_value(self, value: Any) -> Any:
-        """A condition value with its ``F()`` references taken off the relation's path - inside an
-        expression (``F("books__price") - 3``) and its conditions too."""
-        if isinstance(value, F):
-            return F(self.get_relative_path(value.name))
-        if isinstance(value, (list, tuple)):
-            return type(value)(self.get_relative_value(item) for item in value)
-        if isinstance(value, Q):
-            return self.get_relative_condition(value)
-        if isinstance(value, Expression):
-            relative = copy(value)
-            relative.__dict__.update(
-                {name: self.get_relative_value(attribute) for name, attribute in vars(value).items()}
-            )
-            return relative
-        return value
 
     def check_for_model(self, expression_context: ExpressionContext) -> None:
         """Refuses a relation name naming no relation of the model, then a condition reading
@@ -274,15 +262,20 @@ class FilteredRelation(NamedJoin):
         Returns:
             The term, its field and the JOINs.
         """
-        term, path_joins, output_field = LookupPaths.get_nested_field(
-            related_model,
-            related_table,
+        bound_path = BoundLookupPath.bind(
+            replace(
+                expression_context,
+                model=related_model,
+                table=related_table,
+                annotations={},
+                select_related_extra_conditions=None,
+                select_related_path_prefix="",
+            ),
             field_path,
-            visibility=expression_context.visibility,
-            dialect=expression_context.dialect,
-            connection=expression_context.connection,
         )
-        return ExpressionResult(term=term, joins=joins + path_joins, output_field=output_field)
+        return ExpressionResult(
+            term=bound_path.term, joins=joins + list(bound_path.joins), output_field=bound_path.field
+        )
 
     def is_multi_valued(self, model: Any) -> bool:
         """Whether a hop of the relation from ``model`` is to-many - its JOIN may repeat a row."""

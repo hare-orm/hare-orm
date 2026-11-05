@@ -70,7 +70,7 @@ class HareOpenAPI(OpenAPI):
         Returns:
             One parameter object per parameter of the class.
         """
-        request_query_class.prepare_parameters()
+        request_query_class = request_query_class.prepare_parameters()
         schema = request_query_class.model_json_schema(ref_template=COMPONENT_REFERENCE_TEMPLATE)
         self.openapi_spec["components"].setdefault("schemas", {}).update(schema.pop("$defs", {}))
         required = set(schema.get("required", []))

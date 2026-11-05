@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from hare.contrib.frameworks.litestar.constants import DTO_PATH_SEPARATOR, TO_MANY_RELATION_TYPES
 from hare.contrib.frameworks.litestar.declarations import DTOExtraField
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.exceptions import ConfigurationError, NoValuesFetched
 
 if TYPE_CHECKING:
@@ -25,20 +26,22 @@ class HareDTOExtraFields:
         model_type: The model of the DTO.
         extra_fields: Values read from the row by name - a query's annotation, an attribute set on the row
             after it was read - with their types.
-        computed: Properties and methods of the model, typed by their return annotations.
+        computed: Synchronous properties and methods of the model, typed by their return annotations.
+            Getters and methods receive only the row as self and must be callable without additional arguments.
+            Compute asynchronous values in the handler and expose them through extra_fields.
         related_values: Values of a related row, flattened: a name to the path of the related field,
             through relations to one row (``{"author_name": "author.name"}``).
         read_attribute: Reads an attribute of a row - None for a relation the query didn't load.
 
     Raises:
-        ConfigurationError: A path goes through what is no relation to one row or a relation to many
-            rows, a computed name is no property or method of the model or has no return annotation,
+        ConfigurationError: A placement path crosses a non-relation, a related-value path crosses
+            a relation to many rows, a computed name is no property or method or has no return annotation,
             a related value names no value field, or a name is a field of the model or declared twice.
     """
 
     #: The extra fields each set of extra fields found for a class of rows through the class's bases, kept in a
     #: bucket of the set.
-    found_row_class_fields: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_row_class_fields: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     def __init__(
         self,
@@ -52,11 +55,11 @@ class HareDTOExtraFields:
         self.fields_by_model: dict[type[Model], dict[str, DTOExtraField]] = {}
         #: The computed names of each model.
         self.computed_names_by_model: dict[type[Model], set[str]] = {}
-        #: The buckets of the caches these extra fields read (``Cache.get_owner_bucket()``).
+        #: The buckets of the caches these extra fields read (``Cache.get_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
         #: The extra fields of each class of the rows read - its own and its bases'.
-        self.fields_by_row_class: dict[type, dict[str, DTOExtraField]] = (
-            HareDTOExtraFields.found_row_class_fields.get_owner_bucket(self)
+        self.fields_by_row_class: CacheBucket[dict[str, DTOExtraField]] = (
+            HareDTOExtraFields.found_row_class_fields.get_bucket(self)
         )
         for path, annotation in extra_fields.items():
             owner, name = HareDTOExtraFields.get_owner(model_type, path, "extra_fields")
@@ -170,7 +173,7 @@ class HareDTOExtraFields:
 
     @staticmethod
     def get_computed_field(owner: type[Model], name: str) -> DTOExtraField:
-        """The extra field of a property or method of a model.
+        """The extra field of a synchronous property or method of a model.
 
         Raises:
             ConfigurationError: The name is no property or method of the model, or it has no return
@@ -192,7 +195,7 @@ class HareDTOExtraFields:
 
     @staticmethod
     def get_computed_reader(owner: type[Model], name: str, row_class: type) -> Callable[[object], Any]:
-        """Reads a computed value from the rows of a class - its property or method of the name.
+        """Read a computed value synchronously, passing only the row to its getter or method.
 
         Args:
             owner: The model the value is declared on.

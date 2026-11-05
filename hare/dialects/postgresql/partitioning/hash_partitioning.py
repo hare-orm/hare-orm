@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.dialects.postgresql.enums import PartitionStrategy
-from hare.dialects.postgresql.partitioning.constants import HASH_PARTITION_COUNT_LIMIT, HASH_PARTITION_NAME_TEMPLATE
+from hare.dialects.postgresql.partitioning.constants import HASH_PARTITION_NAME_TEMPLATE
 from hare.dialects.postgresql.partitioning.partitioning import BoundValueRenderer, Partitioning
 from hare.exceptions import ConfigurationError
 
@@ -18,7 +18,7 @@ class HashPartitioning(Partitioning):
 
     Attributes:
         fields: The fields of the partition key.
-        partition_count: How many partitions - from 1 to ``HASH_PARTITION_COUNT_LIMIT``.
+        partition_count: A positive integer number of partitions.
     """
 
     strategy: ClassVar[PartitionStrategy] = PartitionStrategy.HASH
@@ -29,14 +29,13 @@ class HashPartitioning(Partitioning):
         """Checks the key fields and the partition count.
 
         Raises:
-            ConfigurationError: A key field is wrong, or the count isn't a whole number from 1 to
-                ``HASH_PARTITION_COUNT_LIMIT``.
+            ConfigurationError: A key field is wrong, or the count isn't a positive whole number.
         """
         super().__post_init__()
         count = self.partition_count
-        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= HASH_PARTITION_COUNT_LIMIT:
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ConfigurationError(
-                f"HashPartitioning: partition_count must be a whole number from 1 to {HASH_PARTITION_COUNT_LIMIT}, "
+                "HashPartitioning: partition_count must be a whole number greater than zero, "
                 f"got {ValueDescriptions.get_shown_value(count)}"
             )
 

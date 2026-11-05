@@ -1,8 +1,10 @@
 # Validators
 
-A field's `validators=[...]` check every value written to it before it reaches the database: the
-validators of `hare.fields.validators`, PostgreSQL's own, a `Validator` subclass of yours or a plain
-callable.
+A field's `validators=[...]` check supplied Python values and known literals in write expressions
+before they reach the database. The result computed by SQL, including `F()` expressions, database
+defaults and generated columns, is subject to database constraints rather than these Python validators.
+Use validators from `hare.fields.validators`, PostgreSQL's field validators, a `Validator` subclass
+of yours or a plain callable.
 
 ```python
 from hare.fields.validators import MaxValueValidator, MinValueValidator, Validator, validate_email

@@ -5,7 +5,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyTuple};
 
-use crate::codecs::json::MAXIMUM_DEPTH;
+/// Maximum container nesting accepted by the JSON field.
+const MAXIMUM_DEPTH: usize = 254;
 
 /// The value holds nothing a JSON column can't store, and no int outside orjson's range.
 const STORABLE: u8 = 0;

@@ -65,11 +65,7 @@ class FilterParameterBuilder:
                 option adds.
         """
         declared_fields = self.request_query_class.model_fields
-        option_parameters = {
-            parameter
-            for option in self.request_query_class.get_request_options()
-            for parameter in option.get_parameters()
-        }
+        option_parameters = self.declaration_builder.get_option_parameters()
         declaration_builder = self.declaration_builder
         fields: dict[str, FieldInfo] = {}
         for parameter, (filter_key, filter_field) in self.get_filter_fields().items():

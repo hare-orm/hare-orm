@@ -21,7 +21,10 @@ class Q(Plannable):
     def __init__(self, *conditions: Q | Exists, **filters: Any) -> None: ...
 
     @classmethod
-    def with_connector(cls, connector: Connector, *conditions: Q | Exists, **filters: Any) -> Q: ...
+    def with_connector(cls, connector: Connector, /, *conditions: Q | Exists, **filters: Any) -> Q: ...
+
+    @classmethod
+    def from_expression(cls, expression: Expression) -> Q: ...
 ```
 
 ```python
@@ -35,9 +38,24 @@ takes nothing but conditions, so a filter on any field name fits in it — a fie
 parameter of a `QuerySet`/`Model` method (`get(does_not_exist_exception=...)`, `When(then=...)`) is
 filtered through a `Q`: `Model.objects.get(Q(does_not_exist_exception="timeout"))`.
 
+`Q.from_expression(expression)` uses a boolean expression as a condition. The expression must
+produce a SQL criterion or declare a `BooleanField` result, such as `ConditionValue(...)`,
+`Exists(...)`, or `F("is_active")` for a boolean field. A non-boolean scalar expression raises
+`QueryError` when the query is prepared; its value is not implicitly treated as true or false.
+The ordinary `Q(...)` constructor still accepts only `Q` and `Exists` as positional conditions.
+
+```python
+Ticket.objects.filter(Q.from_expression(ConditionValue(Q(closed_at__isnull=True))))
+```
+
+Migration/schema declaration serialization does not support expression predicates inside `Q`,
+including `Q.from_expression(...)` and `Q(Exists(...))`, even when nested in another condition.
+Writing such a declaration raises `ConfigurationError`. This restriction does not prevent their
+use in runtime queries or row-scope providers.
+
 Operators: `&` / `|` (build a new `Q` joining both with AND/OR), `~` (returns a new negated `Q`,
 non-mutating), `.negate()` (mutates `_is_negated` in place instead), `bool(q)` (`True` if it has any
-filters, an `Exists` or a truthy child — `False` for an empty `Q()`).
+filters, an expression or a truthy child — `False` for an empty `Q()`).
 
 ### <a id="condition-value"></a>A condition as a value: `ConditionValue`
 
@@ -93,8 +111,8 @@ runs, on every database: SQLite would keep a value the field reads back none of
 (`update(flag=F("count"))` sets a boolean to a number). A text field may be set to any value, as its
 text. An update sets a date field only to a date and a moment field only to a moment (see
 [Date/time arithmetic](#date-time-arithmetic)). `Cast()` converts the value where that is meant:
-`filter(code=Cast(F("number"), CharField(max_length=10)))`. A field of another type (JSON, UUID, an
-array, ...) isn't checked.
+`filter(code=Cast(F("number"), CharField(max_length=10)))`. Other stored types, including JSON, UUID
+and arrays, also follow the [assignment compatibility rules](queryset-methods.md#update).
 
 `F("data__key")` is the JSON value at the path (`jsonb` on PostgreSQL), read back parsed: an object is a
 `dict`, an array a `list`, a boolean a `bool`, a number a number. Arithmetic on it raises `FieldError` —
@@ -170,10 +188,9 @@ await Loan.objects.aggregate(longest=Max(F("returned_at") - F("lent_at")))   # a
 - A date is treated as midnight: `date ± timedelta` is the date of `midnight ± timedelta`, so a sub-day
   remainder is **floored** (`date + 23 hours` is the same date, `date - 1 hour` is the previous date).
 - A `NULL` operand gives `NULL`.
-- A result beyond the dates a database holds is the database's own: SQLite raises `OperationalError`
-  (`timestamp out of range`, `date out of range`), ClickHouse gives the nearest moment or day the column
-  holds (`DateTime` 1900-01-01 to 2299-12-31 23:00, `DateTime64` from ClickHouse 26.7 the years 1 to
-  9999, `Date32` up to 2299-12-31), and on PostgreSQL a
+- A result beyond the dates a database holds follows the database's arithmetic: SQLite raises
+  `OperationalError` (`timestamp out of range`, `date out of range`); ClickHouse's physical types have
+  different [date ranges](../dialects/clickhouse/types.md#fields), and on PostgreSQL a
   result after the year 9999, which Python's `datetime` can't hold, raises when it is read.
 - Under `use_timezone=False` a naive datetime is local wall-clock time and is shifted as absolute time in
   the system zone.
@@ -274,26 +291,22 @@ configured zone, a date's string is parsed, a naive time gets the configured off
 ## <a id="case-when"></a>`Case` / `When`
 
 ```python
-CaseBranchValue = (
-    str | int | float | bool | Decimal | date | datetime | time | uuid.UUID | None | F | CombinedExpression | Function
-)
-
 class When(Expression):
     def __init__(
         self,
         *args: Q | Exists,
-        then: CaseBranchValue,
+        then: Any,
         negate: bool = False,
         **kwargs: Any,
     ) -> None: ...
 
 class Case(CombinableExpression):
-    def __init__(self, *args: When, default: CaseBranchValue = None) -> None: ...
+    def __init__(self, *args: When, default: Any = None) -> None: ...
 ```
 
-`then`/`default` accept either a real expression (evaluated per-row) or a bare Python literal of any of
-the usual field-value types — not just `str`. A branch condition is a `Q`, an `Exists` or keyword
-filters.
+`then`/`default` accept an expression, a SQL `Term` or a Python literal. Literal support follows the
+value field and dialect, including custom field types. A branch condition is a `Q`, an `Exists` or
+keyword filters.
 
 `When(negate=True, ...)` negates the branch's whole condition, exactly like `~Q(...)`:
 `When(a=1, b=2, negate=True)` matches `NOT (a = 1 AND b = 2)`.
@@ -308,8 +321,8 @@ await Book.objects.all().annotate(
 )
 ```
 
-A `When` referencing an aggregated/annotated expression correctly resolves into `HAVING` rather than
-`WHERE`.
+The condition of `When` stays inside `CASE WHEN`, including references to aggregate annotations.
+A separate filter on an aggregate follows the usual `HAVING` rules.
 
 The result type of a `Case` comes from all of its branches together (a `Value(...)` counts as the literal
 it wraps, a `None` branch doesn't count):
@@ -324,8 +337,9 @@ it wraps, a `None` branch doesn't count):
 - literal-only branches of one type give that type (`bool`, `date`, `datetime`, `timedelta`, `uuid.UUID`,
   ...); `date` literals mixed with `datetime` literals give a `datetime` (the date at midnight);
 - a date beside a moment — a `DateField` or a `date` literal beside a `DatetimeField` or a `datetime`
-  literal — gives a moment, the date at midnight UTC, as PostgreSQL makes it a `timestamp` (a moment
-  isn't cut to its date);
+  literal — gives a moment. A date literal becomes midnight through the result `DatetimeField`, using
+  `Timezone.default` when `use_timezone=True`; conversion of date columns follows the database
+  rules. A moment is not cut to its date;
 - values of types that don't combine — a number with text, a boolean with a number, a date with a number
   or a duration, text with a time — raise `FieldError` before the query runs, on every database: convert
   them to one type with `Cast()`. A string literal is text here even when it reads as a number
@@ -340,7 +354,7 @@ The same rules type a `Coalesce` over all of its arguments, and refuse the same 
 
 ```python
 class Subquery(CombinableExpression, Term):
-    def __init__(self, query: AwaitableQuery[Any], *, shares_outer_scope: bool = False) -> None: ...
+    def __init__(self, query: QuerySpecification[Any], *, shares_outer_scope: bool = False) -> None: ...
 
 class OuterReference(CombinableExpression):
     # a direct field of the outer model, or a related__field path
@@ -380,8 +394,9 @@ for `book_count=Count("books")`): the subquery is then evaluated per group of th
 it goes to `HAVING`. A window function (`Window(...)`) annotation can't be referenced and raises
 `QueryError`.
 
-`OuterReference` only works inside a queryset wrapped in `Exists(...)` or `Subquery(...)`. Passing a bare
-(un-awaited) `QuerySet` to `field__in=` is wrapped in `Subquery`.
+`OuterReference` needs an outer scope: a queryset wrapped in `Exists(...)` or `Subquery(...)`, or
+an [`AsofJoin(on=...)`](filters.md#asof-join) condition. Passing a bare (un-awaited) `QuerySet` to
+`field__in=` wraps it in `Subquery`.
 
 With `shares_outer_scope=True`, an `OuterReference` of the subquery's query refers to the query the
 enclosing one is nested in, not to the enclosing one — for a subquery placed between a queryset and its

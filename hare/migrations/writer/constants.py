@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import re
 
-#: ``python -m ruff`` argument lists makemigrations formats new migration files with, in order -
+#: Argument lists for the discovered Ruff binary, formatting new migration files in order -
 #: import sorting first, then the formatter.
 MIGRATION_FORMATTER_RUFF_ARGUMENTS: tuple[tuple[str, ...], ...] = (
     ("check", "--select", "I", "--fix", "--quiet"),
@@ -24,6 +24,3 @@ MIGRATION_UNDERSCORE_RUN_PATTERN = re.compile(r"_+")
 
 #: The longest name of a migration file after its number - a file name any file system takes.
 MIGRATION_SLUG_MAX_LENGTH = 80
-
-#: What follows the package of a dialect in the path of a field class of its - its ``fields`` package.
-DIALECT_FIELDS_PACKAGE_SEPARATOR = ".fields."

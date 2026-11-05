@@ -104,4 +104,5 @@ class HStoreField(Field[dict[str, str | None]]):
         try:
             return HStoreText.parse(value)
         except ValueError as error:
-            raise self.get_validation_error(error, value) from None
+            validation_error = self.get_validation_error(error, value)
+        raise validation_error

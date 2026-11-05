@@ -63,11 +63,16 @@ class NestedTransactionContext(TransactionContext):
         exception_traceback: TracebackType | None,
     ) -> None:
         try:
-            if not self.client._finalized and self.client._get_top_level_transaction()._finalized:
+            if (
+                not self.client.transaction_state.finished
+                and self.client._get_top_level_transaction().transaction_state.finished
+            ):
                 # The whole transaction already ended (a manual commit()/rollback() of an outer
                 # level inside this block) - the savepoint ended with it, nothing is left to send.
-                self.client._finalized = True
-            elif not self.client._finalized:
+                self.client.transaction_state.finish(
+                    self.client._get_top_level_transaction().transaction_state.outcome
+                )
+            elif not self.client.transaction_state.finished:
                 if exception is not None:
                     await self._rollback_savepoint_keeping_error(exception, "Rolling back the savepoint")
                 else:
@@ -82,7 +87,10 @@ class NestedTransactionContext(TransactionContext):
                         # A failed RELEASE (refused in an aborted transaction, say)
                         # leaves the savepoint open - rolling back to it keeps the outer
                         # transaction usable and discards this block's on_commit() callbacks.
-                        if not self.client._finalized and self.client._shielded_savepoint_abandoned_task is None:
+                        if (
+                            not self.client.transaction_state.finished
+                            and self.client._shielded_savepoint_abandoned_task is None
+                        ):
                             await self._rollback_savepoint_keeping_error(
                                 release_error, "Rolling back the savepoint after its failed release"
                             )
@@ -129,7 +137,7 @@ class NestedTransactionContext(TransactionContext):
         try:
             await self.client.savepoint_rollback()
         except Exception as rollback_error:
-            if self.client._finalized:
+            if self.client.transaction_state.finished:
                 # The ROLLBACK TO itself landed - only an on_rollback() callback failed.
                 self.client.log.error("on_rollback() callback failed", exc_info=rollback_error)
                 error.add_note(f"on_rollback() callback failed after rolling back the savepoint: {rollback_error!r}")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -28,14 +27,14 @@ from hare.query.expressions.temporal.temporal_operand import TemporalOperand
 
 
 class TemporalArithmetic:
-    """Rules and SQL for ``+``/``-`` between date, datetime and timedelta operands: ``datetime +/-
-    timedelta``, ``date +/- timedelta`` (the sub-day remainder is dropped), ``datetime - datetime``,
-    ``date - date`` and ``timedelta +/- timedelta``. Durations are absolute time, never calendar
-    days. Any other combination with a date/time operand raises ``FieldError``.
+    """Rules and SQL for temporal addition, subtraction and differences.
+
+    Timedelta values represent absolute durations; a date shift drops their sub-day remainder.
+    Interval fields can additionally carry calendar components, handled by the dialect's
+    temporal shift. The result-type table defines the supported operand combinations.
     """
 
-    #: Shared, long-lived instances - the statement plans hold an annotation's output
-    #: field weakly, so a fresh instance per call would be collected immediately.
+    #: Shared result descriptors avoid allocating a field for each expression build.
     DATETIME_OUTPUT_FIELD = DatetimeField()
     DATE_OUTPUT_FIELD = DateField()
     TIME_OUTPUT_FIELD = TimeField()
@@ -46,19 +45,6 @@ class TemporalArithmetic:
         TemporalType.DATE: DATE_OUTPUT_FIELD,
         TemporalType.TIMEDELTA: TIMEDELTA_OUTPUT_FIELD,
     }
-
-    @staticmethod
-    def get_field_encoder(field: Field[Any], dialect: Dialect) -> Callable[[Any], Any]:
-        """The encoder binding a literal the way a column of ``field`` stores it.
-
-        Args:
-            field: The field.
-            dialect: The dialect of the database the query runs on.
-
-        Returns:
-            A ``(value) -> value`` encoder.
-        """
-        return functools.partial(dialect.types.get_db_value, field, instance=None)
 
     @classmethod
     def get_literal_encoder(cls, temporal_type: TemporalType, dialect: Dialect) -> Callable[[Any], Any] | None:
@@ -72,7 +58,7 @@ class TemporalArithmetic:
             The encoder, or None for a type that has no arithmetic (time).
         """
         output_field = cls.SHARED_OUTPUT_FIELDS.get(temporal_type)
-        return None if output_field is None else cls.get_field_encoder(output_field, dialect)
+        return None if output_field is None else dialect.types.get_field_encoder(output_field)
 
     @staticmethod
     def get_literal_temporal_type(value: Any) -> TemporalType | None:
@@ -99,8 +85,8 @@ class TemporalArithmetic:
         Returns:
             Its type, or None when the field isn't a datetime/date/time/timedelta field.
         """
-        if isinstance(field, GeneratedField):
-            field = field.output_field
+        if field is not None:
+            field = GeneratedField.get_effective_field(field)
         for field_class, temporal_type in TEMPORAL_FIELD_TYPES:
             if isinstance(field, field_class):
                 return temporal_type
@@ -122,8 +108,8 @@ class TemporalArithmetic:
     @staticmethod
     def is_naive_field(field: Field[Any] | None) -> bool:
         """Whether a field holds a wall clock in no zone (``NaiveDatetimeField``), a generated one too."""
-        if isinstance(field, GeneratedField):
-            field = field.output_field
+        if field is not None:
+            field = GeneratedField.get_effective_field(field)
         return field is not None and field.date_function_source is DateTruncSource.NAIVE_DATETIME
 
     @staticmethod

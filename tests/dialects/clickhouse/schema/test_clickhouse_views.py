@@ -55,12 +55,12 @@ async def create_sales(connection):
     await Sale.objects.bulk_create([Sale(id=sale_id, shop=shop, amount=amount) for sale_id, shop, amount in SALES])
 
 
-async def run(operation, state, editor):
-    await apply_operations("models", state, operation, schema_editor=editor)
+async def run(operation, state, editor) -> State:
+    return await apply_operations("models", state, operation, schema_editor=editor)
 
 
 @pytest.mark.asyncio
-async def test_views_are_created_with_the_model_and_follow_its_rows(clickhouse_db):
+async def test_views_are_created_with_the_model_and_follow_its_rows(clickhouse_db, monkeypatch):
     connection = Sale._meta.connection
     assert await get_engines(connection, "sale") == {
         "sale": "MergeTree",
@@ -77,6 +77,18 @@ async def test_views_are_created_with_the_model_and_follow_its_rows(clickhouse_d
 
     # A refresh fills the view by its whole query again - the rows it held are replaced.
     await connection.execute_script("ALTER TABLE sale DELETE WHERE id = 3 SETTINGS mutations_sync = 2")
+
+    def reject_view_query(editor, view):
+        raise ConfigurationError("view query cannot be compiled")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connection.dialect.schema_editor_class, "get_view_query_sql", reject_view_query)
+        for view_name in ("sales_by_shop", "sale_totals"):
+            with pytest.raises(ConfigurationError, match="view query cannot be compiled"):
+                await Sale.objects.refresh_materialized_view(view_name)
+    for table in ("sales_by_shop", "shop_total"):
+        assert await get_rows(connection, totals_sql.format(table)) == [("north", 200), ("south", 500)]
+
     await Sale.objects.refresh_materialized_view("sales_by_shop")
     assert await get_rows(connection, "SELECT shop, total FROM sales_by_shop ORDER BY shop") == [("north", 200)]
     await Sale.objects.refresh_materialized_view("sale_totals")
@@ -120,7 +132,7 @@ async def test_drift_finds_no_change_of_the_declared_views_and_a_changed_one(cli
         assert ("AlterMaterializedView", "sales_by_shop") in await get_view_operations()
     finally:
         editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
-        await editor.materialized_views.drop_model_materialized_views(Sale)
+        await editor.run_sqls(editor.get_model_view_drop_sqls(Sale))
         await editor.run_sqls(editor.table_creation.get_schema_objects_after_table_sqls(Sale, safe=True))
     assert await get_view_operations() == []
 
@@ -130,7 +142,7 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
     connection = Sale._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await run(
+    state = await run(
         CreateModel(
             name="Parcel",
             fields=[
@@ -143,7 +155,7 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
         state,
         editor,
     )
-    await run(
+    state = await run(
         CreateModel(
             name="CityWeight",
             fields=[("city", fields.CharField(max_length=20, primary_key=True)), ("weight", fields.BigIntField())],
@@ -165,16 +177,20 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
     )
     try:
         await connection.execute_script("INSERT INTO views_parcel VALUES (1, 'a', 5), (2, 'a', 20), (3, 'b', 30)")
-        await run(AddView("Parcel", heavy), state, editor)
-        await run(AddMaterializedView("Parcel", by_city), state, editor)
-        await run(AddMaterializedView("Parcel", to_city), state, editor)
+        state = await run(AddView("Parcel", heavy), state, editor)
+        state = await run(AddMaterializedView("Parcel", by_city), state, editor)
+        state = await run(AddMaterializedView("Parcel", to_city), state, editor)
         # Both are filled with the rows the table held.
         totals_sql = "SELECT city, sum(weight) FROM {} GROUP BY city ORDER BY city"
         assert await get_rows(connection, "SELECT id FROM views_heavy ORDER BY id") == [(2,), (3,)]
         assert await get_rows(connection, totals_sql.format("views_by_city")) == [("a", 25), ("b", 30)]
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == [("a", 25), ("b", 30)]
 
-        await run(AlterView("Parcel", View("views_heavy", RawSQLTerm("SELECT id FROM views_parcel"))), state, editor)
+        state = await run(
+            AlterView("Parcel", View("views_heavy", RawSQLTerm("SELECT id FROM views_parcel"))),
+            state,
+            editor,
+        )
         assert len(await get_rows(connection, "SELECT id FROM views_heavy")) == 3
         # The query of a view writing to a table changes in place - the table keeps its rows; a view of
         # its own storage is created anew and filled by the new query.
@@ -183,20 +199,20 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
             RawSQLTerm("SELECT city, toInt64(weight * 2) AS weight FROM views_parcel"),
             to="views_city_weight",
         )
-        await run(AlterMaterializedView("Parcel", doubled), state, editor)
+        state = await run(AlterMaterializedView("Parcel", doubled), state, editor)
         counted = ClickhouseMaterializedView(
             "views_by_city",
             RawSQLTerm("SELECT city, toInt64(count()) AS weight FROM views_parcel GROUP BY city"),
             engine="SummingMergeTree",
             order_by=("city",),
         )
-        await run(AlterMaterializedView("Parcel", counted), state, editor)
+        state = await run(AlterMaterializedView("Parcel", counted), state, editor)
         await connection.execute_script("INSERT INTO views_parcel VALUES (4, 'b', 1)")
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == [("a", 25), ("b", 32)]
         assert await get_rows(connection, totals_sql.format("views_by_city")) == [("a", 2), ("b", 2)]
 
-        await run(RenameView("Parcel", "views_heavy", "views_all"), state, editor)
-        await run(RenameMaterializedView("Parcel", "views_by_city", "views_per_city"), state, editor)
+        state = await run(RenameView("Parcel", "views_heavy", "views_all"), state, editor)
+        state = await run(RenameMaterializedView("Parcel", "views_by_city", "views_per_city"), state, editor)
         assert await get_engines(connection, "views_") == {
             "views_all": "View",
             "views_city_weight": "SummingMergeTree",
@@ -204,12 +220,12 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
             "views_per_city": "MaterializedView",
             "views_to_city": "MaterializedView",
         }
-        await run(RefreshMaterializedView("Parcel", "views_to_city"), state, editor)
+        state = await run(RefreshMaterializedView("Parcel", "views_to_city"), state, editor)
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == [("a", 50), ("b", 62)]
 
         # A remade table has its views over it again: they follow its new rows, the copied ones not
         # taken twice.
-        await run(
+        state = await run(
             AlterModelOptions(
                 name="Parcel",
                 options={"table": "views_parcel", "table_options": [ClickhouseTableOptions(order_by=("id", "city"))]},
@@ -223,8 +239,8 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
         assert await get_rows(connection, totals_sql.format("views_per_city")) == [("a", 2), ("b", 2), ("c", 1)]
         assert len(await get_rows(connection, "SELECT id FROM views_all")) == 5
 
-        await run(RemoveView("Parcel", "views_all"), state, editor)
-        await run(RemoveMaterializedView("Parcel", "views_per_city"), state, editor)
+        state = await run(RemoveView("Parcel", "views_all"), state, editor)
+        state = await run(RemoveMaterializedView("Parcel", "views_per_city"), state, editor)
         assert "views_all" not in await get_engines(connection, "views_")
         # Going back, a view writing to a table is created again over the rows its drop left there - filling
         # it again wrote every row of the source a second time.
@@ -232,14 +248,14 @@ async def test_migrations_add_change_rename_and_remove_views(clickhouse_db):
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == city_weights
         state_before_removal = state.clone()
         removal = RemoveMaterializedView("Parcel", "views_to_city")
-        await run(removal, state, editor)
+        state = await run(removal, state, editor)
         await removal.database_backward("models", state, state_before_removal, state_editor=editor)
         state = state_before_removal
         assert await get_rows(connection, totals_sql.format("views_city_weight")) == city_weights
         assert "views_to_city" in await get_engines(connection, "views_")
     finally:
         # The views a model declares go with its table.
-        await run(DeleteModel(name="Parcel"), state, editor)
+        state = await run(DeleteModel(name="Parcel"), state, editor)
         await run(DeleteModel(name="CityWeight"), state, editor)
     assert await get_engines(connection, "views_") == {}
 
@@ -250,7 +266,7 @@ async def test_a_view_keyed_by_a_column_holding_null_is_created(clickhouse_db):
     connection = Sale._meta.connection
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await run(
+    state = await run(
         CreateModel(
             name="Tag",
             fields=[
@@ -269,7 +285,7 @@ async def test_a_view_keyed_by_a_column_holding_null_is_created(clickhouse_db):
     )
     try:
         await connection.execute_script("INSERT INTO views_tag VALUES (1, 'a'), (2, NULL), (3, NULL)")
-        await run(AddMaterializedView("Tag", labels), state, editor)
+        state = await run(AddMaterializedView("Tag", labels), state, editor)
         totals_sql = "SELECT label, sum(tags) FROM views_tag_labels GROUP BY label ORDER BY label"
         assert await get_rows(connection, totals_sql) == [("a", 1), (None, 2)]
     finally:
@@ -291,20 +307,20 @@ async def test_a_view_is_refreshed_on_a_schedule(clickhouse_db):
         refresh="every 1 hours",
         order_by=("shop",),
     )
-    await run(AddMaterializedView("Sale", snapshot), state, editor)
+    state = await run(AddMaterializedView("Sale", snapshot), state, editor)
     try:
         rows_sql = "SELECT shop, sales FROM sales_snapshot ORDER BY shop"
         # Created with its rows - the first refresh is waited for.
         assert await get_rows(connection, rows_sql) == [("north", 2), ("south", 1)]
         await Sale.objects.create(id=4, shop="south", amount=1)
         assert await get_rows(connection, rows_sql) == [("north", 2), ("south", 1)]
-        await run(RefreshMaterializedView("Sale", "sales_snapshot", concurrently=True), state, editor)
+        state = await run(RefreshMaterializedView("Sale", "sales_snapshot", concurrently=True), state, editor)
         assert await get_rows(connection, rows_sql) == [("north", 2), ("south", 2)]
 
         drift = await detect_drift(connection, state, ["models"])
         assert [operation for operation in drift.operations if "View" in type(operation).__name__] == []
         every_two_hours = dataclasses.replace(snapshot, refresh="EVERY 2 HOUR")
-        await run(AlterMaterializedView("Sale", every_two_hours), state, editor)
+        state = await run(AlterMaterializedView("Sale", every_two_hours), state, editor)
         (definition,) = await get_rows(
             connection,
             "SELECT create_table_query FROM system.tables "

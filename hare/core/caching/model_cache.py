@@ -5,7 +5,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 from weakref import WeakSet
 
-from hare.core.caching.caches import Caches
+from hare.core.caching.cache import Cache
 from hare.core.constants import CACHE_MISS
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ class ModelCache(MutableMapping["type[Model]", TCachedValue]):
         #: The models holding a value of this cache - held weakly; used by iteration, ``len()``
         #: and ``clear()``.
         self.models: WeakSet[type[Model]] = WeakSet()
-        Caches.register(self)
+        self.storage: Cache[TCachedValue] = Cache(1, holds_sql=False, depends_on_other_models=depends_on_other_models)
 
     @staticmethod
     def fact(
@@ -60,16 +60,12 @@ class ModelCache(MutableMapping["type[Model]", TCachedValue]):
             compute: Callable[Concatenate[type[Model], P], TFact],
         ) -> Callable[Concatenate[type[Model], P], TFact]:
             cache: ModelCache[TFact] = ModelCache(depends_on_other_models)
-            cache_key = id(cache)
-            models = cache.models
 
             @wraps(compute)
             def get(model: type[Model], *args: P.args, **kwargs: P.kwargs) -> TFact:
-                values = model._meta.model_cache_values
-                value: Any = values.get(cache_key, CACHE_MISS)
+                value: Any = cache.get(model, CACHE_MISS)
                 if value is CACHE_MISS:
-                    value = values[cache_key] = compute(model, *args, **kwargs)
-                    models.add(model)
+                    value = cache[model] = compute(model, *args, **kwargs)
                 return value
 
             get.cache = cache  # type: ignore[attr-defined]
@@ -78,61 +74,49 @@ class ModelCache(MutableMapping["type[Model]", TCachedValue]):
         return decorator
 
     def get(self, model: type[Model], default: Any = None) -> Any:
-        """The value of ``model``, or ``default`` when it has none - one lookup.
-
-        Args:
-            model: The model.
-            default: Returned on a miss.
-
-        Returns:
-            The value or ``default``.
-        """
-        return model._meta.model_cache_values.get(id(self), default)
+        return self.storage.get_value(model, default)
 
     def __getitem__(self, model: type[Model]) -> TCachedValue:
-        values = model._meta.model_cache_values
-        key = id(self)
-        if key not in values:
+        value = self.get(model, CACHE_MISS)
+        if value is CACHE_MISS:
             raise KeyError(model)
-        return cast("TCachedValue", values[key])
+        return cast("TCachedValue", value)
 
     def __contains__(self, model: object) -> bool:
-        meta = getattr(model, "_meta", None)
-        return meta is not None and id(self) in meta.model_cache_values
+        return hasattr(model, "_meta") and self.get(cast("type[Model]", model), CACHE_MISS) is not CACHE_MISS
 
     def __setitem__(self, model: type[Model], value: TCachedValue) -> None:
-        model._meta.model_cache_values[id(self)] = value
-        self.models.add(model)
+        with self.storage.lock:
+            self.storage.set_value(model, value)
+            self.models.add(model)
 
     def __delitem__(self, model: type[Model]) -> None:
-        del model._meta.model_cache_values[id(self)]
-        self.models.discard(model)
+        with self.storage.lock:
+            del self.storage.get_bucket(model)[None]
+            self.models.discard(model)
 
     def __iter__(self) -> Iterator[type[Model]]:
-        for model in list(self.models):
-            if id(self) in model._meta.model_cache_values:
+        with self.storage.lock:
+            models = tuple(self.models)
+        for model in models:
+            if model in self:
                 yield model
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
 
     def clear(self) -> None:
-        for model in list(self.models):
-            model._meta.model_cache_values.pop(id(self), None)
-        self.models.clear()
+        with self.storage.lock:
+            self.storage.clear()
+            self.models.clear()
 
     def forget_model(self, model: type[Model]) -> None:
-        """Drops the entry of ``model`` - every entry when they depend on other models.
-
-        Args:
-            model: The model that changed.
-        """
-        if self.depends_on_other_models:
-            if self.models:
-                self.clear()
-        elif model._meta.model_cache_values.pop(id(self), CACHE_MISS) is not CACHE_MISS:
-            self.models.discard(model)
+        with self.storage.lock:
+            self.storage.forget_model(model)
+            if self.depends_on_other_models:
+                self.models.clear()
+            else:
+                self.models.discard(model)
 
     def forget_all(self) -> None:
-        """Drops every entry."""
         self.clear()

@@ -16,7 +16,6 @@ class AddSchemaObject(ModelBoundOperation):
     type (``AddIndex``, ``AddConstraint``, ``AddTrigger``) gives its argument its own name."""
 
     object_type: ClassVar[type[SchemaObjectType]]
-    reads_old_state = False
 
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name

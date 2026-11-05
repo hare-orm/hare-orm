@@ -175,13 +175,13 @@ is their `FILTER (WHERE ...)`, like an aggregate's `_filter=`.
 | `RowNumber` | `()` | `ROW_NUMBER()` |
 | `Rank` | `()` | `RANK()` |
 | `DenseRank` | `()` | `DENSE_RANK()` |
-| `NTile` | `(buckets: int)` | `NTILE(buckets)`; `buckets` an integer from 1 to 2147483647, otherwise `QueryError` |
+| `NTile` | <code>(buckets: int &#124; Expression)</code> | `NTILE(buckets)`; a literal `buckets` must be an integer from 1 to 2147483647, otherwise `QueryError`; expressions are evaluated by the database |
 | `Sum`/`Avg`/`Max`/`Min`/`Count` | <code>(field: str &#124; Expression, condition: Q &#124; None = None)</code> | `SUM`/`AVG`/`MAX`/`MIN`/`COUNT(field)` |
 | `StdDev`/`Variance` | <code>(field: str &#124; Expression, condition: Q &#124; None = None, sample: bool = False)</code> | `STDDEV_POP`/`STDDEV_SAMP`/`VAR_POP`/`VAR_SAMP(field)` |
 | `CumeDist`/`PercentRank` | `()` | `CUME_DIST()`/`PERCENT_RANK()` |
 | `FirstValue`/`LastValue` | <code>(field: str &#124; Expression, condition: Q &#124; None = None)</code> | `FIRST_VALUE`/`LAST_VALUE(field)` |
 | `NthValue` | <code>(field: str &#124; Expression, nth: int = 1)</code> | `NTH_VALUE(field, nth)` over the whole partition, like `LastValue`; `nth` from 1 to 2147483647, otherwise `QueryError` |
-| `Lag`/`Lead` | <code>(field: str &#124; Expression, offset: int = 1, default: Any = None)</code> | `LAG`/`LEAD(field, offset, default)`; `offset` an integer from 0 to 2147483647, otherwise `QueryError` |
+| `Lag`/`Lead` | <code>(field: str &#124; Expression, offset: int &#124; Expression = 1, default: Any = None)</code> | `LAG`/`LEAD(field, offset, default)`; a literal `offset` must be an integer from 0 to 2147483647, otherwise `QueryError`; expressions are evaluated by the database |
 
 ```python
 await Book.objects.all().annotate(
@@ -190,8 +190,9 @@ await Book.objects.all().annotate(
 )
 ```
 
-Result types: `Count` is always an `int` (and a `Sum`/`Max`/`Min` over a `Count()` annotation is too, `Avg`
-over it a `float`); `Avg` of integers is what the database computes: an exact `Decimal` on PostgreSQL, whose
+Result types: `Count` is always an `int` (and a `Sum`/`Max`/`Min` over a `Count()` annotation is too);
+`Avg` of integers, including a `Count()` annotation, is what the database computes: an exact `Decimal` on
+PostgreSQL, whose
 `numeric` average a `float` would cut, a `float` on SQLite and ClickHouse, also inside arithmetic or `Concat`;
 `Avg` of a `FloatField` is a `float`, of a `DecimalField` what the database computes: on PostgreSQL a
 `Decimal` that is not rounded to the field's `decimal_places` (the numeric average at its own division scale —
@@ -213,10 +214,12 @@ For a `GeneratedField`, the `Lag`/`Lead` default must fit its `output_field` und
 > **`LastValue` always sees the whole partition**
 >
 > `LastValue(field)` renders an explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`
-> frame, so it always returns the field's value on the partition's actual last row. Without an explicit
+> frame, so it reads the partition through its last row. ClickHouse skips NULL values and returns
+> the last non-NULL value; PostgreSQL and SQLite retain NULL. Without an explicit
 > frame, SQL's own default frame when `order_by` is set
-> (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) would make `LAST_VALUE` always equal the
-> *current* row's value instead — a well-known SQL pitfall. `FirstValue` isn't affected by this (the
+> (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) would make `LAST_VALUE` read the last row of
+> the current frame, including rows tied with the current row in the ordering. `FirstValue` isn't
+> affected by this (the
 > default frame's lower bound is already `UNBOUNDED PRECEDING`), so it keeps SQL's default frame. A
 > `frame=` given replaces it.
 
@@ -246,7 +249,9 @@ partition's first row for `start`, to its last for `end`; both default to `None`
   `order_by`. An offset other than 0 needs the window ordered by exactly one numeric field; another
   `order_by` raises `QueryError`.
 
-A frame that holds no row gives `NULL` (`RowRange(start=1, end=2)` on the partition's last row). A
+A frame that holds no row uses the function's empty-input result: `Count` gives 0; other aggregates
+follow the database-specific rules above. For example, `RowRange(start=1, end=2)` is empty on the
+partition's last row. A
 ranking function (`RowNumber`, `Rank`, `DenseRank`, `NTile`, `CumeDist`, `PercentRank`) and `Lag`/`Lead`
 always see the whole partition — a frame raises `QueryError`; so does an offset that isn't an `int` or
 `None`, or a `start` after `end`. Frames work the same on PostgreSQL, SQLite and ClickHouse.

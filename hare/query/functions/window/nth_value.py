@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.exceptions import UnSupportedError
 from hare.query.expressions import Expression
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql.enums import AnalyticFunctionName
@@ -26,6 +28,8 @@ class NthValue(WindowFunction):
         field: A field name or an expression.
         nth: The row, from 1.
     """
+
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("field", ArgumentRole.FIELD),))
 
     accepts_encrypted_field = True
     full_partition_frame = True

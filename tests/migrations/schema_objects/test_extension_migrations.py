@@ -17,9 +17,9 @@ from hare import fields
 from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.postgresql.fields.citext_field import CitextField
-from hare.dialects.postgresql.fields.postgis_field import PostGISField
 from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
 from hare.dialects.sqlite.schema.sqlite_schema_editor import SqliteSchemaEditor
+from hare.gis import PointField
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.operations import (
     CreateExtension,
@@ -192,13 +192,11 @@ def test_autodetector_generates_create_extension_from_meta() -> None:
         pytest.param(
             "Product", "name", CitextField, "citext", id="autodetector_generates_create_extension_from_field"
         ),
-        # PostGISField's requires_extension was previously missing entirely, so a PostGISField model's
-        # CREATE TABLE failed with "type geography does not exist" on a fresh database that never had
-        # CREATE EXTENSION postgis run manually.
+        # The geography field declares its required extension.
         pytest.param(
             "Place",
             "location",
-            PostGISField,
+            lambda: PointField(geography=True),
             "postgis",
             id="autodetector_generates_create_extension_from_postgis_field",
         ),

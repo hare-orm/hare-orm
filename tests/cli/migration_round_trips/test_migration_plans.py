@@ -9,6 +9,8 @@ import re
 
 import pytest
 
+from hare.migrations import operations as ops
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("table_option", ['\n    class Meta:\n        table = "tag"', ""])
@@ -37,8 +39,14 @@ async def test_model_moved_between_apps_keeps_its_table(project_factory, table_o
     )
     project.write_models("class Other(Model):\n    id = fields.IntField(primary_key=True)\n" + tag_source, "b")
     await project.cli_ok("makemigrations", "--rename", "a.Tag=b.Tag")
-    assert "state_only=True" in project.read_latest_migration("a")
-    assert "state_only=True" in project.read_latest_migration("b")
+    assert any(
+        isinstance(operation, ops.DeleteModel) and operation.name == "Tag" and operation.state_only
+        for operation in project.get_latest_migration("a").operations
+    )
+    assert any(
+        isinstance(operation, ops.CreateModel) and operation.name == "Tag" and operation.state_only
+        for operation in project.get_latest_migration("b").operations
+    )
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT id, name FROM tag") == [{"id": 1, "name": "x"}]
@@ -117,10 +125,10 @@ async def test_a_relation_moved_to_an_existing_model_of_the_app_deleting_its_old
         "b",
     )
     await project.cli_ok("makemigrations")
-    a_migration = project.read_latest_migration("a")
-    b_migration = project.read_latest_migration("b")
-    assert '("b", ' in a_migration.split("dependencies = ", 1)[1].split("\n", 1)[0]
-    assert '("a", "0001_initial")' in b_migration.split("dependencies = ", 1)[1].split("\n", 1)[0]
+    a_migration = project.get_latest_migration("a")
+    b_migration = project.get_latest_migration("b")
+    assert ("b", project.migration_files("b")[-1]) in a_migration.dependencies
+    assert ("a", "0001_initial") in b_migration.dependencies
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT id, keep_id FROM book") == [{"id": 1, "keep_id": None}]
@@ -216,7 +224,7 @@ async def test_deleting_a_model_referenced_from_another_app_waits_for_that_app(p
     assert project.migration_files("a") == ["0001_initial"]
 
     await project.cli_ok("makemigrations")
-    assert '("b", ' in project.read_latest_migration("a").split("dependencies = ", 1)[1].split("\n", 1)[0]
+    assert ("b", project.migration_files("b")[-1]) in project.get_latest_migration("a").dependencies
     await project.cli_ok("migrate")
     await project.assert_in_sync()
     assert await project.query("SELECT id FROM book") == [{"id": 1}]

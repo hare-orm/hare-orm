@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from hare.exceptions import FieldError, QueryError
@@ -208,5 +207,5 @@ class ExpressionAssignment:
         Returns:
             True when such a node appears anywhere in the term.
         """
-        nodes: Iterator[Term] = term.nodes_()
+        nodes = term.nodes_()
         return any(node.is_analytic or node.is_subquery or isinstance(node, AggregateFunction) for node in nodes)

@@ -2,6 +2,9 @@
 model's ``Meta.schema`` names one of them, and the DDL names an index or trigger in it - its table and
 the table a foreign key references are of the same database."""
 
+from collections import UserDict
+from types import MappingProxyType
+
 import pytest
 
 from hare.contrib.test.isolated_contexts import hare_test_context
@@ -20,10 +23,12 @@ SCHEMA_MODULES = ["tests.schema.models_schema_qualified"]
     ("setting", "attached"),
     [
         ({"custom": ":memory:"}, {"custom": ":memory:"}),
+        (UserDict({"custom": ":memory:"}), {"custom": ":memory:"}),
+        (MappingProxyType({"custom": ":memory:"}), {"custom": ":memory:"}),
         ("custom::memory:,archive:C:\\data\\archive.db", {"custom": ":memory:", "archive": "C:\\data\\archive.db"}),
     ],
 )
-def test_the_attached_databases_are_read_from_a_dict_or_a_url_text(setting, attached):
+def test_the_attached_databases_are_read_from_a_mapping_or_a_url_text(setting, attached):
     client = AiosqliteClient(file_path=":memory:", connection_alias="default", attached_databases=setting)
     assert client.attached_databases == attached
 
@@ -37,7 +42,6 @@ def test_the_attached_databases_are_read_from_a_dict_or_a_url_text(setting, atta
         ("", "name:file pairs"),
         (",", "name:file pairs"),
         ("a::memory:,a:other.db", "a database name is given twice"),
-        (["custom"], "a dict of database names to files"),
         ({"main": ":memory:"}, "keeps the database name 'main'"),
         ({"TEMP": ":memory:"}, "keeps the database name 'TEMP'"),
         ({"": ":memory:"}, "a database name must be a non-empty text"),

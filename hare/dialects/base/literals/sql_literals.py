@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
+from hare.core.caching.cache_bucket import CacheBucket
 from hare.dialects.base.literals.constants import SQL_NULL_BYTE, SQL_NULL_BYTE_VALUE_MESSAGE
 from hare.exceptions import ValidationError
 
@@ -31,7 +32,7 @@ class SqlLiterals:
 
     #: The writer each set of literals found for a value's class through the class's bases, kept
     #: in a bucket of the set.
-    found_literal_writers: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False)
+    found_literal_writers: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     def __init__(self, dialect: Dialect) -> None:
         """
@@ -39,12 +40,12 @@ class SqlLiterals:
             dialect: The dialect whose SQL the literals are written into.
         """
         self.dialect = dialect
-        #: The buckets of the caches these literals read (``Cache.get_owner_bucket()``).
+        #: The buckets of the caches these literals read (``Cache.get_bucket()``).
         self.cache_buckets: dict[int, Any] = {}
         #: What writes a value of each class - and of its subclasses - as a literal.
         self.literal_writers: dict[type, Callable[[Any], str]] = self.get_literal_writers()
-        self.literal_writers_by_value_class: dict[type, Callable[[Any], str]] = (
-            SqlLiterals.found_literal_writers.get_owner_bucket(self)
+        self.literal_writers_by_value_class: CacheBucket[Callable[[Any], str]] = (
+            SqlLiterals.found_literal_writers.get_bucket(self)
         )
 
     def quote_identifier(self, name: str) -> str:
@@ -226,7 +227,7 @@ class SqlLiterals:
         Returns:
             The literal.
         """
-        return self.get_string_literal_sql(f"{value.year:04}-{value.month:02}-{value.day:02}")
+        return self.get_string_literal_sql(value.isoformat())
 
     def get_duration_literal_sql(self, value: datetime.timedelta) -> str:
         """A duration as the text ``get_duration_text()`` gives.
@@ -249,7 +250,9 @@ class SqlLiterals:
         Returns:
             The text.
         """
-        total_microseconds = (duration.days * 86400 + duration.seconds) * 1_000_000 + duration.microseconds
+        from hare.fields.data.temporal.time_delta_field import TimeDeltaField
+
+        total_microseconds = TimeDeltaField.get_microseconds(duration)
         sign = "-" if total_microseconds < 0 else ""
         total_microseconds = abs(total_microseconds)
         microseconds = total_microseconds % 1_000_000

@@ -7,21 +7,16 @@ from hare.migrations.operations.constants import DIRECT_RELATION_FIELDS, MISSING
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
 from hare.migrations.operations.dependencies.relation_dependencies import RelationDependencies
 from hare.migrations.operations.enums import DependencyType
-from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.operations.models.model_table_operation import ModelTableOperation
 from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.state import State
-from hare.migrations.state.state_apps import StateApps
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
-class DeleteModel(ModelTableOperation, HareOperation):
+class DeleteModel(ModelTableOperation):
     """Deletes a model and drops its table."""
-
-    backward_reads_state_left = False
 
     def __init__(self, name: str, state_only: bool = False) -> None:
         """
@@ -36,9 +31,6 @@ class DeleteModel(ModelTableOperation, HareOperation):
     def get_referenced_model_labels(self, app_label: str) -> frozenset[str] | None:
         """The model deleted."""
         return frozenset({self.get_model_label(self.name, app_label)})
-
-    def get_table_model_names(self) -> tuple[str, ...]:
-        return (self.name,)
 
     def get_unmet_requirement_message(self, app_label: str, requirement: OperationDependency) -> str:
         return (
@@ -64,7 +56,7 @@ class DeleteModel(ModelTableOperation, HareOperation):
             return f"Delete model {self.name} (state only, its table is kept)"
         return f"Delete model {self.name}"
 
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect:
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
         if self.state_only:
             return OperationEffect(operation=self, reversible=self.reversible)
         return OperationEffect(
@@ -87,7 +79,7 @@ class DeleteModel(ModelTableOperation, HareOperation):
                     continue
 
                 # A label, a model class or a swappable reference alike.
-                if StateApps.split_reference(field.model_name) == model_key:
+                if state.get_model_key(field.model_name) == model_key:
                     raise IncompatibleStateError(
                         f"{model_reference} is still referenced from {model_state.app}.{model_state.name} "
                         f"(field {field_name!r}) - the migration removing or repointing that field must "
@@ -99,11 +91,6 @@ class DeleteModel(ModelTableOperation, HareOperation):
             raise IncompatibleStateError(MISSING_MODEL_MESSAGE.format(app_label=app_label, model_name=self.name))
 
         state.mark_model_removed(app_label, self.name)
-        state.mark_models_changed(
-            StateApps.split_reference(field.model_name)
-            for field in model_state_to_delete.fields.values()
-            if isinstance(field, DIRECT_RELATION_FIELDS)
-        )
 
     async def database_forward(
         self,

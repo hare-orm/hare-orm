@@ -360,12 +360,11 @@ class ChangeCapture(ChangeSink):
         fields_map = model._meta.fields_map
         return {name: fields_map[name].get_json_value(value) for name, value in values.items()}
 
-    async def get_extensions(self, model: type[Model], changes: list[CapturedChange]) -> list[ChangeExtension | None]:
+    async def get_extensions(self, changes: list[CapturedChange]) -> list[ChangeExtension | None]:
         """What ``extend`` - once per change - or ``extend_many`` - once per write - adds to the changes'
         events.
 
         Args:
-            model: The model.
             changes: The changes of one write statement.
 
         Returns:
@@ -376,7 +375,7 @@ class ChangeCapture(ChangeSink):
                 extend_many gives another number of extensions than changes.
         """
         if self.extend_many is None:
-            return [await self.get_extension(model, change) for change in changes]
+            return [await self.get_extension(change) for change in changes]
         extensions = self.extend_many(changes)
         if inspect.isawaitable(extensions):
             extensions = await extensions
@@ -385,11 +384,10 @@ class ChangeCapture(ChangeSink):
             raise ValidationError(f"extend_many gave {len(extension_list)} extensions for {len(changes)} changes")
         return [ChangeCapture.check_extension(extension) for extension in extension_list]
 
-    async def get_extension(self, model: type[Model], change: CapturedChange) -> ChangeExtension | None:
+    async def get_extension(self, change: CapturedChange) -> ChangeExtension | None:
         """What ``extend`` adds to a change's event.
 
         Args:
-            model: The model.
             change: The change.
 
         Returns:
@@ -464,7 +462,7 @@ class ChangeCapture(ChangeSink):
         outbox = self.outbox
         tenant_field = outbox._meta.tenant_field
         events: list[OutboxEvent] = []
-        extensions = await self.get_extensions(model, changes)
+        extensions = await self.get_extensions(changes)
         for change, extension in zip(changes, extensions, strict=True):
             payload = self.get_envelope(model, change)
             headers: dict[str, Any] = {}

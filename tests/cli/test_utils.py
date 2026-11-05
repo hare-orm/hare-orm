@@ -51,10 +51,6 @@ def test_get_hare_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
-    import sys
-
-    sys.modules.pop("cli_app", None)
-    sys.modules.pop("cli_app.migrations", None)
 
     result = HareConfig.load(f"{module_name}.HARE_ORM")
     assert isinstance(result, HareConfig)
@@ -109,10 +105,6 @@ def test_normalize_apps_config_infers_migrations(tmp_path: Path, monkeypatch: py
 
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
-    import sys
-
-    sys.modules.pop("cli_app_no_migrations", None)
-    sys.modules.pop("cli_app_no_migrations.migrations", None)
     apps = {
         "app": {
             "models": ["cli_app.models"],

@@ -4,11 +4,16 @@ import asyncio
 import concurrent.futures
 import contextvars
 import warnings
-from collections.abc import Coroutine, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from hare.core.constants import CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE
+from hare.core.config.connection_config import ConnectionConfig
+from hare.core.connections.connection_frame import ConnectionFrame
+from hare.core.connections.messages import CONNECTION_HANDLER_CLOSING, CONNECTION_RELEASE_FAILED
+from hare.core.constants import CONNECTION_DATABASE_ON_ANOTHER_LOOP_MESSAGE, INITIALIZATION_RELEASE_FAILED
 from hare.core.log import logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError, QueryError
@@ -32,26 +37,44 @@ class ConnectionHandler:
     Each HareContext owns its own ConnectionHandler instance with isolated storage.
     """
 
-    #: The closes of stale connections still running - the event loop keeps a task only weakly, so
-    #: an unreferenced one could be collected before the connection is closed.
-    stale_connection_closes: ClassVar[set[asyncio.Task[None]]] = set()
-
     def __init__(self) -> None:
         self._db_config: DBConfigType | None = None
         self._create_db: bool = False
-        # Use ContextVar for task isolation within this handler instance.
-        # This ensures transactions (which use .set()) are isolated to the task.
-        self._storage_var: contextvars.ContextVar[dict[str, DatabaseClient]] = contextvars.ContextVar(
-            f"storage_{id(self)}", default={}
+        self.application = object()
+        self.root_clients: dict[str, DatabaseClient] = {}
+        self.empty_frame = ConnectionFrame(self.application)
+        self.current_frame: contextvars.ContextVar[ConnectionFrame] = contextvars.ContextVar(
+            "hare_connection_frame", default=self.empty_frame
         )
+        self.stale_connection_closes: set[asyncio.Task[None] | concurrent.futures.Future[None]] = set()
+        self.close_task: asyncio.Task[None] | None = None
+        self.discard_on_close = False
+        self.resource_closers: dict[object, Callable[[], Awaitable[None]]] = {}
 
-    def _get_storage(self) -> dict[str, DatabaseClient]:
-        """The connections of the current task context, by alias."""
-        return self._storage_var.get()
+    def register_resource(self, resource: object, close: Callable[[], Awaitable[None]]) -> None:
+        """Attach a background resource to this application's connection lifetime."""
+        if self.close_task is not None and not self.close_task.done():
+            raise ConfigurationError(CONNECTION_HANDLER_CLOSING)
+        self.resource_closers[resource] = close
 
-    def _copy_storage(self) -> dict[str, DatabaseClient]:
-        """A shallow copy of the connections of the current task context."""
-        return dict(self._get_storage())
+    def unregister_resource(self, resource: object) -> None:
+        """Detach a resource which has already finished releasing its connection."""
+        self.resource_closers.pop(resource, None)
+
+    def _get_storage(self) -> Mapping[str, DatabaseClient]:
+        """A read-only view of current clients for diagnostics; it owns no resources."""
+        frame = self.get_frame()
+        clients = dict(self.root_clients)
+        for alias in frame.bindings:
+            client = frame.get(alias)
+            if client is not None:
+                clients[alias] = client
+        return MappingProxyType(clients)
+
+    def get_frame(self) -> ConnectionFrame:
+        """The task's live frame; a replaced application lifetime has no active bindings."""
+        frame = self.current_frame.get()
+        return frame if frame.application is self.application else self.empty_frame
 
     async def _init(self, db_config: DBConfigType, create_db: bool) -> None:
         self._init_config(db_config, create_db)
@@ -98,17 +121,15 @@ class ConnectionHandler:
                 connection: DatabaseClient = self.get(connection_alias)
                 if self._create_db:
                     await connection.db_create()
-        except BaseException:
+        except BaseException as error:
             # A failure on a later alias closes the connections already opened for earlier ones.
             try:
                 await self.close_all(discard=True)
-            except BaseException:
-                # close_all() derives the broken alias again and may raise the same error - it
-                # mustn't mask the original one.
-                pass
-            # Always reset: a retried init() merges into it and would carry the broken alias
-            # forward.
-            self._db_config = None
+            except BaseException as release_error:
+                raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
+            finally:
+                # A retry must not inherit the broken alias even when release failed.
+                self._db_config = None
             raise
 
     def _get_connection_settings(self, connection_alias: str) -> dict[str, Any]:
@@ -121,15 +142,13 @@ class ConnectionHandler:
             The settings.
 
         Raises:
-            ConfigurationError: The alias doesn't exist, or its settings are no settings.
+            ConfigurationError: The alias doesn't exist.
         """
         db_info = self._get_db_info(connection_alias)
         if isinstance(db_info, Mapping) and "db_url" in db_info:
             db_info = db_info["db_url"]
         if isinstance(db_info, str):
             db_info = DbUrlConfigGenerator.expand(db_info)
-        if not isinstance(db_info, Mapping) or not isinstance(db_info.get("credentials", {}), Mapping):
-            raise ConfigurationError(f"Invalid connection settings for alias {connection_alias!r}")
         return {**db_info, "credentials": dict(db_info.get("credentials", {}))}
 
     def get_dialect(self, connection_alias: str) -> Dialect:
@@ -147,12 +166,21 @@ class ConnectionHandler:
         return self._get_client_class(self._get_connection_settings(connection_alias)).dialect
 
     def _create_connection(
-        self, connection_alias: str, credential_overrides: Mapping[str, Any] | None = None
+        self,
+        connection_alias: str,
+        credential_overrides: Mapping[str, Any] | None = None,
+        *,
+        config: ConnectionConfig | None = None,
     ) -> DatabaseClient:
-        db_info = self._get_connection_settings(connection_alias)
+        db_info = (
+            self._get_connection_settings(connection_alias)
+            if config is None
+            else {"engine": config.engine, "credentials": dict(config.credentials)}
+        )
+        db_info["credentials"].update(credential_overrides or {})
+        effective_config = ConnectionConfig(engine=db_info.get("engine"), credentials=dict(db_info["credentials"]))
         client_class = self._get_client_class(db_info)
         db_parameters = db_info["credentials"].copy()
-        db_parameters.update(credential_overrides or {})
         db_parameters.update({"connection_alias": connection_alias})
         try:
             connection: DatabaseClient = client_class(**db_parameters)
@@ -161,6 +189,7 @@ class ConnectionHandler:
                 f"Invalid connection parameters for alias {connection_alias!r}: {error}"
             ) from error
         connection.connection_handler = self
+        connection.connection_config = effective_config
         return connection
 
     def get(self, connection_alias: str) -> DatabaseClient:
@@ -174,13 +203,9 @@ class ConnectionHandler:
         Raises:
             ConfigurationError: The alias doesn't exist.
         """
-        try:
-            connection = self._storage_var.get()[connection_alias]
-        except KeyError:
+        connection = self.get_frame().get(connection_alias)
+        if connection is None:
             connection = self.get_main(connection_alias)
-        else:
-            if not connection._check_loop():
-                connection = self.get_main(connection_alias)
         # A connection with a schema per tenant works through the active tenant's client, and a
         # transaction of one with tenant row level security checks the scope stayed the same.
         if connection.tenant_schema_template is not None or connection.tenant_row_level_security:
@@ -199,7 +224,9 @@ class ConnectionHandler:
             ConfigurationError: The alias doesn't exist, or its connection is bound to another event loop
                 and holds its database (one living in that connection only) - a new one would open an empty one.
         """
-        storage = self._storage_var.get()
+        if self.close_task is not None and not self.close_task.done():
+            raise ConfigurationError(CONNECTION_HANDLER_CLOSING)
+        storage = self.root_clients
         try:
             connection = storage[connection_alias]
             if not connection._check_loop():
@@ -244,6 +271,8 @@ class ConnectionHandler:
                 running_loop = None
             if bound_loop is not running_loop:
                 future = asyncio.run_coroutine_threadsafe(connection.close(), bound_loop)
+                self.stale_connection_closes.add(future)
+                future.add_done_callback(self.stale_connection_closes.discard)
                 future.add_done_callback(self._log_stale_connection_close_failure)
                 return
         try:
@@ -251,8 +280,8 @@ class ConnectionHandler:
         except RuntimeError:
             return
         task = loop.create_task(connection.close())
-        ConnectionHandler.stale_connection_closes.add(task)
-        task.add_done_callback(ConnectionHandler.stale_connection_closes.discard)
+        self.stale_connection_closes.add(task)
+        task.add_done_callback(self.stale_connection_closes.discard)
         task.add_done_callback(self._log_stale_connection_close_failure)
 
     @staticmethod
@@ -283,7 +312,11 @@ class ConnectionHandler:
         )
 
     def create_independent(
-        self, connection_alias: str, credential_overrides: Mapping[str, Any] | None = None
+        self,
+        connection_alias: str,
+        credential_overrides: Mapping[str, Any] | None = None,
+        *,
+        config: ConnectionConfig | None = None,
     ) -> DatabaseClient:
         """Builds a new connection to the database of ``connection_alias``, apart from the shared one - for
         ``Transactions.autonomous()``. The caller closes it.
@@ -291,11 +324,12 @@ class ConnectionHandler:
         Args:
             connection_alias: The alias whose configuration is used.
             credential_overrides: Settings replacing the alias's own - a pool of one connection.
+            config: Captured settings of a source client; when given, the alias is only its name.
 
         Raises:
             ConfigurationError: The alias doesn't exist.
         """
-        connection = self._create_connection(connection_alias, credential_overrides)
+        connection = self._create_connection(connection_alias, credential_overrides, config=config)
         connection.pool_role = PoolRole.INDEPENDENT
         return connection
 
@@ -310,18 +344,15 @@ class ConnectionHandler:
         Returns:
             The token for ``reset()``.
         """
-        storage = self._storage_var.get()
-        old_value = storage.get(connection_alias)
-        storage_copy = dict(storage)
-        storage_copy[connection_alias] = connection_client
-        cv_token = self._storage_var.set(storage_copy)
-        return ConnectionToken(
+        frame = self.get_frame()
+        token = ConnectionToken(
             _handler=self,
             _alias=connection_alias,
-            _old_value=old_value,
-            _cv_token=cv_token,
+            _previous=frame.get_binding(connection_alias),
             _new_value=connection_client,
         )
+        self.current_frame.set(frame.with_binding(connection_alias, token))
+        return token
 
     def discard(self, connection_alias: str) -> DatabaseClient | None:
         """Drops the alias's connection from the current task context, without closing it - close it
@@ -333,7 +364,8 @@ class ConnectionHandler:
         Returns:
             The dropped connection, or None when the context held none.
         """
-        return self._get_storage().pop(connection_alias, None)
+        self.current_frame.set(self.get_frame().without(connection_alias))
+        return self.root_clients.pop(connection_alias, None)
 
     def reset(self, token: ConnectionToken | None) -> None:
         """Restores the connections of the current task context to what they were before ``set()``,
@@ -352,46 +384,12 @@ class ConnectionHandler:
             raise ValueError("Token has already been used")
         token._used = True
 
-        # set() installed a copy of the storage, and get() creates a connection into whichever
-        # dict is current - a connection created for another alias during the transaction is
-        # carried back.
-        transaction_scoped_storage = self._storage_var.get()
-        try:
-            self._storage_var.reset(token._cv_token)
-        except ValueError:
-            # Reset from a task other than the one that called set() (a transaction context
-            # exited in another task) - that task's context never saw this token.
-            self._restore_alias_outside_token_context(token)
-            return
-        restored_storage = self._storage_var.get()
-        for connection_alias, connection in transaction_scoped_storage.items():
-            if connection_alias == token._alias:
-                # The alias's own entry is what reset() restores.
-                continue
-            if connection_alias not in restored_storage:
-                restored_storage[connection_alias] = connection
-            elif restored_storage[connection_alias] is not connection:
-                # Another task created a client for the same alias meanwhile - this one loses
-                # the slot and is closed, not leaked.
-                self._schedule_stale_connection_close(connection)
-
-    def _restore_alias_outside_token_context(self, token: ConnectionToken) -> None:
-        """Puts the alias's pre-set() client back when the current context still holds the client
-        set() installed - the fallback for a token reset from another context. The storage holding it
-        is changed in place: the task that called set(), and every task sharing its storage, see the
-        transaction end too - not only the task it ended in (a response ASGI sends from a task of its
-        own).
-
-        Args:
-            token: The token returned by the set() method.
-        """
-        storage = self._get_storage()
-        if token._alias not in storage or storage[token._alias] is not token._new_value:
-            return
-        if token._old_value is None:
-            storage.pop(token._alias, None)
-        else:
-            storage[token._alias] = token._old_value
+        frame = self.get_frame()
+        if frame.bindings.get(token._alias) is token:
+            previous = frame.get_binding(token._alias)
+            self.current_frame.set(
+                frame.without(token._alias) if previous is None else frame.with_binding(token._alias, previous)
+            )
 
     def get_non_transactional(self, connection_alias: str) -> DatabaseClient:
         """Returns the alias's shared, non-transactional client, even inside a transaction.
@@ -402,7 +400,10 @@ class ConnectionHandler:
         Raises:
             ConfigurationError: If the connection alias does not exist.
         """
-        return self._get_non_transactional_client(self.get(connection_alias))
+        connection = self.get_main(connection_alias)
+        if connection.tenant_schema_template is not None or connection.tenant_row_level_security:
+            return connection.get_tenant_client()
+        return connection
 
     def create_task_outside_transactions(self, coroutine: Coroutine[Any, Any, TaskResult]) -> asyncio.Task[TaskResult]:
         """Starts ``coroutine`` as a task that sees every alias's shared, non-transactional client
@@ -419,23 +420,7 @@ class ConnectionHandler:
         return asyncio.create_task(coroutine, context=context)
 
     def _detach_from_transactions(self) -> None:
-        storage = self._get_storage()
-        detached_storage = {
-            connection_alias: self._get_non_transactional_client(connection)
-            for connection_alias, connection in storage.items()
-        }
-        if any(
-            detached_storage[connection_alias] is not connection for connection_alias, connection in storage.items()
-        ):
-            self._storage_var.set(detached_storage)
-
-    @staticmethod
-    def _get_non_transactional_client(connection: DatabaseClient) -> DatabaseClient:
-        from hare.dialects.base.client.transaction_client import TransactionClient
-
-        if isinstance(connection, TransactionClient):
-            return connection.get_non_transactional_client()
-        return connection
+        self.current_frame.set(self.empty_frame)
 
     def all(self) -> list[DatabaseClient]:
         """The main connection of every configured alias, created where missing."""
@@ -456,7 +441,7 @@ class ConnectionHandler:
         """
         if self._db_config is None or successors._db_config is None:
             return
-        for connection_alias, connection in self._copy_storage().items():
+        for connection_alias, connection in tuple(self.root_clients.items()):
             if connection_alias in successors.db_config:
                 connection.replaced_by = successors.get_main(connection_alias)
 
@@ -468,22 +453,47 @@ class ConnectionHandler:
                 them, to open again on their next query.
 
         Raises:
-            BaseException: The first error a close raised, after every connection was closed.
+            BaseException: A close error, or a group of errors, after every release finished.
         """
-        # Connections never initialized (a failed init()) - nothing to close.
-        if self._db_config is None:
-            return
-        connections = self.all()
-        if discard:
+        if self.close_task is None:
+            self.discard_on_close = discard
+            self.close_task = asyncio.create_task(self._close_clients())
+        elif discard:
+            self.discard_on_close = True
+        task = self.close_task
+        try:
+            await ResourceCompletion.wait(task)
+        finally:
+            if task.done() and self.close_task is task:
+                self.close_task = None
+
+    async def _close_clients(self) -> None:
+        """Release resources of this handler; concurrent closers share this operation."""
+        closers = tuple(self.resource_closers.values())
+        resource_results = await asyncio.gather(*(close() for close in closers), return_exceptions=True)
+        connections = list(self.root_clients.values())
+        if self.discard_on_close:
             for connection in connections:
                 connection.discarded = True
-        tasks = [connection.close() for connection in connections]
-        # Every connection is closed and dropped even when one fails; the first failure is raised
-        # afterwards.
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        if discard:
-            for connection_alias in self.db_config:
-                self.discard(connection_alias)
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        tasks: list[Awaitable[None]] = [connection.close() for connection in connections]
+        tasks.extend(
+            asyncio.wrap_future(task) if isinstance(task, concurrent.futures.Future) else task
+            for task in tuple(self.stale_connection_closes)
+        )
+        # Every connection is closed and dropped even when one fails.
+        try:
+            results = await ResourceCompletion.wait(asyncio.gather(*tasks, return_exceptions=True))
+        finally:
+            if self.discard_on_close:
+                for connection in connections:
+                    connection.discarded = True
+                self.root_clients.clear()
+            self.application = object()
+            self.empty_frame = ConnectionFrame(self.application)
+            self.current_frame.set(self.empty_frame)
+            self.resource_closers.clear()
+        errors = [result for result in (*resource_results, *results) if isinstance(result, BaseException)]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup(CONNECTION_RELEASE_FAILED, errors)

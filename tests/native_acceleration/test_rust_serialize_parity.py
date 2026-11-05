@@ -1,24 +1,12 @@
-"""Field-by-field parity check between the two write-side serialization paths:
-BulkCreateQuery._execute_many()'s pure-Python `field.to_db_value(getattr(instance, name),
-instance)` loop and the Rust accelerator, wired in via BulkWriteBatches._build_rust_serialize_plan.
-Mirrors the read-side hydration parity test's own structure and conventions exactly - same skip
-mechanism, same value+type diffing, same error-message-parity convention for failure cases.
-
-Covers buckets 0 (NATIVE_INLINED)/1 (NATIVE_REAL_VALIDATE)/2 (COMPLEX fallback)/3 (DateField)/4
-(UUIDField)/5 (Enum)/6 (JSONField) - the full bucket set. Every remaining field type not covered
-by a dedicated bucket (auto_now Datetime/Time) lands on bucket 2, which calls the real
-field.to_db_value() unconditionally - covered here anyway, since bucket 2's OWN correctness (not
-skipping instance-mutation side effects, threading the instance argument through correctly)
-still needs verification even though it does no inline logic itself.
-
-Skipped entirely when the Rust extension hasn't been built locally.
-"""
+"""Batch writers preserve field values, validation and instance side effects."""
 
 from __future__ import annotations
 
 import math
 import uuid
+from copy import copy
 from decimal import Decimal
+from functools import partial
 from typing import Any
 
 import pytest
@@ -34,11 +22,7 @@ from hare.fields.data.text import CharField
 from hare.fields.data.uuid_field import UUIDField
 from hare.fields.field import Field
 from hare.fields.validators import MaxValueValidator, MinValueValidator, Validator
-from hare.query.plans.statement.statement_plans import StatementPlans
-from hare.query.rows.enums import WriteCodecType
-from hare.query.rows.native.field_codecs import FieldCodecs
-from hare.query.rows.native.hydrate_accelerator import HydrateAccelerator
-from hare.time import Timezone
+from hare.query.statements.write.bulk.bulk_write_batches import BulkWriteBatches
 from tests.shared_models.testmodels import (
     BooleanFields,
     CharFields,
@@ -56,69 +40,33 @@ from tests.shared_models.testmodels import (
 )
 from tests.shared_models.testmodels_postgres import DecimalFields
 
-REQUIRES = ("native",)
-
 
 def _serialize_both(model, columns: tuple[str, ...], instances: list) -> tuple[list, list]:
-    """Runs both paths over the SAME instances and returns (python_rows, rust_rows) - never
-    diffs against a value computed only once, since to_db_value() can mutate the instance
-    (auto_now/auto_now_add) and running it twice on the same object would double-apply that
-    side effect. Python runs first (on the original, unmutated instances); the Rust call
-    that follows sees whatever state Python's own pass already left behind for any
-    side-effecting field, exactly like it would in a real caller alternating between the two
-    within the SAME batch (never happens in practice - a batch is either all-Rust or
-    all-Python - but that's the honest way to compare two calls against shared object state
-    without allocating fresh instances for each path)."""
+    reference_instances = [copy(instance) for instance in instances]
     fields_map = model._meta.fields_map
-    python_rows = [[fields_map[name].to_db_value(getattr(inst, name), inst) for name in columns] for inst in instances]
+    python_rows = [
+        [fields_map[name].to_db_value(getattr(inst, name), inst) for name in columns] for inst in reference_instances
+    ]
 
-    writer = HydrateAccelerator.get_model_writer(model, columns, SQL_DIALECT.types)
-    rust_rows = writer.write_rows(instances)
-    return python_rows, rust_rows
+    writer = partial(BulkWriteBatches.serialize_instances, model, SQL_DIALECT.types, columns=columns)
+    batch_rows = writer(instances)
+    return python_rows, batch_rows
 
 
-def _assert_rows_match(model, columns: tuple[str, ...], python_rows: list, rust_rows: list) -> None:
-    assert len(rust_rows) == len(python_rows)
-    for python_row, rust_row in zip(python_rows, rust_rows, strict=True):
-        for name, python_value, rust_value in zip(columns, python_row, rust_row, strict=True):
-            assert rust_value == python_value, (
-                f"{model.__name__}.{name}: rust serialize gave {rust_value!r}, python gave {python_value!r}"
+def _assert_rows_match(model, columns: tuple[str, ...], python_rows: list, batch_rows: list) -> None:
+    assert len(batch_rows) == len(python_rows)
+    for python_row, batch_row in zip(python_rows, batch_rows, strict=True):
+        for name, python_value, batch_value in zip(columns, python_row, batch_row, strict=True):
+            assert batch_value == python_value, (
+                f"{model.__name__}.{name}: batch serialize gave {batch_value!r}, python gave {python_value!r}"
             )
-            assert type(rust_value) is type(python_value), (
-                f"{model.__name__}.{name}: rust serialize gave a {type(rust_value).__name__}, "
+            assert type(batch_value) is type(python_value), (
+                f"{model.__name__}.{name}: batch serialize gave a {type(batch_value).__name__}, "
                 f"python gave a {type(python_value).__name__}"
             )
 
 
-def _bucket_of(model, columns: tuple[str, ...]) -> dict[str, WriteCodecType]:
-    fields_map = model._meta.fields_map
-    return {
-        name: FieldCodecs.get_write_specification(fields_map[name], SQL_DIALECT.types, Timezone.get_aware_zone_name())[
-            0
-        ]
-        for name in columns
-    }
-
-
-def _validates_inline(model, column: str) -> bool:
-    _codec_type, options = FieldCodecs.get_write_specification(
-        model._meta.fields_map[column], SQL_DIALECT.types, Timezone.get_aware_zone_name()
-    )
-    return "checks" in options
-
-
-# --- bucket 0 (NATIVE_INLINED): base Field.to_db_value, only cheap/static validators ---
-
-
 class _BareIntField(Field[int]):
-    """Every built-in int-shaped field now overrides to_db_value (IntField itself coerces a bool
-    to a real int first - see its own to_db_value docstring), so none of them are bucket-0/1-
-    eligible any more. This bare field - identical shape to what IntField looked like before that
-    override, base Field.to_db_value plus the same int32 bounds - stands in for a real-world
-    custom Field subclass that never overrides to_db_value at all, keeping bucket 0/1's own
-    mechanics covered.
-    """
-
     field_type = int
 
     def __init__(self, **kwargs: Any) -> None:
@@ -128,35 +76,26 @@ class _BareIntField(Field[int]):
 
 
 @pytest.mark.database_independent
-def test_int_field_bucket_is_native_inlined():
-    original_field = _swap_field_and_clear_cache(IntFields, "intnum", _BareIntField())
-    try:
-        assert _bucket_of(IntFields, ("intnum",))["intnum"] == WriteCodecType.SCALAR
-    finally:
-        _restore_field(IntFields, "intnum", original_field)
-
-
-@pytest.mark.database_independent
 def test_int_field_success_value_and_type_parity():
     columns = ("intnum", "intnum_null")
     instances = [IntFields(intnum=5, intnum_null=None), IntFields(intnum=42, intnum_null=7)]
-    python_rows, rust_rows = _serialize_both(IntFields, columns, instances)
-    _assert_rows_match(IntFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(IntFields, columns, instances)
+    _assert_rows_match(IntFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
 def test_char_field_max_length_violation_error_parity():
     columns = ("char",)
     inst = CharFields(char="x" * 300, char_null=None)
-    writer = HydrateAccelerator.get_model_writer(CharFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, CharFields, SQL_DIALECT.types, columns=columns)
     fields_map = CharFields._meta.fields_map
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["char"].to_db_value(getattr(inst, "char"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
@@ -164,40 +103,32 @@ def test_int_field_out_of_range_error_parity():
     columns = ("intnum", "intnum_null")
     inst = IntFields(intnum=99999999999999, intnum_null=None)
     fields_map = IntFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(IntFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
 def test_int_field_type_conversion_failure_error_parity():
-    # Round 5 audit bug: bucket 0's field_type() conversion call (int(raw) here) let the raw
-    # PyO3 error (a bare ValueError) through unwrapped instead of the ValidationError
-    # Field.to_db_value's own try/except around this exact call produces - meaning the exception
-    # TYPE a caller sees for identical malformed input depended on whether the optional Rust
-    # accelerator happened to be installed. This is bucket 0's conversion-failure counterpart to
-    # test_int_field_out_of_range_error_parity above (which covers a VALIDATOR rejection, not a
-    # conversion failure). Uses _BareIntField, not a real IntFields.intnum - see its own docstring.
     columns = ("intnum", "intnum_null")
     original_field = _swap_field_and_clear_cache(IntFields, "intnum", _BareIntField())
     try:
         inst = IntFields(intnum=1, intnum_null=None)
         object.__setattr__(inst, "intnum", "not-an-int")
         fields_map = IntFields._meta.fields_map
-        writer = HydrateAccelerator.get_model_writer(IntFields, columns, SQL_DIALECT.types)
-        assert _bucket_of(IntFields, columns)["intnum"] == WriteCodecType.SCALAR
+        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
 
         with pytest.raises(ValidationError) as python_exc:
             fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
-        with pytest.raises(ValidationError) as rust_exc:
-            writer.write_rows([inst])
+        with pytest.raises(ValidationError) as batch_exc:
+            writer([inst])
 
-        assert str(rust_exc.value) == str(python_exc.value)
+        assert str(batch_exc.value) == str(python_exc.value)
     finally:
         _restore_field(IntFields, "intnum", original_field)
 
@@ -205,24 +136,18 @@ def test_int_field_type_conversion_failure_error_parity():
 @pytest.mark.postgresql_models
 @pytest.mark.database_independent
 def test_decimal_field_type_conversion_failure_error_parity():
-    # DecimalField overrides to_db_value (to quantize a value before validating - see its own
-    # to_db_value docstring), so it lands on bucket 2 (COMPLEX fallback), not bucket 1 - bucket
-    # 1's own mechanics are covered generically by test_custom_validator_field_is_bucket_1_and_
-    # matches below (IntField + a non-inlineable custom validator) instead. Kept here anyway
-    # since bucket 2's OWN error-parity still needs verification.
     columns = ("decimal", "decimal_null")
     inst = DecimalFields(decimal=Decimal("1.0000"), decimal_null=None)
     object.__setattr__(inst, "decimal", "not-a-decimal")
     fields_map = DecimalFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(DecimalFields, columns, SQL_DIALECT.types)
-    assert _bucket_of(DecimalFields, columns)["decimal"] == WriteCodecType.DECIMAL
+    writer = partial(BulkWriteBatches.serialize_instances, DecimalFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["decimal"].to_db_value(getattr(inst, "decimal"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
@@ -231,127 +156,86 @@ def test_none_on_non_nullable_field_error_parity():
     inst = IntFields(intnum=1, intnum_null=None)
     inst.intnum = None  # bypass constructor-time validation, matches a direct attribute assignment
     fields_map = IntFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(IntFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["intnum"].to_db_value(getattr(inst, "intnum"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
 def test_none_on_nullable_field_returns_none_both_paths():
     columns = ("intnum", "intnum_null")
     inst = IntFields(intnum=1, intnum_null=None)
-    python_rows, rust_rows = _serialize_both(IntFields, columns, [inst])
+    python_rows, batch_rows = _serialize_both(IntFields, columns, [inst])
     assert python_rows == [[1, None]]
-    assert rust_rows == [[1, None]]
+    assert batch_rows == [[1, None]]
 
 
 @pytest.mark.postgresql_models
 @pytest.mark.database_independent
-def test_decimal_field_max_digits_validator_is_bucket_2_and_matches():
-    # DecimalField overrides to_db_value (to quantize a value before validating), which
-    # unconditionally lands it on bucket 2 regardless of its validators - MaxDigitsValidator
-    # (appended in __init__ to actually enforce max_digits) is exercised here anyway, since
-    # bucket 2's own field.validate() call-through still needs verification.
+def test_decimal_max_digits_validation_matches():
     columns = ("decimal", "decimal_null")
-    assert _bucket_of(DecimalFields, columns)["decimal"] == WriteCodecType.DECIMAL
     inst = DecimalFields(decimal=Decimal("12.3456"), decimal_null=None)
-    python_rows, rust_rows = _serialize_both(DecimalFields, columns, [inst])
-    _assert_rows_match(DecimalFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(DecimalFields, columns, [inst])
+    _assert_rows_match(DecimalFields, columns, python_rows, batch_rows)
 
-    # Bucket 2 always calls the real field.to_db_value() - confirm MaxDigitsValidator's rejection
-    # is identical between the pure-Python path and the Rust bucket-2 fallback.
     over_limit = DecimalFields(decimal=Decimal("123456789012345.6789"), decimal_null=None)
     fields_map = DecimalFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(DecimalFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, DecimalFields, SQL_DIALECT.types, columns=columns)
     with pytest.raises(ValidationError) as python_exc:
         fields_map["decimal"].to_db_value(over_limit.decimal, over_limit)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([over_limit])
-    assert str(rust_exc.value) == str(python_exc.value)
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([over_limit])
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.postgresql_models
 @pytest.mark.database_independent
-def test_decimal_bounded_validator_excluded_from_bucket_0():
-    # A Decimal-valued Min/MaxValueValidator must never be inlined (f64 precision risk on
-    # money-shaped data) - DecimalField already falls to bucket 2 unconditionally (its own
-    # to_db_value override), so this now just confirms adding one more validator doesn't change
-    # that.
-    #
-    # _build_rust_serialize_plan is lru_cache-wrapped, keyed on (model, columns) - real
-    # production code never mutates field.validators after model-class-definition time, but this
-    # test does exactly that to exercise a different bucket, so it must clear the cache both
-    # before (in case an EARLIER test already cached a bucket-0 plan for this same (model,
-    # columns) pair) and after (so it doesn't leave a stale bucket-2 entry behind for a LATER
-    # test) - see the analogous real-world guard on the read side,
-    # test_plan_cache_reflects_timezone_config_change in test_rust_hydrate_parity.py.
+def test_decimal_bound_validator_preserves_precision():
     field = DecimalFields._meta.fields_map["decimal"]
     original_validators = list(field.validators)
-    StatementPlans.model_writers.clear()
+    BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     field.validators.append(MinValueValidator(Decimal("0.0000")))
     try:
-        assert _bucket_of(DecimalFields, ("decimal",))["decimal"] == WriteCodecType.DECIMAL
         inst = DecimalFields(decimal=Decimal("5.0000"), decimal_null=None)
-        python_rows, rust_rows = _serialize_both(DecimalFields, ("decimal",), [inst])
-        _assert_rows_match(DecimalFields, ("decimal",), python_rows, rust_rows)
+        python_rows, batch_rows = _serialize_both(DecimalFields, ("decimal",), [inst])
+        _assert_rows_match(DecimalFields, ("decimal",), python_rows, batch_rows)
     finally:
         field.validators = original_validators
-        StatementPlans.model_writers.clear()
-
-
-# --- bucket 1 (NATIVE_REAL_VALIDATE): base to_db_value, but a non-inlineable validator ---
+        BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
 
 
 class _MultipleOfThreeValidator(Validator):
-    """Deliberately not in `_is_rust_serialize_inlineable_validator`'s recognized set, so a field
-    carrying it can never qualify for bucket 0 - used below to force bucket 1 on a field that
-    otherwise uses base `Field.to_db_value`.
-    """
-
     def __call__(self, value: Any) -> None:
         if value % 3 != 0:
             self._raise("Value must be a multiple of three")
 
 
 @pytest.mark.database_independent
-def test_custom_validator_field_is_bucket_1_and_matches():
-    # A custom Validator subclass is not in the recognized inlineable set - forces bucket 1 even
-    # though the field otherwise uses base Field.to_db_value. Uses _BareIntField, not a real
-    # IntFields.intnum - see its own docstring for why no built-in field qualifies any more.
+def test_base_field_custom_validator_is_called():
     original_field = _swap_field_and_clear_cache(IntFields, "intnum", _BareIntField())
     tag_field = IntFields._meta.fields_map["intnum"]
     tag_field.validators.append(_MultipleOfThreeValidator())
-    StatementPlans.model_writers.clear()
+    BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     try:
-        assert _bucket_of(IntFields, ("intnum",))["intnum"] == WriteCodecType.SCALAR
-        assert not _validates_inline(IntFields, "intnum")
         inst = IntFields(intnum=9, intnum_null=None)
-        python_rows, rust_rows = _serialize_both(IntFields, ("intnum",), [inst])
-        _assert_rows_match(IntFields, ("intnum",), python_rows, rust_rows)
+        python_rows, batch_rows = _serialize_both(IntFields, ("intnum",), [inst])
+        _assert_rows_match(IntFields, ("intnum",), python_rows, batch_rows)
 
         bad_inst = IntFields(intnum=10, intnum_null=None)  # violates the multiple-of-three rule
         fields_map = IntFields._meta.fields_map
-        writer = HydrateAccelerator.get_model_writer(IntFields, ("intnum",), SQL_DIALECT.types)
+        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=("intnum",))
         with pytest.raises(ValidationError) as python_exc:
             fields_map["intnum"].to_db_value(getattr(bad_inst, "intnum"), bad_inst)
-        with pytest.raises(ValidationError) as rust_exc:
-            writer.write_rows([bad_inst])
-        assert str(rust_exc.value) == str(python_exc.value)
+        with pytest.raises(ValidationError) as batch_exc:
+            writer([bad_inst])
+        assert str(batch_exc.value) == str(python_exc.value)
     finally:
         _restore_field(IntFields, "intnum", original_field)
-
-
-# --- bucket 3 (DateField): str-parse (if applicable) -> validate ---
-
-
-@pytest.mark.database_independent
-def test_date_field_bucket_is_3():
-    assert _bucket_of(DateFields, ("date",))["date"] == WriteCodecType.DATE
 
 
 @pytest.mark.database_independent
@@ -363,8 +247,8 @@ def test_date_field_success_value_and_type_parity():
         DateFields(date=datetime.date(2024, 6, 15), date_null=None),
         DateFields(date=datetime.date(2020, 1, 1), date_null=datetime.date(2021, 2, 2)),
     ]
-    python_rows, rust_rows = _serialize_both(DateFields, columns, instances)
-    _assert_rows_match(DateFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(DateFields, columns, instances)
+    _assert_rows_match(DateFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -374,8 +258,8 @@ def test_date_field_raw_string_is_parsed_identically():
     columns = ("date",)
     inst = DateFields(date="2023-11-30T00:00:00", date_null=None)
     inst.date = "2023-11-30T00:00:00"
-    python_rows, rust_rows = _serialize_both(DateFields, columns, [inst])
-    _assert_rows_match(DateFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(DateFields, columns, [inst])
+    _assert_rows_match(DateFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -386,14 +270,14 @@ def test_date_field_malformed_string_error_parity():
     inst = DateFields(date=datetime.date(2024, 1, 1), date_null=None)
     inst.date = "not-a-date-string-longer-than-4-chars"
     fields_map = DateFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(DateFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, DateFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["date"].to_db_value(getattr(inst, "date"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
@@ -407,25 +291,17 @@ def test_date_field_none_on_non_nullable_returns_none_both_paths():
     columns = ("date", "date_null")
     inst = DateFields(date=datetime.date(2024, 1, 1), date_null=None)
     inst.date = None
-    python_rows, rust_rows = _serialize_both(DateFields, columns, [inst])
+    python_rows, batch_rows = _serialize_both(DateFields, columns, [inst])
     assert python_rows == [[None, None]]
-    assert rust_rows == [[None, None]]
-
-
-# --- bucket 4 (UUIDField): validate(RAW value) -> isinstance/UUID()-coercion -> str() ---
-
-
-@pytest.mark.database_independent
-def test_uuid_field_bucket_is_4():
-    assert _bucket_of(UUIDFields, ("data",))["data"] == WriteCodecType.UUID
+    assert batch_rows == [[None, None]]
 
 
 @pytest.mark.database_independent
 def test_uuid_field_success_value_and_type_parity():
     columns = ("data", "data_null")
     inst = UUIDFields(data=uuid.uuid4(), data_null=None)
-    python_rows, rust_rows = _serialize_both(UUIDFields, columns, [inst])
-    _assert_rows_match(UUIDFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(UUIDFields, columns, [inst])
+    _assert_rows_match(UUIDFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -434,14 +310,14 @@ def test_uuid_field_invalid_string_error_parity():
     inst = UUIDFields(data=uuid.uuid4())
     inst.data = "not-a-valid-uuid"
     fields_map = UUIDFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(UUIDFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, UUIDFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["data"].to_db_value(getattr(inst, "data"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
@@ -451,12 +327,9 @@ def test_uuid_field_none_on_non_nullable_returns_none_both_paths():
     columns = ("data",)
     inst = UUIDFields(data=uuid.uuid4())
     inst.data = None
-    python_rows, rust_rows = _serialize_both(UUIDFields, columns, [inst])
+    python_rows, batch_rows = _serialize_both(UUIDFields, columns, [inst])
     assert python_rows == [[None]]
-    assert rust_rows == [[None]]
-
-
-# --- bucket 2 (COMPLEX fallback): every field overriding to_db_value ---
+    assert batch_rows == [[None]]
 
 
 @pytest.mark.parametrize(
@@ -465,19 +338,16 @@ def test_uuid_field_none_on_non_nullable_returns_none_both_paths():
         # BooleanField overrides to_db_value (to reject a string instead of the truthy-coercion trap)
         # and declares that override as its native_write_check.
         pytest.param(BooleanFields, ("boolean", "boolean_null"), {"boolean": True}, id="boolean_field_bucket"),
-        # FloatField declares NOT_NAN as its native_write_check - a NaN takes the dialect's own path,
-        # every other float the accelerator's.
         pytest.param(
             FloatFields, ("floatnum", "floatnum_null"), {"floatnum": 3.14}, id="float_field_bucket_and_parity"
         ),
     ],
 )
 @pytest.mark.database_independent
-def test_a_checked_scalar_field_is_on_the_scalar_bucket_and_matches(model_class, columns, values):
-    assert _bucket_of(model_class, columns[:1])[columns[0]] == WriteCodecType.SCALAR
+def test_checked_scalar_values_match(model_class, columns, values):
     inst = model_class(**values, **{columns[1]: None})
-    python_rows, rust_rows = _serialize_both(model_class, columns, [inst])
-    _assert_rows_match(model_class, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(model_class, columns, [inst])
+    _assert_rows_match(model_class, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -486,45 +356,35 @@ def test_float_field_nan_error_parity():
     inst = FloatFields(floatnum=1.0, floatnum_null=None)
     object.__setattr__(inst, "floatnum", math.nan)
     fields_map = FloatFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(FloatFields, columns, SQLITE_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, FloatFields, SQLITE_DIALECT.types, columns=columns)
 
     # SQLite stores a NaN as NULL - its own writer refuses it.
     with pytest.raises(ValidationError) as python_exc:
         SQLITE_DIALECT.types.get_db_writer(fields_map["floatnum"])(getattr(inst, "floatnum"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
-
-
-# --- bucket 6 (JSONField): dict/list fast path (validate -> encoder), else fallback ---
-
-
-@pytest.mark.database_independent
-def test_json_field_bucket_is_6():
-    assert _bucket_of(JSONFields, ("data",))["data"] == WriteCodecType.JSON
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
 def test_json_field_dict_and_list_value_and_type_parity():
     columns = ("data", "data_null", "data_default")
     inst = JSONFields(data={"a": 1}, data_null=None, data_default={"b": [1, 2, 3]})
-    python_rows, rust_rows = _serialize_both(JSONFields, columns, [inst])
-    _assert_rows_match(JSONFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(JSONFields, columns, [inst])
+    _assert_rows_match(JSONFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
 def test_json_field_list_value_parity():
     columns = ("data",)
     inst = JSONFields(data=[1, "two", {"three": 3}])
-    python_rows, rust_rows = _serialize_both(JSONFields, columns, [inst])
-    _assert_rows_match(JSONFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(JSONFields, columns, [inst])
+    _assert_rows_match(JSONFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
 def test_json_field_encoder_failure_error_parity():
-    # A dict containing something the encoder can't serialize - exercises bucket 6's OWN
-    # encoder-failure wrapping (ValidationError), not the fallback path.
     columns = ("data",)
 
     class Unserializable:
@@ -533,14 +393,14 @@ def test_json_field_encoder_failure_error_parity():
     inst = JSONFields(data={"a": 1})
     inst.data = {"a": Unserializable()}
     fields_map = JSONFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(JSONFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["data"].to_db_value(getattr(inst, "data"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.parametrize(
@@ -553,43 +413,23 @@ def test_json_field_unstorable_value_error_parity(value):
     columns = ("data",)
     inst = JSONFields(data={"a": 1})
     inst.data = value
-    writer = HydrateAccelerator.get_model_writer(JSONFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         JSONFields._meta.fields_map["data"].to_db_value(value, inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
 def test_json_field_long_integer_value_parity():
     columns = ("data",)
     inst = JSONFields(data={"a": 2**64, "b": [-(2**63) - 1]})
-    python_rows, rust_rows = _serialize_both(JSONFields, columns, [inst])
-    _assert_rows_match(JSONFields, columns, python_rows, rust_rows)
-    assert rust_rows[0][0] == '{"a":18446744073709551616,"b":[-9223372036854775809]}'
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize(
-    ("model", "field_name", "sensitive_field"),
-    [
-        (JSONFields, "data", JSONField(sensitive=True)),
-        (CharFields, "char", CharField(max_length=4, sensitive=True)),
-        (UUIDFields, "data", UUIDField(sensitive=True)),
-        (IntFields, "intnum", _BareIntField(sensitive=True)),
-    ],
-)
-def test_sensitive_field_always_takes_bucket_2(model, field_name, sensitive_field):
-    """Every fast-path bucket builds its own error messages from the raw value - a sensitive
-    field's value is only ever handled by its real to_db_value()."""
-    original_field = _swap_field_and_clear_cache(model, field_name, sensitive_field)
-    try:
-        assert _bucket_of(model, (field_name,))[field_name] == WriteCodecType.CALL
-    finally:
-        _restore_field(model, field_name, original_field)
+    python_rows, batch_rows = _serialize_both(JSONFields, columns, [inst])
+    _assert_rows_match(JSONFields, columns, python_rows, batch_rows)
+    assert batch_rows[0][0] == '{"a":18446744073709551616,"b":[-9223372036854775809]}'
 
 
 @pytest.mark.database_independent
@@ -599,27 +439,25 @@ def test_sensitive_inlined_validator_error_parity():
     try:
         inst = CharFields(char="ab", char_null=None)
         inst.char = "SECRET-PIN"
-        writer = HydrateAccelerator.get_model_writer(CharFields, columns, SQL_DIALECT.types)
+        writer = partial(BulkWriteBatches.serialize_instances, CharFields, SQL_DIALECT.types, columns=columns)
         with pytest.raises(ValidationError) as python_exc:
             CharFields._meta.fields_map["char"].to_db_value(inst.char, inst)
-        with pytest.raises(ValidationError) as rust_exc:
-            writer.write_rows([inst])
+        with pytest.raises(ValidationError) as batch_exc:
+            writer([inst])
     finally:
         _restore_field(CharFields, "char", original_field)
 
-    assert str(rust_exc.value) == str(python_exc.value)
-    assert "SECRET" not in str(rust_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
+    assert "SECRET" not in str(batch_exc.value)
 
 
 @pytest.mark.database_independent
 def test_json_field_str_value_uses_fallback_path():
-    # A str value bypasses bucket 6's dict/list fast path entirely - exercises the fallback to
-    # the real to_db_value() (its own decode-verify branch), matching bucket 2's own discipline.
     columns = ("data",)
     inst = JSONFields(data={"a": 1})
     inst.data = '{"a": 1}'
-    python_rows, rust_rows = _serialize_both(JSONFields, columns, [inst])
-    _assert_rows_match(JSONFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(JSONFields, columns, [inst])
+    _assert_rows_match(JSONFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -631,15 +469,15 @@ def test_json_field_invalid_non_dict_list_value_raises_same_error():
     inst.data_validate = 12345  # bypass constructor-time validation - raise_if_not_dict_or_list
     # (data_validate's own validator) should reject a non-dict/list value at to_db_value() time.
     fields_map = JSONFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(JSONFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, JSONFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(Exception) as python_exc:
         fields_map["data_validate"].to_db_value(getattr(inst, "data_validate"), inst)
-    with pytest.raises(Exception) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(Exception) as batch_exc:
+        writer([inst])
 
-    assert type(rust_exc.value) is type(python_exc.value)
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert type(batch_exc.value) is type(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
@@ -648,11 +486,8 @@ def test_uuid_field_raw_string_is_coerced_identically():
     raw = str(uuid.uuid4())
     inst = UUIDFields(data=raw)
     inst.data = raw  # bypass constructor-time from_db_value coercion, matches a raw attribute assignment
-    python_rows, rust_rows = _serialize_both(UUIDFields, columns, [inst])
-    _assert_rows_match(UUIDFields, columns, python_rows, rust_rows)
-
-
-# --- bucket 5 (Enum): isinstance(raw, enum_type) fast path, else fallback to real to_db_value ---
+    python_rows, batch_rows = _serialize_both(UUIDFields, columns, [inst])
+    _assert_rows_match(UUIDFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.parametrize(
@@ -663,12 +498,11 @@ def test_uuid_field_raw_string_is_coerced_identically():
     ],
 )
 @pytest.mark.database_independent
-def test_an_enum_field_is_bucket_5_and_matches(column, value):
+def test_enum_values_match(column, value):
     columns = (column,)
-    assert _bucket_of(EnumFields, columns)[column] == WriteCodecType.ENUMERATION
     inst = EnumFields(**{column: value})
-    python_rows, rust_rows = _serialize_both(EnumFields, columns, [inst])
-    _assert_rows_match(EnumFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(EnumFields, columns, [inst])
+    _assert_rows_match(EnumFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -677,31 +511,28 @@ def test_int_enum_invalid_value_raises_same_error_type_and_message():
     inst = EnumFields(service=Service.python_programming)
     inst.service = 999999  # not a valid Service member
     fields_map = EnumFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(EnumFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, EnumFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(Exception) as python_exc:
         fields_map["service"].to_db_value(getattr(inst, "service"), inst)
-    with pytest.raises(Exception) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(Exception) as batch_exc:
+        writer([inst])
 
     # IntEnumFieldInstance.to_db_value now wraps the enum constructor's ValueError as a
     # ValidationError (see the fix in hare/fields/data/choices.py, tests/fields/value_types/test_enum.py's own
     # test_int_enum_invalid_value_raises_validation_error) - both paths must raise the SAME
     # (now-fixed) exception type.
-    assert type(rust_exc.value) is type(python_exc.value) is ValidationError
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert type(batch_exc.value) is type(python_exc.value) is ValidationError
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
 def test_int_enum_raw_int_fallback_path_matches():
-    # A raw int matching a valid member's value, but NOT an actual enum instance - fails
-    # bucket 5's isinstance(raw, enum_type) fast-path check, exercising the FALLBACK to the real
-    # to_db_value() succeeding (not just erroring, unlike the invalid-value test above).
     columns = ("service",)
     inst = EnumFields(service=Service.python_programming)
     inst.service = 2  # Service.database_design's value, but a plain int, not an enum member
-    python_rows, rust_rows = _serialize_both(EnumFields, columns, [inst])
-    _assert_rows_match(EnumFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(EnumFields, columns, [inst])
+    _assert_rows_match(EnumFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -713,47 +544,43 @@ def test_char_enum_invalid_value_raises_validation_error_not_value_error():
     inst = EnumFields(currency=Currency.USD)
     inst.currency = "not-a-real-currency-code-thats-way-too-long"
     fields_map = EnumFields._meta.fields_map
-    writer = HydrateAccelerator.get_model_writer(EnumFields, columns, SQL_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, EnumFields, SQL_DIALECT.types, columns=columns)
 
     with pytest.raises(ValidationError) as python_exc:
         fields_map["currency"].to_db_value(getattr(inst, "currency"), inst)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([inst])
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([inst])
 
-    assert str(rust_exc.value) == str(python_exc.value)
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
-def test_timedelta_field_is_bucket_2_and_matches():
+def test_timedelta_values_match():
     import datetime
 
     columns = ("timedelta", "timedelta_null")
-    assert _bucket_of(TimeDeltaFields, columns)["timedelta"] == WriteCodecType.TIMEDELTA
     inst = TimeDeltaFields(timedelta=datetime.timedelta(days=2, hours=3), timedelta_null=None)
-    python_rows, rust_rows = _serialize_both(TimeDeltaFields, columns, [inst])
-    _assert_rows_match(TimeDeltaFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(TimeDeltaFields, columns, [inst])
+    _assert_rows_match(TimeDeltaFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
-def test_datetime_field_plain_is_bucket_2_and_matches():
+def test_datetime_values_match():
     import datetime
 
     columns = ("datetime", "datetime_null")
-    assert _bucket_of(DatetimeFields, columns)["datetime"] == WriteCodecType.DATETIME
     inst = DatetimeFields(
         datetime=datetime.datetime(2024, 1, 1, 12, 0, 0),
         datetime_null=None,
         datetime_auto=datetime.datetime(2024, 1, 1),
         datetime_add=datetime.datetime(2024, 1, 1),
     )
-    python_rows, rust_rows = _serialize_both(DatetimeFields, columns, [inst])
-    _assert_rows_match(DatetimeFields, columns, python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(DatetimeFields, columns, [inst])
+    _assert_rows_match(DatetimeFields, columns, python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
 def test_datetime_field_auto_now_values_are_written_as_they_are_on_both_paths():
-    """An auto_now/auto_now_add field is written with the value the instance holds - the stamp is the
-    write's, set before - by the Python field and the Rust writer alike, neither changing the instance."""
     import datetime
 
     from tests.shared_models.testmodels import DatetimeFields as DF
@@ -764,37 +591,25 @@ def test_datetime_field_auto_now_values_are_written_as_they_are_on_both_paths():
         datetime_auto=datetime.datetime(2020, 1, 1),
         datetime_add=datetime.datetime(2020, 1, 1),
     )
-    rust_inst = DF(
+    batch_inst = DF(
         datetime=datetime.datetime(2024, 1, 1, 12, 0, 0),
         datetime_null=None,
         datetime_auto=datetime.datetime(2020, 1, 1),
         datetime_add=datetime.datetime(2020, 1, 1),
     )
     columns = ("datetime_auto", "datetime_add")
-    held_values = [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, rust_inst)]
+    held_values = [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, batch_inst)]
     fields_map = DF._meta.fields_map
     python_row = [fields_map[name].to_db_value(getattr(python_inst, name), python_inst) for name in columns]
 
-    writer = HydrateAccelerator.get_model_writer(DF, columns, SQL_DIALECT.types)
-    rust_row = writer.write_rows([rust_inst])[0]
+    writer = partial(BulkWriteBatches.serialize_instances, DF, SQL_DIALECT.types, columns=columns)
+    batch_row = writer([batch_inst])[0]
 
-    assert [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, rust_inst)] == held_values
-    assert rust_row == python_row
-
-
-# ============================================================================
-# Round-3 finding: the SAME class of bug as the read-side hydrate plan (see
-# test_rust_hydrate_parity.py's own section) - DateField/UUIDField/Enum/JSONField's own
-# isinstance-gated fast-path buckets (3/4/5/6) here ran their base class's write-side logic
-# regardless of whether a further subclass overrode to_db_value with something genuinely
-# different, only ever falling back to the real (overridden) to_db_value for a raw-value shape
-# the fast path itself doesn't recognize - never for the common, successfully-fast-pathed case.
-# ============================================================================
+    assert [(inst.datetime_auto, inst.datetime_add) for inst in (python_inst, batch_inst)] == held_values
+    assert batch_row == python_row
 
 
 def _swap_field_and_clear_cache(model, field_name: str, new_field):
-    # Every cache built for the model (compiled INSERT serializers, Rust serialize plans, ...) is
-    # built from its fields - dropped on the swap and again by _restore_field().
     original_field = model._meta.fields_map[field_name]
     new_field.model_field_name = original_field.model_field_name
     new_field.source_field = original_field.source_field
@@ -809,78 +624,36 @@ def _restore_field(model, field_name: str, original_field):
 
 
 @pytest.mark.database_independent
-def test_overridden_date_field_falls_back_to_complex_bucket():
-    class CustomDateField(DateField):
+@pytest.mark.parametrize(
+    ("model", "name", "field_class", "args"),
+    [
+        (DateFields, "date", DateField, ()),
+        (UUIDFields, "data", UUIDField, ()),
+        (EnumFields, "service", IntEnumFieldInstance, (Service,)),
+        (EnumFields, "currency", CharEnumFieldInstance, (Currency,)),
+        (JSONFields, "data", JSONField, ()),
+    ],
+)
+def test_batch_writer_calls_subclass_with_each_instance(model, name, field_class, args):
+    calls = []
+
+    class CustomField(field_class):
         def to_db_value(self, value, instance):
-            return super().to_db_value(value, instance)
+            calls.append((value, instance))
+            return f"converted:{value}"
 
-    original_field = _swap_field_and_clear_cache(DateFields, "date", CustomDateField())
+    original = _swap_field_and_clear_cache(model, name, CustomField(*args))
     try:
-        assert _bucket_of(DateFields, ("date",))["date"] == WriteCodecType.CALL
+        instances = [_instance_with_raw(model, **{name: value}) for value in ("first", "second")]
+        rows = BulkWriteBatches.serialize_instances(model, SQL_DIALECT.types, instances, [name])
+        assert rows == [["converted:first"], ["converted:second"]]
+        assert calls == [("first", instances[0]), ("second", instances[1])]
     finally:
-        _restore_field(DateFields, "date", original_field)
-
-
-@pytest.mark.database_independent
-def test_overridden_uuid_field_falls_back_to_complex_bucket():
-    class CustomUUIDField(UUIDField):
-        def to_db_value(self, value, instance):
-            return super().to_db_value(value, instance)
-
-    original_field = _swap_field_and_clear_cache(UUIDFields, "data", CustomUUIDField())
-    try:
-        assert _bucket_of(UUIDFields, ("data",))["data"] == WriteCodecType.CALL
-    finally:
-        _restore_field(UUIDFields, "data", original_field)
-
-
-@pytest.mark.database_independent
-def test_overridden_int_enum_field_falls_back_to_complex_bucket():
-    class CustomIntEnumField(IntEnumFieldInstance):
-        def to_db_value(self, value, instance):
-            return super().to_db_value(value, instance)
-
-    original_field = _swap_field_and_clear_cache(EnumFields, "service", CustomIntEnumField(Service))
-    try:
-        assert _bucket_of(EnumFields, ("service",))["service"] == WriteCodecType.CALL
-    finally:
-        _restore_field(EnumFields, "service", original_field)
-
-
-@pytest.mark.database_independent
-def test_overridden_char_enum_field_falls_back_to_complex_bucket():
-    class CustomCharEnumField(CharEnumFieldInstance):
-        def to_db_value(self, value, instance):
-            return super().to_db_value(value, instance)
-
-    original_field = _swap_field_and_clear_cache(EnumFields, "currency", CustomCharEnumField(Currency))
-    try:
-        assert _bucket_of(EnumFields, ("currency",))["currency"] == WriteCodecType.CALL
-    finally:
-        _restore_field(EnumFields, "currency", original_field)
-
-
-@pytest.mark.database_independent
-def test_overridden_json_field_falls_back_to_complex_bucket():
-    class CustomJSONField(JSONField):
-        def to_db_value(self, value, instance):
-            return super().to_db_value(value, instance)
-
-    original_field = _swap_field_and_clear_cache(JSONFields, "data", CustomJSONField())
-    try:
-        assert _bucket_of(JSONFields, ("data",))["data"] == WriteCodecType.CALL
-    finally:
-        _restore_field(JSONFields, "data", original_field)
+        _restore_field(model, name, original)
 
 
 @pytest.mark.asyncio
 async def test_encrypted_style_json_subclass_override_actually_runs_on_real_write(db):
-    """End-to-end: a JSONField subclass whose to_db_value adds a detectable marker must see that
-    marker actually land in the DB on a REAL bulk_create() (the only write path that goes
-    through _build_rust_serialize_plan/hydrate.serialize_rows at all - a plain .create()/
-    save() always calls field.to_db_value() directly, regardless of any Rust bucket, so it
-    wouldn't have exercised this fix's own code path) - not just at the bucket-classification
-    level tested above."""
 
     class MarkerJSONField(JSONField):
         def to_db_value(self, value, instance):
@@ -896,20 +669,14 @@ async def test_encrypted_style_json_subclass_override_actually_runs_on_real_writ
     try:
         await JSONFields.objects.bulk_create([JSONFields(data={"a": 1})])
     finally:
-        # Restored BEFORE reading back, so the read goes through the plain (unpatched) field's
-        # own from_db_value/decoder - isolates the WRITE side, independent of the read-side
-        # fast path this same round covers separately (test_rust_hydrate_parity.py).
         _restore_field(JSONFields, "data", original_field)
 
     refreshed = await JSONFields.objects.get()
     assert refreshed.data == {"a": 1, "_marked": True}
 
 
-# --- buckets 7/8 (NATIVE_CHECKED): fields whose own to_db_value declares native_write_check ---
-
-
 class _Label(str):
-    """A str subclass - never "exactly str", so buckets 7/8 hand it to the real to_db_value."""
+    """A distinct text subclass for scalar conversion checks."""
 
 
 def _instance_with_raw(model, **raw_values):
@@ -918,24 +685,6 @@ def _instance_with_raw(model, **raw_values):
     instance = model()
     instance.__dict__.update(raw_values)
     return instance
-
-
-@pytest.mark.database_independent
-@pytest.mark.parametrize(
-    ("model", "column"),
-    [
-        (IntFields, "intnum"),
-        (BooleanFields, "boolean"),
-        (CharFields, "char"),
-        (TextFields, "text"),
-        (FloatFields, "floatnum"),
-    ],
-)
-def test_builtin_fields_with_write_checks_take_the_native_checked_bucket(model, column):
-    """Bug: the bool/null-byte/NaN checks IntField, BooleanField, CharField, TextField and
-    FloatField added to their own to_db_value sent every one of them to bucket 2 - a Python
-    to_db_value call for every value of every bulk write."""
-    assert _bucket_of(model, (column,))[column] == WriteCodecType.SCALAR
 
 
 @pytest.mark.parametrize(
@@ -953,10 +702,10 @@ def test_builtin_fields_with_write_checks_take_the_native_checked_bucket(model, 
         (FloatFields, "floatnum", math.inf),
     ],
 )
-def test_native_checked_value_and_type_parity(model, column, raw):
+def test_scalar_value_and_type_parity(model, column, raw):
     instance = _instance_with_raw(model, **{column: raw})
-    python_rows, rust_rows = _serialize_both(model, (column,), [instance])
-    _assert_rows_match(model, (column,), python_rows, rust_rows)
+    python_rows, batch_rows = _serialize_both(model, (column,), [instance])
+    _assert_rows_match(model, (column,), python_rows, batch_rows)
 
 
 @pytest.mark.database_independent
@@ -973,41 +722,39 @@ def test_native_checked_value_and_type_parity(model, column, raw):
         (FloatFields, "floatnum", math.nan),
     ],
 )
-def test_native_checked_error_parity(model, column, raw):
+def test_scalar_error_parity(model, column, raw):
     instance = _instance_with_raw(model, **{column: raw})
     field = model._meta.fields_map[column]
-    writer = HydrateAccelerator.get_model_writer(model, (column,), SQLITE_DIALECT.types)
+    writer = partial(BulkWriteBatches.serialize_instances, model, SQLITE_DIALECT.types, columns=(column,))
     with pytest.raises(ValidationError) as python_exc:
         SQLITE_DIALECT.types.get_db_writer(field)(raw, instance)
-    with pytest.raises(ValidationError) as rust_exc:
-        writer.write_rows([instance])
-    assert str(rust_exc.value) == str(python_exc.value)
+    with pytest.raises(ValidationError) as batch_exc:
+        writer([instance])
+    assert str(batch_exc.value) == str(python_exc.value)
 
 
 @pytest.mark.database_independent
-def test_native_checked_field_with_a_custom_validator_takes_bucket_8():
+def test_scalar_custom_validator_is_called():
     original_field = _swap_field_and_clear_cache(IntFields, "intnum", IntFields._meta.fields_map["intnum"].__copy__())
     IntFields._meta.fields_map["intnum"].validators.append(_MultipleOfThreeValidator())
-    StatementPlans.model_writers.clear()
+    BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.clear()
     try:
-        assert _bucket_of(IntFields, ("intnum",))["intnum"] == WriteCodecType.SCALAR
-        assert not _validates_inline(IntFields, "intnum")
-        python_rows, rust_rows = _serialize_both(IntFields, ("intnum",), [_instance_with_raw(IntFields, intnum=9)])
-        _assert_rows_match(IntFields, ("intnum",), python_rows, rust_rows)
+        python_rows, batch_rows = _serialize_both(IntFields, ("intnum",), [_instance_with_raw(IntFields, intnum=9)])
+        _assert_rows_match(IntFields, ("intnum",), python_rows, batch_rows)
 
         bad_instance = _instance_with_raw(IntFields, intnum=10)
-        writer = HydrateAccelerator.get_model_writer(IntFields, ("intnum",), SQL_DIALECT.types)
+        writer = partial(BulkWriteBatches.serialize_instances, IntFields, SQL_DIALECT.types, columns=("intnum",))
         with pytest.raises(ValidationError) as python_exc:
             IntFields._meta.fields_map["intnum"].to_db_value(10, bad_instance)
-        with pytest.raises(ValidationError) as rust_exc:
-            writer.write_rows([bad_instance])
-        assert str(rust_exc.value) == str(python_exc.value)
+        with pytest.raises(ValidationError) as batch_exc:
+            writer([bad_instance])
+        assert str(batch_exc.value) == str(python_exc.value)
     finally:
         _restore_field(IntFields, "intnum", original_field)
 
 
 @pytest.mark.database_independent
-def test_subclass_overriding_to_db_value_again_leaves_the_native_checked_bucket():
+def test_custom_text_writer_changes_values():
     class ShoutingCharField(CharField):
         def to_db_value(self, value, instance):
             value = super().to_db_value(value, instance)
@@ -1015,8 +762,7 @@ def test_subclass_overriding_to_db_value_again_leaves_the_native_checked_bucket(
 
     original_field = _swap_field_and_clear_cache(CharFields, "char", ShoutingCharField(max_length=255))
     try:
-        assert _bucket_of(CharFields, ("char",))["char"] == WriteCodecType.CALL
-        python_rows, rust_rows = _serialize_both(CharFields, ("char",), [_instance_with_raw(CharFields, char="hi")])
-        assert rust_rows == python_rows == [["HI"]]
+        python_rows, batch_rows = _serialize_both(CharFields, ("char",), [_instance_with_raw(CharFields, char="hi")])
+        assert batch_rows == python_rows == [["HI"]]
     finally:
         _restore_field(CharFields, "char", original_field)

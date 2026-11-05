@@ -11,22 +11,20 @@ from hare.query.expressions.arithmetic.combinable_expression import CombinableEx
 from hare.query.expressions.constants import UNBINDABLE_VALUE_ORIGIN
 from hare.query.expressions.expression_context import ExpressionContext
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 from hare.sql import SqlContext
+from hare.sql.terms.field import Field as SqlField
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from hare.fields.field import Field as ModelField
-    from hare.models import Model
     from hare.query.queryset.query_specification import QuerySpecification
     from hare.query.statements import AwaitableQuery
     from hare.sql.builder.queries.query_builder import QueryBuilder
     from hare.sql.builder.tables.selectable import Selectable
-    from hare.sql.terms.node import Node
 from hare.query.expressions.subqueries.outer_scope import OuterScope
 
 
@@ -36,6 +34,8 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
     as a filter or annotation value, it builds its query while the outer query's context is active,
     so an ``OuterReference`` inside finds it.
     """
+
+    structure = ExpressionStructure(query_scope=True)
 
     # The result is decoded by the field of the one column the subquery selects; it stays raw when
     # there is no such field.
@@ -50,6 +50,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         ("shares_outer_scope", PlanPartType.NONE),
         # The name a query selects it under - its annotation's key.
         ("alias", PlanPartType.NONE),
+        ("expression_identity", PlanPartType.NONE),
         ("_query", PlanPartType.NONE),
         ("_built_query", PlanPartType.NONE),
         ("is_aggregate", PlanPartType.NONE),
@@ -89,7 +90,10 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         return self._query
 
     def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
-        built_query = self._get_wrapped_query(self.query, expression_context)
+        declaration_query = self.query
+        bound = copy(self)
+        bound._plan_origin = self
+        built_query = self._get_wrapped_query(declaration_query, expression_context)
         value_wrapper_references = expression_context.value_wrapper_references
         # A subquery sharing the outer scope is built in the scope already open: its OuterRefs - and
         # what they report - go to the query the enclosing one is nested in.
@@ -102,15 +106,15 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
                 built_query._make_subquery()
                 if value_wrapper_references is not None:
                     value_wrapper_references.append((UNBINDABLE_VALUE_ORIGIN, None))
-        self._built_query = built_query
-        self.sensitive = self.selects_sensitive_value()
+        bound._built_query = built_query
+        bound.sensitive = bound.selects_sensitive_value()
         if scope is None:
-            self.is_aggregate = False
-            self.outer_reference_terms = ()
-            return ExpressionResult(term=self, output_field=self.get_output_field())
-        self.is_aggregate = bool(scope.aggregate_references)
-        self.outer_reference_terms = tuple(scope.reference_terms)
-        return ExpressionResult(term=self, joins=scope.extra_joins, output_field=self.get_output_field())
+            bound.is_aggregate = False
+            bound.outer_reference_terms = ()
+            return ExpressionResult(term=bound, output_field=bound.get_output_field())
+        bound.is_aggregate = bool(scope.aggregate_references)
+        bound.outer_reference_terms = tuple(scope.reference_terms)
+        return ExpressionResult(term=bound, joins=scope.extra_joins, output_field=bound.get_output_field())
 
     def selects_sensitive_value(self) -> bool:
         """Whether the value the subquery selects is a sensitive field's, or computed from one - a
@@ -124,9 +128,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
             return True
         nested_query = self.get_nested_query()
         return nested_query is not None and any(
-            node.sensitive
-            for selected_term in nested_query._selects
-            for node in cast("Iterator[Node]", selected_term.nodes_())
+            node.sensitive for selected_term in nested_query._selects for node in selected_term.nodes_()
         )
 
     def get_selected_names(self) -> list[str] | None:
@@ -199,41 +201,14 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         Returns:
             The field, None when it can't be told.
         """
-        from hare.query.functions.aggregates.count import Count
+        from hare.query.statements.select.values.values_output import ValuesOutput
         from hare.query.statements.select.values_query import ValuesQuery
 
         query = self._built_query or self.query
         if not isinstance(query, ValuesQuery):
             return None
-        if (annotation_output_field := query._annotation_output_fields.get(selected_name)) is not None:
-            return annotation_output_field
-        if selected_name in query._annotations:
-            # Count() never populates an output field of its own (its result is the same integer
-            # on every backend as a bare value, but an aggregate wrapped around it isn't).
-            if isinstance(query._annotations[selected_name], Count):
-                return Count.COUNT_OUTPUT_FIELD
-            return None
-        return self.get_path_field(query.model, selected_name)
-
-    @staticmethod
-    def get_path_field(model: type[Model], path: str) -> ModelField[Any] | None:
-        """The field a selected ``field`` or ``relation__field`` path reads.
-
-        Args:
-            model: The model the path starts from.
-            path: The selected name.
-
-        Returns:
-            The field at the end of the path, or None when the path names no field.
-        """
-        field = model._meta.fields_map.get(path)
-        if field is not None:
-            return field
-        relation_name, __, rest_path = path.partition("__")
-        if not rest_path or relation_name not in model._meta.fetch_fields:
-            return None
-        related_model = model._meta.fields_map[relation_name].related_model  # type:ignore[attr-defined]
-        return Subquery.get_path_field(related_model, rest_path)
+        field_name = ValuesOutput.get_selected_fields_by_alias(query).get(selected_name, selected_name)
+        return ValuesOutput.get_output_value_field(query, field_name)
 
     def _build_if_needed(self) -> None:
         # Used as a raw Term, never resolved as an expression: an OuterReference inside has no outer
@@ -266,7 +241,7 @@ class Subquery(CombinableExpression, Term):  # type: ignore[misc]
         null_rows = (
             selection.query_class.from_(derived)
             .select(ValueWrapper(1, allow_parametrize=False))
-            .where(derived[column.alias or column.name].isnull())
+            .where(derived[column.alias or cast("SqlField", column).name].isnull())
         )
         return ExistsTerm(null_rows)
 

@@ -30,12 +30,3 @@ EXPORTED_MODULES = {
     "RowsChanged": "hare.instrumentation.declarations",
     "TransactionEvent": "hare.instrumentation.declarations",
 }
-
-#: The keyword a statement starting with it inserts rows by - query tags go before an INSERT on a
-#: database reading what follows its VALUES as data.
-INSERT_KEYWORD = "INSERT"
-INSERT_KEYWORD_LENGTH = len(INSERT_KEYWORD)
-#: The comments a statement may start with, skipped when its first keyword is read.
-LINE_COMMENT_START = "--"
-BLOCK_COMMENT_START = "/*"
-BLOCK_COMMENT_END = "*/"

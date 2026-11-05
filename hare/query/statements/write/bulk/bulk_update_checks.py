@@ -18,9 +18,11 @@ class BulkUpdateChecks:
     and each has a primary key of its own, its ``Meta.optimistic_lock_field`` version loaded."""
 
     @staticmethod
-    def check_tenant_values_resolved(model: type[Model], objects: Sequence[Model]) -> None:
-        """Raises for an object whose ``Meta.tenant_field`` still waits for an async default - only
-        save() resolves one, so there is no value yet to compare with the active tenant.
+    def check_tenant_defaults_ready(model: type[Model], objects: Sequence[Model]) -> None:
+        """Requires a tenant value before checking the object's tenant scope.
+
+        Pending defaults are evaluated after this check, so an async tenant default cannot
+        supply the value needed to compare the object with the active tenant.
 
         Args:
             model: The model.
@@ -61,7 +63,7 @@ class BulkUpdateChecks:
                 else [obj.pk for obj in objects]
             )
         except AttributeError:
-            # A key never loaded reads as None through pk.
+            # Use the public key accessor when a direct key attribute is unavailable.
             pk_values = [obj.pk for obj in objects]
         if (
             any(any(part is None for part in pk) for pk in pk_values)

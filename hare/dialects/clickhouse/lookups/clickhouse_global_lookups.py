@@ -3,10 +3,12 @@ from __future__ import annotations
 from functools import partial
 from typing import Any
 
+from hare.core.extensions.declarations import LookupRegistration
 from hare.dialects.clickhouse.enums import ClickhouseLookup
 from hare.dialects.clickhouse.lookups.global_contains_criterion import GlobalContainsCriterion
 from hare.exceptions import QueryError
 from hare.fields.field import Field
+from hare.fields.registrations.registered_lookup import RegisteredLookup
 from hare.query.enums import Lookup, LookupValueShape
 from hare.query.filters.lookups.dialect_implemented_operators import DialectImplementedOperators
 from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -119,11 +121,19 @@ class ClickhouseGlobalLookups:
         )
 
     @classmethod
-    def register(cls) -> None:
-        """Adds ``__global_in`` and ``__global_not_in`` to every value on ClickHouse."""
-        for name, lookup in ((ClickhouseLookup.GLOBAL_IN, Lookup.IN), (ClickhouseLookup.GLOBAL_NOT_IN, Lookup.NOT_IN)):
-            Field.register_lookup(
+    def get_registrations(cls) -> tuple[LookupRegistration, ...]:
+        """Declare global membership operators for all field classes."""
+        return tuple(
+            LookupRegistration(
+                Field,
                 name,
-                partial(cls.get_global_lookup, lookup),
-                value_shape=LookupValueShape.LIST,
+                RegisteredLookup(
+                    partial(cls.get_global_lookup, lookup),
+                    value_shape=LookupValueShape.LIST,
+                ),
             )
+            for name, lookup in (
+                (ClickhouseLookup.GLOBAL_IN, Lookup.IN),
+                (ClickhouseLookup.GLOBAL_NOT_IN, Lookup.NOT_IN),
+            )
+        )

@@ -2,19 +2,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hare.migrations.operations.hare_operation import HareOperation
 from hare.migrations.state.state import State
 
 if TYPE_CHECKING:
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
-class ModelTableOperation:
+class ModelTableOperation(HareOperation):
     """Creates or drops the table of the model an operation names - ``CreateModel`` creates it
     forwards and drops it backwards, ``DeleteModel`` the other way round. A state-only operation
     and an unmanaged model (``Meta.managed = False``) leave the database alone."""
 
     name: str
     state_only: bool
+
+    def get_table_model_names(self) -> tuple[str, ...]:
+        """The model whose table is created or removed."""
+        return (self.name,)
 
     async def _create_model_table(self, app_label: str, state: State, state_editor: BaseSchemaEditor | None) -> None:
         """Creates the table of the model as ``state`` has it.

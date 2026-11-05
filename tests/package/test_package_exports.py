@@ -1,6 +1,6 @@
-"""Every name a hare package exports resolves, once in its ``__all__``, and ``dir()`` of a package
-exporting its names lazily lists them before they are imported - a package importing an optional library in
-the environment installing its extra."""
+"""Every exported name resolves and occurs once in ``__all__``; ``dir()`` lists the exports before
+this check loads each one. Packages needing optional libraries are checked in their extra's environment.
+Other tests may already have loaded a package; this is not an isolated cold-import check."""
 
 import ast
 import importlib
@@ -50,9 +50,8 @@ def test_a_package_exports_each_name_once_and_lists_it(package_name):
     package = importlib.import_module(package_name)
 
     assert len(set(package.__all__)) == len(package.__all__)
+    assert set(package.__all__) <= set(dir(package))
     for name in package.__all__:
         getattr(package, name)
-    # A lazily exported name was missing from dir() until something imported it.
-    assert set(package.__all__) <= set(dir(package))
     with pytest.raises(AttributeError):
         package.NoSuchName  # noqa: B018

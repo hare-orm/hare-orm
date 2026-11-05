@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -52,9 +52,9 @@ class CapturedWrite:
         self.occurred_at: datetime.datetime | None = None
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[DatabaseClient]:
-        """The transaction the write and its changes share - the open one, else a new one around both; on a
-        database without transactions, none.
+    async def transaction(self) -> AsyncGenerator[DatabaseClient]:
+        """A transaction around the write and its changes, or a savepoint in an open one;
+        on a database without transactions, none.
 
         Yields:
             The connection to write on.
@@ -71,7 +71,7 @@ class CapturedWrite:
             lock: Lock the rows until the transaction ends, where the database locks rows.
 
         Returns:
-            The values and the tenant of each row found, by primary key.
+            The values of each row, by its Python primary key.
         """
         if isinstance(keys, Sequence):
             return await ChangeCapturing.read_values(self.model, self.connection, keys, self.needs, lock=lock)
@@ -84,7 +84,7 @@ class CapturedWrite:
             keys: The rows' primary keys - a list, or a query of them.
 
         Returns:
-            The values of each row found, by primary key.
+            The values of each row, by its Python primary key.
         """
         return {pk: values for pk, (values, _tenant) in (await self.read(keys, lock=True)).items()}
 
@@ -102,12 +102,12 @@ class CapturedWrite:
             raw_rows: The returned rows, by column.
             operation: What the write did to these rows - the write's operation by default.
             returns_old: The rows hold the values before the write too (``RETURNING OLD``).
-            before_by_pk: The values before the write, read before it, by primary key.
+            before_by_pk: The rows before the write, indexed by their Python primary keys.
 
         Returns:
             The changes, one per row.
         """
-        return ChangeCapturing.get_returned_changes(
+        changes = ChangeCapturing.get_returned_changes(
             self.model,
             self.needs,
             self.connection.dialect.types,
@@ -116,7 +116,11 @@ class CapturedWrite:
             changed=self.changed,
             returns_old=returns_old,
             before_by_pk=before_by_pk,
+            occurred_at=self.occurred_at,
         )
+        if changes:
+            self.occurred_at = changes[0].occurred_at
+        return changes
 
     async def capture_returned(
         self,
@@ -130,7 +134,7 @@ class CapturedWrite:
         Args:
             raw_rows: The returned rows, by column.
             returns_old: The rows hold the values before the write too (``RETURNING OLD``).
-            before_by_pk: The values before the write, read before it, by primary key.
+            before_by_pk: The rows before the write, indexed by their Python primary keys.
 
         Returns:
             The changes, one per row.
@@ -146,7 +150,7 @@ class CapturedWrite:
         an update or an insert, read again after it.
 
         Args:
-            read_before: The captured fields and the tenant of each row before the write, by primary key - empty
+            read_before: The rows before the write, indexed by their Python primary keys - empty
                 for an insert.
             pks: The keys of the rows written.
 
@@ -159,8 +163,16 @@ class CapturedWrite:
             else await ChangeCapturing.read_values(self.model, self.connection, pks, self.needs)
         )
         changes = ChangeCapturing.get_read_changes(
-            self.model, self.needs, self.operation, read_before, read_after, changed=self.changed
+            self.model,
+            self.needs,
+            self.operation,
+            read_before,
+            read_after,
+            changed=self.changed,
+            occurred_at=self.occurred_at,
         )
+        if changes:
+            self.occurred_at = changes[0].occurred_at
         await self.capture(changes)
         return changes
 

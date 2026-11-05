@@ -29,7 +29,7 @@ def pydantic_model_creator(
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
     exclude_readonly: bool = False,
-    meta_override: type | None = None,
+    meta_override: object | None = None,
     model_config: ConfigDict | None = None,
     validators: dict[str, Any] | None = None,
     module: str = PYDANTIC_MODELS_MODULE,
@@ -49,8 +49,9 @@ def pydantic_model_creator(
             after it was read - with their types; None where a row has none. A path through the
             relations (``"author.books_count"``) adds one to the related schema.
         related_values: Values of related rows, flattened - a name to the path of the related field
-            through relations to one row (``{"author_name": "author.name"}``); None where a relation
-            wasn't loaded.
+            through relations to one row (``{"author_name": "author.name"}``). Null intermediate relations
+            yield None; an unfetched ORM field or relation raises ``NoValuesFetched``.
+            Async constructors load the required relations before validation.
         optional: Extra optional fields for the provided model.
         allow_cycles: Whether to allow cycles in the generated model - only useful for
             recursive/self-referential models. ``False`` (the default) prevents any backtracking.
@@ -58,17 +59,14 @@ def pydantic_model_creator(
             order. The default order is: field definition order, then order of reverse relations
             (as discovered), then order of computed functions (as provided).
         exclude_readonly: Build a subset model that excludes any readonly fields.
-        meta_override: A PydanticMeta class to override the model's values.
+        meta_override: A schema-options object to override the model's values.
         model_config: A custom config to use as pydantic config.
         validators: A dictionary of methods that validate fields.
-        module: The name of the module that the model belongs to. Note: the generated pydantic
-            model uses this parameter's config_class and PydanticMeta's own config_class as its
-            Config class's bases (only if provided), but ignores a ``fields`` config -
-            pydantic_model_creator generates fields from include/exclude/computed automatically.
+        module: The name of the module that the generated model belongs to.
         exclude_sensitive: Drop every ``sensitive=True`` field (``Model._meta.sensitive_fields``),
             nested models' included - e.g. for a public/export schema.
         relations_as_ids: Render every forward FK/O2O as its flat ``<name>_id`` field (the
-            target's pk type, the relation's own nullability) instead of a nested submodel, and
+            referenced field's type, the relation's own nullability) instead of a nested submodel, and
             leave reverse relations out. M2M relations stay nested; nested models inherit the flag.
     """
     creator = PydanticModelCreator(
@@ -106,7 +104,7 @@ def pydantic_queryset_creator(
     allow_cycles: bool | None = None,
     sort_alphabetically: bool | None = None,
     exclude_readonly: bool = False,
-    meta_override: type | None = None,
+    meta_override: object | None = None,
     model_config: ConfigDict | None = None,
     validators: dict[str, Any] | None = None,
     module: str = PYDANTIC_MODELS_MODULE,
@@ -127,8 +125,9 @@ def pydantic_queryset_creator(
             after it was read - with their types; None where a row has none. A path through the
             relations (``"author.books_count"``) adds one to the related schema.
         related_values: Values of related rows, flattened - a name to the path of the related field
-            through relations to one row (``{"author_name": "author.name"}``); None where a relation
-            wasn't loaded.
+            through relations to one row (``{"author_name": "author.name"}``). Null intermediate relations
+            yield None; an unfetched ORM field or relation raises ``NoValuesFetched``.
+            Async constructors load the required relations before validation.
         optional: Extra optional fields of the item model.
         allow_cycles: Whether to allow cycles in the generated model - only useful for
             recursive/self-referential models. ``False`` (the default) prevents any backtracking.
@@ -137,7 +136,7 @@ def pydantic_queryset_creator(
             (as discovered), then order of computed functions (as provided).
         exclude_readonly: Build the item model without readonly fields, as in
             ``pydantic_model_creator``.
-        meta_override: A PydanticMeta class to override the model's values.
+        meta_override: A schema-options object to override the model's values.
         model_config: A custom pydantic config of the item model.
         validators: A dictionary of methods that validate fields of the item model.
         module: The name of the module that the item model belongs to.
@@ -167,7 +166,9 @@ def pydantic_queryset_creator(
     list_model_name = name or f"{submodel.__name__}_list"
 
     queryset_index_key = (model, submodel, list_model_name)
-    if (list_model := PydanticModelCreator.QUERYSET_MODEL_INDEX.get(queryset_index_key)) is not None:
+    if (
+        list_model := PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(model).get(queryset_index_key)
+    ) is not None:
         return cast("type[PydanticListModel]", list_model)
 
     new_list_model = create_model(
@@ -179,5 +180,5 @@ def pydantic_queryset_creator(
     new_list_model.model_config["title"] = name or f"{submodel.model_config['title']}_list"
     new_list_model.model_config["submodel"] = submodel  # type: ignore[typeddict-unknown-key]
 
-    PydanticModelCreator.QUERYSET_MODEL_INDEX[queryset_index_key] = new_list_model
+    PydanticModelCreator.QUERYSET_MODEL_INDEX.get_model_bucket(model)[queryset_index_key] = new_list_model
     return new_list_model

@@ -283,6 +283,7 @@ class MypyTypes:
             )
         else:
             item_types.extend(self.get_python_type(cls) for cls in value_type.classes)
+        item_types.extend(self.get_python_type(cls) for cls in value_type.accepted_classes)
         for model in value_type.models:
             model_type = self.get_model_type(model)
             if model_type is not None:

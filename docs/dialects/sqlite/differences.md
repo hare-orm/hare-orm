@@ -25,7 +25,7 @@ table, column and index declarations for conflicting spellings.
 
 | SQLite | hare |
 |---|---|
-| An exact decimal type | A `DecimalField` has no column on SQLite, and a `Decimal` value in a query run on SQLite is refused before any SQL — see [`DecimalField` (SQLite)](../../models/field-types.md#decimal-field-sqlite). |
+| An exact decimal type | `DecimalField` and decimal-typed ORM expressions, including decimal casts, are refused before SQL. Raw `Decimal` parameters are adapted to text — see [`DecimalField` (SQLite)](../../models/field-types.md#decimal-field-sqlite). |
 | Date and time types | Dates, times and datetimes are stored as ISO text; hare's functions truncate, extract and shift them — see [Functions](functions.md#registered-functions). |
 | Integer ranges of a column type | Any 64-bit integer fits any integer column, so hare checks a value it writes against its field's range. A value the database computes is SQLite's own — see [Results](#results). |
 | A negative zero | A `FloatField`'s `-0.0` reads back as `0.0`. |
@@ -79,7 +79,8 @@ of an empty key (`has_key=""` — *JSON path error*). A value read as text, a `C
   `Right`, `LPad`, `RPad`, `Repeat`, `Reverse` and the digests are hare's, with no 32-bit limit on a length,
   a position or a count; a result longer than SQLite holds in one value (1e9 bytes) is refused. A text
   function given an expression of the wrong type is left to SQLite.
-- **`JSONObject()` and `JSONArray()`** are written by `json_object()`: a boolean as 1 or 0, a float with 15
+- **`JSONObject()` and `JSONArray()`** use `json_object()` and `json_array()`: a boolean as 1 or 0, a
+  float with 15
   significant digits (17 from SQLite 3.53), bytes as uppercase hex.
 
 ## <a id="queries"></a>Queries
@@ -91,7 +92,7 @@ of an empty key (`has_key=""` — *JSON path error*). A value read as text, a `C
 | Grouping sets | `Rollup`, `Cube`, `GroupingSets` and `Grouping()` raise `UnSupportedError` — see [Several groupings](../../querying/aggregation.md#grouping-sets). |
 | POSIX regular expressions | `__posix_regex` and `__iposix_regex` need `install_regexp_functions=true` and are matched by Python's `re`, its syntax and semantics — see [Regular expressions](functions.md#regular-expressions). |
 | More than 64 tables in one query | The query fails with an `OperationalError` saying so; shorten the relation paths. |
-| Long `__in` lists as bound parameters | From 20 values, the list is bound as one JSON array read by `json_each()` — see [Large `__in` lists](../../querying/filters.md#large-in-lists). |
+| Long `__in` lists as bound parameters | From 20 non-NULL values, an equivalent JSON representation uses one array read by `json_each()`. Bytes also require `supports_unhex`; otherwise ordinary parameters remain — see [Large `__in` lists](../../querying/filters.md#large-in-lists). |
 
 ## <a id="schema"></a>Schema and migrations
 

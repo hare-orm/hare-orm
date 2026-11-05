@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from collections.abc import Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.core.routing.written_connections import WrittenConnections
 from hare.ddl.raw_sql_term import RawSQLTerm
@@ -9,6 +9,7 @@ from hare.exceptions import UnSupportedError
 from hare.fields.database_default import DatabaseDefault
 from hare.instrumentation.enums import RowOperation
 from hare.models.tenancy.tenancy import Tenancy
+from hare.models.write.declarations import InstanceWriteTemplates, WriteOutcome
 from hare.models.write.generated_keys import GeneratedKeys
 from hare.models.write.insert.insert_statement import InsertStatement
 from hare.models.write.instance_capture import InstanceCapture
@@ -19,8 +20,12 @@ from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.update.expression_assignment import ExpressionAssignment
 from hare.models.write.update.update_parameter_slot import UpdateParameterSlot
+from hare.models.write.write_finalizer import WriteFinalizer
 from hare.models.write.write_steps import WriteSteps
+from hare.query.execution.bound_write import BoundWrite
+from hare.query.execution.write_statements import WriteStatement
 from hare.query.expressions import Expression, ExpressionContext
+from hare.query.key_columns import KeyColumns
 from hare.query.plans.statement.statement_plans import StatementPlans
 from hare.query.scopes.row_scopes import RowScopes
 from hare.query.scopes.row_visibility import RowVisibility
@@ -32,6 +37,7 @@ from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.results.statement_result import StatementResult
     from hare.models import Model
     from hare.sql import Table
     from hare.sql.terms.criteria.criterion import Criterion
@@ -46,18 +52,6 @@ class InstanceWriter:
         connection: The connection.
     """
 
-    #: The attributes a writer computes once per model and connection type - stored in and
-    #: restored from ``StatementPlans.instance_writes``.
-    PER_MODEL_CACHED_ATTRIBUTES: ClassVar[tuple[str, ...]] = (
-        "regular_columns",
-        "insert_query",
-        "regular_columns_all",
-        "insert_query_all",
-        "delete_query",
-        "delete_query_without_tenant_scope",
-        "insert_rules",
-    )
-
     def __init__(self, model: type[Model], connection: DatabaseClient) -> None:
         self.model = model
         self.connection: DatabaseClient = connection
@@ -66,10 +60,6 @@ class InstanceWriter:
         #: Whether the writes capture their changes (``Meta.change_capture``) - off for the writer
         #: ``InstanceCapture`` runs them through.
         self.captures_changes = True
-        #: The update fields and write type of the rules ``get_update_rules()`` gave last, and those rules - a
-        #: save asks for them more than once.
-        self.update_rules_key: tuple[tuple[str, ...] | None, WriteType] | None = None
-        self.update_rules: RowWriteRules | None = None
         # The dialect, the connection's features and the builder class are part of the key: two
         # contexts may use one connection name for different databases.
         meta = model._meta
@@ -77,6 +67,7 @@ class InstanceWriter:
             connection.connection_alias,
             connection.dialect,
             connection.features.plan_key,
+            connection.sql_context_key,
             meta.query_class,
             meta.schema,
             meta.db_table,
@@ -84,49 +75,42 @@ class InstanceWriter:
         #: The writer's key in ``StatementPlans.instance_writes`` - what its UPDATEs and DELETEs of
         #: other shapes are kept under too.
         self.statements_key = key
-        statements = StatementPlans.instance_writes.get_for_model(model, key)
-        if statements is None:
-            insert_statement = InsertStatement(self.model, self.connection)
-            self.regular_columns = insert_statement.get_field_names(with_primary_key=False)
-            self.insert_query = self._get_insert_sql(insert_statement, self.regular_columns, primary_key_given=False)
-            self.regular_columns_all = self.regular_columns
-            self.insert_query_all = self.insert_query
-            if self.model._meta.generated_db_fields:
-                self.regular_columns_all = insert_statement.get_field_names(with_primary_key=True)
-                self.insert_query_all = self._get_insert_sql(
-                    insert_statement, self.regular_columns_all, primary_key_given=True
-                )
+        bucket = StatementPlans.instance_writes.get_model_bucket(model)
+        templates = bucket.get(key)
+        self.templates = bucket.store(key, self._prepare_templates()) if templates is None else templates
 
-            basequery = self.connection.query_class.from_(self.model._meta.basetable)
-            deleted_row_db_columns = self._deleted_row_db_columns()
-            pk_where_delete_builder = self._where_by_columns(basequery, deleted_row_db_columns)
-            # A cascade deletes a descendant it found through a real FK match - without the
-            # active-tenant condition, which could differ from the descendant's tenant.
-            self.delete_query_without_tenant_scope = str(pk_where_delete_builder.delete())
-            tenant_condition, _ = self._tenant_scope_where(self.model._meta.basetable, len(deleted_row_db_columns))
-            delete_builder = (
-                pk_where_delete_builder.where(tenant_condition)
-                if tenant_condition is not None
-                else pk_where_delete_builder
+    def _prepare_templates(self) -> InstanceWriteTemplates:
+        """Build reusable shapes without reading instance values or evaluating defaults."""
+        insert_statement = InsertStatement(self.model, self.connection)
+        insert_fields = tuple(insert_statement.get_field_names(with_primary_key=False))
+        insert_sql, insert_returns_rows = self._get_insert_template(
+            insert_statement, insert_fields, primary_key_given=False
+        )
+        explicit_key_fields, explicit_key_sql = insert_fields, insert_sql
+        explicit_key_returns_rows = insert_returns_rows
+        if self.model._meta.generated_db_fields:
+            explicit_key_fields = tuple(insert_statement.get_field_names(with_primary_key=True))
+            explicit_key_sql, explicit_key_returns_rows = self._get_insert_template(
+                insert_statement, explicit_key_fields, primary_key_given=True
             )
-            self.delete_query = str(delete_builder.delete())
-            #: What an insert of an instance writes itself - its stamps and blind indexes.
-            self.insert_rules = RowWriteRules.get(self.model, WriteType.INSERT, None, SAVE_METHOD_NAME)
-
-            StatementPlans.instance_writes[(self.model, *key)] = tuple(
-                getattr(self, name) for name in self.PER_MODEL_CACHED_ATTRIBUTES
-            )
-        else:
-            # PER_MODEL_CACHED_ATTRIBUTES, in its order - a writer is made for every save().
-            (
-                self.regular_columns,
-                self.insert_query,
-                self.regular_columns_all,
-                self.insert_query_all,
-                self.delete_query,
-                self.delete_query_without_tenant_scope,
-                self.insert_rules,
-            ) = statements
+        basequery = self.connection.query_class.from_(self.model._meta.basetable)
+        deleted_columns = self._deleted_row_db_columns()
+        delete_builder = self._where_by_columns(basequery, deleted_columns)
+        delete_without_tenant_scope_sql = delete_builder.delete().get_sql(self.connection.sql_context)
+        tenant_condition = self._tenant_scope_where(self.model._meta.basetable, len(deleted_columns))
+        if tenant_condition is not None:
+            delete_builder = delete_builder.where(tenant_condition)
+        return InstanceWriteTemplates(
+            insert_fields=insert_fields,
+            insert_sql=insert_sql,
+            insert_returns_rows=insert_returns_rows,
+            explicit_key_fields=explicit_key_fields,
+            explicit_key_sql=explicit_key_sql,
+            explicit_key_returns_rows=explicit_key_returns_rows,
+            delete_sql=delete_builder.delete().get_sql(self.connection.sql_context),
+            delete_without_tenant_scope_sql=delete_without_tenant_scope_sql,
+            insert_rules=RowWriteRules.get(self.model, WriteType.INSERT, None, SAVE_METHOD_NAME),
+        )
 
     def _where_by_columns(self, builder: QueryBuilder, db_columns: Iterable[str]) -> QueryBuilder:
         """Adds one ``column = $N`` condition per column, in the order of ``db_columns`` - the WHERE of a
@@ -156,25 +140,18 @@ class InstanceWriter:
         """
         return Parameter(index=position + 1)
 
-    def _pk_db_columns(self) -> list[str]:
-        """The DB column name(s) making up the PK, in ``primary_key_attribute`` order - one for a single-column
-        PK, one per column for a composite one."""
-        if self.model._meta.has_composite_primary_key:
-            return [self.model._meta.fields_db_projection[name] for name in self.model._meta.primary_key_attribute]
-        return [self.model._meta.db_pk_column]
-
     def _deleted_row_db_columns(self) -> list[str]:
         """The DB columns a DELETE of one row finds it by - the PK's, and
         ``Meta.optimistic_lock_field``'s: a row changed since the instance read it isn't deleted."""
-        pk_db_columns = self._pk_db_columns()
+        pk_db_columns = list(KeyColumns.get_source_columns(self.model._meta))
         optimistic_lock_field = self.model._meta.optimistic_lock_field
         if optimistic_lock_field is None:
             return pk_db_columns
         return [*pk_db_columns, self.model._meta.fields_db_projection[optimistic_lock_field]]
 
-    def _deleted_row_where_values(self, instance: type[Model] | Model) -> list[Any]:
+    def _deleted_row_where_values(self, instance: Model) -> list[Any]:
         """The bound values of ``_deleted_row_db_columns()``, in its order."""
-        values = self._pk_where_values(instance)
+        values = list(KeyColumns.get_db_values(self.model._meta, instance, self.connection.dialect.types))
         optimistic_lock_field = self.model._meta.optimistic_lock_field
         if optimistic_lock_field is not None:
             values.append(
@@ -186,25 +163,13 @@ class InstanceWriter:
             )
         return values
 
-    def _pk_where_values(self, instance: type[Model] | Model) -> list[Any]:
-        """The bound value(s) for a WHERE-by-pk clause, in the same column order
-        ``get_update_sql``/``delete_query`` build it in - one value for a single-column PK, one
-        per column (in ``primary_key_attribute`` order) for a composite one."""
-        if self.model._meta.has_composite_primary_key:
-            pk_values = cast("tuple[Any, ...]", instance.pk)
-            return [
-                self.connection.dialect.types.get_db_value(self.model._meta.fields_map[pk_name], pk_value, instance)
-                for pk_name, pk_value in zip(self.model._meta.primary_key_attribute, pk_values, strict=True)
-            ]
-        return [self.connection.dialect.types.get_db_value(self.model._meta.pk, instance.pk, instance)]
-
     def _tenant_scope_where(
         self,
         table: Table,
         next_index: int,
         parameter_factory: Callable[[int], Term] | None = None,
         tenant_value_count: int = 1,
-    ) -> tuple[Criterion | None, int]:
+    ) -> Criterion | None:
         """The condition limiting a single-row write to the tenants of the model's active scope -
         whatever tenant the instance itself claims.
 
@@ -220,17 +185,16 @@ class InstanceWriter:
             tenant_value_count: How many tenant values the scope has - 1 for one or none.
 
         Returns:
-            The condition and the next free position; ``(None, next_index)`` without
-            ``Meta.tenant_field``.
+            The condition, or None without ``Meta.tenant_field``.
         """
         tenant_field = self.model._meta.tenant_field
         if not tenant_field:
-            return None, next_index
+            return None
         parameter = parameter_factory or self.parameter
         tenant_db_column = self.model._meta.fields_db_projection[tenant_field]
         if tenant_value_count > 1:
             placeholders = [parameter(next_index + position) for position in range(tenant_value_count)]
-            return table[tenant_db_column].isin(placeholders), next_index + tenant_value_count
+            return table[tenant_db_column].isin(placeholders)
         second_parameter: Term = parameter(next_index + 1)
         # A parameter used only in IS NULL gives the database no type to infer - the dialect names
         # the cast.
@@ -240,7 +204,7 @@ class InstanceWriter:
         if sql_type is not None:
             second_parameter = Cast(second_parameter, RawSQLTerm(sql_type))
         condition = (table[tenant_db_column] == parameter(next_index)) | second_parameter.isnull()
-        return condition, next_index + 2
+        return condition
 
     def _get_tenant_scope_guard(self) -> tuple[int, list[Any]]:
         """What ``_tenant_scope_where()`` is built and bound with for the model's active scope.
@@ -263,11 +227,11 @@ class InstanceWriter:
             return len(db_values), db_values
         return 1, db_values * 2
 
-    def _get_insert_values(self, obj: Model, columns: list[str]) -> list[Any]:
-        """The values an INSERT of ``obj`` binds.
+    def _get_instance_values(self, obj: Model, columns: Sequence[str]) -> list[Any]:
+        """The values a write of ``obj`` binds through the shared field serializer.
 
         Args:
-            obj: The obj inserted.
+            obj: The obj written.
             columns: The column list, one of this writer's own.
 
         Returns:
@@ -276,13 +240,13 @@ class InstanceWriter:
         return BulkWriteBatches.serialize_instance(self.model, self.connection.dialect.types, obj, columns)
 
     @staticmethod
-    def _get_insert_sql(
+    def _get_insert_template(
         insert_statement: InsertStatement,
-        field_names: list[str],
+        field_names: Sequence[str],
         *,
         primary_key_given: bool,
-        omitted_field_names: list[str] | tuple[str, ...] = (),
-    ) -> str:
+        omitted_field_names: Sequence[str] | tuple[str, ...] = (),
+    ) -> tuple[str, bool]:
         """The single-row INSERT of fields, returning what the database gives the row.
 
         Args:
@@ -292,21 +256,23 @@ class InstanceWriter:
             omitted_field_names: Fields left to their database default.
 
         Returns:
-            The SQL.
+            The SQL and whether it returns rows.
         """
         columns = insert_statement.get_columns(field_names)
-        return str(
+        returning = insert_statement.get_returning_columns(
+            primary_key_given=primary_key_given, omitted_field_names=omitted_field_names
+        )
+        sql = str(
             insert_statement.get_query(
                 columns,
                 [insert_statement.get_parameter_row(len(columns))] if columns else [],
-                returning=insert_statement.get_returning_columns(
-                    primary_key_given=primary_key_given, omitted_field_names=omitted_field_names
-                ),
+                returning=returning,
             )
         )
+        return sql, bool(returning) and insert_statement.connection.features.supports_returning
 
     def hide_sensitive_values(
-        self, values: list[Any], field_names: list[str], parameter_layout: list[Any] | None = None
+        self, values: list[Any], field_names: Sequence[str], parameter_layout: list[Any] | None = None
     ) -> list[Any]:
         """The values of a write, the ``sensitive=True`` fields' never shown (``QueryParameters``).
 
@@ -331,23 +297,6 @@ class InstanceWriter:
             }
         return QueryParameters(values, hidden_positions)
 
-    async def _execute_insert_statement(self, query: str, values: list[Any]) -> Any:
-        """Runs one INSERT.
-
-        Args:
-            query: The INSERT, with a RETURNING clause when the database generates columns.
-            values: Its parameters.
-
-        Returns:
-            The row the INSERT returned; without one, the key the database gave the row where the
-            driver reports it, else None.
-        """
-        result = await self.connection.execute(query, values, returns_rows=True)
-        rows = result[1]
-        if rows:
-            return rows[0]
-        return result.inserted_id
-
     def _process_insert_result(self, obj: Model, results: Any) -> None:
         """Sets the values an INSERT returned - the columns the database generated - on the
         obj.
@@ -370,8 +319,8 @@ class InstanceWriter:
         ReturnedValues.apply_row(self.model, self.connection.dialect.types, obj, results, connection=self.connection)
 
     def _get_insert_omitting_defaults(
-        self, obj: Model, field_names: list[str], primary_key_given: bool
-    ) -> tuple[str, list[Any]]:
+        self, obj: Model, field_names: Sequence[str], primary_key_given: bool
+    ) -> tuple[str, list[Any], bool]:
         """The INSERT of an obj leaving the fields holding ``DatabaseDefault`` to the database, and
         its values - a refused value raises here.
 
@@ -381,28 +330,24 @@ class InstanceWriter:
             primary_key_given: The obj carries its primary key.
 
         Returns:
-            The SQL and its values.
+            The SQL, its values and whether it returns rows.
         """
         omitted_field_names = [
             field_name for field_name in field_names if isinstance(getattr(obj, field_name), DatabaseDefault)
         ]
         written_field_names = [field_name for field_name in field_names if field_name not in omitted_field_names]
-        fields_map = self.model._meta.fields_map
-        get_db_value = self.connection.dialect.types.get_db_value
-        values = [
-            get_db_value(fields_map[field_name], getattr(obj, field_name), obj) for field_name in written_field_names
-        ]
+        values = self._get_instance_values(obj, written_field_names)
         if self.model._meta.sensitive_fields:
             values = self.hide_sensitive_values(values, written_field_names)
-        sql = self._get_insert_sql(
+        sql, returns_rows = self._get_insert_template(
             InsertStatement(self.model, self.connection),
             written_field_names,
             primary_key_given=primary_key_given,
             omitted_field_names=omitted_field_names,
         )
-        return sql, values
+        return sql, values, returns_rows
 
-    def _has_db_default_values(self, obj: Model, field_names: list[str]) -> bool:
+    def _has_db_default_values(self, obj: Model, field_names: Sequence[str]) -> bool:
         """Whether a field of the obj holds ``DatabaseDefault``."""
         if not self.model._meta.db_default_db_columns:
             return False
@@ -411,7 +356,7 @@ class InstanceWriter:
                 return True
         return False
 
-    async def execute_insert(self, obj: Model) -> None:
+    async def execute_insert(self, obj: Model) -> WriteOutcome:
         """Inserts the obj's row and sets on it what the database gave the row - where the database
         returns no row, the fields it gave values to are left unloaded.
 
@@ -424,52 +369,50 @@ class InstanceWriter:
         """
         capture_needs = self.model._meta.change_capture_needs
         if capture_needs is not None and self.captures_changes and capture_needs.captures(RowOperation.INSERT):
-            await WriteSteps.run_whole(self.connection, InstanceCapture.insert(self, obj, capture_needs))
-            return
+            return await WriteSteps.run_whole(self.connection, InstanceCapture.insert(self, obj, capture_needs))
+        if self.connection.is_transaction_client:
+            WriteFinalizer.remember_persistence(obj, self.connection)
         features = self.connection.features
-        series_keyed: list[Model] = []
         stamped_values = InstanceValues()
         if not features.supports_returning:
             self.raise_if_key_left_to_database(obj)
         try:
-            self.insert_rules.stamp((obj,), stamped_values)
+            self.templates.insert_rules.stamp((obj,), stamped_values)
             if features.takes_keys_before_insert and not obj._custom_generated_pk:
-                series_keyed = await GeneratedKeys.assign(self.model, self.connection, (obj,))
+                stamped_values.capture((obj,), ("_custom_generated_pk", "pk"))
+                await GeneratedKeys.assign(self.model, self.connection, (obj,))
             primary_key_given = obj._custom_generated_pk
-            field_names, insert_sql = (
-                (self.regular_columns_all, self.insert_query_all)
+            field_names, insert_sql, returns_rows = (
+                (
+                    self.templates.explicit_key_fields,
+                    self.templates.explicit_key_sql,
+                    self.templates.explicit_key_returns_rows,
+                )
                 if primary_key_given
-                else (self.regular_columns, self.insert_query)
+                else (self.templates.insert_fields, self.templates.insert_sql, self.templates.insert_returns_rows)
             )
             if self._has_db_default_values(obj, field_names):
-                omitting_sql, omitting_values = self._get_insert_omitting_defaults(obj, field_names, primary_key_given)
-                insert_result = await self._execute_insert_statement(omitting_sql, omitting_values)
-                stamped_values.keep(self.connection)
-                self._process_insert_result(obj, insert_result)
-                if not features.supports_returning:
-                    ReturnedValues.leave_unloaded(
-                        self.model, (obj,), self._get_defaulted_columns(obj), connection=self.connection
-                    )
-                return
-            insert_values = self._get_insert_values(obj, field_names)
-            if self.model._meta.sensitive_fields:
-                insert_values = self.hide_sensitive_values(insert_values, field_names)
-            # _execute_insert_statement(), written out - one coroutine less for every create().
-            result = await self.connection.execute(insert_sql, insert_values, returns_rows=True)
-        except BaseException:
-            # A failed write leaves the obj as it was - without the stamps it took or the key a series
-            # gave it.
-            stamped_values.restore()
-            if series_keyed:
-                GeneratedKeys.take_back(self.model, series_keyed)
+                insert_sql, insert_values, returns_rows = self._get_insert_omitting_defaults(
+                    obj, field_names, primary_key_given
+                )
+            else:
+                insert_values = self._get_instance_values(obj, field_names)
+                if self.model._meta.sensitive_fields:
+                    insert_values = self.hide_sensitive_values(insert_values, field_names)
+            defaulted_columns = self._get_defaulted_columns(obj) if not features.supports_returning else ()
+            result = await BoundWrite.execute_command(
+                self.connection, WriteStatement(insert_sql, insert_values, returns_rows=returns_rows)
+            )
+        except BaseException as error:
+            WriteFinalizer.restore_failed_values(stamped_values, error)
             raise
-        stamped_values.keep(self.connection)
+        outcome = WriteOutcome(RowOperation.INSERT, result[0])
+        WriteFinalizer.settle_values(stamped_values, self.connection, outcome)
         rows = result[1]
         self._process_insert_result(obj, rows[0] if rows else result.inserted_id)
-        if not features.supports_returning and self.model._meta.recomputed_db_fields:
-            ReturnedValues.leave_unloaded(
-                self.model, (obj,), self.model._meta.recomputed_db_fields, connection=self.connection
-            )
+        if defaulted_columns:
+            ReturnedValues.leave_unloaded(self.model, (obj,), defaulted_columns, connection=self.connection)
+        return outcome
 
     def raise_if_key_left_to_database(self, obj: Model) -> None:
         """Refuses an obj whose primary key takes a field's ``db_default`` on a database returning no
@@ -552,7 +495,7 @@ class InstanceWriter:
             guarded_value_count = tenant_value_count if tenant_value_count > 1 else 1
             statement_key = (self.statements_key, False, True, guarded_value_count, fields_tuple)
         if not expressions:
-            cached_sql = StatementPlans.instance_updates.get_for_model(self.model, statement_key)
+            cached_sql = StatementPlans.instance_updates.get_model_bucket(self.model).get(statement_key)
             if cached_sql is not None:
                 return cached_sql, None
         query = self._build_update_query(
@@ -563,10 +506,10 @@ class InstanceWriter:
             only_live_row,
         )
         if not expressions:
-            sql = query.get_sql()
-            StatementPlans.instance_updates[(self.model, *statement_key)] = sql
+            sql = query.get_sql(self.connection.sql_context)
+            StatementPlans.instance_updates.get_model_bucket(self.model)[statement_key] = sql
             return sql, None
-        sql, parameter_layout = query.get_parameterized_sql()
+        sql, parameter_layout = query.get_parameterized_sql(self.connection.sql_context)
         return sql, parameter_layout
 
     def _build_update_query(
@@ -620,7 +563,7 @@ class InstanceWriter:
                 )
                 query = query.set(db_column, expression_term)
 
-        for pk_db_column in self._pk_db_columns():
+        for pk_db_column in KeyColumns.get_source_columns(meta):
             query = query.where(table[pk_db_column] == parameter(parameter_index))
             parameter_index += 1
         if optimistic_lock_field := meta.optimistic_lock_field:
@@ -632,7 +575,7 @@ class InstanceWriter:
             parameter_index += 1
 
         if apply_active_tenant_scope_guard:
-            tenant_condition, _ = self._tenant_scope_where(table, parameter_index, parameter, tenant_value_count)
+            tenant_condition = self._tenant_scope_where(table, parameter_index, parameter, tenant_value_count)
             if tenant_condition is not None:
                 query = query.where(tenant_condition)
         if only_live_row:
@@ -647,12 +590,12 @@ class InstanceWriter:
 
     async def execute_update(
         self,
-        instance: type[Model] | Model,
+        instance: Model,
         update_fields: Iterable[str] | None,
         apply_active_tenant_scope_guard: bool = True,
         only_live_row: bool = False,
         write_type: WriteType = WriteType.UPDATE,
-    ) -> int | None:
+    ) -> WriteOutcome:
         """Updates the instance's row.
 
         Args:
@@ -666,8 +609,8 @@ class InstanceWriter:
                 ``delete()``/``restore()``.
 
         Returns:
-            The number of matched rows; ``None`` when there was nothing to write, or the database doesn't
-            report how many rows a statement wrote (``Features.reports_written_row_count``).
+            The write outcome. An unknown row count differs from an operation that
+            had no writable columns and sent no statement.
 
         Raises:
             QueryError: ``update_fields`` names a field the update can't set.
@@ -680,7 +623,7 @@ class InstanceWriter:
                 self.connection,
                 InstanceCapture.update(
                     self,
-                    instance,  # type: ignore[arg-type]
+                    instance,
                     update_fields,
                     capture_needs,
                     apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
@@ -693,15 +636,16 @@ class InstanceWriter:
         effective_fields = [
             field for field in rules.field_names if not isinstance(getattr(instance, field), DatabaseDefault)
         ]
-        model_instance: Model = instance  # type: ignore[assignment]
-        effective_fields = await self._get_fields_without_fixed(model_instance, effective_fields, update_fields)
+        effective_fields = await self._get_fields_without_fixed(instance, effective_fields, update_fields)
         if not effective_fields:
-            return None
+            return WriteOutcome(RowOperation.UPDATE, None, performed=False)
 
+        if self.connection.is_transaction_client:
+            WriteFinalizer.remember_persistence(instance, self.connection)
         # The stamps, the blind indexes and the lock bump change the instance before the outcome is known.
         changed_values = InstanceValues()
         try:
-            rules.stamp((model_instance,), changed_values)
+            rules.stamp((instance,), changed_values)
             # auto_now fields are written on every save(), whatever update_fields names.
             effective_fields.extend(name for name in rules.stamped_names if name not in effective_fields)
             optimistic_lock_field = rules.version_field_name
@@ -709,21 +653,20 @@ class InstanceWriter:
             if optimistic_lock_field:
                 # Bumped on every update - the old value, bound as an extra WHERE parameter by
                 # get_update_sql(), makes the UPDATE match only a row nothing changed since.
-                old_version_value = changed_values.bump_optimistic_lock(model_instance, optimistic_lock_field)
+                old_version_value = changed_values.bump_optimistic_lock(instance, optimistic_lock_field)
                 if optimistic_lock_field not in effective_fields:
                     effective_fields.append(optimistic_lock_field)
-            rows = await self._execute_update_statement(
+            command = self._get_update_statement(
                 instance, effective_fields, old_version_value, apply_active_tenant_scope_guard, only_live_row
             )
-            if rows == 0:
-                # Nothing matched (typically a concurrent version conflict) - the row never changed.
-                changed_values.restore()
-            else:
-                changed_values.keep(self.connection)
-            return rows
-        except BaseException:
-            changed_values.restore()
+            result = await BoundWrite.execute_command(self.connection, command)
+        except BaseException as error:
+            WriteFinalizer.restore_failed_values(changed_values, error)
             raise
+        outcome = WriteOutcome(RowOperation.UPDATE, result[0])
+        WriteFinalizer.settle_values(changed_values, self.connection, outcome)
+        self._apply_update_result(instance, result)
+        return outcome
 
     async def _get_fields_without_fixed(
         self, obj: Model, field_names: list[str], update_fields: Iterable[str] | None
@@ -785,29 +728,19 @@ class InstanceWriter:
         Raises:
             QueryError, FieldError: ``update_fields`` names a field the update can't set.
         """
-        key = (None if update_fields is None else tuple(update_fields), write_type)
-        if key == self.update_rules_key and self.update_rules is not None:
-            return self.update_rules
-        if key[0] is None:
-            rules = RowWriteRules.get(self.model, write_type, None, SAVE_METHOD_NAME)
-        else:
-            version_field = self.model._meta.optimistic_lock_field
-            rules = RowWriteRules.get(
-                self.model, write_type, [name for name in key[0] if name != version_field], SAVE_METHOD_NAME
-            )
-        self.update_rules_key = key
-        self.update_rules = rules
-        return rules
+        version_field = self.model._meta.optimistic_lock_field
+        field_names = None if update_fields is None else [name for name in update_fields if name != version_field]
+        return RowWriteRules.get(self.model, write_type, field_names, SAVE_METHOD_NAME)
 
-    async def _execute_update_statement(
+    def _get_update_statement(
         self,
-        instance: type[Model] | Model,
+        instance: Model,
         effective_fields: list[str],
         old_version_value: Any,
         apply_active_tenant_scope_guard: bool,
         only_live_row: bool,
-    ) -> int | None:
-        """Runs the UPDATE of the instance's row and applies the values it returns.
+    ) -> WriteStatement:
+        """Bind the UPDATE completely before sending it to the database.
 
         Args:
             instance: The instance to write.
@@ -818,7 +751,7 @@ class InstanceWriter:
             only_live_row: Write the row only while it isn't soft-deleted.
 
         Returns:
-            The number of matched rows.
+            SQL and converted parameters, including the key, version and tenant guard.
         """
         meta = self.model._meta
         optimistic_lock_field = meta.optimistic_lock_field
@@ -830,9 +763,9 @@ class InstanceWriter:
         value_fields = (
             [field for field in effective_fields if field not in expressions] if expressions else effective_fields
         )
-        values = self._get_update_values(instance, value_fields)
+        values = self._get_instance_values(instance, value_fields)
 
-        values.extend(self._pk_where_values(instance))
+        values.extend(KeyColumns.get_db_values(meta, instance, self.connection.dialect.types))
         if optimistic_lock_field:
             values.append(
                 self.connection.dialect.types.get_db_value(
@@ -859,40 +792,35 @@ class InstanceWriter:
             )
         # Rows come back where get_update_sql() returns the fields the database computes again.
         returns_rows = bool(meta.recomputed_db_fields) and self.connection.features.supports_returning
-        rows, returned_rows = await self.connection.execute(update_sql, values, returns_rows=returns_rows)
-        if (rows is None or rows > 0) and (generated_fields := meta.recomputed_db_fields):
+        return WriteStatement(
+            update_sql,
+            values,
+            returns_rows=returns_rows,
+            recovery=self.connection.get_write_recovery(self.model._meta.basetable),
+        )
+
+    def _apply_update_result(self, instance: Model, result: StatementResult) -> None:
+        """Publish generated values after the write outcome is known.
+
+        A decoding or custom-setter failure here must not undo automatic assignments
+        as if the database statement had failed. Transaction rollback retains its own
+        undo records for all assignments already published.
+        """
+        rows, returned_rows = result
+        if (rows is None or rows > 0) and (generated_fields := self.model._meta.recomputed_db_fields):
             if returned_rows:
                 ReturnedValues.apply_row(
                     self.model,
                     self.connection.dialect.types,
-                    cast("Model", instance),
+                    instance,
                     returned_rows[0],
                     generated_fields,
                     connection=self.connection,
                 )
             elif not self.connection.features.supports_returning:
-                ReturnedValues.leave_unloaded(
-                    self.model, (cast("Model", instance),), generated_fields, connection=self.connection
-                )
-        return rows
+                ReturnedValues.leave_unloaded(self.model, (instance,), generated_fields, connection=self.connection)
 
-    def _get_update_values(self, instance: type[Model] | Model, field_names: list[str]) -> list[Any]:
-        """The values an UPDATE of ``instance`` writes to fields.
-
-        Args:
-            instance: The instance written.
-            field_names: The fields, every one holding a value rather than an expression.
-
-        Returns:
-            One value per field.
-        """
-        return BulkWriteBatches.serialize_instance(  # type: ignore[type-var]
-            self.model, self.connection.dialect.types, instance, field_names
-        )
-
-    async def execute_delete(
-        self, instance: type[Model] | Model, apply_active_tenant_scope_guard: bool = True
-    ) -> int | None:
+    async def execute_delete(self, instance: Model, apply_active_tenant_scope_guard: bool = True) -> int | None:
         """Deletes the instance's row.
 
         Args:
@@ -911,7 +839,7 @@ class InstanceWriter:
                 self.connection,
                 InstanceCapture.delete(
                     self,
-                    cast("Model", instance),
+                    instance,
                     capture_needs,
                     apply_active_tenant_scope_guard=apply_active_tenant_scope_guard,
                 ),
@@ -919,13 +847,22 @@ class InstanceWriter:
         if apply_active_tenant_scope_guard:
             tenant_value_count, tenant_guard_values = self._get_tenant_scope_guard()
             values = self._deleted_row_where_values(instance) + tenant_guard_values
-            query = self.delete_query if tenant_value_count == 1 else self._get_delete_query(tenant_value_count)
+            query = (
+                self.templates.delete_sql if tenant_value_count == 1 else self._get_delete_query(tenant_value_count)
+            )
         else:
             values = self._deleted_row_where_values(instance)
-            query = self.delete_query_without_tenant_scope
+            query = self.templates.delete_without_tenant_scope_sql
         if self.model._meta.sensitive_fields:
             values = self.hide_sensitive_values(values, list(self.model._meta.primary_key_attribute_names))
-        return (await self.connection.execute(query, values, returns_rows=False))[0]
+        return (
+            await self.connection.execute(
+                query,
+                values,
+                returns_rows=False,
+                recovery=self.connection.get_write_recovery(self.model._meta.basetable),
+            )
+        )[0]
 
     def _get_delete_query(self, tenant_value_count: int) -> str:
         """The DELETE of one row guarded by a tenant scope of several values.
@@ -937,18 +874,18 @@ class InstanceWriter:
             The statement.
         """
         statement_key = (self.statements_key, tenant_value_count)
-        query: str | None = StatementPlans.instance_deletes.get_for_model(self.model, statement_key)
+        query: str | None = StatementPlans.instance_deletes.get_model_bucket(self.model).get(statement_key)
         if query is None:
             row_columns = self._deleted_row_db_columns()
             basequery = self.connection.query_class.from_(self.model._meta.basetable)
             builder = self._where_by_columns(basequery, row_columns)
-            tenant_condition, _ = self._tenant_scope_where(
+            tenant_condition = self._tenant_scope_where(
                 self.model._meta.basetable, len(row_columns), tenant_value_count=tenant_value_count
             )
             if tenant_condition is not None:
                 builder = builder.where(tenant_condition)
-            query = str(builder.delete())
-            StatementPlans.instance_deletes[(self.model, *statement_key)] = query
+            query = builder.delete().get_sql(self.connection.sql_context)
+            StatementPlans.instance_deletes.get_model_bucket(self.model)[statement_key] = query
         return query
 
 

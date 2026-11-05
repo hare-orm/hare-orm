@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import heapq
 from collections.abc import Collection, Iterable, Sequence
+from contextlib import suppress
 from copy import copy
+from graphlib import CycleError, TopologicalSorter
 from typing import Any, cast
 
-from hare.classes.comparable_values import ComparableValues
 from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.schema_objects.enum_type import EnumType
+from hare.declarations.declaration_values import DeclarationValues
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.fields.field import Field
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
-from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.migrations.autodetection.constants import (
     COLUMN_CHANGING_OPERATIONS,
     MANY_TO_MANY_THROUGH_TABLE_SWAP_SUFFIX,
@@ -20,7 +22,6 @@ from hare.migrations.autodetection.constants import (
 from hare.migrations.autodetection.diffs.state_model_diff import StateModelDiff
 from hare.migrations.autodetection.operation_sorter import OperationSorter
 from hare.migrations.autodetection.rename_questions import RenameQuestions
-from hare.migrations.autodetection.required_extensions import RequiredExtensions
 from hare.migrations.autodetection.schema_object_operations import SchemaObjectOperations
 from hare.migrations.autodetection.state_signatures import StateSignatures
 from hare.migrations.operations import (
@@ -64,15 +65,12 @@ class OperationGenerator:
             new_state: The state of the current models.
             connection_by_app: Each app's default connection alias - a table of one app is the
                 same table as another app's only when both use the same connection.
-            rename_questions: The answers whether a removed field, model or app's model is renamed
-                or moved - none renamed without them.
+            rename_questions: Answers for candidate renames and moves. Unambiguous field matches
+                by column identity or relation signature need no answer.
         """
         self.old_state = old_state
         self.new_state = new_state
         self.rename_questions = rename_questions or RenameQuestions()
-        # The diffs compare indexes by their resolved key expressions.
-        old_state.build_index_expressions()
-        new_state.build_index_expressions()
         self.connection_by_app = connection_by_app or {}
         #: Populated by generate() - (app, model) now in a selected app -> (app, model) it was
         #: moved from, for every model moved between apps with its table kept as it is.
@@ -257,14 +255,14 @@ class OperationGenerator:
         Returns:
             The through model's table, or None when the model isn't part of `state`.
         """
-        through_key = OperationGenerator._get_through_model_key(many_to_many_field)
+        through_key = OperationGenerator._get_through_model_key(many_to_many_field, state)
         through_model_state = state.models.get(through_key) if through_key is not None else None
         if through_model_state is None:
             return None
         return through_model_state.table or through_model_state.name.lower()
 
     @staticmethod
-    def _get_through_model_key(many_to_many_field: ManyToManyFieldInstance[Any]) -> ModelKey | None:
+    def _get_through_model_key(many_to_many_field: ManyToManyFieldInstance[Any], state: State) -> ModelKey | None:
         """The (app, model name) key of the through model an M2M field declares.
 
         Args:
@@ -273,7 +271,7 @@ class OperationGenerator:
         Returns:
             The through model's key, None for a relation through an automatic table.
         """
-        through_reference = SwappableModelReference.get_model_reference(many_to_many_field.through_model)
+        through_reference = state.get_model_reference(many_to_many_field.through_model)
         if isinstance(through_reference, str):
             return cast("ModelKey", tuple(through_reference.split(".", 1)))
         if through_reference is not None:
@@ -318,6 +316,7 @@ class OperationGenerator:
                     continue
                 swapped_field = copy(old_field)
                 swapped_field.through = f"{rendered_old_field.through}{MANY_TO_MANY_THROUGH_TABLE_SWAP_SUFFIX}"
+                swapped_field.declared_through = swapped_field.through
                 operations.append(AlterField(model_name=new_model_state.name, name=field_name, field=swapped_field))
         return operations
 
@@ -364,9 +363,10 @@ class OperationGenerator:
                 continue
             swapped_field = copy(operation.field)
             swapped_field.through = f"{new_through}{MANY_TO_MANY_THROUGH_TABLE_SWAP_SUFFIX}"
+            swapped_field.declared_through = swapped_field.through
             operations[index] = AlterField(model_name=operation.model_name, name=operation.name, field=swapped_field)
             # The automatic table takes the through model's table name once that model is gone.
-            through_key = self._get_through_model_key(old_field)
+            through_key = self._get_through_model_key(old_field, self.old_state)
             if through_key is not None:
                 operation.generation_dependencies = (
                     OperationDependency.of_model(*through_key, DependencyType.REMOVED),
@@ -375,7 +375,7 @@ class OperationGenerator:
         return final_operations
 
     @staticmethod
-    def _get_relation_target_key(field: Field[Any]) -> ModelKey | None:
+    def _get_relation_target_key(field: Field[Any], state: State) -> ModelKey | None:
         """The (app, model name) key of the model a relation field points at.
 
         Args:
@@ -384,7 +384,7 @@ class OperationGenerator:
         Returns:
             The target's key, or None when the reference isn't an "app.Model" string or a model.
         """
-        reference = SwappableModelReference.get_model_reference(getattr(field, "model_name", None))
+        reference = state.get_model_reference(getattr(field, "model_name", None))
         if not reference:
             return None
         if isinstance(reference, str):
@@ -410,7 +410,7 @@ class OperationGenerator:
                 continue
             if isinstance(field, ManyToManyFieldInstance) and field._generated:
                 continue
-            target_key = cls._get_relation_target_key(field)
+            target_key = cls._get_relation_target_key(field, state)
             # The rule the linking goes by.
             related_name = RelationLinking.get_backward_relation_name(
                 field.related_name, model_state.table or model_state.name.lower(), key[0], model_state.name
@@ -436,10 +436,10 @@ class OperationGenerator:
             for field in model_state.fields.values():
                 if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
                     continue
-                if self._get_relation_target_key(field) == key:
+                if self._get_relation_target_key(field, self.old_state) == key:
                     return True
                 through_reference = (
-                    SwappableModelReference.get_model_reference(field.through_model)
+                    self.old_state.get_model_reference(field.through_model)
                     if isinstance(field, ManyToManyFieldInstance)
                     else None
                 )
@@ -530,7 +530,6 @@ class OperationGenerator:
             name=model_state.name,
             fields=fields,
             options=model_state.options,
-            bases=[base.__name__ for base in model_state.bases],
         )
 
     @staticmethod
@@ -550,14 +549,14 @@ class OperationGenerator:
         key_set = set(keys)
         # Adjacency per FIELD, not just per model - breaking a cycle needs to know exactly
         # which field to defer, not just that model A depends on model B (possibly via
-        # several fields, only one of which need actually be deferred to break the cycle).
+        # several fields, each of which must be deferred when that edge is removed).
         field_dependencies: dict[ModelKey, dict[str, ModelKey]] = {model_key: {} for model_key in keys}
         for key in keys:
             model_state = state.models[key]
             for field_name, field in model_state.fields.items():
                 if not isinstance(field, (ForeignKeyFieldInstance, ManyToManyFieldInstance)):
                     continue
-                dep_key = OperationGenerator._get_relation_target_key(field)
+                dep_key = OperationGenerator._get_relation_target_key(field, state)
                 if dep_key is not None and dep_key in key_set and dep_key != key:
                     field_dependencies[key][field_name] = dep_key
 
@@ -566,36 +565,29 @@ class OperationGenerator:
             for model_key, dependencies_by_field in field_dependencies.items()
         }
 
-        # Kahn's algorithm
+        sorter = TopologicalSorter(dependencies_by_model)
+        with suppress(CycleError):
+            sorter.prepare()
         result: list[ModelKey] = []
-        in_degree = {
-            model_key: len(dependencies_by_field) for model_key, dependencies_by_field in dependencies_by_model.items()
-        }
-        queue = sorted([model_key for model_key, model_dependencies in in_degree.items() if model_dependencies == 0])
+        queue = list(sorter.get_ready())
+        heapq.heapify(queue)
         while queue:
-            node = queue.pop(0)
+            node = heapq.heappop(queue)
             result.append(node)
-            for model_key, model_dependencies in dependencies_by_model.items():
-                if node in model_dependencies:
-                    model_dependencies.discard(node)
-                    in_degree[model_key] -= 1
-                    if in_degree[model_key] == 0:
-                        queue.append(model_key)
-                        queue.sort()
+            sorter.done(node)
+            for ready in sorter.get_ready():
+                heapq.heappush(queue, ready)
 
         # What is left is a cycle among `keys` - one node's dependencies are deferred at a time.
         deferred: list[tuple[ModelKey, str]] = []
-        remaining = {model_key for model_key in keys if model_key not in result}
+        remaining = key_set - set(result)
         while remaining:
-            node = sorted(remaining)[0]
+            node = min(remaining)
             for field_name, dep_key in sorted(field_dependencies[node].items()):
-                if dep_key in dependencies_by_model[node]:
+                if dep_key in remaining:
                     deferred.append((node, field_name))
-                    dependencies_by_model[node].discard(dep_key)
             result.append(node)
-            remaining.discard(node)
-            for model_key in remaining:
-                dependencies_by_model[model_key].discard(node)
+            remaining.remove(node)
 
         return result, deferred
 
@@ -623,7 +615,7 @@ class OperationGenerator:
     @staticmethod
     def _collect_extensions(state: State, keys: Iterable[ModelKey] | None = None) -> set[str]:
         """Collect every extension name a model in `state` needs on any dialect - a migration file
-        runs on any database (``RequiredExtensions``).
+        runs on any database (``SchemaRequirements``).
 
         Args:
             state: The state to scan.
@@ -632,7 +624,7 @@ class OperationGenerator:
         dialects = DialectRegistry.get_dialects()
         extensions: set[str] = set()
         for key in state.models if keys is None else keys:
-            extensions |= RequiredExtensions.get_for_model_state(state.models[key], dialects)
+            extensions |= state.models[key].get_required_extensions(dialects)
         return extensions
 
     @staticmethod
@@ -787,11 +779,11 @@ class OperationGenerator:
             for relation_name, relation in self.old_state.models[owner_key].fields.items():
                 if not isinstance(relation, ManyToManyFieldInstance):
                     continue
-                through_key = self._get_through_model_key(relation)
+                through_key = self._get_through_model_key(relation, self.old_state)
                 through_model_state = self.old_state.models.get(through_key) if through_key is not None else None
                 if through_key is None or through_model_state is None:
                     continue
-                side_keys = {owner_key, self._get_relation_target_key(relation)}
+                side_keys = {owner_key, self._get_relation_target_key(relation, self.old_state)}
                 through_name = new_names.get(through_key, through_key[1])
                 key_removal_index = next(
                     (
@@ -800,7 +792,8 @@ class OperationGenerator:
                         if isinstance(operation, RemoveField)
                         and operation.model_name == through_name
                         and operation.name in through_model_state.fields
-                        and self._get_relation_target_key(through_model_state.fields[operation.name]) in side_keys
+                        and self._get_relation_target_key(through_model_state.fields[operation.name], self.old_state)
+                        in side_keys
                     ),
                     None,
                 )
@@ -968,7 +961,7 @@ class OperationGenerator:
                 and isinstance(renamed_field, ForeignKeyFieldInstance)
                 and renamed_field.to_field != field.to_field
             ):
-                relation = copy(field)
+                relation = field.snapshot()
                 relation.to_field = renamed_field.to_field
                 changed_relations[field_name] = relation
         if not changed_relations:
@@ -1076,7 +1069,7 @@ class OperationGenerator:
         """
         views = self._get_views(self.old_state, old_keys)
         new_declarations = {
-            view.name: ComparableValues.get_declaration_key(view, without_name=True)
+            view.name: DeclarationValues.get_declaration_key(view, without_name=True)
             for view in self._get_views(self.new_state, new_keys)
         }
         # A view whose declaration changes is dropped and created again - the views reading it with it.
@@ -1084,7 +1077,7 @@ class OperationGenerator:
             view.name
             for view in views
             if view.name in new_declarations
-            and ComparableValues.get_declaration_key(view, without_name=True) != new_declarations[view.name]
+            and DeclarationValues.get_declaration_key(view, without_name=True) != new_declarations[view.name]
         }
         while True:
             new_names = {

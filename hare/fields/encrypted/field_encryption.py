@@ -8,7 +8,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -19,25 +21,34 @@ from hare.fields.encrypted.constants import (
     REENCRYPT_BATCH_SIZE,
     UNENCRYPTABLE_SURROGATE_MESSAGE,
 )
+from hare.fields.encrypted.encryption_keyring import EncryptionBinding, EncryptionKeyring
 from hare.query.scopes.row_visibility import RowVisibility
 
 if TYPE_CHECKING:
     from cryptography.fernet import MultiFernet
 
+    from hare.core.hare_context import HareContext
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
 
 
 class FieldEncryption:
-    """Process-wide Fernet key holder shared by every encrypted field."""
+    """Application keyrings and execution-local snapshots for encrypted field conversions."""
 
     #: ``cryptography.fernet``, imported by the first ``get_fernet_module()`` rather than with hare.
     fernet_module: ClassVar[ModuleType | None] = None
-    fernet: ClassVar[MultiFernet | None] = None
-    #: The HMAC key of the blind indexes.
-    blind_index_key: ClassVar[bytes | None] = None
+    default_keyring: ClassVar[EncryptionKeyring | None] = None
+    binding: ClassVar[ContextVar[EncryptionBinding | None]] = ContextVar("hare_encryption_binding", default=None)
 
     @classmethod
-    def configure(cls, secret_key: str, previous_keys: Sequence[str] = (), blind_index_key: str | None = None) -> None:
+    def configure(
+        cls,
+        secret_key: str,
+        previous_keys: Sequence[str] = (),
+        blind_index_key: str | None = None,
+        *,
+        context: HareContext | None = None,
+    ) -> None:
         """Derives the field-encryption keys: values are encrypted with ``secret_key`` and
         decrypted with it or any of ``previous_keys``; blind indexes are HMACs with
         ``blind_index_key``.
@@ -49,6 +60,8 @@ class FieldEncryption:
                 until ``FieldEncryption.reencrypt()`` writes them with ``secret_key``.
             blind_index_key: The secret of the blind indexes; derived from ``secret_key`` when not
                 given.
+            context: The application to configure. Defaults to the active application; outside
+                a context, configures the default captured by subsequently created applications.
 
         Raises:
             ConfigurationError: A secret isn't a non-empty string, or ``cryptography`` isn't
@@ -61,24 +74,58 @@ class FieldEncryption:
             raise ConfigurationError("FieldEncryption.configure() needs non-empty string secrets")
         if blind_index_key is not None and not (isinstance(blind_index_key, str) and blind_index_key):
             raise ConfigurationError("FieldEncryption.configure() needs a non-empty string blind_index_key")
-        cls.blind_index_key = (
+        index_key = (
             hashlib.sha256(blind_index_key.encode()).digest()
             if blind_index_key is not None
             else hashlib.sha256(BLIND_INDEX_KEY_DERIVATION_PREFIX + secret_key.encode()).digest()
         )
         fernet_module = cls.get_fernet_module()
-        cls.fernet = fernet_module.MultiFernet(
+        fernet = fernet_module.MultiFernet(
             [
                 fernet_module.Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
                 for secret in secrets
             ]
         )
+        cls.set_keyring(EncryptionKeyring(fernet, index_key), context)
 
     @classmethod
-    def reset(cls) -> None:
-        """Forgets the configured key."""
-        cls.fernet = None
-        cls.blind_index_key = None
+    def set_keyring(cls, keyring: EncryptionKeyring | None, context: HareContext | None = None) -> None:
+        """Replace the selected application's keys without modifying active conversions."""
+        from hare.core.hare_context import HareContext
+
+        context = context if context is not None else HareContext.get_current()
+        if context is None:
+            cls.default_keyring = keyring
+        else:
+            context.encryption_keyring = keyring
+
+    @classmethod
+    def get_binding(cls) -> EncryptionBinding:
+        """Capture the active application's keyring, inheriting a containing conversion."""
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.get_current()
+        application = None if context is None else context.identity
+        binding = cls.binding.get()
+        if binding is not None and binding.application is application:
+            return binding
+        return EncryptionBinding(application, cls.default_keyring if context is None else context.encryption_keyring)
+
+    @classmethod
+    @contextmanager
+    def bind(cls) -> Generator[EncryptionBinding]:
+        """Use one keyring for a complete value conversion, including user encoders."""
+        binding = cls.get_binding()
+        token = cls.binding.set(binding)
+        try:
+            yield binding
+        finally:
+            cls.binding.reset(token)
+
+    @classmethod
+    def reset(cls, *, context: HareContext | None = None) -> None:
+        """Forget the selected application's keys; existing executions keep their snapshot."""
+        cls.set_keyring(None, context)
 
     @classmethod
     def get_blind_index(cls, plaintext: str) -> str:
@@ -93,12 +140,13 @@ class FieldEncryption:
         Raises:
             ConfigurationError: No key was configured.
         """
-        if cls.blind_index_key is None:
+        keyring = cls.get_binding().keyring
+        if keyring is None:
             raise ConfigurationError(
                 "A blind index was computed before an encryption key was configured - call "
                 "hare.fields.encrypted.field_encryption.FieldEncryption.configure(secret_key) at startup."
             )
-        return hmac.new(cls.blind_index_key, cls.get_plaintext_bytes(plaintext), hashlib.sha256).hexdigest()
+        return hmac.new(keyring.blind_index_key, cls.get_plaintext_bytes(plaintext), hashlib.sha256).hexdigest()
 
     @classmethod
     def get_fernet_module(cls) -> ModuleType:
@@ -126,13 +174,14 @@ class FieldEncryption:
             ConfigurationError: ``cryptography`` isn't installed, or no key was configured.
         """
         cls.get_fernet_module()
-        if cls.fernet is None:
+        keyring = cls.get_binding().keyring
+        if keyring is None:
             raise ConfigurationError(
                 "An encrypted field was used before an encryption key was configured - call "
                 "hare.fields.encrypted.field_encryption.FieldEncryption.configure(secret_key) at startup, "
                 "before reading or writing any EncryptedTextField/EncryptedJSONField."
             )
-        return cls.fernet
+        return keyring.fernet
 
     @classmethod
     def encrypt(cls, plaintext: str) -> str:
@@ -192,7 +241,12 @@ class FieldEncryption:
             ) from error
 
     @classmethod
-    async def reencrypt(cls, *models: type[Model], batch_size: int = REENCRYPT_BATCH_SIZE) -> int:
+    async def reencrypt(
+        cls,
+        *models: type[Model],
+        batch_size: int = REENCRYPT_BATCH_SIZE,
+        using: str | DatabaseClient | None = None,
+    ) -> int:
         """Writes every encrypted value of ``models`` with the current key - after
         ``configure(new_secret, previous_keys=[old_secret])``; once it has run, the old secret can be
         dropped. Soft-deleted rows and every tenant's are included, a batch per transaction, ordered by
@@ -201,6 +255,8 @@ class FieldEncryption:
         Args:
             models: The models.
             batch_size: The rows read and written at once.
+            using: The connection used for both reading and writing. Defaults to each model's
+                write connection, so replica routing cannot split the rotation.
 
         Returns:
             How many rows were written.
@@ -210,14 +266,26 @@ class FieldEncryption:
             QueryError: ``batch_size`` isn't a positive int.
         """
         # Deferred: the query layer imports the fields, which import this module.
-        from hare.query.scopes.row_scopes import RowScopes
-        from hare.transactions.transactions import Transactions
+        from hare.query.execution.query_execution import QueryExecution
 
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
             raise QueryError(
                 f"FieldEncryption.reencrypt() needs a positive int batch_size, got "
                 f"{ValueDescriptions.get_shown_value(batch_size)}"
             )
+        return await QueryExecution.run_operation((), lambda: cls.reencrypt_models(models, batch_size, using))
+
+    @classmethod
+    async def reencrypt_models(
+        cls,
+        models: Sequence[type[Model]],
+        batch_size: int,
+        using: str | DatabaseClient | None,
+    ) -> int:
+        """Rotate every batch under the execution's captured keyring and selected connection."""
+        from hare.core.connections.connections import Connections
+        from hare.query.scopes.row_scopes import RowScopes
+
         written = 0
         # A model given twice is written once.
         for model in dict.fromkeys(models):
@@ -229,19 +297,24 @@ class FieldEncryption:
             if not encrypted_field_names:
                 continue
             model._meta.raise_if_no_primary_key(f"FieldEncryption.reencrypt() of {model.__name__}")
-            rows = RowScopes.get_base_queryset(model, RowVisibility(all_tenants=True, include_deleted=True))
+            connection = Connections.get_client(using) or model.get_connection(for_write=True)
+            rows = RowScopes.get_base_queryset(model, RowVisibility(all_tenants=True, include_deleted=True)).using(
+                connection
+            )
             batch: list[Any] = []
             async for row in rows.order_by(*model._meta.primary_key_attribute_names).iterator(chunk_size=batch_size):
                 batch.append(row)
                 if len(batch) == batch_size:
-                    written += await cls.write_batch(model, batch, encrypted_field_names, Transactions)
+                    written += await cls.write_batch(model, batch, encrypted_field_names, connection)
                     batch = []
             if batch:
-                written += await cls.write_batch(model, batch, encrypted_field_names, Transactions)
+                written += await cls.write_batch(model, batch, encrypted_field_names, connection)
         return written
 
     @staticmethod
-    async def write_batch(model: type[Model], rows: list[Any], field_names: list[str], transactions: Any) -> int:
+    async def write_batch(
+        model: type[Model], rows: list[Any], field_names: list[str], connection: DatabaseClient
+    ) -> int:
         """Writes the encrypted fields of a batch of rows in one transaction - as they are on a
         database without transactions.
 
@@ -249,7 +322,7 @@ class FieldEncryption:
             model: The rows' model.
             rows: The rows, read (and so decrypted) with any configured key.
             field_names: The encrypted fields.
-            transactions: ``Transactions``.
+            connection: The connection selected for this model's rotation.
 
         Returns:
             How many rows were written.
@@ -258,10 +331,6 @@ class FieldEncryption:
         from hare.query.scopes.row_scopes import RowScopes
 
         queryset = RowScopes.get_base_queryset(model, RowVisibility(all_tenants=True, include_deleted=True))
-        # A database without transactions writes the batch as it is.
-        if not model._meta.connection.features.supports_transactions:
-            await queryset.bulk_update(rows, fields=field_names)
-            return len(rows)
-        async with transactions.atomic(model._meta.default_connection):
-            await queryset.bulk_update(rows, fields=field_names)
+        async with connection._in_transaction() as transaction:
+            await queryset.using(transaction).bulk_update(rows, fields=field_names)
         return len(rows)

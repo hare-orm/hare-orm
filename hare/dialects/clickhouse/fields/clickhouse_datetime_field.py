@@ -29,7 +29,8 @@ TDatetime = TypeVar("TDatetime", datetime.datetime, datetime.datetime | None)
 class ClickhouseDatetimeField(DatetimeField[TDatetime]):
     """A moment as ClickHouse's own types keep it: ``DateTime`` - whole seconds from 1970 to 2106 -
     without ``precision``, ``DateTime64(precision)`` - digits after the second, from 1900 to 2299 -
-    with it; in the column's ``timezone``. A written moment is rounded to the column's precision, as a
+    with it; precision 9 ends at 2262-04-11 23:47:16.854775 UTC for Python's microsecond values.
+    Values use the column's ``timezone``. A written moment is rounded to the column's precision, as a
     ``DecimalField`` rounds to its places. ``DatetimeField`` writes ``DateTime64(6, 'UTC')``.
 
     Args:

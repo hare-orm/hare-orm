@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.connection.connection_option import ConnectionOption
 from hare.dialects.base.connection.connection_options import ConnectionOptions
-from hare.dialects.dialect_registry import DialectRegistry
 from hare.dialects.enums import ConnectionOptionType
 from hare.dialects.postgresql.connection.postgresql_driver import PostgresqlDriver
 from hare.dialects.postgresql.constants import POSTGRES_CONNECTION_OPTIONS, POSTGRES_PORT_OPTION
@@ -63,4 +62,4 @@ class RustPgDriver(PostgresqlDriver):
         return {"ssl_mode": mode}
 
 
-DialectRegistry.register_driver(RustPgDriver())
+extension = RustPgDriver.get_contribution

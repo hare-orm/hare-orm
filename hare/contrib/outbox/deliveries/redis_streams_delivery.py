@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from hare.contrib.outbox.brokers.redis_connection import RedisConnection
 from hare.contrib.outbox.deliveries.constants import EVENT_ID_HEADER, REDIS_STREAM_EVENT_FIELD
+from hare.contrib.outbox.deliveries.delivery_result import DeliveryResult
 from hare.contrib.outbox.deliveries.outbox_delivery import OutboxDelivery
 from hare.contrib.outbox.outbox_json_encoding import OutboxJsonEncoding
 from hare.contrib.package_checks import PackageChecks
@@ -47,7 +48,8 @@ class RedisStreamsDelivery(OutboxDelivery):
         self.max_length = max_length
         self.broker_connection = RedisConnection(url, client)
 
-    def get_entry(self, event: OutboxEvent) -> dict[str, str]:
+    @staticmethod
+    def get_entry(event: OutboxEvent) -> dict[str, str]:
         """The stream entry of an event.
 
         Args:
@@ -87,15 +89,18 @@ class RedisStreamsDelivery(OutboxDelivery):
 
     async def deliver_batch(
         self, events: Sequence[OutboxEvent], *, concurrency: int, timeout_seconds: float
-    ) -> list[BaseException | None]:
+    ) -> list[DeliveryResult]:
         pipeline = self.broker_connection.get_client().pipeline(transaction=False)
         for event in events:
             self.add_entry(pipeline, event)
         try:
             results = await asyncio.wait_for(pipeline.execute(raise_on_error=False), timeout_seconds)
         except Exception as error:
-            return [error] * len(events)
-        return [result if isinstance(result, BaseException) else None for result in results]
+            return [DeliveryResult(event.id, error) for event in events]
+        return [
+            DeliveryResult(event.id, result if isinstance(result, BaseException) else None)
+            for event, result in zip(events, results, strict=True)
+        ]
 
     async def close(self) -> None:
         await self.broker_connection.close()

@@ -153,8 +153,7 @@ class InstanceDeletion:
             # looked for up front.
             await DeletionCollector.check_protected_transitively(type(obj), [obj.pk], connection)
         if obj._meta.soft_delete_field:
-            # One transaction for the cascade and this obj's own UPDATE - they succeed or fail
-            # together.
+            # The cascade on this connection and the obj's UPDATE share a transaction where supported.
             deleted_at = CascadeDeletion.get_deleted_at()
             async with connection._in_transaction() as transaction_connection:
                 soft_delete_values = await RelatedRows.lock_soft_delete_values(

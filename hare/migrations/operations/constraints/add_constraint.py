@@ -6,6 +6,7 @@ from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.exceptions import ConfigurationError
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.schema_objects.add_schema_object import AddSchemaObject
@@ -111,9 +112,10 @@ class AddConstraint(AddSchemaObject):
         if not state_editor:
             return
         self.raise_if_table_options_unsupported(app_label, new_state, state_editor)
-        await state_editor.constraint_statements.add_unique_constraint_using_index(
+        plan = state_editor.constraint_statements.get_unique_constraint_using_index_plan(
             self._model(new_state, app_label), cast("UniqueConstraint", self.constraint), self.using_index
         )
+        await plan.execute(state_editor)
 
     async def database_backward(
         self,
@@ -122,9 +124,15 @@ class AddConstraint(AddSchemaObject):
         new_state: State,
         state_editor: BaseSchemaEditor | None = None,
     ) -> None:
-        await super().database_backward(app_label, old_state, new_state, state_editor)
-        if self.using_index is None or not state_editor:
+        if self.using_index is None:
+            await super().database_backward(app_label, old_state, new_state, state_editor)
             return
+        if not state_editor:
+            return
+        self.check_can_run(state_editor)
         # Dropping the constraint dropped the index it took over - built again, for whatever
         # removes it going further back.
-        await state_editor.add_index(self._model(new_state, app_label), self.get_used_index(new_state, app_label))
+        model = self._model(new_state, app_label)
+        removal = state_editor.get_remove_constraint_plan(model, self.constraint)
+        restoration = state_editor.get_add_index_plan(model, self.get_used_index(new_state, app_label))
+        await SchemaChangePlan((*removal.steps, *restoration.steps)).execute(state_editor)

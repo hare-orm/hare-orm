@@ -207,19 +207,29 @@ class OnlyDeferFields:
         Args:
             query: The model rows query.
         """
-        relation_names = query._prefetch_map.keys() | query._prefetch_queries.keys()
-        required = OnlyDeferFields.get_prefetch_key_field_names(query.model, relation_names)
+        return OnlyDeferFields.get_prefetch_required_fields(
+            query.model, query._fields_for_select, query._prefetch_map, query._prefetch_queries
+        )
+
+    @staticmethod
+    def get_prefetch_required_fields(
+        model: type[Model],
+        fields_for_select: Iterable[str],
+        prefetch_map: dict[str, set[Any]],
+        prefetch_queries: dict[str, Any],
+    ) -> set[str]:
+        """Select the key columns needed by a request, including paths already loaded by only()."""
+        relation_names = prefetch_map.keys() | prefetch_queries.keys()
+        required = OnlyDeferFields.get_prefetch_key_field_names(model, relation_names)
         loaded_paths = set()
-        for expression in query._fields_for_select:
+        for expression in fields_for_select:
             relation_path = expression.rpartition("__")[0]
             while relation_path:
                 loaded_paths.add(relation_path)
                 relation_path = relation_path.rpartition("__")[0]
-        for relation_name, nested_lookups in query._prefetch_map.items():
+        for relation_name, nested_lookups in prefetch_map.items():
             required.update(
-                OnlyDeferFields.get_nested_prefetch_field_paths(
-                    query.model, relation_name, nested_lookups, loaded_paths
-                )
+                OnlyDeferFields.get_nested_prefetch_field_paths(model, relation_name, nested_lookups, loaded_paths)
             )
         return required
 

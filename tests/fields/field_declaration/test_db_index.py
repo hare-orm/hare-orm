@@ -67,10 +67,10 @@ def test_index_repr():
 
 @pytest.mark.asyncio
 async def test_model_with_indexes_meta(db):
-    assert ModelWithIndexes._meta.indexes == [
+    assert ModelWithIndexes._meta.indexes == (
         Index(fields=("f1", "f2")),
         Index(fields=("f3",), name="model_with_indexes__f3"),
-    ]
+    )
     assert ModelWithIndexes._meta.fields_map["id"].index
     assert ModelWithIndexes._meta.fields_map["indexed"].index
     assert ModelWithIndexes._meta.fields_map["unique_indexed"].unique

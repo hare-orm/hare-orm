@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.core.caching.cache import Cache
@@ -11,9 +10,8 @@ from hare.query.expressions import ExpressionContext, Q
 from hare.query.plans.description.filter_plan_descriptions import FilterPlanDescriptions
 from hare.query.plans.description.plan_description import PlanDescription
 from hare.query.plans.recording.plan_recording import PlanRecording
-from hare.query.scopes.constants import DESCRIBED_FILTERS_ATTRIBUTE
-from hare.query.scopes.manager_scope import ManagerScope
 from hare.query.scopes.row_scope import RowScope
+from hare.query.scopes.row_scope_binding import RowScopeBinding
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.query.scopes.soft_delete_scope import SoftDeleteScope
 from hare.query.scopes.tenants.tenant_scope import TenantScope
@@ -36,26 +34,14 @@ class RowScopes:
         model: The model.
     """
 
-    #: The model and visibility a query made for another query is being built with - read by the
-    #: base Manager.get_queryset(), so an override calling super() gets them. Applies to that
-    #: model's manager only.
-    requested_visibility: ClassVar[ContextVar[tuple[type[Model], RowVisibility] | None]] = ContextVar(
-        "hare_requested_row_visibility", default=None
-    )
-
     #: The description of the filters the scopes last described - ``(visibility, uses_default_scope,
-    #: description)``, kept on the scopes (``DESCRIBED_FILTERS_ATTRIBUTE``): the queries of a model are
+    #: description)``, kept on the scopes in a lifetime bucket: the queries of a model are
     #: described with one visibility over and over.
-    described_filters: ClassVar[Cache[tuple[RowVisibility, bool, Any]]] = Cache(
-        holds_sql=False, keyed_by_model=False, owner_attribute=DESCRIBED_FILTERS_ATTRIBUTE
-    )
+    described_filters: ClassVar[Cache[tuple[RowVisibility, bool, Any]]] = Cache(holds_sql=False)
 
-    __slots__ = ("model", "field_scopes", "scopes", DESCRIBED_FILTERS_ATTRIBUTE, "__weakref__")
+    __slots__ = ("model", "field_scopes", "cache_buckets", "__weakref__")
 
     def __init__(self, model: type[Model]) -> None:
-        # Deferred import: hare.query.managers.manager imports this module.
-        from hare.query.managers.manager import Manager
-
         meta = model._meta
         self.model = model
         #: The scopes filtering by one field of the model, soft-delete first.
@@ -63,15 +49,10 @@ class RowScopes:
             *((SoftDeleteScope(model),) if meta.soft_delete_field else ()),
             *((TenantScope(model),) if meta.tenant_field else ()),
         )
-        #: Every scope - a custom manager's last.
-        self.scopes: tuple[RowScope, ...] = (
-            *self.field_scopes,
-            *((ManagerScope(model),) if Manager.has_custom_get_queryset(model) else ()),
-        )
-        setattr(self, DESCRIBED_FILTERS_ATTRIBUTE, None)
+        self.cache_buckets: dict[int, Any] = {}
 
     def __bool__(self) -> bool:
-        return bool(self.scopes)
+        return bool(self.field_scopes) or self.model._meta.manager.scope is not None
 
     @staticmethod
     @ModelCache.fact()
@@ -121,15 +102,13 @@ class RowScopes:
         Returns:
             The queryset.
         """
-        token = RowScopes.requested_visibility.set((model, visibility.get_for_related_query()))
-        try:
-            return model._meta.manager.get_queryset()
-        finally:
-            RowScopes.requested_visibility.reset(token)
+        queryset = model._meta.manager.create_queryset()
+        queryset._visibility = visibility.get_for_related_query()
+        return queryset
 
     def get_filters(self, visibility: RowVisibility, *, uses_default_scope: bool = True) -> list[tuple[str, Any]]:
-        """The ``(field_name, value)`` filters a query of the model itself runs under - a custom
-        manager's are in the queryset it returned already.
+        """The ``(field_name, value)`` filters a query of the model itself runs under.
+        Provider predicates are bound separately.
 
         Args:
             visibility: Which rows the query asks to see.
@@ -168,12 +147,12 @@ class RowScopes:
             active.
         """
         # A visibility resolved for the active tenant names its tenant - the filters follow from it alone.
-        described: tuple[RowVisibility, bool, Any] | None = getattr(self, DESCRIBED_FILTERS_ATTRIBUTE)
+        described: tuple[RowVisibility, bool, Any] | None = RowScopes.described_filters.get_value(self)
         if described is not None and described[0] is visibility and described[1] is uses_default_scope:
             return described[2]
         description = self.describe_filters(visibility, uses_default_scope=uses_default_scope)
         if visibility.tenant is not AMBIENT_TENANT_NOT_OVERRIDDEN:
-            RowScopes.described_filters.set_owner_value(self, (visibility, uses_default_scope, description))
+            RowScopes.described_filters.set_value(self, (visibility, uses_default_scope, description))
         return description
 
     def describe_filters(
@@ -215,14 +194,16 @@ class RowScopes:
         Raises:
             QueryError: If the model is tenant-scoped, the tenant filter isn't switched off and
                 no tenant is active.
-            ConfigurationError: If the manager's queryset carries state with no condition
-                equivalent.
         """
+        visibility = visibility.get_for_active_tenant()
         condition: Q | None = None
-        for scope in self.scopes:
+        for scope in self.field_scopes:
             scope_condition = scope.get_condition(visibility)
             if scope_condition is not None:
                 condition = scope_condition if condition is None else condition & scope_condition
+        provider_condition = RowScopeBinding.get_condition(self.model._meta.manager.scope, self.model, visibility)
+        if provider_condition is not None:
+            condition = provider_condition if condition is None else condition & provider_condition
         return condition
 
     def get_criterion(
@@ -249,7 +230,7 @@ class RowScopes:
             QueryError: As ``get_condition()``.
             ConfigurationError: The manager's scope crosses a relation, or as ``get_condition()``.
         """
-        if not self.scopes:
+        if not self:
             return None
         condition = self.get_condition(visibility)
         model = self.model
@@ -274,7 +255,7 @@ class RowScopes:
             PlanRecording.record_scope(model, visibility, condition, value_wrapper_references)
         if modifier.joins:
             raise ConfigurationError(
-                f"{model.__name__}'s Meta.manager get_queryset() filters across a relation, which a "
+                f"{model.__name__}'s row scope filters across a relation, which a "
                 f"JOIN to {model.__name__} can't carry in its ON condition - only direct fields of "
                 f"{model.__name__} are supported in its default scope"
             )

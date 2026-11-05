@@ -28,6 +28,7 @@ class DecimalField(Field[TDecimal]):
     """
 
     field_type = Decimal
+    accepted_value_types = (int, float, str)
 
     COLUMN_TYPE_FROM_DIALECT = True
     keeps_native_db_values = True

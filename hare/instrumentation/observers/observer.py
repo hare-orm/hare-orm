@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -22,19 +21,11 @@ class Observer:
         models: The models whose events it gets - their subclasses' too; None for every event.
         model_labels: The ``"app.Model"`` labels of more models whose events it gets - the model
             registered under the label in any context, its subclasses too.
-        is_async: Whether calling it gives a coroutine.
     """
 
     callback: ObserverCallback
     models: frozenset[type[Model]] | None
     model_labels: frozenset[str] = frozenset()
-    is_async: bool = dataclasses.field(init=False)
-
-    def __post_init__(self) -> None:
-        # inspect.iscoroutinefunction() alone misses an object whose __call__ is async.
-        self.is_async = inspect.iscoroutinefunction(self.callback) or inspect.iscoroutinefunction(
-            type(self.callback).__call__
-        )
 
     def observes(self, event: Any) -> bool:
         """Whether the event is one this observer gets.

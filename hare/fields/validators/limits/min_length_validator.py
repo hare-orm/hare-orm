@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ValidationError
 from hare.fields.validators.limits.length_validator import LengthValidator
@@ -12,7 +14,7 @@ class MinLengthValidator(LengthValidator):
         self.min_length = min_length
         super().__init__(message)
 
-    def __call__(self, value: str) -> None:
+    def __call__(self, value: Any) -> None:
         if value is None:
             raise ValidationError("Value must not be None")
         self._validate_type(value)

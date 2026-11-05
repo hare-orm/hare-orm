@@ -1,38 +1,10 @@
-import os
-
 import pytest
-import pytest_asyncio
 
 from hare.exceptions import (
     QueryError,
 )
 from hare.query.expressions import Exists, OuterReference, Subquery
 from tests.shared_models.multi_database_models import Author, Book
-from tests.utils.multi_database_context import MultiDatabaseTestContext
-
-
-@pytest_asyncio.fixture(scope="function")
-async def two_databases():
-    """Two genuinely separate physical connections ("models"/"events"), both schema'd with
-    tests.shared_models.multi_database_models - mirrors the fixture of
-    tests/multiple_connections/test_two_databases.py. Author/Book
-    declare no Meta.app, so they default to app "models"; .using(second_db) below is what
-    forces a Book queryset onto the OTHER, "events" connection explicitly."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with MultiDatabaseTestContext.open(
-        db_url,
-        ["models", "events"],
-        apps={
-            "models": {"models": ["tests.shared_models.multi_database_models"], "default_connection": "models"},
-            "events": {"models": ["tests.shared_models.multi_database_models"], "default_connection": "events"},
-        },
-    ) as ctx:
-        await ctx.generate_schemas()
-
-        db = ctx.connections.get("models")
-        second_db = ctx.connections.get("events")
-
-        yield db, second_db
 
 
 @pytest.mark.asyncio

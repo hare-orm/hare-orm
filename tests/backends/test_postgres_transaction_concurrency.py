@@ -2,11 +2,13 @@
 cancelled statement whose CancelRequest must never hit a later statement (rust_pg)."""
 
 import asyncio
+from contextlib import aclosing
 
 import pytest
 
 from hare.contrib.test import requires_features
 from hare.dialects.base.client.transaction_lifecycle import transaction_ending
+from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.transactions.transactions import Transactions
 from tests.shared_models.testmodels import Tournament
 from tests.utils.waiting import WAIT_DEADLINE_SECONDS
@@ -63,32 +65,70 @@ async def test_asyncpg_discards_the_connection_of_an_abandoned_begin(db_truncate
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_stream_and_a_sibling_opening_savepoints_share_the_connection(db_truncate):
-    await Tournament.objects.bulk_create([Tournament(name=f"tournament {index}") for index in range(300)])
-    savepoint_count = 0
-    stop = False
+    await Tournament.objects.bulk_create([Tournament(name=f"tournament {index}") for index in range(3)])
+    first_row_read = asyncio.Event()
+    savepoint_closed = asyncio.Event()
 
-    async def stream_everything() -> int:
-        streamed = 0
-        async for _tournament in Tournament.objects.all().order_by("id").stream(chunk_size=1):
-            streamed += 1
-        return streamed
-
-    async def open_savepoints() -> None:
-        nonlocal savepoint_count
-        while not stop:
-            async with Transactions.atomic():
-                await asyncio.sleep(0)
-            savepoint_count += 1
+    async def open_savepoint() -> None:
+        await first_row_read.wait()
+        async with Transactions.atomic():
+            assert await Tournament.objects.count() == 3
+        savepoint_closed.set()
 
     async with asyncio.timeout(TEST_TIMEOUT_SECONDS):
         async with Transactions.atomic():
-            saver = asyncio.ensure_future(open_savepoints())
-            try:
-                assert await stream_everything() == 300
-            finally:
-                stop = True
-            await saver
-    assert savepoint_count > 0
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(open_savepoint())
+                async with aclosing(Tournament.objects.all().order_by("id").stream(chunk_size=1)) as stream:
+                    first = await anext(stream)
+                    assert first.name == "tournament 0"
+                    first_row_read.set()
+                    await savepoint_closed.wait()
+                    assert [item.name async for item in stream] == ["tournament 1", "tournament 2"]
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.parametrize("boundary", ["open", "fetch"])
+@pytest.mark.asyncio
+async def test_stream_waits_outside_a_sibling_savepoint(db_truncate, monkeypatch, boundary):
+    names = [f"tournament {index}" for index in range(3)]
+    await Tournament.objects.bulk_create([Tournament(name=name) for name in names])
+    ready, start_read, waiting_for_span = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original_wait = NestedSavepointLock.wait_for_query_span
+
+    async def read_stream():
+        values = []
+        async with aclosing(Tournament.objects.all().order_by("id").stream(chunk_size=1)) as stream:
+            if boundary == "fetch":
+                values.append((await anext(stream)).name)
+            ready.set()
+            await start_read.wait()
+            values.extend([item.name async for item in stream])
+        return values
+
+    async with asyncio.timeout(TEST_TIMEOUT_SECONDS):
+        async with Transactions.atomic() as connection:
+            async with asyncio.TaskGroup() as tasks:
+                reader = tasks.create_task(read_stream())
+
+                async def observe_wait(lock, current_span):
+                    if lock is connection._savepoint_lock and asyncio.current_task() is reader:
+                        waiting_for_span.set()
+                    return await original_wait(lock, current_span)
+
+                monkeypatch.setattr(NestedSavepointLock, "wait_for_query_span", observe_wait)
+                await ready.wait()
+                with pytest.raises(ValueError, match="rollback sibling"):
+                    async with Transactions.atomic():
+                        assert await Tournament.objects.count() == 3
+                        start_read.set()
+                        waiting = tasks.create_task(waiting_for_span.wait())
+                        completed, _ = await asyncio.wait((reader, waiting), return_when=asyncio.FIRST_COMPLETED)
+                        assert waiting in completed
+                        assert not reader.done()
+                        raise ValueError("rollback sibling")
+                assert await reader == names
+                assert await Tournament.objects.count() == 3
 
 
 #: How many outer transactions the stray-cancel stress test runs - before the fix roughly one in
@@ -101,6 +141,7 @@ class Boom(Exception):
 
 
 @requires_features(dialect="postgresql")
+@pytest.mark.timing
 @pytest.mark.asyncio
 async def test_cancelled_statements_never_cancel_a_later_statement_of_the_transaction(db_truncate):
     """Workers cancelled by a failing TaskGroup inside their own savepoints: a statement cancelled

@@ -89,7 +89,8 @@ class ValidationError(HareError, ValueError):
 class UnSupportedError(HareError):
     """
     The connection's database, dialect, driver or server version can't do what was asked - raised
-    before anything is sent. A mistake in the declaration itself, whatever the database, is a
+    before executing the unsupported action. Capability checks may query the server. A mistake
+    in the declaration itself, whatever the database, is a
     ConfigurationError instead.
     """
 
@@ -212,7 +213,8 @@ class DistributedTransactionCommitAmbiguousError(TransactionManagementError):
 class DatabaseError(HareError):
     """The database refused a statement or would refuse the data - the driver's errors and the
     integrity checks hare runs in the database's place. ``str()`` names the SQL but never the
-    parameters, which may hold secrets - read ``params`` when debugging.
+    parameters, which may hold secrets - read individual elements of ``parameters`` when debugging.
+    The parameter collection's repr hides its values too.
 
     Args:
         sql: The SQL text, if known.

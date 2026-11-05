@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from functools import reduce
 from typing import TYPE_CHECKING, Any, overload
 
@@ -54,7 +53,7 @@ class Table(Selectable):
     def __init__(
         self,
         name: str,
-        schema: Schema | str | None = None,
+        schema: Schema | str | list[str] | tuple[str, ...] | None = None,
         alias: str | None = None,
         query_class: type[Query] | None = None,
         table_options: tuple[Any, ...] = (),
@@ -70,8 +69,6 @@ class Table(Selectable):
         self._schema = self._init_schema(schema)
         if query_class is None:
             query_class = Query
-        elif not issubclass(query_class, Query):
-            raise TypeError("Expected 'query_cls' to be subclass of Query")
         self._query_class = query_class
 
     def get_table_name(self) -> str:
@@ -132,12 +129,9 @@ class Table(Selectable):
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        # Cheap, attribute-based hash mirroring __eq__ exactly (table name, schema chain,
-        # alias) instead of rendering full SQL just to hash it.
-        schema_key = self._schema._hash_key() if self._schema else None
-        return hash((self._table_name, schema_key, self.alias))
+        return hash((self._table_name, self._schema, self.alias))
 
-    def select(self, *terms: Sequence[int | float | str | bool | Term | Field]) -> QueryBuilder:
+    def select(self, *terms: int | float | str | bool | Term | Field) -> QueryBuilder:
         """Performs a SELECT operation on the current table.
 
         Args:

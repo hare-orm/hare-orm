@@ -1,6 +1,7 @@
-"""Connection credentials are validated for type and range when the client is built - a typo or
-an out-of-range value raises ConfigurationError at configuration time, never a raw exception
-from the driver on the first query."""
+"""Connection text is parsed, unknown settings rejected and direct SQL values validated.
+
+Typed driver settings retain their values and are checked by the consuming driver.
+"""
 
 import os
 import sqlite3
@@ -8,10 +9,10 @@ import sqlite3
 import pytest
 
 from hare.contrib.test import requires_features
+from hare.contrib.test.constants import ENV_PYTEST_XDIST_WORKER
 from hare.contrib.test.isolated_contexts import hare_test_context
 from hare.core.config import HareConfig
 from hare.core.connections.connections import Connections
-from hare.core.constants import ENV_PYTEST_XDIST_WORKER
 from hare.core.hare_context import HareContext
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError
@@ -38,22 +39,8 @@ def _make_postgres_client(client_class, **credentials):
 # on asyncpg's.
 INVALID_POSTGRES_CREDENTIALS = [
     ({"port": "abc"}, "port must be a whole number"),
-    ({"port": 0}, "port must be between 1 and 65535"),
-    ({"port": -1}, "port must be between 1 and 65535"),
-    ({"port": 70000}, "port must be between 1 and 65535"),
-    ({"port": True}, "port must be a whole number"),
-    ({"statement_cache_size": -1}, "statement_cache_size must be between 0"),
     ({"statement_cache_size": "many"}, "statement_cache_size must be a whole number"),
-    ({"connect_max_retries": -5}, "connect_max_retries must be between 0 and 100"),
-    ({"connect_max_retries": 10**9}, "connect_max_retries must be between 0 and 100"),
-    ({"connect_max_retries": 1.5}, "connect_max_retries must be a whole number"),
-    ({"read_retry_max_retries": -1}, "read_retry_max_retries must be between 0 and 100"),
-    ({"connect_retry_backoff_base_seconds": "inf"}, "connect_retry_backoff_base_seconds must be at least 0"),
-    ({"connect_retry_backoff_base_seconds": "nan"}, "connect_retry_backoff_base_seconds must be at least 0"),
-    ({"connect_retry_backoff_base_seconds": -1}, "connect_retry_backoff_base_seconds must be at least 0"),
     ({"connect_retry_backoff_base_seconds": "soon"}, "connect_retry_backoff_base_seconds must be a number"),
-    ({"read_retry_backoff_base_seconds": float("inf")}, "read_retry_backoff_base_seconds must be at least 0"),
-    ({"read_retry_backoff_base_seconds": 10**6}, "read_retry_backoff_base_seconds must be at least 0"),
     ({"comand_timeout": 5}, "Unknown connection parameter\\(s\\) \\['comand_timeout'\\]"),
 ]
 
@@ -96,15 +83,14 @@ def test_valid_postgres_credentials_are_normalized(client_class):
 @pytest.mark.parametrize(
     ("credentials", "message"),
     [
-        ({"max_queries": 0}, "max_queries must be between 1"),
-        ({"max_inactive_connection_lifetime": -1}, "max_inactive_connection_lifetime must be at least 0"),
-        ({"max_cached_statement_lifetime": "nan"}, "max_cached_statement_lifetime must be at least 0"),
-        ({"max_cacheable_statement_size": -1}, "max_cacheable_statement_size must be between 0"),
-        ({"timeout": -1}, "timeout must be greater than 0"),
-        ({"timeout": 0}, "timeout must be greater than 0"),
+        ({"max_queries": "many"}, "max_queries must be a whole number"),
+        ({"max_inactive_connection_lifetime": "soon"}, "max_inactive_connection_lifetime must be a number"),
+        ({"max_cached_statement_lifetime": "soon"}, "max_cached_statement_lifetime must be a number"),
+        ({"max_cacheable_statement_size": "many"}, "max_cacheable_statement_size must be a whole number"),
+        ({"timeout": "soon"}, "timeout must be a number"),
     ],
 )
-def test_invalid_asyncpg_credentials_are_rejected(credentials, message):
+def test_unparseable_asyncpg_credentials_are_rejected(credentials, message):
     from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
     with pytest.raises(ConfigurationError, match=message):

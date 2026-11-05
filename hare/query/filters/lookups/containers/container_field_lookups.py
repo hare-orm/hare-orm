@@ -44,17 +44,9 @@ class ContainerFieldLookups:
         """
         return {
             **ContainerFieldLookups.get_whole_value_lookups(),
-            # binds_by_rebuild: a plan builds the test of a later value again - the value is the
-            # ValueWrapper of its ContainerLiteral.
-            "contains": FieldLookup(
-                ContainerLookups.contains, ContainerValueEncoders.encode_container, binds_by_rebuild=True
-            ),
-            "contained_by": FieldLookup(
-                ContainerLookups.contained_by, ContainerValueEncoders.encode_container, binds_by_rebuild=True
-            ),
-            "overlap": FieldLookup(
-                ContainerLookups.overlap, ContainerValueEncoders.encode_container, binds_by_rebuild=True
-            ),
+            "contains": FieldLookup(ContainerLookups.contains, ContainerValueEncoders.encode_container),
+            "contained_by": FieldLookup(ContainerLookups.contained_by, ContainerValueEncoders.encode_container),
+            "overlap": FieldLookup(ContainerLookups.overlap, ContainerValueEncoders.encode_container),
             "len": FieldLookup(ContainerLookups.length, ValueEncoders.encode_int),
             "item": FieldLookup(
                 partial(ContainerLookups.item, element_field=field.base_field),

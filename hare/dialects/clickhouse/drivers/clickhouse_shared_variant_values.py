@@ -7,7 +7,7 @@ import uuid
 import zoneinfo
 from collections.abc import Callable, Sequence
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from hare.core.caching.cache import Cache
 from hare.dialects.clickhouse.drivers.constants import (
@@ -17,14 +17,11 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_BINARY_DECIMAL_WIDTHS,
     CLICKHOUSE_BINARY_ENUM8_TAG,
     CLICKHOUSE_BINARY_ENUM16_TAG,
-    CLICKHOUSE_BINARY_ENUM_MEMBER_PATTERN,
     CLICKHOUSE_BINARY_EPOCH_DATE,
     CLICKHOUSE_BINARY_EPOCH_MOMENT,
-    CLICKHOUSE_BINARY_ESCAPED_CHARACTER_PATTERN,
     CLICKHOUSE_BINARY_FIXED_STRING_TAG,
     CLICKHOUSE_BINARY_INTEGER_WIDTHS,
     CLICKHOUSE_BINARY_MAP_TAG,
-    CLICKHOUSE_BINARY_NAMED_ELEMENT_PATTERN,
     CLICKHOUSE_BINARY_NAMED_TUPLE_TAG,
     CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS,
     CLICKHOUSE_BINARY_PLAIN_TYPES_BY_TAG,
@@ -35,7 +32,8 @@ from hare.dialects.clickhouse.drivers.constants import (
     CLICKHOUSE_BINARY_ZONED_DATETIME64_TAG,
     CLICKHOUSE_BINARY_ZONED_DATETIME_TAG,
 )
-from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.dialects.clickhouse.introspection.clickhouse_sql_parts import ClickhouseSqlParts
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.exceptions import UnSupportedError
 
 
@@ -46,54 +44,8 @@ class ClickhouseSharedVariantValues:
     needs no reading of its values), and how they read one the server keeps there - the drivers'
     own reading leaves out decimals, dates and the containers of them."""
 
-    #: The name and the arguments of each type met, by its text.
-    type_parts: ClassVar[Cache[tuple[str, list[str]]]] = Cache(
-        CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE, holds_sql=False, keyed_by_model=False
-    )
     #: The binary encoding of each type written, by its text.
-    type_encodings: ClassVar[Cache[bytes]] = Cache(
-        CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE, holds_sql=False, keyed_by_model=False
-    )
-
-    @classmethod
-    def get_type_parts(cls, type_text: str) -> tuple[str, list[str]]:
-        """A type's name and the texts of its arguments - parsed once per type.
-
-        Args:
-            type_text: The type, as the server names it.
-
-        Returns:
-            The name and the arguments - shared between the calls, not to be changed.
-        """
-        key = (type_text,)
-        parts: tuple[str, list[str]] | None = cls.type_parts.get(key)
-        if parts is None:
-            parts = cls.type_parts[key] = ClickhouseTypeNames.get_type_parts(type_text)
-        return parts
-
-    @staticmethod
-    def get_unescaped_text(text: str) -> str:
-        """A text without the backslashes escaping its characters.
-
-        Args:
-            text: The text between the quotes.
-
-        Returns:
-            The text.
-        """
-        return CLICKHOUSE_BINARY_ESCAPED_CHARACTER_PATTERN.sub(r"\1", text)
-
-    @staticmethod
-    def get_unquoted_text(quoted_text: str) -> str:
-        """A quoted argument's text.
-
-        Args:
-            quoted_text: The argument - ``'UTC'``.
-
-        Returns:
-            The text inside the quotes, unescaped.
-        """
-        return ClickhouseSharedVariantValues.get_unescaped_text(quoted_text.strip()[1:-1])
+    type_encodings: ClassVar[Cache[bytes]] = Cache(CLICKHOUSE_BINARY_TYPE_CACHE_MAX_SIZE, holds_sql=False)
 
     @staticmethod
     def get_decimal_width(precision: int) -> tuple[int, int]:
@@ -111,37 +63,6 @@ class ClickhouseSharedVariantValues:
             if precision <= most_digits:
                 return tag, width
         raise UnSupportedError(f"A decimal of {precision} digits has no ClickHouse type")
-
-    @staticmethod
-    def get_element_type(argument: str) -> str:
-        """The type of a tuple's element.
-
-        Args:
-            argument: The element as the tuple's type names it - its type, after its name when it
-                has one.
-
-        Returns:
-            The type.
-        """
-        named_element = CLICKHOUSE_BINARY_NAMED_ELEMENT_PATTERN.fullmatch(argument)
-        return argument if named_element is None else named_element.group(2)
-
-    @staticmethod
-    def get_enum_numbers(arguments: Sequence[str]) -> dict[str, int]:
-        """The number of each member of an enum, by its label.
-
-        Args:
-            arguments: The members as the enum's type names them.
-
-        Returns:
-            The numbers.
-        """
-        members = (CLICKHOUSE_BINARY_ENUM_MEMBER_PATTERN.match(argument) for argument in arguments)
-        return {
-            ClickhouseSharedVariantValues.get_unescaped_text(member.group(1)): int(member.group(2))
-            for member in members
-            if member is not None
-        }
 
     @staticmethod
     def write_varint(number: int, blob: bytearray) -> None:
@@ -207,7 +128,8 @@ class ClickhouseSharedVariantValues:
         Raises:
             UnSupportedError: The type has no binary encoding here.
         """
-        name, arguments = cls.get_type_parts(type_text)
+        physical_type = ClickhousePhysicalType.from_sql(type_text)
+        name, arguments = physical_type.name, physical_type.arguments
         plain_tag = CLICKHOUSE_BINARY_PLAIN_TYPE_TAGS.get(name)
         if plain_tag is not None and not arguments:
             blob.append(plain_tag)
@@ -234,7 +156,7 @@ class ClickhouseSharedVariantValues:
             blob.append(CLICKHOUSE_BINARY_ZONED_DATETIME64_TAG if is_zoned else CLICKHOUSE_BINARY_DATETIME64_TAG)
             blob.append(int(arguments[0]))
         if is_zoned:
-            zone_name = ClickhouseSharedVariantValues.get_unquoted_text(arguments[zone_position])
+            zone_name = ClickhouseSqlParts.get_string_text(arguments[zone_position].strip())
             ClickhouseSharedVariantValues.write_bytes(zone_name.encode(), blob)
 
     @staticmethod
@@ -282,16 +204,14 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        named_elements = [CLICKHOUSE_BINARY_NAMED_ELEMENT_PATTERN.fullmatch(argument) for argument in arguments]
-        is_named = bool(named_elements) and all(named_elements)
+        elements = [ClickhousePhysicalType.get_element(argument) for argument in arguments]
+        is_named = bool(elements) and all(element_name is not None for element_name, _ in elements)
         blob.append(CLICKHOUSE_BINARY_NAMED_TUPLE_TAG if is_named else CLICKHOUSE_BINARY_TUPLE_TAG)
-        ClickhouseSharedVariantValues.write_varint(len(arguments), blob)
-        for argument, named_element in zip(arguments, named_elements, strict=True):
-            if is_named and named_element is not None:
-                ClickhouseSharedVariantValues.write_bytes(named_element.group(1).encode(), blob)
-                ClickhouseSharedVariantValues.write_type(named_element.group(2), blob)
-            else:
-                ClickhouseSharedVariantValues.write_type(argument, blob)
+        ClickhouseSharedVariantValues.write_varint(len(elements), blob)
+        for element_name, element_type in elements:
+            if is_named and element_name is not None:
+                ClickhouseSharedVariantValues.write_bytes(element_name.encode(), blob)
+            ClickhouseSharedVariantValues.write_type(element_type.sql, blob)
 
     @staticmethod
     def write_enum_type(name: str, arguments: Sequence[str], blob: bytearray) -> None:
@@ -303,13 +223,10 @@ class ClickhouseSharedVariantValues:
             blob: The bytes written into.
         """
         blob.append(CLICKHOUSE_BINARY_ENUM8_TAG if name == "Enum8" else CLICKHOUSE_BINARY_ENUM16_TAG)
-        members = [CLICKHOUSE_BINARY_ENUM_MEMBER_PATTERN.match(argument) for argument in arguments]
+        members = ClickhousePhysicalType.get_enum_members(arguments)
         ClickhouseSharedVariantValues.write_varint(len(members), blob)
-        for member in members:
-            label, number = member.group(1), int(member.group(2))  # type: ignore[union-attr]
-            ClickhouseSharedVariantValues.write_bytes(
-                ClickhouseSharedVariantValues.get_unescaped_text(label).encode(), blob
-            )
+        for label, number in members.items():
+            ClickhouseSharedVariantValues.write_bytes(label.encode(), blob)
             blob += number.to_bytes(1 if name == "Enum8" else 2, "little", signed=True)
 
     @classmethod
@@ -329,7 +246,8 @@ class ClickhouseSharedVariantValues:
         if writer is not None:
             writer(value, type_text, (), blob)
             return
-        name, arguments = cls.get_type_parts(type_text)
+        physical_type = ClickhousePhysicalType.from_sql(type_text)
+        name, arguments = physical_type.name, physical_type.arguments
         writer = cls.VALUE_WRITERS.get(name)
         if writer is None:
             raise UnSupportedError(f"A value of type {type_text} isn't written into a Dynamic column")
@@ -423,7 +341,8 @@ class ClickhouseSharedVariantValues:
             blob: The bytes written into.
         """
         precision, scale = int(arguments[0]), int(arguments[1])
-        unscaled = int(Decimal(value).scaleb(scale))
+        parts = Decimal(value).as_tuple()
+        unscaled = int(Decimal((parts.sign, parts.digits, cast(int, parts.exponent) + scale)))
         width = ClickhouseSharedVariantValues.get_decimal_width(precision)[1]
         blob += unscaled.to_bytes(width, "little", signed=True)
 
@@ -465,7 +384,7 @@ class ClickhouseSharedVariantValues:
                 write_value(element, arguments[0], blob)
         elif name == "Tuple":
             for element, argument in zip(value, arguments, strict=True):
-                write_value(element, ClickhouseSharedVariantValues.get_element_type(argument), blob)
+                write_value(element, ClickhousePhysicalType.get_element(argument)[1].sql, blob)
         else:
             ClickhouseSharedVariantValues.write_varint(len(value), blob)
             for key, item in value.items():
@@ -482,9 +401,7 @@ class ClickhouseSharedVariantValues:
             arguments: Its arguments.
             blob: The bytes written into.
         """
-        number = (
-            ClickhouseSharedVariantValues.get_enum_numbers(arguments)[value] if isinstance(value, str) else int(value)
-        )
+        number = ClickhousePhysicalType.get_enum_members(arguments)[value] if isinstance(value, str) else int(value)
         blob += number.to_bytes(1 if name == "Enum8" else 2, "little", signed=True)
 
     @staticmethod
@@ -596,6 +513,8 @@ class ClickhouseSharedVariantValues:
         Returns:
             The type, and where the bytes after it start.
         """
+        from hare.dialects.clickhouse.constants import CLICKHOUSE_DIALECT
+
         count, position = cls.read_varint(blob, position)
         element_types = []
         for _ in range(count):
@@ -603,7 +522,11 @@ class ClickhouseSharedVariantValues:
             if is_named:
                 element_name, position = cls.read_bytes(blob, position)
             element_type, position = cls.read_type(blob, position)
-            element_types.append(element_type if element_name is None else f"{element_name.decode()} {element_type}")
+            element_types.append(
+                element_type
+                if element_name is None
+                else f"{CLICKHOUSE_DIALECT.literals.quote_identifier(element_name.decode())} {element_type}"
+            )
         return f"Tuple({', '.join(element_types)})", position
 
     @classmethod
@@ -647,7 +570,8 @@ class ClickhouseSharedVariantValues:
         reader = cls.VALUE_READERS.get(type_text)
         if reader is not None:
             return reader(type_text, (), blob, position)
-        name, arguments = cls.get_type_parts(type_text)
+        physical_type = ClickhousePhysicalType.from_sql(type_text)
+        name, arguments = physical_type.name, physical_type.arguments
         reader = cls.VALUE_READERS.get(name)
         if reader is None:
             raise UnSupportedError(f"A Dynamic value of type {type_text} isn't read")
@@ -738,7 +662,7 @@ class ClickhouseSharedVariantValues:
             return CLICKHOUSE_BINARY_EPOCH_DATE + datetime.timedelta(days=days), position + width
         zone_position = 0 if name == "DateTime" else 1
         zone = (
-            zoneinfo.ZoneInfo(ClickhouseSharedVariantValues.get_unquoted_text(arguments[zone_position]))
+            zoneinfo.ZoneInfo(ClickhouseSqlParts.get_string_text(arguments[zone_position].strip()))
             if len(arguments) > zone_position
             else datetime.UTC
         )
@@ -766,7 +690,8 @@ class ClickhouseSharedVariantValues:
         """
         width = ClickhouseSharedVariantValues.get_decimal_width(int(arguments[0]))[1]
         unscaled = int.from_bytes(blob[position : position + width], "little", signed=True)
-        return Decimal(unscaled).scaleb(-int(arguments[1])), position + width
+        parts = Decimal(unscaled).as_tuple()
+        return Decimal((parts.sign, parts.digits, -int(arguments[1]))), position + width
 
     @staticmethod
     def read_identifier_value(name: str, arguments: Sequence[str], blob: bytes, position: int) -> tuple[Any, int]:
@@ -806,9 +731,7 @@ class ClickhouseSharedVariantValues:
         if name == "Tuple":
             elements = []
             for argument in arguments:
-                element, position = read_value(
-                    ClickhouseSharedVariantValues.get_element_type(argument), blob, position
-                )
+                element, position = read_value(ClickhousePhysicalType.get_element(argument)[1].sql, blob, position)
                 elements.append(element)
             return tuple(elements), position
         count, position = ClickhouseSharedVariantValues.read_varint(blob, position)
@@ -841,8 +764,7 @@ class ClickhouseSharedVariantValues:
         width = 1 if name == "Enum8" else 2
         number = int.from_bytes(blob[position : position + width], "little", signed=True)
         labels = {
-            member_number: label
-            for label, member_number in ClickhouseSharedVariantValues.get_enum_numbers(arguments).items()
+            member_number: label for label, member_number in ClickhousePhysicalType.get_enum_members(arguments).items()
         }
         return labels.get(number, number), position + width
 

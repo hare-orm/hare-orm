@@ -4,10 +4,11 @@ import re
 
 from hare.dialects.clickhouse.introspection.constants import (
     CLICKHOUSE_PLAIN_IDENTIFIER_PATTERN,
-    CLICKHOUSE_SQL_QUOTES,
     CLICKHOUSE_SQL_WORD_PATTERN,
+    CLICKHOUSE_STRING_ESCAPE_PATTERN,
     CLICKHOUSE_STRING_UNESCAPES,
 )
+from hare.inspectdb.introspection.catalog_sql import CatalogSql
 
 
 class ClickhouseSqlParts:
@@ -15,39 +16,7 @@ class ClickhouseSqlParts:
     parentheses."""
 
     @staticmethod
-    def get_unquoted_characters(sql: str) -> list[tuple[int, str, int]]:
-        """The characters outside every string and quoted identifier.
-
-        Args:
-            sql: The text.
-
-        Returns:
-            The position of each, the character and how many parentheses are open before it.
-        """
-        characters = []
-        depth = 0
-        quote = ""
-        index = 0
-        while index < len(sql):
-            character = sql[index]
-            if quote:
-                if character == "\\":
-                    index += 1
-                elif character == quote:
-                    quote = ""
-            elif character in CLICKHOUSE_SQL_QUOTES:
-                quote = character
-            else:
-                characters.append((index, character, depth))
-                if character == "(":
-                    depth += 1
-                elif character == ")":
-                    depth -= 1
-            index += 1
-        return characters
-
-    @classmethod
-    def get_top_level_indexes(cls, sql: str) -> list[int]:
+    def get_top_level_indexes(sql: str) -> list[int]:
         """The positions of the characters outside every string, quoted identifier and pair of
         parentheses - an opening parenthesis of an outermost pair among them.
 
@@ -57,24 +26,10 @@ class ClickhouseSqlParts:
         Returns:
             The positions, in order.
         """
-        return [index for index, _, depth in cls.get_unquoted_characters(sql) if depth == 0]
+        return [index for index, _, depth in CatalogSql.get_unquoted_characters(sql) if depth == 0]
 
-    @classmethod
-    def search_outside_strings(cls, pattern: re.Pattern[str], sql: str) -> re.Match[str] | None:
-        """The first match of a pattern beginning outside every string and quoted identifier.
-
-        Args:
-            pattern: The pattern.
-            sql: The text.
-
-        Returns:
-            The match, None for none.
-        """
-        unquoted_indexes = {index for index, _, _ in cls.get_unquoted_characters(sql)}
-        return next((match for match in pattern.finditer(sql) if match.start() in unquoted_indexes), None)
-
-    @classmethod
-    def split(cls, sql: str, separator: str = ",") -> list[str]:
+    @staticmethod
+    def split(sql: str, separator: str = ",") -> list[str]:
         """The parts of a list.
 
         Args:
@@ -86,14 +41,7 @@ class ClickhouseSqlParts:
         """
         if not sql.strip():
             return []
-        parts = []
-        start = 0
-        for index in cls.get_top_level_indexes(sql):
-            if sql[index] == separator:
-                parts.append(sql[start:index].strip())
-                start = index + 1
-        parts.append(sql[start:].strip())
-        return parts
+        return [part.strip() for part in CatalogSql.split_terms(sql, separator)]
 
     @classmethod
     def find_words(cls, sql: str, words: str, start: int = 0) -> int:
@@ -142,8 +90,8 @@ class ClickhouseSqlParts:
             clauses[words] = sql[index + len(words) : end].strip()
         return clauses
 
-    @classmethod
-    def get_before_parentheses(cls, sql: str) -> str:
+    @staticmethod
+    def get_before_parentheses(sql: str) -> str:
         """The text before the first pair of parentheses.
 
         Args:
@@ -153,13 +101,17 @@ class ClickhouseSqlParts:
             The text, without the spaces around it - whole when it has no parentheses.
         """
         open_index = next(
-            (index for index, character, depth in cls.get_unquoted_characters(sql) if character == "(" and depth == 0),
+            (
+                index
+                for index, character, depth in CatalogSql.get_unquoted_characters(sql)
+                if character == "(" and depth == 0
+            ),
             len(sql),
         )
         return sql[:open_index].strip()
 
-    @classmethod
-    def get_parenthesised(cls, sql: str) -> tuple[str, str]:
+    @staticmethod
+    def get_parenthesised(sql: str) -> tuple[str, str]:
         """What the first pair of parentheses holds.
 
         Args:
@@ -169,7 +121,7 @@ class ClickhouseSqlParts:
             The text inside the pair and the text after it; two empty texts without a pair.
         """
         open_index = -1
-        for index, character, depth in cls.get_unquoted_characters(sql):
+        for index, character, depth in CatalogSql.get_unquoted_characters(sql):
             if character == "(" and depth == 0 and open_index < 0:
                 open_index = index
             elif character == ")" and depth == 1 and open_index >= 0:
@@ -245,32 +197,27 @@ class ClickhouseSqlParts:
         match = CLICKHOUSE_PLAIN_IDENTIFIER_PATTERN.match(sql)
         return ("", sql) if match is None else (match.group(0), sql[match.end() :])
 
-    @staticmethod
-    def get_string_text(literal_sql: str) -> str:
+    @classmethod
+    def get_string_text(cls, literal_sql: str) -> str:
         """The text a quoted string literal holds.
 
         Args:
             literal_sql: The literal with its quotes.
 
         Returns:
-            The text - a backslash escapes the next character, a doubled quote is one.
+            The text, decoding backslash and hexadecimal escapes and doubled quotes.
         """
-        text = literal_sql[1:-1]
-        characters: list[str] = []
-        index = 0
-        while index < len(text):
-            character = text[index]
-            following = text[index + 1 : index + 2]
-            if character == "\\" and following:
-                characters.append(CLICKHOUSE_STRING_UNESCAPES.get(following, following))
-                index += 2
-            elif character == "'" and following == "'":
-                characters.append("'")
-                index += 2
-            else:
-                characters.append(character)
-                index += 1
-        return "".join(characters)
+        return CLICKHOUSE_STRING_ESCAPE_PATTERN.sub(cls.get_escaped_character, literal_sql[1:-1])
+
+    @staticmethod
+    def get_escaped_character(escape_match: re.Match[str]) -> str:
+        """Decode one matched backslash escape or doubled SQL quote."""
+        escaped = escape_match.group(1)
+        if escaped is None:
+            return "'"
+        if len(escaped) == 3:
+            return chr(int(escaped[1:], 16))
+        return CLICKHOUSE_STRING_UNESCAPES.get(escaped, escaped)
 
     @classmethod
     def get_name_argument(cls, argument_sql: str) -> str | None:

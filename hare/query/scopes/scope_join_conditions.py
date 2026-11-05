@@ -145,6 +145,7 @@ class ScopeJoinConditions:
         *,
         dialect: Dialect,
         connection: DatabaseClient | None,
+        value_wrapper_references: RecordedValueReferences | None = None,
     ) -> None:
         """ANDs a ``Select(relation, extra_condition=Q(...))`` declared for the relation into
         ``joins[-1]``, in place - the JOIN built first is the one kept.
@@ -156,7 +157,9 @@ class ScopeJoinConditions:
         from hare.query.plans.recording.plan_recording import PlanRecording
 
         # Its values bound from the query holding it when a plan runs.
-        value_wrapper_references: RecordedValueReferences | None = [] if PlanRecording.is_recording() else None
+        records_join_condition = value_wrapper_references is None and PlanRecording.is_recording()
+        if records_join_condition:
+            value_wrapper_references = []
         join_table, join_criterion = joins[-1]
         extra_modifier = extra_condition.get_result(
             ExpressionContext(
@@ -168,7 +171,7 @@ class ScopeJoinConditions:
                 value_wrapper_references=value_wrapper_references,
             )
         )
-        if value_wrapper_references is not None:
+        if records_join_condition and value_wrapper_references is not None:
             PlanRecording.record_join_condition(value_wrapper_references)
         if extra_modifier.joins:
             raise QueryError(

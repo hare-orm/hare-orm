@@ -59,7 +59,7 @@ class QueryConnection:
     ) -> BoundSpecification:
         """This query as it is built into another one - bound to the connection the outer query runs
         on, since both compile to one SQL text. Without ``.using()`` it takes the outer connection;
-        pinned to the same one it is kept as is.
+        a declaration already pinned to that connection is copied too, keeping build state separate.
 
         Args:
             specification: The query specification - a queryset or a query made from one.

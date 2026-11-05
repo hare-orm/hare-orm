@@ -54,7 +54,7 @@ class QueryExecuted:
     sql: str
     parameters: list[Any] | None
     duration_ms: float
-    error: Exception | None
+    error: BaseException | None
     connection_alias: str
 
 
@@ -86,15 +86,14 @@ class RowsChanged:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class TransactionEvent:
-    """A real, top-level transaction began, committed or rolled back - never a savepoint.
+    """A top-level transaction began or ended with a known or unknown outcome - never a savepoint.
 
     Attributes:
-        type: Begin, commit or rollback.
+        type: Begin, commit, rollback or unknown.
         connection_alias: The connection the transaction runs on.
-        duration_ms: 0.0 for a begin; the time since the begin for a commit or rollback.
-        error: The error a rollback was caused by - a lost connection carries the connection
-            error (when it broke while the COMMIT was in flight, the COMMIT may still have landed,
-            and no ``on_commit()``/``on_rollback()`` callback runs); None otherwise.
+        duration_ms: 0.0 for a begin; the time since the begin for an ending event.
+        error: A lost connection's error, None otherwise. Loss of an in-flight COMMIT's
+            confirmation produces UNKNOWN: neither commit nor rollback callbacks run.
     """
 
     #: Observers of this event can't be narrowed to models.

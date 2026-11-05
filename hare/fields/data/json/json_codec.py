@@ -23,9 +23,6 @@ class JsonCodec:
     #: rust.native.rows.check_json_storable() - JSONField.check_storable_value()'s walk, done
     #: natively - None without the compiled accelerator or with a build without it.
     storable_value_checker: ClassVar[Any] = getattr(NativeModules.rows, "check_json_storable", None)
-    #: rust.native.rows.encode_json() - the text orjson writes for a plain JSON value, checked on the
-    #: same pass - None without the compiled accelerator or with a build without it.
-    native_encoder: ClassVar[Any] = getattr(NativeModules.rows, "encode_json", None)
 
     @staticmethod
     def dumps(value: Any) -> str:
@@ -38,9 +35,7 @@ class JsonCodec:
             The JSON text.
         """
         if JsonCodec.orjson is None:
-            return json.dumps(
-                value, separators=(",", ":"), ensure_ascii=False, default=JsonCodec.get_orjson_compatible_value
-            )
+            return JsonCodec.dumps_exact(value)
         try:
             return cast("str", JsonCodec.orjson.dumps(value, default=JsonCodec.get_orjson_compatible_value).decode())
         except TypeError:

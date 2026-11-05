@@ -51,7 +51,7 @@ class AlterEnumType(EnumTypeOperation):
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
         if self._runs_enum_types(state_editor, f"altering the ENUM type {self.name}"):
-            await state_editor.enum_types.alter_enum_type(  # type: ignore[union-attr]
+            await state_editor.enum_types.alter_enum_type(
                 EnumType(self.name, self.old_labels, self.schema), EnumType(self.name, self.new_labels, self.schema)
             )
 
@@ -59,6 +59,6 @@ class AlterEnumType(EnumTypeOperation):
         self, app_label: str, old_state: State, new_state: State, state_editor: BaseSchemaEditor | None = None
     ) -> None:
         if self._runs_enum_types(state_editor, f"altering the ENUM type {self.name}"):
-            await state_editor.enum_types.alter_enum_type(  # type: ignore[union-attr]
+            await state_editor.enum_types.alter_enum_type(
                 EnumType(self.name, self.new_labels, self.schema), EnumType(self.name, self.old_labels, self.schema)
             )

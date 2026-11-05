@@ -77,3 +77,22 @@ async def test_array_subquery_takes_one_column():
         await Writer.objects.annotate(titles=ArraySubquery(novels_of_writer("title", "rating")))
     with pytest.raises(QueryError, match="one column"):
         await Writer.objects.annotate(titles=ArraySubquery(Novel.objects.filter(writer=OuterReference("pk"))))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("writers")
+async def test_reused_array_subquery_keeps_both_annotation_names():
+    if DatabaseUnderTest.get_dialect().name != "postgresql":
+        pytest.skip("ArraySubquery requires PostgreSQL")
+    titles = ArraySubquery(novels_of_writer("title"))
+    first = titles.as_("first")
+    second = titles.as_("second")
+    assert first.alias == "first"
+    assert second.alias == "second"
+    assert titles.alias is None
+    for _ in range(2):
+        rows = await Writer.objects.annotate(first=titles, second=titles).order_by("id").values("first", "second")
+        assert rows == [
+            {"first": ["n2", "n3", "n1"], "second": ["n2", "n3", "n1"]},
+            {"first": [], "second": []},
+        ]

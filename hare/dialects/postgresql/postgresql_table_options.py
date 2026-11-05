@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Self
 
 from hare.ddl.table_options import TableOptions
@@ -108,32 +108,19 @@ class PostgresqlTableOptions(TableOptions):
         return dataclasses.replace(self, partitioning=self.partitioning.with_partitions(partitions))
 
     @staticmethod
-    def get_storage_parameter_value_sql(value: bool | int | float | str) -> str:
-        """Returns a storage parameter's value as written in ``WITH (...)``/``SET (...)``.
-
-        Args:
-            value: The value.
-
-        Returns:
-            The SQL.
-        """
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, str):
-            return "'" + value.replace("'", "''") + "'"
-        return repr(value)
-
-    def get_storage_parameters_sql(self, storage_parameters: Mapping[str, Any]) -> str:
+    def get_storage_parameters_sql(storage_parameters: Mapping[str, Any], editor: BaseSchemaEditor) -> str:
         """Returns storage parameters as the list inside ``WITH (...)``/``SET (...)``.
 
         Args:
             storage_parameters: The parameters.
+            editor: The schema editor whose dialect renders the values.
 
         Returns:
             The comma-separated ``name = value`` list.
         """
         return ", ".join(
-            f"{name} = {self.get_storage_parameter_value_sql(value)}" for name, value in storage_parameters.items()
+            f"{name} = {editor.client.dialect.literals.get_literal_sql(value)}"
+            for name, value in storage_parameters.items()
         )
 
     def get_create_prefix_sql(self) -> str:
@@ -145,21 +132,21 @@ class PostgresqlTableOptions(TableOptions):
             # A partitioned table holds no rows - its storage parameters go to its partitions.
             sql = f" {self.partitioning.get_partition_by_sql(model, quote)}"
             return sql + (f" TABLESPACE {quote(self.tablespace)}" if self.tablespace else "")
-        return self.get_storage_sql(quote)
+        return self.get_storage_sql(editor)
 
-    def get_storage_sql(self, quote: Callable[[str], str]) -> str:
+    def get_storage_sql(self, editor: BaseSchemaEditor) -> str:
         """The storage parameters and tablespace of a table holding rows - a plain table, or each
         partition of a partitioned one.
 
         Args:
-            quote: Quotes an identifier.
+            editor: The schema editor whose dialect renders literals and identifiers.
 
         Returns:
             ``WITH (...)`` and ``TABLESPACE ...`` with a leading space, or an empty string.
         """
         sql = ""
         if self.storage_parameters:
-            sql += f" WITH ({self.get_storage_parameters_sql(self.storage_parameters)})"
+            sql += f" WITH ({self.get_storage_parameters_sql(self.storage_parameters, editor)})"
         if self.tablespace:
-            sql += f" TABLESPACE {quote(self.tablespace)}"
+            sql += f" TABLESPACE {editor.quote(self.tablespace)}"
         return sql

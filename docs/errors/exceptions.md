@@ -37,8 +37,8 @@ Every exception the core of hare raises is a `HareError` ([other packages](#pack
 subclasses and a few exceptions of their own). The tree separates two types of failure:
 
 - **The call is wrong** — `QueryError`, `FieldError`, `ConfigurationError`, `ValidationError`,
-  `UnSupportedError`, `NoValuesFetched`, `IncompleteInstanceError`: raised by hare itself, before
-  anything is sent to the database.
+  `UnSupportedError`, `NoValuesFetched`, `IncompleteInstanceError`: raised by hare itself. Capability
+  checks can read the server before refusing an unsupported action.
 - **The database refused** — `DatabaseError` and its subclasses: what the connection's driver reported,
   and the integrity checks hare runs in the database's place (`PROTECT`, `RESTRICT`, the optimistic
   lock).
@@ -47,9 +47,10 @@ subclasses and a few exceptions of their own). The tree separates two types of f
 `NoValuesFetched` an `AttributeError`, `DBConnectionError` a `ConnectionError` — a plain
 `except ValueError:`/`except LookupError:` written without knowing about hare catches them.
 
-An error a database reported (`IntegrityError`, `OperationalError`, `DBConnectionError`, ...) is raised
-from the driver's own exception, on every database: it is the exception's `__cause__` (and its
-`args[0]`), carrying the server's `sqlstate`, `constraint_name`, `table_name`, ... on PostgreSQL.
+A database error (`IntegrityError`, `OperationalError`, `DBConnectionError`, ...) normally retains the
+driver exception in `__cause__`, including PostgreSQL server details such as `sqlstate`,
+`constraint_name` and `table_name`. Errors containing sensitive values are sanitized: the original
+driver exception is removed from the cause chain, and its argument representation is not a stable API.
 
 | Exception | Raised when |
 |---|---|
@@ -127,9 +128,10 @@ The connection's database, dialect, driver or server version can't do what was a
 transaction or isolation level, two-phase commit, a field type, constraint, index option or trigger type,
 `.explain(output_format=...)` on SQLite (plain `.explain()` works there too, via `EXPLAIN QUERY PLAN`),
 or a server older than the dialect runs on. A lookup given an argument of another sort raises it too —
-`__year=` not an `int`, `__isnull=` not a `bool`, `__in=` not a list, `has_key=` not a text; a value that
-can't be converted to its field's type is a `ValidationError`. Raised before anything is sent. A mistake in
-the declaration itself, whatever the database, is a `ConfigurationError`.
+`__year=` not an `int`, `__isnull=` not a `bool`, or a scalar/text value for `__in=`; a value that
+can't be converted to its field's type is a `ValidationError`. The unsupported action is refused before
+it executes, but capability checks can query the server. A mistake in the declaration itself, whatever
+the database, is a `ConfigurationError`.
 
 ## <a id="package-exceptions"></a>Exceptions of other packages
 
@@ -143,8 +145,8 @@ Several packages raise subclasses of the exceptions above, so the same `except` 
 | `hare.sql.exceptions` | `HareSqlException` (a `QueryError`) and its `QueryException`, `GroupingException`, `CaseException`, `JoinException`, `SetOperationException`, `FunctionException`: a statement the SQL builder can't put together. |
 | `hare.dialects.sqlite.exceptions` | `SqliteTriggerRecursionLimitError` (a `CascadeDepthLimitError`). |
 
-The contrib packages that answer requests or deliver events raise exceptions of the standard library's
-types instead, for the code around them to handle without knowing hare:
+Some contrib exceptions use standard-library bases, so surrounding code can handle them without
+knowing hare. Others, including `ApiGetterError`, remain `HareError` subclasses:
 
 | Module | Exceptions |
 |---|---|

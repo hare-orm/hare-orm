@@ -1,23 +1,14 @@
 from __future__ import annotations
 
-import math
+from html import escape
 from pathlib import Path
 from typing import Any, ClassVar
 
-from orm_benchmark.constants import (
-    BASELINE_DISTRIBUTION,
-    CHART_DIRECTORY,
-    FAMILIES,
-    LOAD_TESTS,
-    RUSSIAN_NAME_PARTS,
-    SIZES,
-)
-from orm_benchmark.declarations.databases import DATABASE_BY_KEY, DATABASES
-from orm_benchmark.declarations.targets import TARGETS
+from orm_benchmark.constants import BENCHMARK_STATUS_LABELS, CHART_DIRECTORY
+from orm_benchmark.definitions.benchmark_report import BenchmarkReport
 from orm_benchmark.definitions.database import Database
 from orm_benchmark.definitions.scenario import Scenario
 from orm_benchmark.definitions.target import Target
-from orm_benchmark.measuring.workload import Workload
 
 
 class ChartWriter:
@@ -58,29 +49,20 @@ class ChartWriter:
             language: ``en`` or ``ru``.
             theme: ``light`` or ``dark``.
         """
-        self.report = report
+        self.data = BenchmarkReport(report)
         self.language = language
         self.russian = language == "ru"
         self.theme = theme
         self.colours = self.THEMES[theme]
-        self.counts = Workload.get_counts(SIZES[report["size"]])
+        self.counts = self.data.conditions["counts"]
 
     # --- The report's figures -------------------------------------------------------------------------
-
-    def get_databases(self) -> list[Database]:
-        """The databases of the report, in page order."""
-        return [database for database in DATABASES if database.key in self.report["databases"]]
-
-    def get_targets(self, database: Database) -> list[Target]:
-        """The targets of a database in the report, in chart order."""
-        measured = self.report["databases"][database.key]["targets"]
-        return [target for target in TARGETS if target.key in measured]
 
     def get_target_name(self, target: Target) -> str:
         """A target's name in the chart's language."""
         name = target.name
         if self.russian:
-            for english, russian in RUSSIAN_NAME_PARTS.items():
+            for english, russian in self.data.conditions["russian_name_parts"].items():
                 name = name.replace(english, russian)
         return name
 
@@ -90,61 +72,6 @@ class ChartWriter:
 
     def get_scenario_label(self, scenario: Scenario) -> str:
         return self.get_label(scenario.english, scenario.russian)
-
-    def get_scenarios(self, database: Database) -> list[Scenario]:
-        """The scenarios a database runs, in page order."""
-        return [
-            scenario
-            for group in database.groups
-            for scenario in group.scenarios
-            if scenario.key not in database.excluded_scenarios
-        ]
-
-    def get_result(self, target: Target, scenario: str) -> dict[str, Any] | None:
-        """A target's median and runs of a scenario; None for one its ORM has no way to write."""
-        return self.report["databases"][target.database]["targets"][target.key]["scenarios"].get(scenario)
-
-    def get_median(self, target: Target, scenario: str) -> float | None:
-        result = self.get_result(target, scenario)
-        return None if result is None else float(result["median"])
-
-    def get_latency_scenarios(self, database: Database) -> list[str]:
-        """The scenarios the average ratio is taken over - every one but the cold start."""
-        return [scenario.key for scenario in self.get_scenarios(database) if scenario.key != "cold_start"]
-
-    def get_ratio(self, target: Target, baseline: Target) -> float:
-        """How many times slower than ``baseline`` a target is: the ratio of their geometric means over
-        the scenarios both of them run."""
-        database = DATABASE_BY_KEY[target.database]
-        logarithms = []
-        for scenario in self.get_latency_scenarios(database):
-            value, baseline_value = self.get_median(target, scenario), self.get_median(baseline, scenario)
-            if value is not None and baseline_value is not None:
-                logarithms.append(math.log(value) - math.log(baseline_value))
-        return math.exp(sum(logarithms) / len(logarithms))
-
-    def get_geometric_mean_time(self, target: Target) -> float:
-        """The geometric mean of a target's medians over the scenarios it runs."""
-        database = DATABASE_BY_KEY[target.database]
-        values = [
-            value for scenario in self.get_latency_scenarios(database) if (value := self.get_median(target, scenario))
-        ]
-        return math.exp(sum(math.log(value) for value in values) / len(values))
-
-    def get_baseline_drivers(self, database: Database) -> list[Target]:
-        """The targets of ``BASELINE_DISTRIBUTION`` on a database, fastest first."""
-        drivers = [target for target in self.get_targets(database) if target.distribution == BASELINE_DISTRIBUTION]
-        return sorted(drivers, key=self.get_geometric_mean_time)
-
-    def get_baseline(self, database: Database) -> Target | None:
-        """hare-orm's fastest driver on a database - the summary's ×1; None when no hare-orm target ran."""
-        drivers = self.get_baseline_drivers(database)
-        return drivers[0] if drivers else None
-
-    def get_load_tests(self, database: Database) -> list[str]:
-        """The load tests a database's targets ran."""
-        target = self.get_targets(database)[0]
-        return [name for name in LOAD_TESTS if self.get_result(target, f"{name}_throughput_ops_per_sec") is not None]
 
     # --- Drawing ------------------------------------------------------------------------------------------
 
@@ -165,10 +92,6 @@ class ChartWriter:
         decimals = 3 if not is_baseline and round(ratio, 2) == 1 else 2
         return "×" + self.format_number(ratio, decimals)
 
-    @staticmethod
-    def escape(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
     def text(self, x: float, y: float, content: str, **attributes: Any) -> str:
         """An SVG text element in the chart's font."""
         size = attributes.pop("size", 13)
@@ -177,7 +100,7 @@ class ChartWriter:
         extra = "".join(f' {name.replace("_", "-")}="{value}"' for name, value in attributes.items())
         return (
             f'<text x="{x:.1f}" y="{y:.1f}" font-family="{family}" font-size="{size}" fill="{colour}"{extra}>'
-            f"{self.escape(content)}</text>"
+            f"{escape(content, quote=True)}</text>"
         )
 
     @staticmethod
@@ -226,7 +149,7 @@ class ChartWriter:
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {full_height:.0f}" '
             f'width="{width}" height="{full_height:.0f}" role="img">'
-            f"<title>{self.escape(title)}</title>"
+            f"<title>{escape(title, quote=True)}</title>"
             f'<rect width="{width}" height="{full_height:.0f}" rx="10" fill="{self.colours["surface"]}"/>'
             f'<g transform="translate({self.PADDING},{self.PADDING})">{"".join(elements)}</g></svg>\n'
         )
@@ -237,18 +160,20 @@ class ChartWriter:
         """The summary table: a row per ORM and a column per database, each cell how many times slower
         than hare-orm the ORM is there on average - a bar and its number, a dash where the ORM doesn't
         run on the database - and a last row of hare-orm's operations per second under load."""
-        databases = self.get_databases()
+        databases = self.data.get_databases()
         label_width, row_height, top = 220.0, 32.0, 30.0
         column_width = (self.WIDTH - label_width) / len(databases)
         bar_room = column_width - 74
         targets_by_cell = {
             (target.family, database.key): target
             for database in databases
-            for target in self.get_targets(database)
+            for target in self.data.get_targets(database)
             # One target per ORM and database: hare-orm's fastest driver stands for it.
-            if target.family != "hare-orm" or target == self.get_baseline(database)
+            if target.family != "hare-orm" or target == self.data.get_baseline(database)
         }
-        families = [family for family in FAMILIES if any(cell[0] == family for cell in targets_by_cell)]
+        families = [
+            family for family in self.data.conditions["families"] if any(cell[0] == family for cell in targets_by_cell)
+        ]
         elements = []
         for column, database in enumerate(databases):
             x = label_width + column * column_width
@@ -264,8 +189,11 @@ class ChartWriter:
                 if target is None:
                     elements.append(self.text(x, y + 21, "—", size=13, colour=self.colours["muted"]))
                     continue
-                baseline = self.get_baseline(database)
-                ratio = 1.0 if target == baseline or baseline is None else self.get_ratio(target, baseline)
+                baseline = self.data.get_baseline(database)
+                ratio = self.data.get_ratio(target, baseline)
+                if ratio is None:
+                    elements.append(self.text(x, y + 21, "—", size=13, colour=self.colours["muted"]))
+                    continue
                 length = max(3.0, min(ratio, self.SCOREBOARD_RATIO_CEILING) / self.SCOREBOARD_RATIO_CEILING * bar_room)
                 elements.append(self.bar(x, y + 9, length, 14, self.get_series_colour(target)))
                 elements.append(
@@ -284,10 +212,10 @@ class ChartWriter:
         load_label = "hare-orm под нагрузкой, оп/с" if self.russian else "hare-orm under load, ops/s"
         elements.append(self.text(0, y + 21, load_label, size=13, colour=self.colours["secondary"]))
         for column, database in enumerate(databases):
-            baseline = self.get_baseline(database)
+            baseline = self.data.get_baseline(database)
             if baseline is None:
                 continue
-            throughput = self.get_median(baseline, "load_test_throughput_ops_per_sec")
+            throughput = self.data.get_median(baseline, "load_test_throughput_ops_per_sec")
             if throughput is not None:
                 x = label_width + column * column_width
                 elements.append(
@@ -307,7 +235,7 @@ class ChartWriter:
             The SVG.
         """
         label_width, row_height = 220.0, 30.0
-        maximum = max(value for __, value, __ in rows)
+        maximum = max((value for __, value, __ in rows), default=1.0)
         plot_width = self.WIDTH - label_width - 90
         elements = []
         for index, (target, value, value_text) in enumerate(rows):
@@ -333,8 +261,10 @@ class ChartWriter:
         """How many times slower than ``baseline`` every target of a database is, hare-orm's other
         drivers included."""
         rows = []
-        for target in self.get_targets(database):
-            ratio = 1.0 if target == baseline else self.get_ratio(target, baseline)
+        for target in self.data.get_targets(database):
+            ratio = self.data.get_ratio(target, baseline)
+            if ratio is None:
+                continue
             rows.append((target, ratio, self.format_ratio(ratio, target == baseline)))
         rows.sort(key=lambda row: row[1])
         name = self.get_target_name(baseline)
@@ -347,11 +277,14 @@ class ChartWriter:
         key = f"{load_test}_throughput_ops_per_sec"
         rows = [
             (target, value, self.format_number(value, 0))
-            for target in self.get_targets(database)
-            if (value := self.get_median(target, key)) is not None
+            for target in self.data.get_targets(database)
+            if (value := self.data.get_median(target, key)) is not None
         ]
         rows.sort(key=lambda row: -row[1])
         return self.ranked_bars("Операций в секунду" if self.russian else "Operations per second", rows)
+
+    def get_status_label(self, status: str) -> str:
+        return BENCHMARK_STATUS_LABELS[status][int(self.russian)]
 
     def group(self, database: Database, group_key: str) -> str:
         """One scenario group of a database: a legend, then a group of bars per scenario, two columns
@@ -359,7 +292,7 @@ class ChartWriter:
         bar for an ORM with no way to write the scenario."""
         group = next(group for group in database.groups if group.key == group_key)
         scenarios = [scenario for scenario in group.scenarios if scenario.key not in database.excluded_scenarios]
-        targets = self.get_targets(database)
+        targets = self.data.get_targets(database)
         legend_elements, legend_height = self.legend(targets, 0)
         elements = list(legend_elements)
         column_gap = 36.0
@@ -367,20 +300,20 @@ class ChartWriter:
         bar_thickness, bar_gap = 10.0, 4.0
         block_height = 26 + len(targets) * (bar_thickness + bar_gap) + 18
         top = legend_height + 14
-        missing_text = "нет в этой ORM" if self.russian else "not in this ORM"
         for index, scenario in enumerate(scenarios):
             column, row = index % 2, index // 2
             x = column * (column_width + column_gap)
             y = top + row * block_height
             elements.append(self.text(x, y + 14, self.get_scenario_label(scenario), size=13.5, font_weight="600"))
-            results = [self.get_result(target, scenario.key) for target in targets]
-            measured = [result for result in results if result is not None]
-            maximum = max(max(result["runs"]) for result in measured)
-            fastest = min(result["median"] for result in measured)
+            results = [self.data.get_result(target, scenario.key) for target in targets]
+            measured = [result for result in results if result["status"] == "measured"]
+            maximum = max((max(result["runs"]) for result in measured), default=1.0) or 1.0
+            fastest = min((result["median"] for result in measured), default=None)
             plot_width = column_width - 88
             for target_index, (target, result) in enumerate(zip(targets, results, strict=True)):
                 bar_y = y + 24 + target_index * (bar_thickness + bar_gap)
-                if result is None:
+                if result["status"] != "measured":
+                    missing_text = self.get_status_label(result["status"])
                     elements.append(
                         self.text(
                             x, bar_y + 9, missing_text, size=11, colour=self.colours["muted"], font_style="italic"
@@ -417,11 +350,11 @@ class ChartWriter:
     def get_charts(self) -> dict[str, str]:
         """Every chart of the report, by file name without the language and theme."""
         charts = {"scoreboard": self.scoreboard()}
-        for database in self.get_databases():
-            baseline = self.get_baseline(database)
+        for database in self.data.get_databases():
+            baseline = self.data.get_baseline(database)
             if baseline is not None:
                 charts[f"{database.key}-summary-slower"] = self.summary_ratio(database, baseline)
-            for load_test in self.get_load_tests(database):
+            for load_test in self.data.get_load_tests(database):
                 charts[f"{database.key}-summary-{load_test.replace('_', '-')}"] = self.summary_load(
                     database, load_test
                 )
@@ -430,24 +363,11 @@ class ChartWriter:
         return charts
 
     @classmethod
-    def write_all(cls, report: dict[str, Any], directory: Path = CHART_DIRECTORY) -> list[Path]:
-        """Writes every chart in every language and colour scheme, in place of the charts there.
-
-        Args:
-            report: The report.
-            directory: Where the charts go.
-
-        Returns:
-            The files written.
-        """
-        directory.mkdir(parents=True, exist_ok=True)
-        for old_chart in directory.glob("*.svg"):
-            old_chart.unlink()
-        written = []
-        for language in ("en", "ru"):
-            for theme in ("light", "dark"):
-                for name, svg in cls(report, language, theme).get_charts().items():
-                    path = directory / f"{name}-{language}-{theme}.svg"
-                    path.write_text(svg, encoding="utf-8", newline="\n")
-                    written.append(path)
-        return written
+    def render_all(cls, report: dict[str, Any], directory: Path = CHART_DIRECTORY) -> dict[Path, str]:
+        """Generate the complete set before any published artifact is replaced."""
+        return {
+            directory / f"{name}-{language}-{theme}.svg": svg
+            for language in ("en", "ru")
+            for theme in ("light", "dark")
+            for name, svg in cls(report, language, theme).get_charts().items()
+        }

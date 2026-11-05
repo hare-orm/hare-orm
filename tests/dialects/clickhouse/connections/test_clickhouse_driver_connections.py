@@ -1,5 +1,5 @@
 """The clickhouse-driver driver - ClickHouse's native TCP protocol: its settings, the worker threads
-keeping a connection each, the ping a busy connection skips and the moments its binary insert writes
+keeping a connection each and the moments its binary insert writes
 as whole ticks. The tests of a live server run on its own DB_URL (``make test_clickhouse``)."""
 
 import asyncio
@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 import pytz  # noqa: E402
 from clickhouse_driver.columns.datetimecolumn import DateTime64Column, DateTimeColumn  # noqa: E402
-from clickhouse_driver.connection import Connection as LibraryConnection  # noqa: E402
 
 from hare import Connections  # noqa: E402
 from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator  # noqa: E402
@@ -26,11 +25,10 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_moment_columns import (  # noqa: E402
     ClickhouseDriverMomentColumns,
 )
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.exceptions import ConfigurationError, DBConnectionError, OperationalError  # noqa: E402
 from tests.dialects.clickhouse.models import Player  # noqa: E402
 from tests.utils.waiting import wait_until  # noqa: E402
-
-REQUIRES = ("clickhouse-driver",)
 
 BEFORE_1970 = datetime.datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=datetime.UTC)
 
@@ -64,10 +62,9 @@ def test_a_db_url_names_the_native_port_and_the_most_connections():
 
 
 @pytest.mark.database_independent
-@pytest.mark.parametrize("max_size", [0, 1025, "many"])
-def test_the_most_connections_is_checked(max_size):
-    with pytest.raises(ConfigurationError, match="max_size"):
-        ClickhouseDriverClient(connection_alias="clickhouse", host="h", max_size=max_size)
+def test_the_worker_count_has_no_additional_upper_limit():
+    client = ClickhouseDriverClient(connection_alias="clickhouse", host="h", max_size=1025)
+    assert client.options["max_size"] == 1025
 
 
 @pytest.mark.database_independent
@@ -94,6 +91,7 @@ async def test_the_interactive_client_gets_the_connections_own_port():
     )
 
 
+@pytest.mark.database_independent
 @pytest.mark.parametrize(
     ("column_type", "moment_scale"),
     [
@@ -110,7 +108,9 @@ async def test_the_interactive_client_gets_the_connections_own_port():
     ],
 )
 def test_the_scale_of_moments_is_read_off_the_servers_column_type(column_type, moment_scale):
-    assert ClickhouseDriverLibraryClient._get_moment_scale(column_type) == moment_scale
+    assert (
+        ClickhouseDriverLibraryClient._get_moment_scale(ClickhousePhysicalType.from_sql(column_type)) == moment_scale
+    )
 
 
 @pytest.mark.database_independent
@@ -196,31 +196,6 @@ async def test_a_server_that_cannot_be_reached_is_a_connection_error(driver_db):
         status = client.get_pool_status()
         assert (status.size, status.connect_failures) == (0, 1)
         assert client.pool_statistics.connect_failures == 1
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
-async def test_a_busy_connection_skips_the_ping_and_an_idle_one_is_checked(driver_db, monkeypatch):
-    pings = []
-    library_ping = LibraryConnection.ping
-
-    def counting_ping(connection):
-        pings.append(connection)
-        return library_ping(connection)
-
-    monkeypatch.setattr(LibraryConnection, "ping", counting_ping)
-    client = Connections.current().create_independent("models", {"max_size": 1})
-    try:
-        for _ in range(5):
-            await client.execute_dicts("SELECT 1 AS n")
-        assert pings == []
-        (library_client,) = client._connection.library_clients
-        library_client.last_statement_time = time.monotonic() - 3600
-        await client.execute_dicts("SELECT 1 AS n")
-        assert len(pings) == 1
-        await client.execute_dicts("SELECT 1 AS n")
-        assert len(pings) == 1
     finally:
         await client.close()
 
@@ -326,28 +301,27 @@ def make_moment_column(column_class, **options):
     ],
 )
 def test_a_moment_is_read_from_its_ticks_exactly(scale, ticks, moment):
-    ClickhouseDriverMomentColumns.install()
     column = make_moment_column(DateTime64Column, scale=scale, timezone=pytz.utc, offset_naive=False)
-    assert column.after_read_items((ticks, 0), [0, 1]) == (moment, None)
+    assert ClickhouseDriverMomentColumns.read_moments(column, (ticks, 0), [0, 1]) == (moment, None)
 
 
 @pytest.mark.database_independent
 def test_a_moment_of_another_zone_is_read_in_it():
-    ClickhouseDriverMomentColumns.install()
     tokyo = pytz.timezone("Asia/Tokyo")
     column = make_moment_column(DateTime64Column, scale=6, timezone=tokyo, offset_naive=False)
-    (moment,) = column.after_read_items((-1_000_000,))
+    (moment,) = ClickhouseDriverMomentColumns.read_moments(column, (-1_000_000,))
     assert moment == datetime.datetime(1969, 12, 31, 23, 59, 59, tzinfo=datetime.UTC)
     assert moment.utcoffset() == datetime.timedelta(hours=9)
     naive_column = make_moment_column(DateTime64Column, scale=6, timezone=tokyo, offset_naive=True)
-    assert naive_column.after_read_items((0,)) == (datetime.datetime(1970, 1, 1, 9),)
+    assert ClickhouseDriverMomentColumns.read_moments(naive_column, (0,)) == (datetime.datetime(1970, 1, 1, 9),)
 
 
 @pytest.mark.database_independent
 def test_a_whole_second_before_1970_is_read():
-    ClickhouseDriverMomentColumns.install()
     column = make_moment_column(DateTimeColumn, timezone=pytz.utc, offset_naive=False)
-    assert column.after_read_items((-86_400,)) == (datetime.datetime(1969, 12, 31, tzinfo=datetime.UTC),)
+    assert ClickhouseDriverMomentColumns.read_whole_seconds(column, (-86_400,)) == (
+        datetime.datetime(1969, 12, 31, tzinfo=datetime.UTC),
+    )
 
 
 @pytest.mark.asyncio

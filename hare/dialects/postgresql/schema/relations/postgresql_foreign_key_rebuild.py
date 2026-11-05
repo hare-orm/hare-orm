@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, cast
 
 from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.generated_names import GeneratedNames
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.relations.foreign_key_rebuild import ForeignKeyRebuild
 from hare.fields.enums import OnDelete
 from hare.fields.field import Field
@@ -26,81 +28,85 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
 
     editor: PostgresqlSchemaEditor
 
-    async def drop_foreign_key(self, table_name: str, column_names: Sequence[str], schema: str | None) -> None:
-        """Drops the foreign key over exactly ``column_names`` of a table.
-
-        Args:
-            table_name: The table owning the constraint.
-            column_names: The constraint's own columns, in order.
-            schema: The table's schema.
-        """
-        await self.editor.run_sql(
-            self.editor.DELETE_CONSTRAINT_TEMPLATE.format(
-                table=self.editor.qualify_table_name(table_name, schema),
-                name=self.editor.quote(GeneratedNames.get_foreign_key_name(table_name, column_names)),
-            )
+    def get_foreign_key_drop_sql(self, table_name: str, column_names: Sequence[str], schema: str | None) -> str:
+        """Compile removal of the declared key before executing a schema plan."""
+        return self.editor.DELETE_CONSTRAINT_TEMPLATE.format(
+            table=self.editor.qualify_table_name(table_name, schema),
+            name=self.editor.quote(GeneratedNames.get_foreign_key_name(table_name, column_names)),
         )
 
-    async def drop_relation_foreign_keys(self, model: type[Model], relation_field: Field[Any]) -> None:
+    def get_relation_foreign_key_drop_plan(self, model: type[Model], relation_field: Field[Any]) -> SchemaChangePlan:
+        """Compile removal of the declared key or both automatic through-table keys."""
         if not self.creates_foreign_key(relation_field):
-            return
+            return SchemaChangePlan(())
         if isinstance(relation_field, ManyToManyFieldInstance):
             if relation_field._generated or relation_field.through_model is not None:
-                return
-            for side_keys in (relation_field.backward_keys, relation_field.forward_keys):
-                await self.drop_foreign_key(relation_field.through, side_keys, model._meta.schema)
-            return
+                return SchemaChangePlan(())
+            return SchemaChangePlan(
+                tuple(
+                    SchemaStatement(
+                        self.get_foreign_key_drop_sql(
+                            relation_field.through,
+                            keys,
+                            model._meta.schema,
+                        )
+                    )
+                    for keys in (relation_field.backward_keys, relation_field.forward_keys)
+                )
+            )
         if isinstance(relation_field, ForeignKeyFieldInstance):
-            columns = [
-                model._meta.fields_db_projection[key_field_name] for key_field_name in relation_field.source_fields
-            ]
-            await self.drop_foreign_key(model._meta.db_table, columns, model._meta.schema)
+            columns = [model._meta.fields_db_projection[name] for name in relation_field.source_fields]
+            return SchemaChangePlan(
+                (SchemaStatement(self.get_foreign_key_drop_sql(model._meta.db_table, columns, model._meta.schema)),)
+            )
+        return SchemaChangePlan(())
 
-    async def add_relation_foreign_key(
+    def get_relation_foreign_key_sql(
         self, model: type[Model], foreign_key_field: ForeignKeyFieldInstance[Model]
-    ) -> None:
-        """Adds a FK/O2O field's constraint - nothing for one declared without it.
-
-        Args:
-            model: The model owning the relation.
-            foreign_key_field: The relation.
-        """
+    ) -> str | None:
+        """Compile the relation's constraint, or omit it when none is declared."""
         if not self.creates_foreign_key(foreign_key_field):
-            return
+            return None
         if len(foreign_key_field.source_fields) > 1:
             constraint = self.editor.table_creation.get_composite_foreign_key_constraint(model, foreign_key_field)
         else:
             constraint = self.editor.table_creation.get_single_column_foreign_key_constraint(
                 model, foreign_key_field.source_fields[0]
             )
-        await self.editor.run_sql(self.editor.table_creation.get_add_foreign_key_sql(model, constraint, safe=False))
+        return self.editor.table_creation.get_add_foreign_key_sql(model, constraint, safe=False)
 
-    async def alter_foreign_key_on_delete(
+    def get_foreign_key_change_plan(
         self,
         model: type[Model],
-        db_field: str,
-        old_foreign_key_field: ForeignKeyFieldInstance[Model],
-        new_foreign_key_field: ForeignKeyFieldInstance[Model],
-    ) -> None:
-        await self.drop_relation_foreign_keys(model, old_foreign_key_field)
-        await self.add_relation_foreign_key(model, new_foreign_key_field)
+        old_field: ForeignKeyFieldInstance[Model],
+        new_field: ForeignKeyFieldInstance[Model],
+    ) -> SchemaChangePlan:
+        """Prepare dropping the old constraint and adding its new declaration."""
+        return SchemaChangePlan(
+            (
+                *self.get_relation_foreign_key_drop_plan(model, old_field).steps,
+                *self.get_foreign_key_rebuild_plan(model, new_field).steps,
+            )
+        )
 
-    async def rebuild_foreign_key_constraints(
-        self, model: type[Model], foreign_key_field: ForeignKeyFieldInstance[Model]
-    ) -> None:
-        """Adds back a FK/O2O field's constraint dropped for a change of its key columns."""
-        await self.add_relation_foreign_key(model, foreign_key_field)
+    def get_foreign_key_rebuild_plan(
+        self, model: type[Model], field: ForeignKeyFieldInstance[Model]
+    ) -> SchemaChangePlan:
+        """Prepare restoration of a constraint already removed for a key change."""
+        sql = self.get_relation_foreign_key_sql(model, field)
+        return SchemaChangePlan((SchemaStatement(sql),) if sql else ())
 
-    async def rebuild_many_to_many_through_foreign_keys(
+    def get_many_to_many_rebuild_plan(
         self,
         model: type[Model],
         field: ManyToManyFieldInstance[Model],
-    ) -> None:
+    ) -> SchemaChangePlan:
         """Replaces the FK constraints of an auto-managed through table with the field's current ON
         DELETE action and aligns the key columns' nullability with it
         (only ON DELETE SET NULL needs nullable columns)."""
         from hare.query.key_columns import KeyColumns
 
+        statements = []
         schema = model._meta.schema
         through_table = field.through
         qualified_through = self.editor.qualify_table_name(through_table, schema)
@@ -112,7 +118,7 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
         sides = ((field.backward_keys, model._meta), (field.forward_keys, field.related_model._meta))
         for side_keys, target_meta in sides:
             for key in side_keys:
-                await self.editor.run_sql(
+                statements.append(
                     self.editor.ALTER_FIELD_TEMPLATE.format(
                         table=qualified_through, changes=nullability_template.format(column=self.editor.quote(key))
                     )
@@ -127,9 +133,10 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
                 to_fields=", ".join(self.editor.quote(column) for column in pk_columns),
                 on_delete=field.db_on_delete,
             )
-            await self.editor.run_sql(
+            statements.append(
                 self.editor.ADD_CONSTRAINT_TEMPLATE.format(table=qualified_through, constraint=constraint_sql)
             )
+        return SchemaChangePlan(tuple(SchemaStatement(sql) for sql in statements))
 
     def get_incoming_relations(
         self, model: type[Model]
@@ -174,32 +181,32 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
                         incoming.append((candidate_model, relation_field, tuple(relation_field.forward_keys)))
         return incoming
 
-    async def drop_incoming_foreign_keys(self, model: type[Model]) -> None:
-        """Drops the foreign keys of other tables referencing a model's table.
-
-        Args:
-            model: The model rendered from the state.
-        """
+    def get_incoming_foreign_key_drop_sqls(self, model: type[Model]) -> list[str]:
+        """Prepare removal of every incoming relation known to the migration state."""
+        statements = []
         for referencing_model, relation_field, side_keys in self.get_incoming_relations(model):
+            meta = referencing_model._meta
             if side_keys is None:
-                await self.drop_relation_foreign_keys(referencing_model, relation_field)
+                field = cast("ForeignKeyFieldInstance[Model]", relation_field)
+                columns = [meta.fields_db_projection[name] for name in field.source_fields]
+                statements.append(self.get_foreign_key_drop_sql(meta.db_table, columns, meta.schema))
             else:
                 through_field = cast("ManyToManyFieldInstance[Model]", relation_field)
-                await self.drop_foreign_key(through_field.through, side_keys, referencing_model._meta.schema)
+                statements.append(self.get_foreign_key_drop_sql(through_field.through, side_keys, meta.schema))
+        return statements
 
-    async def add_incoming_foreign_keys(self, model: type[Model]) -> None:
-        """Adds back the foreign keys of other tables referencing a model's table.
-
-        Args:
-            model: The model rendered from the state.
-        """
+    def get_incoming_foreign_key_create_sqls(self, model: type[Model]) -> list[str]:
+        """Prepare restoration from the target declarations, including through-table keys."""
         from hare.query.key_columns import KeyColumns
 
+        statements = []
         for referencing_model, relation_field, side_keys in self.get_incoming_relations(model):
             if side_keys is None:
-                await self.add_relation_foreign_key(
+                sql = self.get_relation_foreign_key_sql(
                     referencing_model, cast("ForeignKeyFieldInstance[Model]", relation_field)
                 )
+                if sql is not None:
+                    statements.append(sql)
                 continue
             through_field = cast("ManyToManyFieldInstance[Model]", relation_field)
             constraint_sql = self.editor.FOREIGN_KEY_CONSTRAINT_CREATE_TEMPLATE.format(
@@ -211,17 +218,25 @@ class PostgresqlForeignKeyRebuild(ForeignKeyRebuild):
                 ),
                 on_delete=through_field.db_on_delete,
             )
-            await self.editor.run_sql(
+            statements.append(
                 self.editor.ADD_CONSTRAINT_TEMPLATE.format(
                     table=self.editor.qualify_table_name(through_field.through, referencing_model._meta.schema),
                     constraint=constraint_sql,
                 )
             )
+        return statements
 
-    async def add_foreign_key_constraint_not_valid(self, model: type[Model], constraint: ForeignKeyConstraint) -> None:
-        await self.editor.run_sql(
-            self.editor.ADD_CONSTRAINT_TEMPLATE.format(
-                table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
-                constraint=f"{self.editor.table_creation.get_foreign_key_constraint_clause(constraint)} NOT VALID",
+    def get_foreign_key_not_valid_plan(self, model: type[Model], constraint: ForeignKeyConstraint) -> SchemaChangePlan:
+        """Prepare a key whose existing rows will be checked by a later operation."""
+        return SchemaChangePlan(
+            (
+                SchemaStatement(
+                    self.editor.ADD_CONSTRAINT_TEMPLATE.format(
+                        table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+                        constraint=(
+                            f"{self.editor.table_creation.get_foreign_key_constraint_clause(constraint)} NOT VALID"
+                        ),
+                    )
+                ),
             )
         )

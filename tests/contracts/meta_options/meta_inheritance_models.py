@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import importlib
-import re
 from typing import Any
 
 from hare import fields
+from hare.contrib.outbox.capture.change_capture import ChangeCapture
+from hare.contrib.outbox.wakeups.outbox_wakeup import OutboxWakeup
+from hare.declarations.declaration_values import DeclarationValues
 from hare.models import Model
+from hare.query.managers.manager import Manager
 from tests.contracts.constants import CONTRACT_APP
 from tests.contracts.meta_options.enums import MetaVariant
 from tests.contracts.meta_options.meta_option_sample import MetaOptionSample
@@ -125,18 +128,36 @@ class MetaInheritanceModels:
         return concrete, control
 
     @staticmethod
-    def get_option_value(model: type[Model], option: str) -> str:
-        """What a model holds of an option, as text comparable between models.
+    def get_option_value(model: type[Model], option: str) -> object:
+        """Compare declaration inputs, excluding bound models, caches and live subscriptions.
 
         Args:
             model: The model.
             option: The option.
 
         Returns:
-            The value's text, without the addresses of objects.
+            The structural declaration, including exact raw SQL and scalar types.
         """
         meta = model._meta
         if option == "primary_key":
-            return repr(meta.has_primary_key)
+            return meta.has_primary_key
         value = getattr(meta, option) if hasattr(meta, option) else getattr(meta.meta, option, None)
-        return re.sub(r" at 0x[0-9a-fA-F]+", "", repr(value))
+        if isinstance(value, Manager):
+            value = (type(value), value.queryset_class, value.scope)
+        elif isinstance(value, OutboxWakeup):
+            # This matrix declares only the parameterless in-process wakeup.
+            value = type(value)
+        elif isinstance(value, ChangeCapture):
+            value = (
+                type(value),
+                value.outbox_reference,
+                value.operations,
+                value.payload,
+                value.fields,
+                value.exclude,
+                value.topic,
+                value.ordering_key,
+                value.extend,
+                value.extend_many,
+            )
+        return DeclarationValues.get(value)

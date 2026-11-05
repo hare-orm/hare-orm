@@ -32,7 +32,10 @@ INVALID_POOLER_OPTIONS = [
     ({"direct_host": "db.internal"}, "set transaction_pooling=true"),
     ({"direct_port": 5432}, "set transaction_pooling=true"),
     ({"transaction_pooling": True, "direct_port": 5432}, "direct_port needs direct_host"),
-    ({"transaction_pooling": True, "direct_host": "db.internal", "direct_port": 0}, "direct_port must be between"),
+    (
+        {"transaction_pooling": True, "direct_host": "db.internal", "direct_port": "bad"},
+        "direct_port must be a whole number",
+    ),
     ({"transaction_pooling": "maybe"}, "transaction_pooling"),
 ]
 
@@ -63,6 +66,8 @@ def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class)
         "host": "db.internal",
         "port": 5433,
         "schema": None,
+        "search_path": None,
+        "server_settings": {"TimeZone": "UTC"},
         "transaction_pooling": False,
         "direct_host": None,
         "direct_port": None,
@@ -86,13 +91,6 @@ def test_a_session_of_its_own_goes_to_the_server_behind_the_pooler(client_class)
 async def test_listen_behind_the_pooler_needs_the_server_address(client_class):
     with pytest.raises(ConfigurationError, match="set direct_host"):
         await make_client(client_class, transaction_pooling=True).listen("channel", lambda *args: None)
-
-
-@pytest.mark.database_independent
-def test_search_path_schemas_are_compared_as_the_server_lists_them():
-    assert TransactionPooler.get_search_path_schemas('"$user", public') == ("$user", "public")
-    assert TransactionPooler.get_search_path_schemas("tenant_1,public") == ("tenant_1", "public")
-    assert TransactionPooler.get_search_path_schemas(' "Mixed Case" , public ,') == ("Mixed Case", "public")
 
 
 @requires_features(dialect="postgresql")

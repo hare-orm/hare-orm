@@ -14,8 +14,6 @@ from hare.dialects.sqlite.functions.json.sqlite_json_datetime import SqliteJsonD
 from hare.dialects.sqlite.functions.json.sqlite_json_path import SqliteJsonPath
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]
@@ -107,5 +105,8 @@ def test_json_datetime() -> None:
             assert_same(normalize, SqliteJsonDatetime.normalize, text, mode)
     for value in [None, 5, 2.5, b"2020-01-02"]:
         assert_same(normalize, SqliteJsonDatetime.normalize, value, "wall")
+    for text in ["2020-01-02\n", "2020-01-02T03:04:05Z\n"]:
+        assert SqliteJsonDatetime.normalize(text, "wall") is None
+        assert normalize(text, "wall") is None
     assert_same(normalize, SqliteJsonDatetime.normalize, "2020-01-02", None)
     assert json.dumps(normalize("2020-01-02T03:04:05+01:00", "instant")) == "1577930645000000"

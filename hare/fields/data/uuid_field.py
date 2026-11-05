@@ -24,6 +24,7 @@ class UUIDField(Field[TUuid]):
     """
 
     field_type = UUID
+    accepted_value_types = (str,)
 
     SQL_TYPE = "CHAR(36)"
 

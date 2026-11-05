@@ -10,7 +10,7 @@ class AiosqliteClientWithRegexpSupport(AiosqliteClient):
 
     features = AiosqliteClient.features.replace(supports_posix_regex=True)
 
-    async def create_connection(self, with_db: bool) -> None:
-        await super().create_connection(with_db)
+    async def _post_connect(self) -> None:
+        await super()._post_connect()
         if self._connection:
             await SqlitePosixRegex.install(self._connection, self.function_errors)

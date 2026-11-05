@@ -94,7 +94,7 @@ async def test_the_declaration_lists_the_bounds(library):
 @pytest.mark.asyncio
 async def test_the_parameters_keep_one_order(library):
     DatedBookQuery.prepare_parameters()
-    assert list(DatedBookQuery.model_fields) == [
+    assert list(DatedBookQuery.prepare_parameters().model_fields) == [
         "published_since",
         "author__lte",
         "published_at__gt",

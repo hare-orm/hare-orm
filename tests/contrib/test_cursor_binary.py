@@ -11,8 +11,6 @@ from hare.contrib.request_query.paginations.cursor import Cursor
 from hare.contrib.test import hare_test_context
 from hare.models import Model
 
-REQUIRES = ("request-query",)
-
 
 class BinaryEntry(Model):
     id = fields.IntField(primary_key=True)

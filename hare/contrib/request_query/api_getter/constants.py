@@ -6,7 +6,7 @@ API_PATH_SEPARATOR = "."
 #: The values a path ends at - a text or a number has nothing a path goes on to.
 JSON_SCALAR_TYPES = (str, bytes, int, float, bool)
 
-#: The longest a request to a source may take by default.
+#: The default passed to HTTPX for each connect, read, write and pool wait, not a total request deadline.
 DEFAULT_API_TIMEOUT_SECONDS = 10.0
 
 #: The most requests of a source at a time by default.
@@ -14,6 +14,7 @@ DEFAULT_API_CONCURRENCY = 10
 
 #: The most values one ``ApiRequestMode.QUERY_MANY`` request asks for by default.
 DEFAULT_API_BATCH_SIZE = 200
+API_POSITIVE_CAPACITY_MESSAGE = "ApiSource concurrency and batch_size must be positive"
 
 #: The longest pause before the first repeat of a failed request by default.
 DEFAULT_API_RETRY_BASE_DELAY_SECONDS = 0.5

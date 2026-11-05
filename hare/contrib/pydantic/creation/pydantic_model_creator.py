@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     from hare.models import Model
 
 
-# Type alias for a single entry in the recursion stack: (model_class, field_name, max_recursion)
-StackEntry: TypeAlias = tuple["type[Model]", str, int]
+# A recursion level's model and maximum nesting depth.
+StackEntry: TypeAlias = tuple["type[Model]", int]
 
 
 # Type alias for property values stored in _properties.
@@ -51,7 +51,7 @@ PropertyValue: TypeAlias = "tuple[type, Any] | Any"
 
 class PydanticModelCreator:
     """Builds the Pydantic schema of a model - its fields, relations and computed fields as the model's
-    ``PydanticMeta`` and the call's options take them - and keeps each built schema for the next call."""
+    ``Meta.pydantic`` and the call's options take them - and keeps each built schema for the next call."""
 
     #: (model, index key) -> the Pydantic model generated from the model. Dropped with the model: a
     #: re-registered class for the same table would otherwise get the old class's schema, whose
@@ -81,7 +81,7 @@ class PydanticModelCreator:
         allow_cycles: bool | None = None,
         sort_alphabetically: bool | None = None,
         exclude_readonly: bool = False,
-        meta_override: type | None = None,
+        meta_override: object | None = None,
         model_config: ConfigDict | None = None,
         validators: dict[str, Any] | None = None,
         module: str = PYDANTIC_MODELS_MODULE,
@@ -296,23 +296,14 @@ class PydanticModelCreator:
         if not self._exclude_read_only:
             # A reverse relation has no column on this row, so a flat (relations_as_ids) schema
             # leaves it out.
-            if self._relations_as_ids:
-                pass
-            elif self.meta.backward_relations:
+            if not self._relations_as_ids:
                 for fields in (
                     self._model_description.backward_foreign_key_fields,
                     self._model_description.backward_one_to_one_fields,
                 ):
+                    if not self.meta.backward_relations:
+                        fields = [field for field in fields if field.model_field_name in self._annotations]
                     self._field_map.field_map_update(fields, self.meta)
-            else:
-                # Include only explicitly annotated backward relations
-                for fields in (
-                    self._model_description.backward_foreign_key_fields,
-                    self._model_description.backward_one_to_one_fields,
-                ):
-                    annotated = [field for field in fields if field.model_field_name in self._annotations]
-                    if annotated:
-                        self._field_map.field_map_update(annotated, self.meta)
             self._field_map.computed_field_map_update(self.meta.model_computed, self._model_class, self.meta)
         if self.meta.sort_alphabetically:
             self._field_map.sort_alphabetically()
@@ -338,7 +329,9 @@ class PydanticModelCreator:
         # Keyed by hash AND name: a root schema and the ":leaf" submodel of the same model (or
         # two given name= values) can share one hash while being different schemas.
         model_index_key = (self._model_class, f"{self._hash};{self._name}")
-        if (hashed_model := PydanticModelCreator.MODEL_INDEX.get(model_index_key)) is not None:
+        if (
+            hashed_model := PydanticModelCreator.MODEL_INDEX.get_model_bucket(self._model_class).get(model_index_key)
+        ) is not None:
             return cast("type[PydanticModel]", hashed_model)
 
         self._pconfig = PydanticMetaReading.initialize_pconfig(self)
@@ -374,7 +367,7 @@ class PydanticModelCreator:
         model.related_value_paths = (
             () if self._exclude_read_only else tuple(ExtraFieldSchemas.get_shown_related_values(self).values())
         )
-        PydanticModelCreator.MODEL_INDEX[model_index_key] = model
+        PydanticModelCreator.MODEL_INDEX.get_model_bucket(self._model_class)[model_index_key] = model
         return model
 
     def _process_field(
@@ -392,7 +385,7 @@ class PydanticModelCreator:
         fconfig: dict[str, Any] = {
             "json_schema_extra": json_schema_extra,
         }
-        field_property, _ = self._process_normal_field(field_name, field, json_schema_extra, fconfig)
+        field_property = self._process_normal_field(field_name, field, json_schema_extra, fconfig)
         if field_property:
             fconfig["title"] = field_name.replace("_", " ").title()
             description = FieldDescriptions.replace_newlines_with_br(field.docstring or field.description or "")
@@ -443,11 +436,11 @@ class PydanticModelCreator:
         field: Field[Any],
         json_schema_extra: dict[str, Any],
         fconfig: dict[str, Any],
-    ) -> tuple[Any, bool]:
+    ) -> Any:
         if isinstance(field, (ForeignKeyFieldInstance, OneToOneFieldInstance, BackwardOneToOneRelation)):
-            return RelationFieldSchemas.process_single_field_relation(self, field_name, field, json_schema_extra), True
+            return RelationFieldSchemas.process_single_field_relation(self, field_name, field, json_schema_extra)
         if isinstance(field, (BackwardForeignKeyRelation, ManyToManyFieldInstance)):
-            return RelationFieldSchemas.process_many_field_relation(self, field_name, field), False
+            return RelationFieldSchemas.process_many_field_relation(self, field_name, field)
         if isinstance(json_field := DataFieldSchemas.unwrap_generated_field(field), JSONField):
             # A JSONField(null=True) is marked nullable here - it doesn't go through
             # _process_data_field. Its type is field_type when declared, else Any.
@@ -455,8 +448,8 @@ class PydanticModelCreator:
                 json_schema_extra["nullable"] = True
             declared_value_type = json_field.declared_value_type
             if not declared_value_type:
-                return Any, False
+                return Any
             if field.null or field_name in self._optional:
                 declared_value_type = declared_value_type | None
-            return self._annotations.get(field_name) or declared_value_type, False
-        return DataFieldSchemas.process_data_field(self, field_name, field, json_schema_extra, fconfig), False
+            return self._annotations.get(field_name) or declared_value_type
+        return DataFieldSchemas.process_data_field(self, field_name, field, json_schema_extra, fconfig)

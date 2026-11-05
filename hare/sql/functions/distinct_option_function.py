@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
@@ -12,6 +12,8 @@ if TYPE_CHECKING:
 
 class DistinctOptionFunction(AggregateFunction):
     """An aggregate taking ``DISTINCT`` before its arguments (``distinct()``)."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ("_distinct",)
 
     def __init__(self, name: str, *args: Any, **kwargs: Any) -> None:
         alias = kwargs.get("alias")

@@ -81,8 +81,10 @@ class Field:
 
 ### <a id="default"></a>`default`
 
-Значение по умолчанию на стороне Python: само значение, обычная функция или **асинхронная** функция;
-вычисляется при `save()`. В схему базы не попадает. Значение (или результат функции) преобразуется так
+Значение по умолчанию на стороне Python: само значение, обычная функция или **асинхронная** функция.
+Статические значения и синхронные функции присваиваются при создании экземпляра; асинхронные значения
+ожидаются при подготовке записи (`save()`, `create()` или массовая вставка). В схему базы не попадают.
+Значение (или результат функции) преобразуется так
 же, как значение, переданное явно, поэтому в памяти оказывается тот же тип, что вернёт последующее
 чтение: `default="red"` у `CharEnumField` — это элемент перечисления, `default=1.5` у `DecimalField` —
 `Decimal("1.50")`, `datetime` без часового пояса получает настроенный пояс.
@@ -164,9 +166,10 @@ class Review(Model):
 
 Поле с `db_default` без собственного значения держит в новом объекте `DatabaseDefault` (`hare.fields`):
 `INSERT` не пишет его колонку, и её заполняет база. Это значение ложно;
-`isinstance(value, DatabaseDefault)` отличает его от других ложных значений. `bulk_create()` не пишет
-колонку, которую все объекты оставляют базе, и бросает `QueryError` для колонки, которую оставляют только
-некоторые.
+`isinstance(value, DatabaseDefault)` отличает его от других ложных значений. `bulk_create()` группирует
+последовательные объекты по колонкам, которые они оставляют базе, и пропускает эти колонки при вставке
+каждой группы, сохраняя порядок входа. Объекты с явными значениями можно смешивать с объектами,
+использующими значения по умолчанию из базы.
 
 ## <a id="data-fields"></a>Поля с данными (`hare.fields`)
 
@@ -191,7 +194,7 @@ class Review(Model):
 | `TimeField` | `datetime.time` | `auto_now`, `auto_now_add` (местное время на часах со стандартным смещением настроенного пояса — тем же, что получает время без пояса) | `TIME` (PostgreSQL: `TIMETZ`); `timedelta` или текст `24:00` дают `ValidationError` |
 | `TimeDeltaField` | `datetime.timedelta` | — | `BIGINT` (хранится в микросекундах); число вместо `timedelta` даёт `ValidationError` |
 | `FloatField` | `float` | — | `DOUBLE PRECISION` (SQLite: `REAL`) |
-| `JSONField[T]` | `dict` / `list` (или класс модели Pydantic) | `encoder`, `decoder`, `field_type` (для документации OpenAPI) | `JSON` (PostgreSQL: `JSONB`); обычный индекс-дерево (btree: `unique=True`/`db_index=True`/`Index(fields=...)`) не допускается, но индекс другого вида в `Meta.indexes`, например `GinIndex(fields=[...])`, принимается |
+| `JSONField[T]` | `dict` / `list` (или класс модели Pydantic) | `encoder`, `decoder`, `field_type` (валидация Python-значения и схемы) | `JSON` (PostgreSQL: `JSONB`); обычный индекс-дерево (btree: `unique=True`/`db_index=True`/`Index(fields=...)`) не допускается, но индекс другого вида в `Meta.indexes`, например `GinIndex(fields=[...])`, принимается |
 | `JSONTextField` | `dict` / `list` / любое значение JSON | как у `JSONField` | колонка `JSONField`, но на ClickHouse — `String` с текстом JSON: его тип `JSON` теряет null у ключа и список на верхнем уровне; любое значение читается таким, каким записано (`payload` и `headers` outbox) |
 | `UUIDField` | `uuid.UUID` | `version` (UUID другой версии RFC 9562 отклоняется везде, где hare передаёт его в базу, — в записи, в фильтре, в ключе существующей строки и в ссылке на неё, `ValidationError` — значение, которое вычисляет сама база, например `F(...)` или `db_default`, не проверяется; `primary_key=True` без явного `default` сам задаёт `default=uuid4`, а с `version=7` — `Uuid7.new`) | `CHAR(36)` (PostgreSQL: `UUID`); читается как обычный `uuid.UUID` на любом драйвере |
 | `BinaryField` | `bytes` (и `bytearray`, `memoryview`; иное даёт `ValidationError`) | — | `BLOB` (PostgreSQL: `BYTEA`); фильтруется по равенству, `__in`, `__isnull` и сравнениям (порядок байтов) — текстовый lookup (`__contains`, ...) даёт `FieldError`, — обновляется через `update()`, принимает `unique=True`/`db_index=True` (индекс B-tree — в PostgreSQL значение больше примерно 2,7 КБ проиндексировать нельзя) |
@@ -220,8 +223,10 @@ class Book(Model):
 `str`: число, `UUID`, `bytes` или любой другой объект при любой записи и в фильтре дают `ValidationError`
 — иначе записался бы или сравнивался его `str()`. Текстовый оператор фильтра (`__contains`, `__icontains`,
 `__startswith`, `__endswith`, `__iexact`, `__posix_regex`, `__search` и др.) у поля любого типа принимает
-только `str`: `number__contains=5` даёт ошибку, а `number__contains="5"` ищет в тексте числа. Значение,
-прочитанное из колонки, берётся таким, каким его вернул драйвер.
+только `str`: `number__contains=5` даёт ошибку, а `number__contains="5"` ищет в тексте числа. При чтении
+нативные текстовые значения могут использоваться напрямую. Резервный обработчик `CharField`/`TextField`
+сохраняет `None` и строки, а остальные значения драйвера преобразует через `str()` перед преобразованием
+в Python-значение поля.
 
 ### <a id="numbers"></a>Числа
 
@@ -248,15 +253,23 @@ PostgreSQL и ClickHouse его хранят. Фильтр по `NaN` сравн
 лишние знаки. Отрицательный ноль (`Decimal("-0.00")`) читается как `Decimal("0.00")`: у
 нуля в десятичной колонке знака нет.
 
+Конструктор (в том числе `create()`) нормализует десятичное значение сразу. Последующее присваивание
+атрибута сохраняет на экземпляре переданное Python-значение; `save()` и `bulk_update()` нормализуют
+записываемое значение, не заменяя атрибут. Для чтения сохранённого результата используйте `refresh_from_db()`.
+
 ### <a id="decimal-field-sqlite"></a>`DecimalField` (SQLite)
 
 В SQLite нет точного десятичного типа, поэтому колонки для `DecimalField` там нет: модель с таким полем
-даёт `UnSupportedError` при привязке к соединению SQLite, как и запрос к SQLite со значением `Decimal`
-или с `Cast()` к десятичному типу — до любого SQL. Храните деньги в целых младших единицах (`IntField`
-или `BigIntField` копеек) в SQLite либо используйте PostgreSQL или ClickHouse, которые хранят точные
-десятичные числа. [inspectdb](../migrations/inspectdb.ru.md) читает колонку SQLite `DECIMAL` или `NUMERIC`
-как `FloatField`: у такой колонки в SQLite числовое сродство (NUMERIC affinity), которое хранит целое
-или 64-битное число с плавающей точкой.
+даёт `UnSupportedError` при привязке к соединению SQLite. ORM-выражения десятичного типа, включая
+`Cast()` к `DecimalField`, тоже отклоняются до SQL. Это не запрет всех аргументов Python типа `Decimal`:
+для параметров raw SQL стандартный адаптер преобразует `Decimal` в текст. Такое преобразование
+не даёт SQLite точной десятичной арифметики.
+
+Храните деньги в целых младших единицах (`IntField` или `BigIntField` копеек) в SQLite либо используйте
+PostgreSQL или ClickHouse, которые хранят точные десятичные числа.
+[inspectdb](../migrations/inspectdb.ru.md) читает колонку SQLite `DECIMAL` или `NUMERIC` как `FloatField`:
+у такой колонки в SQLite числовое сродство (NUMERIC affinity), которое хранит целое или 64-битное число
+с плавающей точкой.
 
 ### <a id="date-and-time-values"></a>Дата и время
 
@@ -285,8 +298,8 @@ hare, где действует пояс UTC.
 
 ### <a id="extreme-dates"></a>Крайние даты (PostgreSQL)
 
-`datetime.min`/`datetime.max` и `date(1, 1, 1)`/`date(9999, 12, 31)` хранятся на любой базе как те дни и
-моменты, которыми они являются, — и в PostgreSQL (через `asyncpg` и через `rust_pg`), а не как
+`datetime.min`/`datetime.max` и `date(1, 1, 1)`/`date(9999, 12, 31)` хранятся в SQLite и PostgreSQL
+(через `asyncpg` и через `rust_pg`) как те дни и моменты, которыми они являются, а не как
 `-infinity`/`infinity`, — поэтому `__year`/`__month`/`__day`, `Extract`/`Trunc` и
 `F("dt") ± timedelta(...)` с ними работают. `infinity`/`-infinity` в PostgreSQL, записанные иначе,
 читаются как те же крайние значения Python: `date.max`/`date.min`, `datetime.max`/`datetime.min`. В поясе
@@ -296,7 +309,12 @@ hare, где действует пояс UTC.
 обратно как naive крайнее значение, а не как местное время, которое восточнее или западнее UTC вышло бы
 за диапазон.
 
+В ClickHouse диапазоны даты и времени уже; см. [Типы ClickHouse](../dialects/clickhouse/types.ru.md).
+
 ### <a id="json-values"></a>Значения JSON
+
+Стандартный кодировщик JSON использует `orjson`, если он установлен, иначе — стандартную библиотеку.
+Проверки поля выполняются до кодирования, в том числе перед пользовательским callback `encoder`.
 
 `JSONField` даёт `ValidationError` (а не просто `ValueError`/`TypeError`), если значение не удаётся
 преобразовать в JSON, если из колонки прочитан испорченный JSON или если значение не соответствует
@@ -388,8 +406,10 @@ hare никогда не пишет в эту колонку: `INSERT` чита�
 (`bulk_create()` без `returning=True`, база без `RETURNING`), пока его не прочитает `refresh_from_db()`.
 Значение, присвоенное загруженному экземпляру, при `save()` заменяется
 вычисленным; `bulk_update()` перечитывает новое значение только с `returning=True`. Оно не может быть
-первичным ключом и не принимает `validators=` (`ConfigurationError` — задайте их у `output_field`);
-`sensitive` оно наследует от `output_field`, если не передано своё значение.
+первичным ключом и не принимает `validators=` (`ConfigurationError`). Входные значения проверяют
+validators на входных полях; вычисленный результат ограничивает constraint базы данных.
+Validators на `output_field` не выполняются при чтении результата. `sensitive` поле наследует
+от `output_field`, если не передано своё значение.
 
 ### <a id="format-fields"></a>Поля адреса почты, URL, слага и телефона
 
@@ -480,7 +500,8 @@ def CharEnumField(
 ```
 
 - `IntEnumField` построено на `SmallIntField` — значения перечисления должны помещаться в `int16`
-  (1..32767 при `generated=True`, иначе весь диапазон `int16`).
+  (1..32767 при `generated=True`, иначе весь диапазон `int16`). По умолчанию генерация отключена,
+  в том числе у первичного ключа; её можно включить явно через `generated=True`.
 - `CharEnumField` построено на `CharField` — при `max_length=0` длина берётся по самому длинному значению
   перечисления. **Если позже вы добавите более длинное значение, увеличьте `max_length` сами** — оно не
   пересчитывается. Перечисление с нестроковыми значениями (например, `ONE = 1`) тоже работает: в колонку
@@ -534,8 +555,9 @@ class Shelf(Model):
 значение-контейнер — `ArrayField`, `MapField`, `TupleField`, `NestedField` или `JSONField`, ни в
 составном ключе, ни ключом целиком: ORM держит прочитанные и записанные строки по их ключу
 (`ConfigurationError`); такие поля делайте уникальными через `UniqueConstraint`. `Model.pk` у такой
-модели — кортеж. `clone()` вычисляет `default=`/`db_default=` каждой части ключа отдельно, поэтому в
-`pk=(...)` явно указываются только части, у которых нет ни того, ни другого.
+модели — кортеж. Без `pk` метод `clone()` использует `default=` или `db_default=` каждой части; если
+у какой-либо части нет ни того, ни другого, возникает `QueryError`. Явный `pk=(...)` должен содержать
+полный ключ в порядке его частей, без дополнения значениями по умолчанию.
 
 Частью ключа может быть внешний ключ — по своему имени или по имени колонки ключа:
 `CompositePrimaryKey("book_id", "number")` и `CompositePrimaryKey("book", "number")` — один и тот же
@@ -582,7 +604,7 @@ class RoomBooking(Model):
 
 ## <a id="postgresql-only-fields"></a>Поля отдельных баз данных
 
-`HStoreField`, `TSVectorField`, `PostGISField`, `CitextField` и поля диапазонов находятся в
+`HStoreField`, `TSVectorField`, `CitextField` и поля диапазонов находятся в
 `hare.dialects.postgresql` — см. [Поля PostgreSQL](../dialects/postgresql/fields.ru.md). Из `hare.fields`
 `ArrayField` работает в PostgreSQL и ClickHouse, `MapField`, `TupleField` и `NestedField` — в ClickHouse,
 а `IPAddressField` — везде (`inet` в PostgreSQL, `IPv6` в ClickHouse, текст в остальных). См. [Типы

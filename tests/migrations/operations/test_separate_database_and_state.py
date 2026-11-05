@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from hare import Connections
+from hare.declarations.declaration_values import DeclarationValues
 from hare.exceptions import OperationalError
 from hare.fields import CharField, IntField
 from hare.migrations.making.migration_optimizer import MigrationOptimizer
@@ -141,4 +142,5 @@ def test_a_squash_folds_nothing_across_it():
         SeparateDatabaseAndState(state_operations=[AddField(model_name="Book", name="pages", field=IntField())]),
         DeleteModel(name="Book"),
     ]
-    assert MigrationOptimizer("models").optimize(operations) == operations
+    result = MigrationOptimizer("models").optimize(operations, State())
+    assert DeclarationValues.get(result) == DeclarationValues.get(operations)

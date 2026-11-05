@@ -62,7 +62,10 @@ class Invoice(Model):           # one table in each tenant's schema
   raises `ProtectedError` before anything is written. `restore(cascade=True)` brings back the rows
   deleted with it in every tenant's schema, and `delete_preview()` counts and lists them all. The
   transaction visits the schemas one by one (a `SET LOCAL search_path`), so the delete reads the list of
-  tenant schemas and costs a few statements per tenant. A hard delete the database's own `ON DELETE`
+  tenant schemas and costs a few statements per tenant. Each visit uses a separate savepoint client;
+  the enclosing wrappers keep their schema, and exceptions restore the previous context by rollback.
+  This atomicity applies to that database connection, not to writes routed to other databases. A hard delete
+  the database's own `ON DELETE`
   carries out in every schema visits none — only for a `PROTECT` relation, a `db_constraint=False` one,
   captured changes or an overridden `delete()` of a tenant's model. A schema without a model's table
   (made before its migration) holds no row of it and is passed over.
@@ -104,7 +107,10 @@ schema doesn't exist raises `ConfigurationError` naming it, until the schema is 
 
 Inside `Tenancy.scope(tenant)` of a single tenant, every query of the connection runs on a client of that
 tenant's schema: its connections have the search path `tenant_<tenant>, public` (the connection's own
-`schema` setting in place of `public` when given). A tenant's model reads and writes its tenant's table;
+`schema` setting in place of `public` when given). With an explicit `search_path`, the tenant schema
+is prepended to that path. `schema` remains one exact shared-schema name, including any commas or
+quotes in it; see [Schema and search path](../dialects/postgresql/connecting.md#search-path).
+A tenant's model reads and writes its tenant's table;
 a shared model is found in `public` through the same search path — joins between the two
 (`select_related("customer")`) are ordinary joins.
 

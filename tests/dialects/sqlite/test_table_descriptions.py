@@ -33,7 +33,7 @@ async def test_a_table_description_stays_in_the_schema():
             # Rebuilt for the wider column.
             AlterField(model_name="Described", name="name", field=fields.CharField(max_length=50)),
         ):
-            await apply_operations("models", state, operation, schema_editor=editor)
+            state = await apply_operations("models", state, operation, schema_editor=editor)
             assert "/* Rows (with parentheses) */" in await get_table_sql(client)
         await apply_operations(
             "models",

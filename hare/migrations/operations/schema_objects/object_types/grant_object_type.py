@@ -24,6 +24,11 @@ class GrantObjectType(SchemaObjectType):
     feature: ClassVar[str | None] = "supports_grants"
 
     @classmethod
+    def renamed(cls, schema_object: Any, new_name: str) -> Any:
+        """Grants have no name and cannot be renamed."""
+        raise NotImplementedError
+
+    @classmethod
     def find_grant(cls, model_state: ModelState, grant: Grant) -> Grant:
         """The grant of a model's state equal to ``grant``, as the state stores it.
 

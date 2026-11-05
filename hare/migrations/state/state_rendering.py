@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
-from hare.ddl.indexes.index import Index
+from hare.core.apps.model_binding_graph import ModelBindingGraph
 from hare.fields.field import Field
 from hare.fields.relations.fields.backward_foreign_key_relation import BackwardForeignKeyRelation
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
@@ -12,6 +11,7 @@ from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 
 if TYPE_CHECKING:
+    from hare.migrations.state.migration_environment import MigrationEnvironment
     from hare.migrations.state.model_state import ModelState
 
 
@@ -22,12 +22,14 @@ class StateRendering:
 
     Args:
         default_connections: Each app's default connection alias.
+        environment: Connections and application declarations captured by the state.
     """
 
-    __slots__ = ("added_keys", "apps", "changed_keys", "default_connections", "removed_keys")
+    __slots__ = ("added_keys", "apps", "changed_keys", "default_connections", "environment", "removed_keys")
 
-    def __init__(self, default_connections: dict[str, str]) -> None:
+    def __init__(self, default_connections: dict[str, str], environment: MigrationEnvironment) -> None:
         self.default_connections = default_connections
+        self.environment = environment
         self.apps: StateApps | None = None
         self.added_keys: set[tuple[str, str]] = set()
         self.changed_keys: set[tuple[str, str]] = set()
@@ -83,8 +85,10 @@ class StateRendering:
             The registry of the rendered classes.
         """
         if self.apps is None:
-            self.apps = StateApps(default_connections=dict(self.default_connections)).clone(model_states=model_states)
-            self.build_index_expressions(model for app in self.apps.apps.values() for model in app.values())
+            prepared_apps = StateApps(
+                default_connections=dict(self.default_connections), environment=self.environment
+            ).clone(model_states=model_states)
+            self.apps = prepared_apps
             return self.apps
         if self.added_keys or self.changed_keys or self.removed_keys:
             self.apply_marks(model_states)
@@ -100,20 +104,20 @@ class StateRendering:
         """
         apps = cast("StateApps", self.apps)
         added_keys, changed_keys, removed_keys = self.added_keys, self.changed_keys, self.removed_keys
+        with ModelBindingGraph(apps):
+            if not changed_keys and self.removes_in_place(removed_keys):
+                self.remove_models(removed_keys)
+                self.add_models([key for key in added_keys if key in model_states], model_states)
+            else:
+                # Find dependants while the previous classes are still registered.
+                related_keys: set[tuple[str, str]] = set()
+                for key in changed_keys | removed_keys:
+                    related_keys |= self.find_related_models(key)
+                for app_label, model_name in removed_keys:
+                    apps.unregister_model(app_label, model_name)
+                reloaded_keys = {key for key in related_keys | changed_keys | added_keys if key in model_states}
+                self.reload_models(reloaded_keys, model_states)
         self.added_keys, self.changed_keys, self.removed_keys = set(), set(), set()
-        if not changed_keys and self.removes_in_place(removed_keys):
-            self.remove_models(removed_keys)
-            self.add_models([key for key in added_keys if key in model_states], model_states)
-            return
-        # The models the old classes reach still carry the backward relations those registered on
-        # them - they are rendered again too, found while the old classes are still registered.
-        related_keys: set[tuple[str, str]] = set()
-        for key in changed_keys | removed_keys:
-            related_keys |= self.find_related_models(key)
-        for app_label, model_name in removed_keys:
-            apps.unregister_model(app_label, model_name)
-        reloaded_keys = {key for key in related_keys | changed_keys | added_keys if key in model_states}
-        self.reload_models(reloaded_keys, model_states)
 
     def removes_in_place(self, keys: set[tuple[str, str]]) -> bool:
         """Whether removed models can be taken out of the rendered classes in place - no model left is a
@@ -261,10 +265,9 @@ class StateRendering:
         apps = cast("StateApps", self.apps)
         for app_label, model_name in keys:
             apps.unregister_model(app_label, model_name)
-            apps.register_model(app_label, model_states[(app_label, model_name)].render(apps))
+            apps.register_model(app_label, model_states[(app_label, model_name)].render())
         apps.init_relations()
         apps.build_initial_querysets()
-        self.build_index_expressions(apps.get_model(".".join(key)) for key in keys)
 
     def add_models(self, keys: list[tuple[str, str]], model_states: dict[tuple[str, str], ModelState]) -> None:
         """Renders models just added to the state and links them in place, as ``Apps`` links models
@@ -280,7 +283,7 @@ class StateRendering:
             return
         apps = cast("StateApps", self.apps)
         for app_label, model_name in keys:
-            apps.register_model(app_label, model_states[(app_label, model_name)].render(apps))
+            apps.register_model(app_label, model_states[(app_label, model_name)].render())
         uninited_models = [model for app in apps.apps.values() for model in app.values() if not model._meta._inited]
         # Only the models these link to are finalised - not every rendered model again.
         apps.link_relations()
@@ -296,20 +299,3 @@ class StateRendering:
         for linked_model in linked_models:
             linked_model._meta.finalise_model()
         apps.build_querysets(linked_models)
-        self.build_index_expressions(linked_models)
-
-    @staticmethod
-    def build_index_expressions(models: Iterable[type[Model]]) -> None:
-        """Builds the key expressions of the models' indexes from their declared form against the rendered models -
-        a migration file keeps them as declared, ``ModelState.make_from_model()`` resolves a live
-        model's, so an index's generated name and its comparisons work the same on both sides.
-
-        Args:
-            models: The rendered models.
-        """
-        for model in models:
-            if not model._meta._inited:
-                continue
-            for index in model._meta.indexes:
-                if isinstance(index, Index) and index.declared_expressions:
-                    index.get_expressions(model)

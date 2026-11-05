@@ -7,6 +7,7 @@ from itertools import count
 from typing import Any, ClassVar, cast
 
 from hare.dialects.base.client.constants import DISCARDED_CLIENT_MESSAGE, TRANSACTION_FINALISED_MESSAGE
+from hare.dialects.base.client.enums import StatementForm
 from hare.dialects.base.client.transaction_client import TransactionClient
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.sqlite.client.sqlite_client import SqliteClient
@@ -38,6 +39,7 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         self._connection = connection._connection
         self.binds_parameters_by_number = connection.binds_parameters_by_number
         self.function_errors = connection.function_errors
+        self.parameter_adapters = connection.parameter_adapters
         self._lock = asyncio.Lock()
         #: Whether the transaction is aborted - read on the top-level wrapper, shared by every nested
         #: savepoint wrapper of the same transaction.
@@ -144,9 +146,9 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
             query: The statement.
         """
 
-    savepoint = SqliteClient.translate_exceptions(TransactionClient.savepoint)
-    commit = SqliteClient.translate_exceptions(TransactionClient.commit)
-    rollback = SqliteClient.translate_exceptions(TransactionClient.rollback)
+    savepoint = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.savepoint)
+    commit = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.commit)
+    rollback = SqliteClient.translate_exceptions(StatementForm.CONTROL)(TransactionClient.rollback)
 
     async def begin(self) -> None:
         try:
@@ -162,7 +164,7 @@ class SqliteTransactionClient(TransactionClient, SqliteClient):
         return isinstance(error, Exception)
 
     async def _check_commit_allowed(self) -> None:
-        if self._finalized:
+        if self.transaction_state.finished:
             raise TransactionManagementError(TRANSACTION_FINALISED_MESSAGE)
         if self._is_transaction_aborted():
             if self._savepoint_name is None:

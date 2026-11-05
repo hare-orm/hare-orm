@@ -8,7 +8,6 @@ from hare.dialects.base.features import Features
 from hare.dialects.base.sql_dialect import SqlDialect
 from hare.exceptions import QueryError, UnSupportedError
 from hare.instrumentation.declarations import QueryExecuted
-from hare.instrumentation.observers.observer_dispatch import ObserverDispatch
 from hare.instrumentation.observers.observers import Observers
 from hare.transactions.enums import IsolationLevel
 from hare.transactions.transaction_options import TransactionOptions
@@ -27,10 +26,12 @@ class ReadCommittedOnlyDialect(SqlDialect):
 @pytest.fixture(autouse=True)
 def _clear_query_hooks():
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
     yield
     Observers.process_observers.clear()
-    ObserverDispatch.pending_errors.clear()
+    for dispatcher in Observers.process_observers.dispatchers.values():
+        dispatcher.pending_errors.clear()
 
 
 async def _record_statements(isolation, **options) -> list[str]:

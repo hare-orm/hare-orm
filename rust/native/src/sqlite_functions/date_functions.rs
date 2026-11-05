@@ -4,7 +4,7 @@
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::PyString;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::sqlite_functions::iso_moment::{format_date, format_moment, format_time, IsoMoment};
@@ -96,7 +96,7 @@ impl DateFunctions {
     #[new]
     fn new(
         zone_parser: Py<PyAny>,
-        zones_by_name: Py<PyDict>,
+        zones_by_name: Py<PyAny>,
         extract_in_python: Py<PyAny>,
         truncate_in_python: Py<PyAny>,
     ) -> Self {

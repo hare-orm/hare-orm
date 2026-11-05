@@ -70,9 +70,11 @@ async def test_asyncpg_checks_the_server_against_the_root_certificate_of_the_db_
     from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
 
     taken_dsns = []
+    taken_settings = []
 
     def create_pool(dsn, **settings):
         taken_dsns.append(dsn)
+        taken_settings.append(settings)
         raise RuntimeError("no pool")
 
     client = make_client(
@@ -86,6 +88,55 @@ async def test_asyncpg_checks_the_server_against_the_root_certificate_of_the_db_
     assert [urllib.parse.parse_qs(urllib.parse.urlsplit(dsn).query) for dsn in taken_dsns] == [
         {"sslrootcert": ["/etc/a b.pem"]}
     ]
+    assert [settings["ssl"] for settings in taken_settings] == ["verify-full"]
+
+
+@pytest.mark.requires("asyncpg")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom_context", [False, True])
+async def test_asyncpg_passes_the_tls_setting_to_the_driver(monkeypatch, custom_context):
+    import asyncpg
+
+    from hare.dialects.postgresql.drivers.asyncpg.client import AsyncpgClient
+
+    setting = ssl.create_default_context() if custom_context else True
+    received = []
+
+    def create_pool(_dsn, **settings):
+        received.append(settings["ssl"])
+        raise RuntimeError("connection boundary reached")
+
+    monkeypatch.setattr(asyncpg, "create_pool", create_pool)
+    client = AsyncpgClient(connection_alias="tls", host="127.0.0.1", ssl=setting)
+    with pytest.raises(RuntimeError, match="connection boundary reached"):
+        await client.create_connection(with_db=True)
+    assert len(received) == 1
+    assert received[0] is setting
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(RUST_PG_CLIENT_PATH), indirect=True)
+@pytest.mark.parametrize("mode", ["require", "verify-full"])
+async def test_native_tls_mode_reaches_the_driver(client_class, monkeypatch, mode):
+    from rust.native import pg
+
+    received = []
+
+    async def connect(**settings):
+        received.append(settings["ssl_mode"])
+        raise RuntimeError("connection boundary reached")
+
+    monkeypatch.setattr(pg, "connect", connect)
+    client = make_client(client_class, f"postgresql://orders@127.0.0.1:1/orders?sslmode={mode}")
+    with pytest.raises(RuntimeError, match="connection boundary reached"):
+        await client.create_connection(with_db=True)
+    assert received == [mode]
+
+
+@pytest.mark.parametrize("client_class", DriverClasses.get_parameters(RUST_PG_CLIENT_PATH), indirect=True)
+def test_invalid_tls_mode_is_rejected_before_connecting(client_class):
+    with pytest.raises(ConfigurationError, match="Invalid value 'verrify-full'.*'sslmode'"):
+        make_client(client_class, "postgresql://orders@127.0.0.1:1/orders?sslmode=verrify-full")
 
 
 @pytest.mark.requires("asyncpg")

@@ -131,7 +131,7 @@ async def test_create_model_and_delete_model(db_simple):
 
     try:
         # Forward: create the table
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Verify table exists by inserting and querying (let auto-increment assign id)
         tbl = q("test_widget", dialect)
@@ -171,7 +171,7 @@ async def test_alter_model_table_renames_the_real_table(db_simple):
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         alter_op = AlterModelTable(name="Widget", table="test_alter_model_table_new")
         await apply_operations("models", state, alter_op, schema_editor=editor)
@@ -213,7 +213,7 @@ async def test_alter_model_table_backward_renames_to_old_table(db_simple):
             options={"table": old_name},
         )
         state = State()
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Migration.unapply() takes the PRE-migration state (before this migration's operations
         # ran) and re-derives the forward states internally - so keep a clone of it separately
@@ -267,13 +267,13 @@ async def test_alter_model_schema_moves_the_real_table(db_simple):
             options={"table": "test_alter_model_schema_widget"},
         )
         state = State()
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_alter_model_schema_widget", dialect)
         await conn.execute_script(f"INSERT INTO {tbl} (id) VALUES (1)")
 
         create_schema_op = CreateSchema(schema_name=schema_name)
-        await apply_operations("models", state, create_schema_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_schema_op, schema_editor=editor)
 
         alter_op = AlterModelSchema(name="Widget", schema=schema_name)
         await apply_operations("models", state, alter_op, schema_editor=editor)
@@ -310,7 +310,7 @@ async def test_alter_model_schema_is_refused_before_any_sql_where_a_table_cant_m
     try:
         state = State()
         create_op = CreateModel(name="Widget", fields=[("id", IntField(primary_key=True))], options={"table": table})
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {q(table, dialect)} (id) VALUES (1)")
         with pytest.raises(UnSupportedError, match="Moving a table to another schema"):
             await apply_operations(
@@ -343,7 +343,7 @@ async def test_autodetect_and_apply_field_unique_and_unique_together_together(db
             options={"table": table_name},
         )
         state = State()
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         OldUser = type(
             "User",
@@ -415,7 +415,7 @@ async def test_alter_field_backward_restores_the_old_nullability_via_real_unappl
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         pre_migration_state = state.clone()
 
         migration = Migration(name="0002_alter_field", app_label="models")
@@ -448,7 +448,7 @@ async def test_alter_field_dropping_unique_and_made_not_null_backfills_after_the
     table_name = "test_alter_field_unique_backfill"
     state = State()
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -503,7 +503,7 @@ async def test_alter_field_class_change_without_an_automatic_cast_still_lands(db
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q(table_name, dialect)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('value', dialect)}) VALUES ('42'), ('7')")
@@ -541,7 +541,7 @@ async def test_rename_field_backward_restores_the_old_name_via_real_unapply(db_s
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         pre_migration_state = state.clone()
 
         migration = Migration(name="0002_rename_field", app_label="models")
@@ -585,7 +585,7 @@ async def test_add_field_with_db_default(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Step 2: Add a field with db_default via AddField
         add_op = AddField(
@@ -637,11 +637,11 @@ async def test_add_indexed_field_creates_a_real_index(db_simple):
         return len(rows) == 1
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         name_field = CharField(max_length=50, db_index=True)
         add_field_op = AddField(model_name="Widget", name="name", field=name_field)
-        await apply_operations("models", state, add_field_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_field_op, schema_editor=editor)
 
         index = Index(fields=("name",))
         widget_model = state.apps.get_model("models.Widget")
@@ -684,10 +684,10 @@ async def test_second_makemigrations_after_indexed_field_addition_does_not_drop_
             options={"table": table},
         )
         tracked_state = State()
-        await apply_operations("models", tracked_state, create_op, schema_editor=editor)
+        tracked_state = await apply_operations("models", tracked_state, create_op, schema_editor=editor)
 
         name_field = CharField(max_length=50, db_index=True)
-        await apply_operations(
+        tracked_state = await apply_operations(
             "models", tracked_state, AddField(model_name="Widget", name="name", field=name_field), schema_editor=editor
         )
         index = Index(fields=("name",))
@@ -752,7 +752,7 @@ async def test_add_field_with_now_default(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Add a datetime field with Now() default
         add_op = AddField(
@@ -826,7 +826,7 @@ async def test_alter_field_set_and_drop_db_default(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_setting", dialect)
 
@@ -836,7 +836,7 @@ async def test_alter_field_set_and_drop_db_default(db_simple):
             name="value",
             field=IntField(null=True, db_default=99),
         )
-        await apply_operations("models", state, alter_op, schema_editor=editor)
+        state = await apply_operations("models", state, alter_op, schema_editor=editor)
 
         # Insert without specifying value — should get default 99
         await conn.execute_script(f"INSERT INTO {tbl} ({q('tag', dialect)}) VALUES ('with_default')")
@@ -889,7 +889,7 @@ async def test_remove_field(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Verify column exists
         tbl = q("test_article", dialect)
@@ -940,7 +940,7 @@ async def test_rename_model(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Insert data under old name (default table = "oldname")
         old_tbl = q("oldname", dialect)
@@ -988,14 +988,14 @@ async def test_add_and_remove_unique_constraint(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_employee", dialect)
 
         # Add unique constraint via AddConstraint operation
         constraint = UniqueConstraint(fields=("email",), name="uq_employee_email")
         add_constraint_op = AddConstraint(model_name="Employee", constraint=constraint)
-        await apply_operations("models", state, add_constraint_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_constraint_op, schema_editor=editor)
 
         # Insert first row
         await conn.execute_script(f"INSERT INTO {tbl} ({q('email', dialect)}) VALUES ('alice@test.com')")
@@ -1051,7 +1051,7 @@ async def test_add_deferrable_unique_constraint_defers_check_to_commit(db_simple
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = UniqueConstraint(
             fields=("room", "day"),
@@ -1060,7 +1060,7 @@ async def test_add_deferrable_unique_constraint_defers_check_to_commit(db_simple
             initially_deferred=True,
         )
         add_op = AddConstraint(model_name="Order", constraint=constraint)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         tbl = q("test_deferrable_unique", dialect)
 
@@ -1081,7 +1081,7 @@ async def test_add_deferrable_unique_constraint_defers_check_to_commit(db_simple
         # Contrast: the SAME temporary duplicate against a plain (non-deferrable) UniqueConstraint
         # is rejected immediately at INSERT time, never even reaching the fix-up UPDATE.
         remove_op = RemoveConstraint(model_name="Order", name="uq_order_room_day")
-        await apply_operations("models", state, remove_op, schema_editor=editor)
+        state = await apply_operations("models", state, remove_op, schema_editor=editor)
         immediate_constraint = UniqueConstraint(fields=("room", "day"), name="uq_order_room_day_immediate")
         add_immediate_op = AddConstraint(model_name="Order", constraint=immediate_constraint)
         await apply_operations("models", state, add_immediate_op, schema_editor=editor)
@@ -1128,7 +1128,7 @@ async def test_deferred_unique_violation_at_commit_raises_integrity_error(db_sim
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = UniqueConstraint(
             fields=("room", "day"),
@@ -1227,7 +1227,7 @@ async def test_deferrable_unique_constraint_matches_between_generate_schemas_and
             options={"table": "test_deferrable_unique_gs"},
         )
         state = State()
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         add_op = AddConstraint(
             model_name="Ticket",
             constraint=UniqueConstraint(
@@ -1267,7 +1267,7 @@ async def test_add_check_constraint(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # Add check constraint
         constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_product_price_positive")
@@ -1321,7 +1321,7 @@ async def test_add_exclusion_constraint_with_raw_sql_expression_enforces_exclusi
 
     try:
         await conn.execute_script("CREATE EXTENSION IF NOT EXISTS btree_gist;")
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = ExclusionConstraint(
             name="no_overlap_range",
@@ -1403,10 +1403,10 @@ async def test_rename_field_renames_the_field_entries_of_an_exclusion_constraint
 
     try:
         await conn.execute_script("CREATE EXTENSION IF NOT EXISTS btree_gist;")
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Order", old_name="resource", new_name="room")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Order")]
         (constraint,) = model_state.get_option_list("constraints")
@@ -1443,7 +1443,7 @@ async def test_add_partial_index_with_raw_sql_non_equality_predicate_applies_sel
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         index = PartialIndex(
             fields=("price",), name="idx_product_promo", condition=RawSQLTerm("price > 100 OR is_featured")
@@ -1507,7 +1507,7 @@ async def test_sqlite_remove_unique_constraint_declared_in_first_migration(db_si
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_employee_ut_first", dialect)
         rows = await conn.execute_dicts(f"PRAGMA index_list({tbl})")
@@ -1558,7 +1558,7 @@ async def test_remove_unnamed_uniqueconstraint_declared_via_meta_constraints(db_
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_order_unnamed_uc", dialect)
         resource_col = q("resource", dialect)
@@ -1605,11 +1605,11 @@ async def test_sqlite_remove_check_constraint_actually_drops_it(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_product_price_positive_remove")
         add_op = AddConstraint(model_name="Product", constraint=constraint)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         remove_op = RemoveConstraint(model_name="Product", name="ck_product_price_positive_remove")
         await apply_operations("models", state, remove_op, schema_editor=editor)
@@ -1648,7 +1648,7 @@ async def test_alter_field_null_change(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_config", dialect)
 
@@ -1662,7 +1662,7 @@ async def test_alter_field_null_change(db_simple):
             name="value",
             field=IntField(null=True),
         )
-        await apply_operations("models", state, alter_op, schema_editor=editor)
+        state = await apply_operations("models", state, alter_op, schema_editor=editor)
 
         # Now NULL should be accepted
         await conn.execute_script(f"INSERT INTO {tbl} ({q('value', dialect)}) VALUES (NULL)")
@@ -1716,7 +1716,7 @@ async def test_alter_field_rename_combined_with_type_and_null_change(db_simple):
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         alter_op = AlterField(
             model_name="Widget",
@@ -1760,7 +1760,7 @@ async def test_alter_field_rename_combined_with_nullable_change(db_simple):
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         alter_op = AlterField(
             model_name="Widget",
@@ -1816,7 +1816,7 @@ async def test_alter_field_max_length_preserves_db_default(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_profile_2141", dialect)
 
@@ -1872,7 +1872,7 @@ async def test_alter_field_null_change_preserves_db_default(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         tbl = q("test_score_2141", dialect)
 
@@ -1929,7 +1929,7 @@ async def test_alter_field_description_change_applied(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # AlterField: change only the description
         alter_op = AlterField(
@@ -1985,7 +1985,7 @@ async def test_alter_field_class_change_preserves_data(db_simple):
     tbl = q("test_invoice_class_change", dialect)
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('amount', dialect)}) VALUES (42)")
 
         alter_op = AlterField(
@@ -2058,7 +2058,7 @@ async def test_autodetect_and_apply_pk_field_rename(db_simple):
 
     apply_state = State()
     try:
-        await apply_operations(
+        apply_state = await apply_operations(
             "models",
             apply_state,
             CreateModel(
@@ -2071,7 +2071,7 @@ async def test_autodetect_and_apply_pk_field_rename(db_simple):
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id', dialect)}, {q('title', dialect)}) VALUES (1, 'x')")
 
         for operation in operations:
-            await apply_operations("models", apply_state, operation, schema_editor=editor)
+            apply_state = await apply_operations("models", apply_state, operation, schema_editor=editor)
 
         # The generated RenameField carries source_field="id" (the disambiguation marker the
         # autodetector's rename heuristic itself requires - see field_diff.py's "an intentional
@@ -2209,7 +2209,7 @@ async def test_sqlite_remake_table_coalesces_null_on_tightening(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         tbl = q("test_widget_coalesce", dialect)
 
         await conn.execute_script(f"INSERT INTO {tbl} ({q('stock', dialect)}) VALUES (NULL)")
@@ -2274,7 +2274,7 @@ async def test_sqlite_remake_table_coalesces_null(db_simple, table, make_field, 
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         tbl = q(table, dialect)
 
         await conn.execute_script(f"INSERT INTO {tbl} ({q('note', dialect)}) VALUES (NULL)")
@@ -2315,7 +2315,7 @@ async def test_sqlite_remake_table_rejects_callable_default_on_tightening(db_sim
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         alter_op = AlterField(
             model_name="Widget",
@@ -2356,11 +2356,11 @@ async def test_sqlite_remake_table_preserves_check_constraint(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_remake_price_positive")
         add_op = AddConstraint(model_name="Product", constraint=constraint)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         # Unrelated field alter triggers a full table remake.
         alter_op = AlterField(
@@ -2419,7 +2419,7 @@ async def test_sqlite_remake_table_preserves_indexes_and_unique_together(db_simp
         return {row["name"] for row in rows}
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         indexes_before = await index_names()
         assert len(indexes_before) == 2  # Meta.indexes entry + unique_together's own auto-index
 
@@ -2588,7 +2588,7 @@ async def test_sqlite_add_field_for_a_generated_field_keeps_generated_column(db_
     tbl = q("test_product_addfield_generated", dialect)
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         add_op = AddField(
             model_name="Product",
@@ -2647,7 +2647,7 @@ async def test_sqlite_add_field_for_a_generated_field_on_a_non_empty_table(db_si
     tbl = q("test_product_addfield_generated_nonempty", dialect)
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(
             f"INSERT INTO {tbl} ({q('price', dialect)}, {q('quantity', dialect)}) VALUES (10, 3), (7, 5)"
         )
@@ -2675,7 +2675,7 @@ async def test_sqlite_add_field_for_a_generated_field_on_a_non_empty_table(db_si
 
 @pytest.mark.asyncio
 async def test_alter_field_generated_field_output_field_change_raises_clean_error(db_simple):
-    """_alter_generated_field()'s guard only compared GENERATED_SQL (built purely from
+    """raise_if_generated_field_changes()'s guard only compared GENERATED_SQL (built purely from
     expression+stored) - an AlterField changing ONLY output_field (same expression/stored) gave
     a false negative (no ValueError raised), falling through into the ordinary ALTER-COLUMN-TYPE
     path. On Postgres, that path then sent `ALTER TABLE ... TYPE ... USING ...`, which Postgres
@@ -2711,8 +2711,8 @@ async def test_alter_field_generated_field_output_field_change_raises_clean_erro
                 output_field=IntField(),
             ),
         )
-        await apply_operations("models", state, create_op, schema_editor=editor)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         alter_op = AlterField(
             model_name="Product",
@@ -2738,7 +2738,7 @@ async def test_sqlite_alter_field_generated_field_expression_change_raises_clean
     excludes it) - so on SQLite, ANY real AlterField on a GeneratedField (expression, stored, or
     output_field - anything past the safe-rename fast path) crashed with "cannot INSERT into
     generated column" during the rebuild's own INSERT...SELECT step, before
-    _alter_generated_field()'s intended ValueError protection (which SQLite's own _alter_field()
+    raise_if_generated_field_changes()'s intended ValueError protection (which SQLite's own _alter_field()
     override never even called) got a chance to matter. Confirmed live before this fix - now
     raises the same clean ValueError as Postgres instead of a raw sqlite3.OperationalError."""
     conn = db_simple.get_connection()
@@ -2769,8 +2769,8 @@ async def test_sqlite_alter_field_generated_field_expression_change_raises_clean
                 output_field=FloatField(),
             ),
         )
-        await apply_operations("models", state, create_op, schema_editor=editor)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
         await conn.execute_script(
             f"INSERT INTO {tbl} ({q('price', dialect)}, {q('quantity', dialect)}) VALUES (10, 3)"
         )
@@ -2817,10 +2817,10 @@ async def test_remove_field_drops_a_single_field_constraint_that_referenced_it(d
     table_name = "test_widget_removefield_constraint"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         remove_op = RemoveField(model_name="Widget", name="total")
-        await apply_operations("models", state, remove_op, schema_editor=editor)
+        state = await apply_operations("models", state, remove_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         assert model_state.get_option_list("constraints") == []
@@ -2859,11 +2859,11 @@ async def test_remove_field_rejects_a_multi_field_constraint_that_still_referenc
     table_name = "test_widget_pair_removefield_constraint"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         remove_op = RemoveField(model_name="WidgetPair", name="a")
         with pytest.raises(ConfigurationError, match="still referenced by constraint"):
-            await apply_operations("models", state, remove_op, schema_editor=editor)
+            state = await apply_operations("models", state, remove_op, schema_editor=editor)
 
         # Rejected before state_forward() ever popped the field or touched the constraint list.
         model_state = state.models[("models", "WidgetPair")]
@@ -2899,10 +2899,10 @@ async def test_rename_field_leaves_the_raw_sql_of_a_check_constraint_as_written(
     table_name = "test_widget_renamefield_check_constraint"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Widget", old_name="quantity", new_name="qty")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         (constraint,) = model_state.get_option_list("constraints")
@@ -2945,10 +2945,10 @@ async def test_rename_field_renames_the_fields_of_a_unique_constraint_and_leaves
     table_name = "test_widget_renamefield_unique_condition"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Widget", old_name="amount", new_name="qty")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         (constraint,) = model_state.get_option_list("constraints")
@@ -2990,11 +2990,11 @@ async def test_remove_field_rejects_a_partial_index_q_condition_that_still_refer
     table_name = "test_widget_removefield_partial_idx_dict"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         remove_op = RemoveField(model_name="Widget", name="status")
         with pytest.raises(ConfigurationError, match="still referenced by the condition of PartialIndex"):
-            await apply_operations("models", state, remove_op, schema_editor=editor)
+            state = await apply_operations("models", state, remove_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         assert "status" in model_state.fields
@@ -3035,10 +3035,10 @@ async def test_rename_field_updates_a_partial_index_q_condition_that_referenced_
     table_name = "test_widget_renamefield_partial_idx_dict"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Widget", old_name="status", new_name="state")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         (index,) = model_state.get_option_list("indexes")
@@ -3080,10 +3080,10 @@ async def test_rename_field_leaves_the_raw_sql_condition_of_a_partial_index_as_w
     table_name = "test_widget_renamefield_partial_idx_sql"
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Widget", old_name="amount", new_name="qty")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         (index,) = model_state.get_option_list("indexes")
@@ -3161,7 +3161,7 @@ async def test_sqlite_remake_table_preserves_field_level_index(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         alter_op = AlterField(
             model_name="Widget",
@@ -3206,7 +3206,7 @@ async def test_sqlite_remake_table_preserves_composite_primary_key(db_isolated):
 
     # A rebuild with no field changes - the mechanism under test, regardless of what real
     # operation would normally trigger it (any unrelated AlterField/RemoveField does).
-    await editor.table_rebuild.remake_table(CompositePkThing, CompositePkThing)
+    await editor.table_rebuild.get_rebuild_plan(CompositePkThing, CompositePkThing).execute(editor)
 
     with pytest.raises(Exception, match="UNIQUE constraint failed"):
         await conn.execute_script(
@@ -3248,8 +3248,8 @@ async def test_add_alter_and_remove_trigger(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_widget, schema_editor=editor)
-        await apply_operations("models", state, create_audit, schema_editor=editor)
+        state = await apply_operations("models", state, create_widget, schema_editor=editor)
+        state = await apply_operations("models", state, create_audit, schema_editor=editor)
 
         # Body inserts into the audit table, not the trigger's own table - avoids any
         # dialect-specific recursive-trigger behavior entirely.
@@ -3259,7 +3259,7 @@ async def test_add_alter_and_remove_trigger(db_simple):
             body=RawSQLTerm(f"INSERT INTO {audit_tbl} ({q('note', dialect)}) VALUES ('updated');{return_suffix}"),
         )
         add_op = AddTrigger(model_name="Widget", trigger=trigger)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         await conn.execute_script(f"INSERT INTO {widget_tbl} ({q('name', dialect)}) VALUES ('foo')")
         await conn.execute_script(f"UPDATE {widget_tbl} SET {q('name', dialect)} = 'bar' WHERE id = 1")
@@ -3272,7 +3272,7 @@ async def test_add_alter_and_remove_trigger(db_simple):
             body=RawSQLTerm(f"INSERT INTO {audit_tbl} ({q('note', dialect)}) VALUES ('altered');{return_suffix}"),
         )
         alter_op = AlterTrigger(model_name="Widget", trigger=altered)
-        await apply_operations("models", state, alter_op, schema_editor=editor)
+        state = await apply_operations("models", state, alter_op, schema_editor=editor)
 
         await conn.execute_script(f"UPDATE {widget_tbl} SET {q('name', dialect)} = 'baz' WHERE id = 1")
         rows = await conn.execute_dicts(f"SELECT note FROM {audit_tbl} ORDER BY id")
@@ -3316,7 +3316,7 @@ async def test_add_trigger_with_quote_in_name_is_escaped(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_widget, schema_editor=editor)
+        state = await apply_operations("models", state, create_widget, schema_editor=editor)
 
         trigger = Trigger(
             name=trigger_name,
@@ -3340,7 +3340,7 @@ async def test_add_trigger_with_quote_in_name_is_escaped(db_simple):
         # Then run it for real through the actual operation, proving the escaped DDL both
         # executes successfully and the trigger fires under its real (quote-containing) name.
         add_op = AddTrigger(model_name="Widget", trigger=trigger)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         await conn.execute_script(f"INSERT INTO {widget_tbl} ({q('name', dialect)}) VALUES ('foo')")
         rows = await conn.execute_dicts(f"SELECT name FROM {widget_tbl}")
@@ -3372,11 +3372,11 @@ async def test_postgres_trigger_manages_backing_function(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         trigger = Trigger(name="widget_trig_fn_check", on=TriggerEvent.INSERT, body=RawSQLTerm("RETURN NEW;"))
         add_op = AddTrigger(model_name="Widget", trigger=trigger)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         rows = await conn.execute_dicts("SELECT proname FROM pg_proc WHERE proname = 'widget_trig_fn_check_fn'")
         assert len(rows) == 1
@@ -3414,7 +3414,7 @@ async def test_postgres_constraint_trigger_deferral_semantics(db_simple, initial
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         trigger = Trigger(
             name=trigger_name,
@@ -3424,7 +3424,7 @@ async def test_postgres_constraint_trigger_deferral_semantics(db_simple, initial
             initially_deferred=initially_deferred,
         )
         add_op = AddTrigger(model_name="Widget", trigger=trigger)
-        await apply_operations("models", state, add_op, schema_editor=editor)
+        state = await apply_operations("models", state, add_op, schema_editor=editor)
 
         rows = await conn.execute_dicts(
             "SELECT tgdeferrable, tginitdeferred FROM pg_trigger WHERE tgname = $1", [trigger_name]
@@ -3462,7 +3462,7 @@ async def test_sqlite_constraint_trigger_not_supported(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         trigger = Trigger(
             name="widget_trig_deferrable",
             on=TriggerEvent.INSERT,
@@ -3501,7 +3501,7 @@ async def test_delete_model_drops_orphaned_trigger_function(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         rows = await conn.execute_dicts("SELECT proname FROM pg_proc WHERE proname = 'widget_trig_del_check_fn'")
         assert len(rows) == 1
 
@@ -3536,7 +3536,7 @@ async def test_sqlite_trigger_body_with_internal_semicolons(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         trigger = Trigger(
             name="widget_trig_multi_stmt",
@@ -3578,7 +3578,7 @@ async def test_sqlite_statement_level_trigger_not_supported(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         trigger = Trigger(
             name="widget_trig_stmt",
             on=TriggerEvent.INSERT,
@@ -3628,7 +3628,7 @@ async def test_sqlite_remake_table_preserves_trigger(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         # An unrelated AlterField (not a simple rename) forces _remake_table().
         alter_op = AlterField(
@@ -3683,10 +3683,10 @@ async def test_rename_field_leaves_the_raw_sql_of_a_trigger_as_written(db_simple
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameField(model_name="Widget", old_name="quantity", new_name="qty")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         model_state = state.models[("models", "Widget")]
         (trigger,) = model_state.get_option_list("triggers")
@@ -3727,11 +3727,11 @@ async def test_remove_field_rejects_a_tsvectorfield_source_field_that_still_refe
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         remove_op = RemoveField(model_name="Doc", name="body")
         with pytest.raises(ConfigurationError, match="TSVectorField 'search_vector'"):
-            await apply_operations("models", state, remove_op, schema_editor=editor)
+            state = await apply_operations("models", state, remove_op, schema_editor=editor)
 
         model_state = state.models[("models", "Doc")]
         assert "body" in model_state.fields
@@ -3824,7 +3824,7 @@ async def test_rename_trigger_renames_function_too(db_simple):
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameTrigger(
             model_name="Widget", old_name="widget_trig_old_name", new_name="widget_trig_new_name"
@@ -3888,7 +3888,7 @@ async def test_rename_trigger_backward_renames_back(db_simple):
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         rename_op = RenameTrigger(model_name="Widget", old_name="widget_trig_old_bwd", new_name="widget_trig_new_bwd")
         old_state = state.clone()
@@ -4146,9 +4146,8 @@ async def test_composite_target_fk_migration_lifecycle(db_isolated):
         # The still-referencing row must have survived the rejected delete attempt. This exact
         # "SELECT * FROM {child_tbl}" text was ALSO used earlier in this test (before the
         # RemoveField/AddField pair changed the table's column set) - rust.pg's connection-level
-        # statement cache used to reuse the stale plan from that earlier call and have Postgres
-        # reject it with "cached plan must not change result type" (SQLSTATE 0A000). Now covered
-        # by rust/pg/src/client.rs's prepare_and_run_with_stale_plan_retry - kept as SELECT *
+        # statement cache must be invalidated by the schema editor after its DDL, before Postgres
+        # can reject a stale result type (SQLSTATE 0A000). Kept as SELECT *
         # (not COUNT(*)) deliberately, to keep exercising that exact regression. Behind a transaction
         # pooler the server connections share the plan prepared by that text and the server refuses
         # it - hare raises the server's error there, so the row is counted by another text.
@@ -4253,11 +4252,11 @@ async def test_rename_pk_field_end_to_end_then_autodetector_reports_no_changes(d
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id', dialect)}, {q('name', dialect)}) VALUES (1, 'gizmo')")
 
         rename_op = RenameField(model_name="Widget", old_name="id", new_name="pk_id")
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         # The column rename actually happened at the DB level and the row survived it.
         rows = await conn.execute_dicts(f"SELECT * FROM {tbl}")
@@ -4315,12 +4314,12 @@ async def test_rename_field_with_matching_source_field_keeps_the_db_column(db_si
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('id', dialect)}, {q('old_name', dialect)}) VALUES (1, 'x')")
 
         new_field = CharField(max_length=32, source_field="old_name")
         rename_op = RenameField(model_name="Widget", old_name="old_name", new_name="new_name", field=new_field)
-        await apply_operations("models", state, rename_op, schema_editor=editor)
+        state = await apply_operations("models", state, rename_op, schema_editor=editor)
 
         # The DB column must still be "old_name" - only the Python-level field name changed.
         rows = await conn.execute_dicts(f"SELECT * FROM {tbl}")
@@ -4404,7 +4403,7 @@ async def test_autodetect_and_apply_field_rename_combined_with_type_change_prese
 
     apply_state = State()
     try:
-        await apply_operations(
+        apply_state = await apply_operations(
             "models",
             apply_state,
             CreateModel(
@@ -4419,7 +4418,7 @@ async def test_autodetect_and_apply_field_rename_combined_with_type_change_prese
         )
 
         for operation in operations:
-            await apply_operations("models", apply_state, operation, schema_editor=editor)
+            apply_state = await apply_operations("models", apply_state, operation, schema_editor=editor)
 
         # The row's data must have survived both the rename and the type change - not been
         # dropped and recreated empty under the new name.
@@ -4501,7 +4500,7 @@ async def test_autodetect_and_apply_m2m_field_rename_preserves_through_table(db_
     for operation in operations:
         # This must not raise - applying the pre-fix AddField+RemoveField pair crashed here with
         # ConfigurationError on a duplicate default related_name, before any DDL ran.
-        await apply_operations("models", apply_state, operation, schema_editor=editor)
+        apply_state = await apply_operations("models", apply_state, operation, schema_editor=editor)
 
     # The through table must still be the SAME table with its data intact - not dropped and
     # recreated empty.
@@ -4543,7 +4542,7 @@ async def test_alter_field_null_to_not_null_backfills_existing_null_rows_on_ever
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         tbl = q("test_widget_notnull_backfill", dialect)
 
         await conn.execute_script(f"INSERT INTO {tbl} ({q('note', dialect)}) VALUES (NULL)")
@@ -4589,7 +4588,7 @@ async def test_sqlite_remake_table_preserves_surviving_columns_comments(db_simpl
     state = State()
 
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
 
         constraint = CheckConstraint(check=RawSQLTerm("price > 0"), name="ck_product_remake_comment_price_positive")
         add_op = AddConstraint(model_name="Product", constraint=constraint)
@@ -4658,7 +4657,7 @@ async def test_alter_field_narrowing_max_length_raises_instead_of_truncating(db_
     state = State()
     tbl = q("test_widget_narrow_max_length", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('note', dialect)}) VALUES ('ABCDEFGHIJKLMNOPQRSTUVWXYZ')")
 
         alter_op = AlterField(model_name="Widget", name="note", field=CharField(max_length=5))
@@ -4690,7 +4689,7 @@ async def test_alter_field_narrowing_max_length_succeeds_when_no_row_overflows(d
     state = State()
     tbl = q("test_widget_narrow_max_length_ok", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('note', dialect)}) VALUES ('short')")
 
         alter_op = AlterField(model_name="Widget", name="note", field=CharField(max_length=5))
@@ -4723,7 +4722,7 @@ async def test_alter_field_narrowing_decimal_places_raises_instead_of_rounding(d
     state = State()
     tbl = q("test_widget_narrow_decimal", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('amount', dialect)}) VALUES (12.34567)")
 
         alter_op = AlterField(model_name="Widget", name="amount", field=DecimalField(max_digits=10, decimal_places=2))
@@ -4801,7 +4800,7 @@ async def test_alter_field_refuses_values_the_new_type_cannot_hold(db_simple, la
     state = State()
     tbl = q(table_name, dialect)
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -4870,7 +4869,7 @@ async def test_alter_field_narrowing_keeps_values_that_fit(db_simple, label, old
     state = State()
     tbl = q(table_name, dialect)
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -4918,7 +4917,7 @@ async def test_alter_field_type_and_null_tightening_together_applies_type_change
     state = State()
     tbl = q("test_widget_type_and_null_tighten", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('count', dialect)}) VALUES (NULL)")
         await conn.execute_script(f"INSERT INTO {tbl} ({q('count', dialect)}) VALUES (7)")
 
@@ -4958,7 +4957,7 @@ async def test_alter_field_null_and_default_change_without_type_change_still_bat
     state = State()
     tbl = q("test_widget_null_default_only", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {tbl} ({q('note', dialect)}) VALUES (NULL)")
 
         alter_op = AlterField(
@@ -5001,14 +5000,14 @@ async def test_a_trigger_condition_given_as_q_fires_on_the_matching_rows_and_fol
     state = State()
     table = q("test_widget_trig_q", dialect)
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await conn.execute_script(f"INSERT INTO {table} (id, quantity) VALUES (1, 5)")
         await conn.execute_script(f"UPDATE {table} SET quantity = 3 WHERE id = 1")
         with pytest.raises(Exception, match="bad qty"):
             await conn.execute_script(f"UPDATE {table} SET quantity = 0 WHERE id = 1")
 
         # The condition names the field - renamed with it, the trigger still compares the row.
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             RenameField(model_name="Widget", old_name="quantity", new_name="qty"),
@@ -5016,7 +5015,7 @@ async def test_a_trigger_condition_given_as_q_fires_on_the_matching_rows_and_fol
         )
         (trigger,) = state.models[("models", "Widget")].get_option_list("triggers")
         assert trigger.when == Q(qty__lte=0)
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AlterField(model_name="Widget", name="id", field=IntField(primary_key=True)),
@@ -5049,7 +5048,7 @@ async def test_alter_field_narrowing_the_values_an_array_holds_raises(db_simple)
     state = State()
     table = q("test_widget_narrow_array", dialect)
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -5071,7 +5070,7 @@ async def test_alter_field_narrowing_the_values_an_array_holds_raises(db_simple)
             ("counts", ArrayField(ArrayField(SmallIntField()))),
         ):
             with pytest.raises(FieldNarrowingDataLossError, match=name):
-                await apply_operations(
+                state = await apply_operations(
                     "models",
                     state,
                     AlterField(model_name="Widget", name=name, field=narrowed_field),
@@ -5104,7 +5103,7 @@ async def test_alter_field_to_a_network_or_other_array_dimensions_keeps_the_valu
     state = State()
     table = q("test_widget_kept_values", dialect)
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -5124,7 +5123,7 @@ async def test_alter_field_to_a_network_or_other_array_dimensions_keeps_the_valu
         )
         for name, changed_field in (("host", CidrField()), ("counts", ArrayField(ArrayField(IntField())))):
             with pytest.raises(FieldNarrowingDataLossError, match=name):
-                await apply_operations(
+                state = await apply_operations(
                     "models",
                     state,
                     AlterField(model_name="Widget", name=name, field=changed_field),
@@ -5151,7 +5150,7 @@ async def test_the_collected_sql_of_an_index_dropped_around_a_column_change_runs
     not from the database."""
     connection = Connections.get("models")
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -5163,7 +5162,7 @@ async def test_the_collected_sql_of_an_index_dropped_around_a_column_change_runs
     )
     try:
         collecting_editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             AlterField(model_name="Shelf", name="label", field=CharField(max_length=40, db_index=True)),
@@ -5195,7 +5194,7 @@ async def test_run_sql_parameters_take_percent_s_placeholders_on_every_database(
     table = q("test_run_sql_parameters", dialect)
     state = State()
     try:
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             CreateModel(
@@ -5205,7 +5204,7 @@ async def test_run_sql_parameters_take_percent_s_placeholders_on_every_database(
             ),
             schema_editor=editor,
         )
-        await apply_operations(
+        state = await apply_operations(
             "models",
             state,
             RunSQL([(f"INSERT INTO {table} (id, body) VALUES (%s, %s)", [1, "kept"])]),

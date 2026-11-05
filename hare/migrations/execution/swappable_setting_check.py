@@ -12,6 +12,7 @@ from hare.inspectdb.introspection.table_info import TableInfo
 from hare.migrations.operations import CreateModel
 
 if TYPE_CHECKING:
+    from hare.core.apps import Apps
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.migrations.loading.graph.migration_key import MigrationKey
     from hare.migrations.migration import Migration
@@ -28,6 +29,7 @@ class SwappableSettingCheck:
         connection: The connection migrated.
         apps_config: The configuration of the apps migrated on it.
         disk_migrations: The migrations on disk, by key.
+        apps: The executor's live model registry, if one was supplied or captured.
     """
 
     def __init__(
@@ -35,10 +37,12 @@ class SwappableSettingCheck:
         connection: DatabaseClient,
         apps_config: Mapping[str, Any],
         disk_migrations: Mapping[MigrationKey, Migration],
+        apps: Apps | None,
     ) -> None:
         self.connection = connection
         self.apps_config = apps_config
         self.disk_migrations = disk_migrations
+        self.apps = apps
 
     async def check(self, applied: set[MigrationKey]) -> None:
         """Reads the tables of the live models declaring a swappable relation and compares their
@@ -52,11 +56,9 @@ class SwappableSettingCheck:
         """
         if not applied or not self.has_swappable_relations():
             return
-        from hare.core.hare_context import HareContext
         from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 
-        live_context = HareContext.get_current()
-        live_apps = live_context.apps if live_context is not None else None
+        live_apps = self.apps
         if live_apps is None:
             return
         # None stands for the connection's default schema, where a model without Meta.schema lives.
@@ -73,7 +75,7 @@ class SwappableSettingCheck:
             if not models:
                 continue
             table_infos = await DatabaseCatalog.inspect_tables(
-                self.connection, [model._meta.db_table for model in models], schema=schema, verify_exists=False
+                self.connection, [model._meta.db_table for model in models], schema=schema
             )
             for model, table_info in zip(models, table_infos, strict=True):
                 mismatch_lines.extend(
@@ -95,7 +97,6 @@ class SwappableSettingCheck:
                     self.connection,
                     [field.through for _model, field in through_relations],
                     schema=schema,
-                    verify_exists=False,
                 )
                 for (model, field), through_info in zip(through_relations, through_infos, strict=True):
                     foreign_key_targets = {

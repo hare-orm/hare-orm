@@ -13,9 +13,10 @@ pip install hare-orm
 Optional extras:
 
 ```bash
-pip install hare-orm[asyncpg]        # the pure-Python PostgreSQL driver, instead of the Rust one
+pip install hare-orm[asyncpg]        # PostgreSQL through asyncpg
 pip install hare-orm[clickhouse-connect]  # the ClickHouse dialect over HTTP (clickhouse-connect)
 pip install hare-orm[clickhouse-driver]   # the ClickHouse dialect over the native TCP protocol (clickhouse-driver)
+pip install hare-orm[clickhouse-keeper]   # Keeper migration locks and node cleanup (Kazoo)
 pip install hare-orm[sqlite-vec]     # vector search on SQLite (sqlite-vec)
 pip install hare-orm[ipython]        # `hare shell` with IPython
 pip install hare-orm[tzlocal]        # the machine's own zone for date/time functions on PostgreSQL and ClickHouse with use_timezone=False
@@ -65,10 +66,14 @@ the version of the server the connection talks to — see [The server
 version](../dialects/dialects-and-features.md#the-server-version).
 
 The lowest versions of the dependencies that `pyproject.toml` declares are tested too, on each Python.
+That environment selects the lower bounds of hare's direct dependencies and extras. Test tools come
+from Poetry's locked export, retaining Python and platform markers; exporting runs in a separate
+tool environment so its dependencies do not enter the environment being tested. These runs also
+verify cached query plans with `--verify-plans`.
 
 ## <a id="wheels"></a>Wheels
 
-The Rust PostgreSQL driver, the Rust row readers/writers and the compiled
+The Rust PostgreSQL driver, the native attribute and value-format helpers and the compiled
 [SQLite functions](../dialects/sqlite/functions.md#compiled-functions) (the `rust.native` extension) come
 prebuilt in a wheel per Python version — cp312, cp313 and cp314 — for each platform:
 

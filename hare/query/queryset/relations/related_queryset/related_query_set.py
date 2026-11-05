@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any, ClassVar, Self, TypeVar, cast, overload
 
 from hare.core.caching.cache import Cache
-from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
+from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
 from hare.exceptions import (
     NoValuesFetched,
 )
@@ -14,13 +14,13 @@ from hare.query.expressions.constants import PLAIN_VALUE_TYPES
 from hare.query.queryset.arguments.filter_arguments import FilterArguments
 from hare.query.queryset.constants import RELATION_CLASS_CACHE_SIZE
 from hare.query.queryset.queryset import QuerySet
+from hare.query.queryset.relations.related_queryset.declarations import RelationRollbackReset
 from hare.query.queryset.specification_copying import SpecificationCopying
 from hare.query.scopes.row_visibility import RowVisibility
-from hare.transactions.atomic.atomic import Atomic
-from hare.transactions.transactions import Transactions
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
+    from hare.dialects.base.client.transaction_client import TransactionClient
     from hare.models import Model
 from hare.query.queryset.relations.related_queryset.related_rows_iterator import RelatedRowsIterator
 from hare.query.queryset.relations.related_queryset.relation_rows import RelationRows
@@ -56,9 +56,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
 
     #: (relation class, queryset class) -> the relation class of related models whose manager has
     #: a queryset class of its own - such a relation has that class's methods too.
-    CLASSES_BY_QUERYSET_CLASS: ClassVar[Cache[type]] = Cache(
-        RELATION_CLASS_CACHE_SIZE, holds_sql=False, keyed_by_model=False
-    )
+    CLASSES_BY_QUERYSET_CLASS: ClassVar[Cache[type]] = Cache(RELATION_CLASS_CACHE_SIZE, holds_sql=False)
 
     def __init__(
         self,
@@ -83,7 +81,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         self._is_bound = False
         #: The open transactions a reset of the fetched rows on rollback is registered with - made on
         #: the first registration, most relations are only read.
-        self._rollback_reset_layers: list[dict[str, Any]] | None = None
+        self._rollback_reset_layers: list[RelationRollbackReset] | None = None
 
     @classmethod
     def get_class_for(cls, remote_model: type[Model]) -> type[Self]:
@@ -168,7 +166,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         instance = self.instance
         manager = self.model._meta.manager
         if not instance._saved_in_db:
-            queryset = manager.get_queryset()
+            queryset = manager.create_queryset()
             queryset._q_objects.append(UnsavedOwnerCondition())
             key_values = None
         else:
@@ -199,7 +197,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
                 # for these key values.
                 self._copy_bound_settings(bound_settings[2], key_values)
                 return
-            queryset = manager.get_queryset()
+            queryset = manager.create_queryset()
             # _append_filters(), the conditions built only once the relation is queried - a
             # relation whose fetched rows are only read never builds them.
             relation_filters = dict(zip(self.relation_fields, key_values, strict=True))
@@ -234,9 +232,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
             queryset: The queryset holding them.
             key_values: The key values they were made for; None for an unsaved obj.
         """
-        SpecificationCopying.compile_copy(type(queryset))(queryset, self)
-        if hasattr(queryset, "__dict__"):
-            self.__dict__.update(queryset.__dict__)
+        SpecificationCopying.copy_state(queryset, self)
         self._bound_key_values = key_values
         self._is_bound = True
 
@@ -244,8 +240,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         # A queryset of the manager's class - without the relation's writes and fetched rows.
         queryset_class = self.model._meta.manager.queryset_class
         queryset = queryset_class.__new__(queryset_class)
-        SpecificationCopying.compile_copy(queryset_class)(self, queryset)
-        queryset._prefetch_queries = {key: list(value) for key, value in self._prefetch_queries.items()}
+        SpecificationCopying.copy_state(self, queryset, queryset_class)
         return queryset  # type: ignore[return-value]
 
     def _get_model_queryset(self, connection: DatabaseClient) -> QuerySet[TModel]:
@@ -258,7 +253,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         Returns:
             The queryset.
         """
-        queryset = cast("QuerySet[TModel]", self.model._meta.manager.get_queryset())
+        queryset = cast("QuerySet[TModel]", self.model._meta.manager.create_queryset())
         queryset._apply_connection(connection)
         queryset._connection_explicitly_chosen = True
         return queryset
@@ -315,19 +310,34 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         """
         if not connection.is_transaction_client:
             return
-        registered_on = Atomic.get_connection(connection.connection_alias)
-        if not registered_on.is_transaction_client:
-            return
-        current_span = current_savepoint_span.get()
+        transaction = cast("TransactionClient", connection)
+        registered_on = transaction._get_top_level_transaction()
+        current_span = TransactionCallbacks.get_registration_span(transaction)
         layers = self._rollback_reset_layers
         if layers is None:
             layers = self._rollback_reset_layers = []
-        while layers and layers[-1]["client"]._finalized:
-            layers.pop()
-        if layers and layers[-1]["span"] is current_span:
+        layers[:] = [layer for layer in layers if not layer.client.transaction_state.finished]
+        if any(layer.client is registered_on and layer.span is current_span for layer in layers):
             return
-        Transactions.on_rollback(self._reset_cache, using=connection.connection_alias)
-        layers.append({"span": current_span, "client": registered_on})
+        layer = RelationRollbackReset(registered_on, current_span)
+        layers.append(layer)
+
+        def discard() -> None:
+            layers[:] = [entry for entry in layers if entry is not layer]
+
+        def invalidate() -> None:
+            try:
+                self._reset_cache()
+            finally:
+                discard()
+
+        TransactionCallbacks.add_on_rollback_callback(transaction, invalidate)
+        TransactionCallbacks.add_on_commit_callback(transaction, discard, is_user_callback=False)
+
+    def _invalidate_after_write(self, connection: DatabaseClient) -> None:
+        """Drop fetched rows now and register another drop on the actual write's rollback."""
+        self._invalidate_local_cache()
+        self._reset_cache_on_rollback(connection)
 
     def _reset_cache(self) -> None:
         # The relation's own drop - a subclass's registers a reset again.

@@ -69,7 +69,7 @@ def test_array_to_db_value_sorts_a_set_for_deterministic_order():
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_field_validators_run_on_save(db_array_fields):
-    """ArrayField.to_db_value never called self.validate(value) (unlike PostGISField/RangeField
+    """ArrayField.to_db_value never called self.validate(value) (unlike PointField/RangeField
     in the same file) - array-level validators (e.g. a max-element-count check) were declared but
     silently never enforced on save."""
     with pytest.raises(ValidationError):
@@ -83,7 +83,7 @@ async def test_array_field_validators_run_on_save(db_array_fields):
 def test_range_field_to_db_value_wraps_wrong_shape():
     """RangeField.to_db_value's non-Range branch does `lower, upper = value` with no check that
     `value` actually unpacks to exactly 2 elements first - same unwrapped-exception bug class as
-    PostGISField's own identical unpacking pattern (tests/dialects/postgresql/column_types/test_postgis.py) and
+    PointField's own identical unpacking pattern (tests/dialects/postgresql/column_types/test_postgis.py) and
     every other field's own conversion step fixed this session."""
     from hare.dialects.postgresql.fields.ranges import IntRangeField
 
@@ -402,7 +402,7 @@ async def test_equality_and_contains_lookups_work_on_a_generated_array_column(db
     2. Even after fixing (1), calling the SAME filter key twice with two DIFFERENT values (e.g.
        tags__contains=[1] then tags__contains=[9] below) hit QUERY_SHAPE_CACHE's cache-hit
        replay path on the second call - which stored the WRAPPED GeneratedField object itself
-       (not output_field) in its ArrayValueReference, so the replay's own array_encoder() call crashed
+       (not output_field) in its ContainerValueReference, so the replay's own array_encoder() call crashed
        on `field.base_field` (a GeneratedField genuinely has no such attribute) even though the
        FIRST call for the same key succeeded. __len/__isnull don't need either fix (they never
        reach get_db_field_type()/base_field), so this test specifically exercises the ones that

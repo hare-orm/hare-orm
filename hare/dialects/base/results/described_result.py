@@ -14,9 +14,9 @@ class DescribedResult:
         rows: The rows, each a tuple of values in the order of ``columns`` - two columns of one
             name both keep their value.
         row_count: The rows the statement changed, for a write without ``RETURNING``; else the
-            rows it returned.
+            rows it returned. None when the driver has no command completion count.
     """
 
     columns: tuple[str, ...]
     rows: tuple[tuple[Any, ...], ...]
-    row_count: int
+    row_count: int | None

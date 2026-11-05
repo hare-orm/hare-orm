@@ -6,8 +6,6 @@ import pytest
 from hare.contrib.frameworks.robyn import HareRobyn
 from tests.contrib.frameworks.request_state import in_a_task_that_wrote_before, request_state
 
-REQUIRES = ("robyn",)
-
 pytestmark = pytest.mark.database_independent
 
 

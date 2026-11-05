@@ -4,8 +4,8 @@ built, so a later query with the same plan can bind its own values there
 
 from __future__ import annotations
 
-from hare.query.expressions.value_references.array_value_reference import ArrayValueReference
 from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
+from hare.query.expressions.value_references.container_value_reference import ContainerValueReference
 from hare.query.expressions.value_references.cursor_value_reference import CursorValueReference
 from hare.query.expressions.value_references.encoded_value_reference import EncodedValueReference
 from hare.query.expressions.value_references.like_value_reference import LikeValueReference
@@ -14,7 +14,6 @@ from hare.query.expressions.value_references.list_value_reference import ListVal
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
 from hare.query.expressions.value_references.open_range_value_reference import OpenRangeValueReference
 from hare.query.expressions.value_references.range_value_reference import RangeValueReference
-from hare.query.expressions.value_references.rebuilt_criterion_value_reference import RebuiltCriterionValueReference
 from hare.query.expressions.value_references.related_key_value_reference import RelatedKeyValueReference
 from hare.query.expressions.value_references.related_value_reference import RelatedValueReference
 from hare.query.expressions.value_references.row_list_value_reference import RowListValueReference
@@ -33,7 +32,6 @@ __all__ = [
     "ListParameterValueReference",
     "RangeValueReference",
     "OpenRangeValueReference",
-    "RebuiltCriterionValueReference",
     "CompositeKeyValueReference",
     "LiteralValueReference",
     "CursorValueReference",
@@ -41,7 +39,7 @@ __all__ = [
     "RelatedKeyValueReference",
     "RowListValueReference",
     "LikeValueReference",
-    "ArrayValueReference",
+    "ContainerValueReference",
     "EncodedValueReference",
     "WriteValueReference",
     "ValueReference",

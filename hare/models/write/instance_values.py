@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from hare.exceptions import QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.database_default import DatabaseDefault
+from hare.models.write.instance_snapshot import InstanceSnapshot
 from hare.models.write.rollback_restores import RollbackRestores
 from hare.models.write.rules.constants import UNREAD_VERSION_MESSAGE
 from hare.native.native_modules import NativeModules
@@ -55,12 +56,13 @@ class InstanceValues:
                 if name not in values:
                     values[name] = getattr(instance, name, ROLLBACK_RESTORE_UNSET)
 
-    def bump_optimistic_lock(self, obj: Model, field_name: str) -> Any:
+    def bump_optimistic_lock(self, obj: Model, field_name: str, connection: DatabaseClient | None = None) -> Any:
         """Increments the optimistic lock field of an obj, remembering its value.
 
         Args:
             obj: The obj.
             field_name: The ``Meta.optimistic_lock_field``.
+            connection: Register undo before publication when the SQL already completed.
 
         Returns:
             The value before the bump - the one the row must still have.
@@ -73,6 +75,8 @@ class InstanceValues:
                 raise QueryError(UNREAD_VERSION_MESSAGE.format(model=type(obj).__name__, field=field_name)) from None
             raise
         self.capture((obj,), (field_name,))
+        if connection is not None:
+            RollbackRestores.register_rollback_restore(obj, connection, field_name, old_version)
         setattr(obj, field_name, new_version)
         return old_version
 
@@ -87,9 +91,7 @@ class InstanceValues:
             if instances is None
             else [entry for instance in instances if (entry := self.old_values.get(id(instance))) is not None]
         )
-        for instance, values in entries:
-            for name, old_value in values.items():
-                RollbackRestores.restore_field_value(instance, name, old_value)
+        InstanceSnapshot.restore_all(InstanceSnapshot(instance, values) for instance, values in entries)
 
     def keep(self, connection: DatabaseClient, instances: Iterable[Model] | None = None) -> None:
         """Keeps the new values - registering putting each changed one back should the

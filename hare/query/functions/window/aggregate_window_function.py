@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from hare.query.functions.window.field_window_function import FieldWindowFunction
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
+from hare.query.functions.window.window_function import WindowFunction
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
 
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from hare.sql.terms.functions.analytic_function import AnalyticFunction
 
 
-class AggregateWindowFunction(FieldWindowFunction):
+class AggregateWindowFunction(WindowFunction):
     """An aggregate computed over the window as the aggregate itself builds it - its own function,
     extra arguments and ``_filter=`` (``Window(Quantile("price", 0.9))``): what ``Window(...)`` makes
     of an aggregate declaring ``computed_over_window``.
@@ -23,16 +24,12 @@ class AggregateWindowFunction(FieldWindowFunction):
         aggregate: The aggregate.
     """
 
-    plan_parts: ClassVar[DeclaredPlanParts] = (
-        ("aggregate", PlanPartType.EXPRESSION),
-        ("field", PlanPartType.NONE),
-        ("condition", PlanPartType.NONE),
-    )
+    structure = ExpressionStructure()
+
+    plan_parts: ClassVar[DeclaredPlanParts] = (("aggregate", PlanPartType.EXPRESSION),)
 
     def __init__(self, aggregate: Aggregate) -> None:
         # The aggregate checked its own argument and filter - it computes them itself.
-        self.field = cast("Any", aggregate.field)
-        self.condition = aggregate.filter
         self.aggregate = aggregate
 
     def build(

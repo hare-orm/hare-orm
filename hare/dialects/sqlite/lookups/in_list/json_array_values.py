@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from hare.dialects.sqlite.constants import SQLITE_INTEGER_MAX, SQLITE_INTEGER_MIN
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
+from hare.dialects.sqlite.parameters.sqlite_encoded_text import SqliteEncodedText
+from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqliteParameterAdapters
 from hare.sql.terms.parameters.list_parameter import ListParameter
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.sql import SqlContext
-    from hare.sql.terms.node import TNode
+    from hare.sql.terms.node import Node
 
 
 class JsonArrayValues(Term, ListParameter):
@@ -25,14 +27,14 @@ class JsonArrayValues(Term, ListParameter):
         decode_hex: Each array element is a hex string to decode back into a BLOB.
     """
 
-    def __init__(self, values_json: str, *, decode_hex: bool) -> None:
+    def __init__(self, values_json: str, *, decode_hex: bool, adapters: SqliteParameterAdapters | None = None) -> None:
         super().__init__()
-        self.values_json = ValueWrapper(values_json)
+        self.values_json = ValueWrapper(SqliteEncodedText(values_json))
+        self.adapters = adapters or SqliteParameterAdapters()
         self.decode_hex = decode_hex
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.values_json.nodes_()
+    def get_children(self) -> Iterator[Node]:
+        yield self.values_json
 
     def get_sql(self, sql_context: SqlContext) -> str:
         selected_value = "unhex(value)" if self.decode_hex else "value"
@@ -41,8 +43,8 @@ class JsonArrayValues(Term, ListParameter):
     def get_parameter_source(self) -> Term:
         return self.values_json
 
-    def get_parameter(self, values: list[Any], *, holds_no_term: bool = False) -> str | None:
-        return self.get_values_json(values, self.decode_hex)
+    def get_parameter_encoder(self) -> Callable[[list[Any]], SqliteEncodedText | None]:
+        return partial(type(self).get_adapted_values_json, decode_hex=self.decode_hex, adapters=self.adapters)
 
     @staticmethod
     def get_json_element(value: Any) -> int | float | str | None:
@@ -54,9 +56,6 @@ class JsonArrayValues(Term, ListParameter):
         Returns:
             The element, or None when the value has no exactly equivalent JSON form.
         """
-        adapter = sqlite3.adapters.get((type(value), sqlite3.PrepareProtocol))
-        if adapter is not None:
-            value = adapter(value)
         if isinstance(value, bool):
             return int(value)
         if isinstance(value, int):
@@ -70,13 +69,17 @@ class JsonArrayValues(Term, ListParameter):
     @staticmethod
     def holds_only_bytes(values: list[Any]) -> bool:
         """Whether every one of ``values`` is bytes."""
-        for value in values:
-            if not isinstance(value, bytes):
-                return False
-        return True
+        return all(isinstance(value, bytes) for value in values)
 
     @classmethod
-    def get_values_json(cls, values: list[Any], decode_hex: bool) -> str | None:
+    def get_adapted_values_json(
+        cls, values: list[Any], decode_hex: bool, adapters: SqliteParameterAdapters
+    ) -> SqliteEncodedText | None:
+        """Adapt fresh list elements using the snapshot that prepared the SQL form."""
+        return cls.get_values_json([adapters.adapt(value) for value in values], decode_hex)
+
+    @classmethod
+    def get_values_json(cls, values: list[Any], decode_hex: bool) -> SqliteEncodedText | None:
         """The JSON array text standing for ``values``.
 
         Args:
@@ -89,28 +92,17 @@ class JsonArrayValues(Term, ListParameter):
         if decode_hex:
             if not cls.holds_only_bytes(values):
                 return None
-            return json.dumps([value.hex() for value in values], separators=(",", ":"))
-        adapters = sqlite3.adapters
-        if (int, sqlite3.PrepareProtocol) not in adapters and (str, sqlite3.PrepareProtocol) not in adapters:
-            # A list of plain integers and strings is its own JSON array.
-            native_functions = SqliteNativeFunctions.module
-            if native_functions is not None:
-                values_json = native_functions.get_json_array_text(values)
-                if values_json is not None:
-                    return values_json
-            for value in values:
-                value_type = type(value)
-                if value_type is int:
-                    if not SQLITE_INTEGER_MIN <= value <= SQLITE_INTEGER_MAX:
-                        return None
-                elif value_type is not str:
-                    break
-            else:
-                return json.dumps(values, separators=(",", ":"))
+            return SqliteEncodedText(json.dumps([value.hex() for value in values], separators=(",", ":")))
+        # Values are already adapted; the native helper performs JSON encoding only.
+        native_functions = SqliteNativeFunctions.module
+        if native_functions is not None:
+            values_json = native_functions.get_json_array_text(values)
+            if values_json is not None:
+                return SqliteEncodedText(values_json)
         json_elements = []
         for value in values:
             json_element = cls.get_json_element(value)
             if json_element is None:
                 return None
             json_elements.append(json_element)
-        return json.dumps(json_elements, separators=(",", ":"))
+        return SqliteEncodedText(json.dumps(json_elements, separators=(",", ":")))

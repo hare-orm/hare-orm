@@ -175,7 +175,7 @@ async def test_a_migration_adds_and_removes_an_index(clickhouse_db):
     state = State()
     state.models[("models", "Article")] = ModelState.make_from_model("models", Article)
     index = SetIndex(fields=["views"], max_rows=10, granularity=3, name="article_views_set_idx")
-    await apply_operations("models", state, AddIndex(model_name="Article", index=index), schema_editor=editor)
+    state = await apply_operations("models", state, AddIndex(model_name="Article", index=index), schema_editor=editor)
     assert (await get_index_types(connection))["article_views_set_idx"] == ("set(10)", 3)
     await apply_operations(
         "models", state, RemoveIndex(model_name="Article", name="article_views_set_idx"), schema_editor=editor
@@ -233,7 +233,12 @@ async def test_a_partial_index_is_the_index_of_every_row(clickhouse_db):
     )
     try:
         for index in indexes:
-            await apply_operations("models", state, AddIndex(model_name="Article", index=index), schema_editor=editor)
+            state = await apply_operations(
+                "models",
+                state,
+                AddIndex(model_name="Article", index=index),
+                schema_editor=editor,
+            )
 
         index_types = await get_index_types(connection)
         assert index_types["article_viewed_idx"] == ("minmax", 1)

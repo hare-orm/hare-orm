@@ -2,17 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from copy import copy
-from typing import TYPE_CHECKING
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.sql_context import SqlContext
-from hare.sql.terms.node import TNode
+from hare.sql.terms.node import Node
 from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
 
 
 class FullTextQueryCombination(Term):
@@ -26,6 +19,8 @@ class FullTextQueryCombination(Term):
         column_filter: The FTS5 column filter the combination is restricted by, empty for every
             column of the index.
     """
+
+    structure_attributes = ("left", "operator", "right", "column_filter")
 
     def __init__(
         self, left: Term, operator: str, right: Term, column_filter: str = "", alias: str | None = None
@@ -49,25 +44,9 @@ class FullTextQueryCombination(Term):
         restricted_query.column_filter = column_filter
         return restricted_query
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield self  # type:ignore[misc]
-        yield from self.left.nodes_()
-        yield from self.right.nodes_()
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces the table of both queries' terms.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy with the table replaced.
-        """
-        self.left = self.left.replace_table(current_table, new_table)
-        self.right = self.right.replace_table(current_table, new_table)
-        return self
+    def get_children(self) -> Iterator[Node]:
+        yield self.left
+        yield self.right
 
     def get_sql(self, sql_context: SqlContext) -> str:
         inner_context = sql_context.copy(with_alias=False)

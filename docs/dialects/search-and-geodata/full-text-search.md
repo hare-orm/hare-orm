@@ -14,14 +14,20 @@ SQL is sent.
 | Configurations, lexemes, label weights | yes | no |
 | Weights by field | through `SearchVector(weight=...)` | `SearchRank(weights={"title": 10})` |
 
-What only one dialect runs is declared by two `Features` flags, and a call that needs a flag the
-connection hasn't raises `UnSupportedError` before any SQL is sent:
+Search support is checked against the selected connection before SQL is sent:
 
-- `supports_text_search_configurations` (PostgreSQL) — a text search configuration (`config=`), a
-  `SearchVector` as a value of its own (an annotation, `+`, a weight), lexemes, `SearchRank`'s label
-  weights, `normalization` and `cover_density`, and `SearchHeadline`'s `config`, `min_words`,
-  `short_word`, `highlight_all` and `max_fragments`;
-- `supports_full_text_index` (SQLite) — a `FullTextIndex` and `SearchRank`'s weights by field.
+- `supports_text_search_configurations` enables explicit `config=` only.
+- `SqliteFeatures.supports_full_text_index` enables the managed `FullTextIndex` table.
+- `text_search_operations` is a set of `TextSearchOperation` values from
+  `hare.dialects.base.search.enums`. Vector creation, concatenation and weights, raw query
+  expressions, rank field/label weights, normalization, cover density and each headline
+  option have independent entries. Supporting configurations does not enable these operations.
+
+PostgreSQL supports vector operations, raw query expressions, label weights, normalization,
+cover density and all headline options. SQLite supports field weights and the headline
+options `start_sel`, `stop_sel`, `max_words`, `fragment_delimiter`, through FTS5.
+Removing an operation from connection features rejects just that operation; compilation without
+a connection uses dialect features.
 
 ```python
 from hare.search import SearchHeadline, SearchQuery, SearchRank, SearchType, SearchVector
@@ -33,7 +39,12 @@ await (
     .annotate(rank=SearchRank("description", "white whale"))
     .order_by("-rank")
 )
-await Book.objects.annotate(excerpt=SearchHeadline("description", "white whale", max_words=20))
+await Book.objects.annotate(
+    excerpt=SearchHeadline(
+        "description", "white whale", max_words=20,
+        start_sel="<b>", stop_sel="</b>", fragment_delimiter=" ... ",
+    )
+)
 ```
 
 On SQLite the model declares the index the search reads:
@@ -72,7 +83,7 @@ SearchQuery(value, config=None, search_type=SearchType.PLAIN, invert=False)
 |---|---|
 | `value` | The search text, an expression giving it, or PostgreSQL's lexemes (read as `RAW`) |
 | `config` | The text search configuration (`"english"`) — PostgreSQL |
-| `search_type` | How the text is read — a `SearchType`; anything else raises `ConfigurationError` |
+| `search_type` | How the text is read — a `SearchType` or its string value; an unknown value raises `ConfigurationError` |
 | `invert` | Negate the query |
 
 `SearchType`:
@@ -133,7 +144,7 @@ How well each row matches, higher for a better match — for an annotation to fi
 |---|---|
 | `vector` | The ranked field, a tuple of fields, a `SearchVector`, or (PostgreSQL) a tsvector expression — a `TSVectorField` is ranked as it is |
 | `query` | The search text (`PLAIN`) or a `SearchQuery` |
-| `weights` | A dict of weights by field — a match in a heavier field ranks higher, 1 for a field left out, each a finite number from 0 to 1000000 (SQLite); or PostgreSQL's weights of the labels D, C, B, A as a sequence of four numbers or an expression — another sequence raises `ConfigurationError` |
+| `weights` | A dict of weights by field — a match in a heavier field ranks higher, 1 for a field left out, each a finite nonnegative number (SQLite); or PostgreSQL's weights of the labels D, C, B, A as a sequence of four numbers or an expression — another sequence raises `ConfigurationError` |
 | `normalization` | PostgreSQL's length normalization bitmask — an integer of 32 bits or an expression; another value raises `ConfigurationError` |
 | `cover_density` | `TS_RANK_CD()` instead of `TS_RANK()` — PostgreSQL |
 
@@ -158,14 +169,20 @@ The text with the matched words marked, for an annotation.
 |---|---|
 | `expression` | The field whose text is marked; on PostgreSQL also an expression |
 | `query` | The search text (`PLAIN`) or a `SearchQuery` |
-| `start_sel`, `stop_sel` | The text before and after a matched word — PostgreSQL's `<b>` and `</b>` by default; on SQLite required, FTS5 having no marker of its own; at most 1000 characters |
+| `start_sel`, `stop_sel` | The text before and after a matched word — PostgreSQL's `<b>` and `</b>` by default; on SQLite required, FTS5 having no marker of its own; text without NUL |
 | `max_words` | The most words of a fragment — from 1; on SQLite at most 64, and it switches to FTS5's `snippet()`; on PostgreSQL above `min_words`, 15 unless given — `max_words=3` needs a lower `min_words`, else PostgreSQL raises `OperationalError` |
 | `fragment_delimiter` | The text between fragments — PostgreSQL's `" ... "` by default; on SQLite required with `max_words` |
 | `config`, `min_words`, `short_word`, `highlight_all`, `max_fragments` | `TS_HEADLINE()`'s own options — PostgreSQL |
 
 On SQLite a row the query doesn't match gets `NULL`, and a `SearchHeadline` without `start_sel` and
 `stop_sel`, or with `max_words` but no `fragment_delimiter`, raises `QueryError` before any SQL is sent. A
-count out of range or a marker that isn't text raises `ConfigurationError`.
+count below its minimum, a boolean count, or a non-text/NUL-containing marker raises `ConfigurationError`.
+
+Hare imposes no common upper limit on counts or marker lengths. PostgreSQL parses counts as signed
+32-bit integers and limits each marker/delimiter to 32767 bytes in the server encoding. Unless
+`highlight_all=True`, it also requires `0 < min_words < max_words`; `short_word` and `max_fragments`
+are nonnegative. PostgreSQL reports violations of its limits as database errors. SQLite retains
+its 64-word snippet limit.
 
 ## <a id="lexemes"></a>Lexemes (PostgreSQL)
 
@@ -205,7 +222,7 @@ with its triggers; changing the fields or the tokenizer replaces it.
 
 The model needs an integer primary key (FTS5's rowid); a model without one, no fields, a descending key
 or an empty tokenizer raise `ConfigurationError`. On a connection without
-`Features.supports_full_text_index` a model declaring the index raises `ConfigurationError` in
+`SqliteFeatures.supports_full_text_index` a model declaring the index raises `ConfigurationError` in
 `Hare.init()`, and a migration creating or dropping it raises `UnSupportedError` before any SQL.
 
 ## <a id="query-plans"></a>Query plans

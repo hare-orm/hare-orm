@@ -37,7 +37,7 @@ def test_descending_fields_and_ordered_keys():
     assert index.get_name_parts() == ("desc", "title")
     assert index != Index(fields=("title", "rank"))
     assert Index(F("title").desc(), F("rank")) == index
-    assert Index(F("rank").desc(nulls_last=True)).expressions != ()
+    assert Index(F("rank").desc(nulls_last=True)).declared_expressions != ()
     assert Index(F("rank").desc(nulls_first=True)).get_key_orders() == Index(fields=("-rank",)).get_key_orders()
     assert Index(F("rank").asc(nulls_last=True)).get_key_orders() == [Order.ASC_NULLS_LAST]
 

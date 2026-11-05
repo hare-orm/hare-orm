@@ -415,7 +415,7 @@ async def test_alter_field_into_a_format_field_on_the_database(db_text_formats):
         options={"table": table_name},
     )
     try:
-        await apply_operations("models", state, create_model, schema_editor=editor)
+        state = await apply_operations("models", state, create_model, schema_editor=editor)
         await connection.execute(
             f"INSERT INTO {literals.quote_identifier(table_name)} (id, email, slug) VALUES (1, 'a@example.com', 'a-b')"
         )

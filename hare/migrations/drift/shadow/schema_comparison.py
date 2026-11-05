@@ -7,17 +7,27 @@ from hare.core.apps.relation_linking import RelationLinking
 from hare.ddl.constraints.check_constraint import CheckConstraint
 from hare.ddl.constraints.exclusion_constraint import ExclusionConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
+from hare.ddl.enums import GrantTarget
 from hare.ddl.indexes.index import Index
 from hare.ddl.security.grant import Grant
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
+from hare.inspectdb.introspection.composite_foreign_key_info import CompositeForeignKeyInfo
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.inspectdb.introspection.enums import SchemaPartType
+from hare.inspectdb.introspection.foreign_key_info import ForeignKeyInfo
 from hare.inspectdb.introspection.index_info import IndexInfo
 from hare.inspectdb.introspection.schema_part import SchemaPart
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.drift.column_mismatch import ColumnMismatch
 from hare.migrations.drift.constants import DRIFT_NAMED_OBJECT_OPERATIONS, DRIFT_SCHEMA_OBJECT_PART_TYPES
+from hare.migrations.drift.messages import (
+    UNREPRESENTABLE_COLUMN,
+    UNREPRESENTABLE_FUNCTION,
+    UNREPRESENTABLE_GRANT,
+    UNREPRESENTABLE_PRIMARY_KEY,
+)
+from hare.migrations.drift.object_mismatch import ObjectMismatch
 from hare.migrations.drift.shadow.column_field_names import ColumnFieldNames
 from hare.migrations.execution.swappable_setting_check import SwappableSettingCheck
 from hare.migrations.operations import (
@@ -75,6 +85,7 @@ class SchemaComparison:
         self.operations: list[HareOperation] = []
         self.untracked_columns: list[tuple[str, str, str, str]] = []
         self.mismatched_columns: list[ColumnMismatch] = []
+        self.mismatched_objects: list[ObjectMismatch] = []
         # One operation per field: adding it outweighs altering it.
         self.field_operations: dict[tuple[str, str, str], HareOperation] = {}
 
@@ -140,7 +151,9 @@ class SchemaComparison:
         if not self.has_table(tables[0]):
             self.operations.append(OperationGenerator.get_create_model_operation(model_state))
             return
-        field_name_by_column = ColumnFieldNames.column_to_field_name(model_state.fields)
+        field_name_by_column = ColumnFieldNames.column_to_field_name(
+            {name: model._meta.fields_map[name] for name in model_state.fields}
+        )
         for table in tables:
             if not self.has_table(table):
                 continue
@@ -191,6 +204,12 @@ class SchemaComparison:
         for part in shadow_only:
             self.add_field_operation(key, model_state, field_name_by_column[part.name], added=True)
         for part in changed:
+            real_part = self.real_parts[part.key]
+            if part.unrepresented_definition != real_part.unrepresented_definition:
+                self.add_object_mismatch(real_part, UNREPRESENTABLE_COLUMN)
+            if SchemaPart.get_definition(part.value) == SchemaPart.get_definition(real_part.value):
+                self.add_object_mismatch(real_part, UNREPRESENTABLE_COLUMN)
+                continue
             self.add_field_operation(key, model_state, field_name_by_column[part.name], added=False)
         for part in real_only:
             if part.name in field_name_by_column:
@@ -210,6 +229,8 @@ class SchemaComparison:
         differing_columns = [column for column in declared_columns if column not in real_columns] + [
             column for column in real_columns if column not in declared_columns
         ]
+        if not differing_columns and not declared_columns:
+            self.add_object_mismatch(real_part, UNREPRESENTABLE_PRIMARY_KEY)
         for column in differing_columns or declared_columns[:1]:
             if column in declared_columns and column not in real_columns:
                 detail = "is not in the table's PRIMARY KEY, the model's primary key holds it"
@@ -269,10 +290,6 @@ class SchemaComparison:
         for constraint in meta.constraints:
             if isinstance(constraint, UniqueConstraint) and constraint.name:
                 owners[constraint.name] = ("constraint", constraint)
-        for field_name in model_state.fields:
-            field = meta.fields_map.get(field_name)
-            if field is not None and field.pk:
-                owners.setdefault(f"pk:{field_name}", ("field", field_name))
         return owners
 
     @staticmethod
@@ -413,7 +430,13 @@ class SchemaComparison:
         pointed at before is a ``ColumnMismatch``: no operation moves the rows."""
         shadow_only, real_only, changed = self.get_differences(SchemaPartType.FOREIGN_KEY, table)
         for part in [*shadow_only, *real_only, *changed]:
-            column = part.name.split(",")[0]
+            if isinstance(part.value, ForeignKeyInfo):
+                column = part.value.column
+            elif isinstance(part.value, CompositeForeignKeyInfo):
+                column = part.value.columns[0]
+            else:
+                # An unrepresentable constraint retains the catalog diagnostic's name.
+                column = part.name.split(",")[0]
             field_name = field_name_by_column.get(column)
             if field_name is None:
                 continue
@@ -449,6 +472,14 @@ class SchemaComparison:
                 self.operations.append(add_class(model_name, declared[part.name]))
         for part in changed:
             if part.name in declared:
+                real = self.real_parts[part.key]
+                if part_type is SchemaPartType.FUNCTION and (
+                    real.operation_signatures != part.operation_signatures
+                    or real.operation_signatures is None
+                    or len(real.operation_signatures) != 1
+                ):
+                    self.add_object_mismatch(real, UNREPRESENTABLE_FUNCTION)
+                    continue
                 self.operations.append(alter_class(model_name, declared[part.name]))
         if remove_class is not None:
             for part in real_only:
@@ -458,16 +489,27 @@ class SchemaComparison:
         """A grant the database lacks is added, one it has of its own revoked."""
         shadow_only, real_only, _changed = self.get_differences(SchemaPartType.GRANT, table)
         for part in real_only:
-            if not isinstance(part.value, str):
+            if isinstance(part.value, Grant):
                 self.operations.append(RemoveGrant(model_name, part.value))
+            else:
+                self.add_object_mismatch(part, UNREPRESENTABLE_GRANT)
         for part in shadow_only:
-            if not isinstance(part.value, str):
+            if isinstance(part.value, Grant):
                 self.operations.append(AddGrant(model_name, part.value))
+            else:
+                self.add_object_mismatch(part, UNREPRESENTABLE_GRANT)
+
+    def add_object_mismatch(self, part: SchemaPart, detail: str) -> None:
+        """Keep unsupported differences visible without inventing a corrective operation."""
+        mismatch = ObjectMismatch(part.part_type, part.table, part.name, detail)
+        if mismatch not in self.mismatched_objects:
+            self.mismatched_objects.append(mismatch)
 
     def compare_table_options(self, model_name: str, model_state: ModelState, table: str) -> None:
         """Partitions added or dropped by hand are their ``AddPartition``/``RemovePartition``; other storage
         and the table's comment ``AlterModelOptions``; row level security ``AlterRowLevelSecurity``."""
         key = (SchemaPartType.TABLE_OPTIONS, table, table)
+        changes_options = False
         shadow_part, real_part = self.shadow_parts.get(key), self.real_parts.get(key)
         if shadow_part is not None and real_part is not None and shadow_part.definition != real_part.definition:
             declared_options, real_options = shadow_part.value, real_part.value
@@ -485,7 +527,7 @@ class SchemaComparison:
                     if real_partitions.get(name) != partition:
                         self.operations.append(AddPartition(model_name=model_name, partition=partition))
             else:
-                self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
+                changes_options = True
         # A partitioning hare declares no such one of, or another comment - the options aren't the table's.
         for options_key in (
             (SchemaPartType.UNPARSED_PARTITIONING, table, table),
@@ -493,7 +535,9 @@ class SchemaComparison:
         ):
             if options_key in self.shadow_parts and options_key in self.real_parts:
                 if self.shadow_parts[options_key].definition != self.real_parts[options_key].definition:
-                    self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
+                    changes_options = True
+        if changes_options:
+            self.operations.append(AlterModelOptions(name=model_name, options=dict(model_state.options)))
         security_key = (SchemaPartType.ROW_LEVEL_SECURITY, table, table)
         if security_key in self.shadow_parts and security_key in self.real_parts:
             if self.shadow_parts[security_key].definition != self.real_parts[security_key].definition:
@@ -518,9 +562,11 @@ class SchemaComparison:
                 continue
             if isinstance(field.model_name, SwappableModelReference):
                 foreign_key_targets = {
-                    part.name.split(",")[0]: part.value.target_table
+                    (
+                        part.value.column if isinstance(part.value, ForeignKeyInfo) else part.value.columns[0]
+                    ): part.value.target_table
                     for part in self.real_parts_by_table.get((SchemaPartType.FOREIGN_KEY, through_table), {}).values()
-                    if hasattr(part.value, "target_table")
+                    if isinstance(part.value, (ForeignKeyInfo, CompositeForeignKeyInfo))
                 }
                 swappable_mismatches = SwappableSettingCheck.get_through_table_mismatches(
                     model, field, foreign_key_targets
@@ -561,27 +607,52 @@ class SchemaComparison:
         model = self.new_state.apps.get_model(f"{key[0]}.{key[1]}")
         for part_type in DRIFT_SCHEMA_OBJECT_PART_TYPES:
             self.compare_named_objects(part_type, model, key[1], "", prefix)
-        self.compare_object_grants(model, key[1])
+        self.compare_object_grants(model, key[1], prefix)
 
-    def compare_object_grants(self, model: type[Model], model_name: str) -> None:
+    def compare_object_grants(self, model: type[Model], model_name: str, prefix: str = "") -> None:
         """A grant on a sequence or a function of a model the database lacks is added, one it has of its own
         revoked.
 
         Args:
             model: The model.
             model_name: Its name.
+            prefix: The logical namespace prefix used by the compared object parts.
         """
         object_names = {
             *(sequence.name for sequence in model._meta.sequences),
             *(function.name for function in model._meta.functions),
         }
         shadow_only, real_only, _changed = self.get_differences(SchemaPartType.GRANT, "")
-        for part in real_only:
-            if isinstance(part.value, Grant) and part.value.object_name in object_names:
-                self.operations.append(RemoveGrant(model_name, part.value))
-        for part in shadow_only:
-            if isinstance(part.value, Grant) and part.value.object_name in object_names:
-                self.operations.append(AddGrant(model_name, part.value))
+        for parts, operation in ((real_only, RemoveGrant), (shadow_only, AddGrant)):
+            for part in parts:
+                object_name = (
+                    part.value.object_name
+                    if isinstance(part.value, Grant)
+                    else part.definition.get("object_name")
+                    if isinstance(part.definition, dict)
+                    else None
+                )
+                if object_name not in object_names or part.name != prefix + repr(part.definition):
+                    continue
+                if not isinstance(part.value, Grant) or not self.can_map_function_grant(part.value, prefix):
+                    self.add_object_mismatch(part, UNREPRESENTABLE_GRANT)
+                else:
+                    self.operations.append(operation(model_name, part.value))
+
+    def can_map_function_grant(self, grant: Grant, prefix: str) -> bool:
+        """A name-based Grant cannot choose between different physical overload signatures."""
+        if grant.on != GrantTarget.FUNCTION:
+            return True
+        key = SchemaPartType.FUNCTION, "", prefix + str(grant.object_name)
+        real, shadow = self.real_parts.get(key), self.shadow_parts.get(key)
+        if real is None or shadow is None:
+            return True
+        return (
+            real.operation_signatures is not None
+            and shadow.operation_signatures is not None
+            and len(real.operation_signatures) == len(shadow.operation_signatures) == 1
+            and real.operation_signatures == shadow.operation_signatures
+        )
 
     def compare_enum_types(self) -> None:
         """An ``ENUM`` type the database lacks is created, one of other labels altered."""

@@ -50,7 +50,7 @@ class ColstoreDialect(Dialect):
 | `get_parameter_cast_type(value, position)`, `get_field_parameter_cast_type(field)`, `get_row_key_cast_type(field)`, `get_json_object_value_cast_type(value, value_type)`, `get_cast_parameter_sql(sql, value)` | Тип, к которому приводится значение-параметр там, где его тип ничто не задаёт — см. [`get_parameter_cast_type()`](#get-parameter-cast-type) |
 | `get_bindable_number(value)` | Как передаётся число, означающее число JSON. |
 | `single_parameter_in_list_min_length` | Длина, начиная с которой список `__in`/`__not_in` передаётся одним параметром. |
-| `get_default_rows_source_sql(row_count)`, `get_column_arrays_rows_source_sql(column_types, first_index)` | Источники, из которых многострочный `INSERT` читает строки значений по умолчанию или по одному массиву на колонку, — `None` для команды на строку и `VALUES`. |
+| `get_default_rows_source_sql(row_count)`, `get_column_arrays_rows_source_sql(column_cast_types, first_parameter_index, *, column_values_sql=None)` | Источники, из которых многострочный `INSERT` читает строки значений по умолчанию или по одному массиву на колонку, — `None` для команды на строку и `VALUES`. Необязательные выражения выводят уже подготовленные массивы непосредственно в SQL; иначе источник использует placeholders параметров. |
 | `get_copy_column_type(field)` | Тип, который массовой загрузке (`copy()`) называют для колонки поля, — по умолчанию тот, что объявлен в таблице. |
 | `supports_copy_column_type(column_type)` | Загружает ли массовая загрузка колонку такого типа. |
 
@@ -86,17 +86,11 @@ def build_types(self):
     return types
 ```
 
-| Член `TypeMapping` | Что задаёт |
-|---|---|
-| `column_type` | Тип колонки или функция `(field) -> str`. Без него — собственный `SQL_TYPE` поля. |
-| `generated_sql` | Команда создания колонки первичного ключа, который генерирует база. |
-| `function_cast` | Функция `(field, term) -> term`, которой колонка оборачивается везде, где её сравнивают, сортируют или копируют. |
-| `to_db`, `to_lookup`, `to_python` | Заменяют `to_db_value()`, `to_lookup_value()` и `from_db_value()` поля — каждое значение передаётся и читается через подключение запроса. |
-| `to_db_refuses_only` | `to_db` только отклоняет значение — то, которое `native_write_check` поля оставляет ему, — а любое другое пишет так же, как поле: ускоритель записи сам пишет все остальные значения. |
-| `json_term` | Текст, которым значение колонки записывается в объект JSON, — для значения, которое хранится в виде, непригодном для JSON (UUID, хранимый 16 байтами). |
-| `extension` | Расширение базы, которое нужно типу колонки (`postgis` для пространственных типов PostgreSQL), — создаётся везде, где используется поле этого класса, и попадает в миграции как `CreateExtension`. |
-| `naive_datetime_is_utc` | `to_python` — собственный `from_db_value()` поля, а дата-время без пояса от драйвера читается как момент в UTC. |
-| `inserted_by_select` | INSERT, записывающий колонку, пишет строки как `SELECT` из них, а не `VALUES`, — для значения, записанного выражением, которое `VALUES` диалекта не читает; или `(field) -> bool`, решающая это для каждого поля. |
+Полный [справочник TypeMapping](../custom-fields.ru.md#per-dialect-storage) описывает типы колонок,
+преобразователи, сортировку, поддержку NULL и расширения.
+
+Нормализация формата драйвера выполняется в `to_python`. Например, если драйвер возвращает моменты
+UTC как дату-время без пояса, преобразователь добавляет UTC перед вызовом `from_db_value()` поля.
 
 `Features` описывают поведение значений: `divides_integers_exactly` (`/` целых даёт и дробь),
 `computes_integer_statistics_exactly` (среднее целых — точное десятичное),
@@ -120,8 +114,9 @@ DialectRegistry.get_dialect("colstore").types.register(MoneyField, TypeMapping(c
 
 ## <a id="functions-and-lookups"></a>5. Выражения и операторы фильтров: `TermRenderers`, `FilterOperators`
 
-По умолчанию каждое выражение выводится стандартным SQL. `build_renderers()` возвращает `TermRenderers` —
-замены для того, что база записывает иначе; они находятся по иерархии классов выражения:
+Обычные функции по умолчанию используют стандартную форму вызова SQL. Термам с
+`requires_dialect_renderer` нужна зарегистрированная реализация. `build_renderers()` возвращает
+`TermRenderers` — замены для того, что база записывает иначе; они находятся по иерархии классов терма:
 
 ```python
 def build_renderers(self):
@@ -135,7 +130,8 @@ def render_length(length, sql_context):
     return f"lengthUTF8({length.get_arg_sql(length.args[0], sql_context)})"
 ```
 
-Собственные диалекты hare строят свои рендереры на `CheckedTermRenderers`
+Для стандартного вызова `register_name()` может задать только другое имя функции. Обязательный рендерер
+диалекта это не заменяет. Диалекты hare строят свои рендереры на `CheckedTermRenderers`
 (`hare.dialects.base.renderers`): его `add_dialect_renderers()` регистрирует рендереры диалекта,
 сгруппированные по темам в классы с одним `register(renderers)` — `<Dialect>JsonRenderers`,
 `<Dialect>TemporalRenderers`, `<Dialect>NumberRenderers`, `<Dialect>TextRenderers`, а также рендереры
@@ -190,12 +186,11 @@ SQL нужно другое:
 подкласс `LargeInList` (`hare.dialects.base.parameters.large_in_list`) и в `build_filter_operators()`
 сопоставьте `Lookups.is_in`/`not_in`/`row_is_in`/`row_not_in` его одноимённым методам. Алгоритм написан
 один раз в базовом классе — когда применяется короткая форма, как отдельно сравниваются `NULL` из списка,
-как отрицается `not_in`, форма «строка значений» для составного ключа; диалект даёт только контейнер, в
-который значения привязываются **одним** параметром:
-`get_membership_criterion(field, values, non_null_values, element_type)` (`= ANY($1::type[])` в
-PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite) и
-`get_row_container(value_rows, element_types)` для строк значений. Возврат `None` оставляет обычный
-список `IN (...)`.
+как отрицается `not_in`, форма «строка значений» для составного ключа. Скалярный список использует один
+параметр-контейнер через `get_membership_criterion(term, values, non_null_values, element_type)`
+(`= ANY($1::type[])` в PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite).
+`get_row_container(value_rows, element_types)` задаёт форму для строк: PostgreSQL привязывает отдельный
+массив на колонку. Возврат `None` оставляет обычный список `IN (...)`.
 
 Рендерер меняет то, как пишется SQL терма, но никогда не то, по чему составлен ключ плана запроса, —
 диалект входит в каждый ключ. Собственный класс выражения диалекта (функции массивов, триграмм и
@@ -203,9 +198,10 @@ PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite) и
 разрешает аргументы через `ExpressionArguments.get_result()`, как любое [своё
 выражение](../custom-functions-and-expressions.ru.md#writing-a-custom-expression).
 
-Пакет, объявляющий такие выражения, при импорте регистрирует их за своим диалектом —
-`DialectExpressions.register(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`);
-подкласс зарегистрированного класса зарегистрирован вместе с ним. Запрос к другой базе отвергает каждое из
+При определении выражений пакет задаёт неизменяемые ограничения диалекта через
+`DialectExpressions.declare(MyDialect, (MyFunction, ...))` (`hare.query.expressions.dialect_expressions`).
+Подклассы наследуют ограничения. Добавление во время работы использует
+`DialectExpressions.register(...)`, публикующий новый снимок реестра. Запрос к другой базе отвергает каждое из
 них с `UnSupportedError` до построения SQL: `Function.get_result()` проверяет это для любой функции, а
 выражение со своим `get_result()` первым делом вызывает
 `DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)`.
@@ -241,6 +237,12 @@ PostgreSQL, `IN (SELECT value FROM json_each(?))` в SQLite) и
 | `get_select_all_except_sql(quoted_columns)` | Начало запроса, выбирающего все колонки источника, кроме некоторых, — производная таблица, в которой выполняется запрос с коррелированными подзапросами там, где база выполняет их так; по умолчанию `UnSupportedError`. |
 | `get_values_source_sql(row_sqls, column_names, alias_sql, *, matches_no_row)` | Подзапрос строк, заданных значениями, — источник `MERGE`. |
 
+`get_update_from_values_sql(write=..., with_sql=..., values_sql=..., sql_context=...)` получает
+декларацию `UpdateFromValues`. Присваивания содержат имена колонок без кавычек и позиции
+`ValuesColumn` либо деревья выражений; сопоставления связывают имена с позициями, а фильтр остаётся
+выражением. Диалект выбирает квалификацию имён и источник строк до рендеринга. Нельзя разбирать
+напечатанные идентификаторы или заменять префиксы таблиц в SQL: литералы и `RawSQLTerm` неизменны.
+
 Класс запроса только привязывает команды к диалекту:
 
 ```python
@@ -251,14 +253,17 @@ ColstoreQuery = DeclaredSubclass.make(
 
 ### <a id="queryset-methods"></a>Методы `QuerySet` от диалекта
 
-Собственные модификаторы запросов базы становятся методами `QuerySet`, и hare о них знать не нужно.
-Зарегистрируйте их в `install()` функцией, которая получает построитель запроса и аргументы вызова и
-возвращает построитель, — например, `random_share()` у Colstore:
+Методы диалекта объявляются в `get_contribution()` и публикуются вместе с диалектом.
+Функция получает построитель запроса и аргументы вызова, возвращая построитель:
 
 ```python
-def install(self):
-    super().install()
-    QuerySetExtensions.register("random_share", self.name, self.apply_random_share)
+from hare.core.extensions import ExtensionContribution, MethodRegistration
+from hare.query.queryset.extensions.query_set_extension import QuerySetExtension
+
+def get_contribution(self):
+    return ExtensionContribution(methods=(
+        MethodRegistration("random_share", type(self), QuerySetExtension(self.apply_random_share)),
+    ))
 
 def apply_random_share(self, builder, percent):
     return builder.where(LiteralValue(f"abs(random()) % 100 < {int(percent)}"))
@@ -268,8 +273,10 @@ def apply_random_share(self, builder, percent):
 применяет его, когда строится для своего подключения; на подключении другого диалекта это даёт
 `UnSupportedError`. Пакет может зарегистрировать метод и для диалекта, который определил не он.
 
-`QuerySetExtensions.register(name, dialect_class, apply)` (из `hare.query.queryset.extensions`) обычно
-вызывается в `install()` диалекта с `type(self)` — метод получает каждый объект класса диалекта.
+`QuerySetExtensions.register(name, dialect_class, apply)` (из `hare.query.queryset.extensions`)
+применяется вне фабрик расширений. Фабрика возвращает
+`MethodRegistration(name, type(self), QuerySetExtension(apply, ...))`: метод получает каждый объект класса
+диалекта.
 `apply(builder, *args, **kwargs)` возвращает построитель запроса с применённым вызовом. Вызов запоминается в
 запросе (в том числе до `Hare.init()`) и переносится в `values()`, `count()` и другие запросы, построенные из
 него; когда запрос строится для своего подключения, вызов применяет реализация диалекта этого подключения. На
@@ -280,17 +287,72 @@ def apply_random_share(self, builder, percent):
 словарь), лишает запрос плана. Аргумент, который сам описывает себя для плана, — `Q`, выражение, — входит в
 ключ своей структурой, а его значения подставляются, как значения фильтров.
 
-`register()` принимает ещё четыре именованных аргумента — для метода, которому мало построителя:
+`register()` принимает дополнительные именованные аргументы, описывающие влияние на SQL и результат:
 
 | Аргумент | Что задаёт |
 |---|---|
 | `reads_query=True` | `apply(builder, extension_query, *args, **kwargs)` получает и запрос — `QuerySetExtensionQuery`: его `model`, `connection`, `dialect`, `table`, признаки `is_write` и `is_summary`, а также `get_condition(q)`, `get_expression(name_or_expression)` и `join(builder, joins)`, которые разрешают условие или поле так же, как собственные фильтры запроса, и записывают их значения в его план. |
 | `takes_condition=True` | Метод принимает аргументы `filter()` — объекты `Q` и фильтры, — записанные одним `Q`, который получает `apply` (`prewhere()` ClickHouse). Все диалекты, регистрирующие это имя, объявляют его одинаково, иначе `register()` даёт `ConfigurationError`. |
 | `changes_rows=True` | Вызов меняет, какие строки возвращает запрос, помимо его условий (`limit_by()` ClickHouse): `count()` и `exists()` считают строки запроса как производной таблицы. |
-| `run_query=` | `await run_query(extension_query, *args, **kwargs)` выполняет запрос строк с этим вызовом вместо его обычного выполнения и возвращает то, что вернёт запрос (`with_totals()` ClickHouse читает строки и итоговую строку своей одной команды). |
+| `transform_result=` | `transform_result(result, *args, **kwargs)` получает `QuerySetExtensionResult` после обычного выполнения. Его `result` уже материализован; запросы значений также предоставляют `statement_result` и `read_row()` для дополнительных строк драйвера, например totals. Обработчик не выполняет SQL. |
+| `phase=` | `ExtensionPhase.ROW_SOURCE` (по умолчанию) применяется до оборачивания в производную таблицу; `ExtensionPhase.STATEMENT` — к итоговой команде, как настройки ClickHouse. |
+| `refuses_writes=True` | Запрещает UPDATE и DELETE с этим вызовом до выбора изменяемых строк. |
+
+Реализации и их эффект `changes_rows` выбираются для фактического соединения. Метод другого диалекта
+не влияет на стратегию сводного запроса. Допускается один обработчик формы результата; сочетание
+нескольких вызывает `QueryError` до выполнения SQL. Обработчик преобразует полный результат await.
+`iterator()` и `stream()` выдают обычные декодированные строки и не применяют преобразование полного
+результата к отдельным страницам или порциям курсора.
+
 
 `QueryBuilder.set_dialect_clause(name, value)` хранит то, что задаёт вызов, — это пишет `QueryClauses`
 диалекта в `get_main_table_suffix_sql()`, `get_prewhere_sql()`, `get_group_by_modifier_sql()` (то, что
 идёт после `GROUP BY`, ` WITH TOTALS` ClickHouse), `get_limit_by_sql()` и `get_statement_end_sql()`; их
 спрашивают только у запроса, где такие клаузы есть. `hare stubs` и плагин
 mypy объявляют методы диалектов соединений проекта с параметрами `apply` после построителя (и запроса).
+
+### <a id="query-source-bindings"></a>Привязка источников запроса
+
+У построителя запроса, используемого как источник, есть идентичность, не зависящая от печатного alias.
+`from_(subquery)` и `join(subquery)` назначают автоматические имена локальным копиям,
+не изменяя переданный подзапрос. Ссылки на колонки и звёздочку используют привязку текущего
+`SqlContext`. Повторное использование подзапроса в другом родителе не меняет SQL первого.
+Явный `as_(...)` создаёт отдельное вхождение для соединения источника с самим собой.
+
+Анализ корреляции обходит непосредственные области запросов. Таблицы вложенного или соседнего
+запроса не становятся источниками родителя. При сравнении источников учитывается схема:
+одинаковые печатные имена таблиц в разных схемах не взаимозаменяемы.
+
+`SqlContext.features` позволяет передать возможности соединения; без них `effective_features`
+использует возможности диалекта. Обычное исполнение statement и запись плана передают возможности
+выбранного соединения. Поддержка корреляции в SELECT, ORDER BY, GROUP BY, UPDATE и DELETE
+проверяется независимо до рендеринга statement.
+
+### <a id="structural-sql-expressions"></a>Структура SQL-выражений
+
+`NodeStructure` сравнивает и перестраивает SQL-выражения без рендеринга. Конкретный класс узла
+объявляет семантические входы через `structure_attributes`; объявления базовых классов тоже
+учитываются. Alias относится к отображению. Атрибуты с данными помечаются в `literal_attributes`:
+объект выражения внутри такого значения не становится SQL-узлом для замены.
+Значения словаря и элементы последовательностей могут содержать дочерние выражения; ключи
+словаря остаются метками. Неизвестный подкласс непрозрачен, пока явно не объявит свои входы.
+Для неповторяемого выражения задайте `has_repeatable_value=False`: два отдельных вызова нельзя объединять.
+
+`rebuild_structure(attributes)` создаёт копию. Переопределите его, если изменение входа требует
+пересчёта производных данных, например глубины составного условия. Итеративный обход отвергает
+циклы предков и сохраняет неизменённые узлы. Источники и вложенные запросы ограничивают область
+обхода: замена во внешнем выражении не входит в тело вложенного запроса.
+
+`Term.replace_table()` использует тот же обход с контрактом замены таблиц. Необъявленный подкласс
+сохраняет входы ближайшей объявленной базы (например, аргументы пользовательской функции), а его
+дополнительные атрибуты остаются непрозрачными. Специальные реализации `replace_table()` сохраняют
+свои границы. Изменяемый builder (`immutable=False`) меняется на месте; неизменённые ссылки могут
+сохранить идентичность. Кэш хеша предков сбрасывается и после изменения дочернего узла на месте.
+Это не раскрывает необъявленный подкласс для структурной идентичности и обычного `NodeStructure.rewrite()`.
+
+Производные запросы используют `DerivedProjection`, которая связывает структурную идентичность
+выражения с именем колонки и типом результата. Внешний запрос явно выбирает выходные псевдонимы.
+Оконные фильтры и сортировка могут
+запрашивать скрытые колонки, не меняя видимого результата. GROUP BY использует ту же идентичность.
+Агрегации строят независимые внутреннее и внешнее состояния запроса; вхождения параметров
+ссылаются на объявленные источники значений без повторения предыдущих шагов построения.

@@ -15,33 +15,22 @@ if TYPE_CHECKING:
 class Criterion(Term):
     """The base of the conditions - terms combined by ``&``, ``|`` and ``^``."""
 
-    #: ``ComplexCriterion`` - it builds on this class, so it is taken on the first combination
-    #: rather than imported here; None until then.
-    complex_criterion_class: ClassVar[type[ComplexCriterion] | None] = None
-
-    @staticmethod
-    def get_complex_criterion_class() -> type[ComplexCriterion]:
-        """``ComplexCriterion``, kept on the class once taken.
-
-        Returns:
-            The class.
-        """
-        from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
-
-        Criterion.complex_criterion_class = ComplexCriterion
-        return ComplexCriterion
+    structure_attributes: ClassVar[tuple[str, ...]] = ()
 
     def __and__(self, other: Any) -> ComplexCriterion:
-        complex_criterion_class = Criterion.complex_criterion_class or Criterion.get_complex_criterion_class()
-        return complex_criterion_class(Boolean.AND, self, other)
+        from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
+
+        return ComplexCriterion(Boolean.AND, self, other)
 
     def __or__(self, other: Any) -> ComplexCriterion:
-        complex_criterion_class = Criterion.complex_criterion_class or Criterion.get_complex_criterion_class()
-        return complex_criterion_class(Boolean.OR, self, other)
+        from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
+
+        return ComplexCriterion(Boolean.OR, self, other)
 
     def __xor__(self, other: Any) -> ComplexCriterion:
-        complex_criterion_class = Criterion.complex_criterion_class or Criterion.get_complex_criterion_class()
-        return complex_criterion_class(Boolean.XOR, self, other)
+        from hare.sql.terms.criteria.complex_criterion import ComplexCriterion
+
+        return ComplexCriterion(Boolean.XOR, self, other)
 
     @staticmethod
     def any(terms: Iterable[Term] = ()) -> EmptyCriterion:

@@ -1,16 +1,16 @@
-use crate::asyncio::completion::future_into_py;
-use crate::pg::error::DriverError;
+use crate::pg::error::{to_pyerr, DriverError};
 use crate::pg::first_row::FirstRow;
 use crate::pg::result::PgResult;
 use crate::pg::result_columns::ResultColumns;
 use crate::pg::result_data::ResultData;
 use crate::pg::value::Value;
+use pyo3_async_runtimes::tokio::future_into_py;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::cursor_rows::CursorRows;
-use super::{stream_exhausted, tx_finished, Transaction};
+use super::{stream_exhausted, tx_finished};
 use pyo3::prelude::*;
 
 /// How many rows `__anext__()` fetches off the cursor at a time.
@@ -20,7 +20,6 @@ const ITERATION_FETCH_SIZE: usize = 1000;
 pub(super) struct OpenRowStream {
     pub(super) rows: CursorRows,
     pub(super) columns: Arc<ResultColumns>,
-    pub(super) connection_poisoned: Arc<AtomicBool>,
     /// An error met after rows already returned by `fetch_many()` - raised by the next fetch.
     pub(super) pending_error: Option<DriverError>,
 }
@@ -103,7 +102,6 @@ impl RowStreamIterator {
             };
             let next_values = state.next_values(ITERATION_FETCH_SIZE).await;
             let columns = state.columns.clone();
-            let connection_poisoned = state.connection_poisoned.clone();
             // The stream is unusable after an error or its end - drop it so a later __anext__()
             // gets a clean StopAsyncIteration instead of polling a finished stream again. A
             // close() that arrived while this fetch held the stream drops it now as well.
@@ -113,7 +111,7 @@ impl RowStreamIterator {
             drop(guard);
             match next_values {
                 Some(Ok(values)) => Ok(FirstRow { columns, values: Some(values) }),
-                Some(Err(error)) => Transaction::note_outcome(&connection_poisoned, Err(error)),
+                Some(Err(error)) => Err(to_pyerr(error)),
                 None => Err(stream_exhausted()),
             }
         })
@@ -132,7 +130,7 @@ impl RowStreamIterator {
                 if slot.closed_by_transaction_end.load(Ordering::Acquire) {
                     return Err(tx_finished());
                 }
-                return Ok(PgResult::new(ResultColumns::none(), ResultData::Values(Vec::new())));
+                return Ok(PgResult::new(ResultColumns::none(), ResultData::from_rows(Vec::new())));
             };
             let mut batch = Vec::with_capacity(size.clamp(1, 1024));
             let mut failure = None;
@@ -155,15 +153,14 @@ impl RowStreamIterator {
                 }
             }
             let columns = state.columns.clone();
-            let connection_poisoned = state.connection_poisoned.clone();
             if failure.is_some() || ended || slot.close_requested.load(Ordering::Acquire) {
                 *guard = None;
             }
             drop(guard);
             if let Some(error) = failure {
-                return Transaction::note_outcome(&connection_poisoned, Err(error));
+                return Err(to_pyerr(error));
             }
-            Ok(PgResult::new(columns, ResultData::Values(batch)))
+            Ok(PgResult::new(columns, ResultData::from_rows(batch)))
         })
     }
 }

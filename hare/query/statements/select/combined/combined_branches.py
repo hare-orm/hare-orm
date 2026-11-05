@@ -2,22 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from hare.exceptions import FieldError, QueryError
+from hare.exceptions import QueryError
 from hare.query.constants import COMBINED_QUERY_APP_COLUMN, COMBINED_QUERY_MODEL_COLUMN
-from hare.query.expressions.raw_sql import RawSQL
+from hare.query.expressions.term_expression import TermExpression
 from hare.query.expressions.value_references.value_reference_types import RecordedValueReferences
 from hare.query.hare_column_names import HareColumnNames
 from hare.query.query_connection import QueryConnection
 from hare.query.queryset.row_multiplication import RowMultiplication
 from hare.query.statements.constants import VALUES_SET_OPERATION_COLUMN_PREFIX
+from hare.query.statements.select.model_rows.instance_hydration import InstanceHydration
 from hare.query.statements.select.model_rows_query import ModelRowsQuery
 from hare.query.statements.select.select_query import SelectQuery
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.builder.queries.set_operation_query import SetOperationQuery
 from hare.sql.enums import SetOperation
 from hare.sql.terms.field import Field
+from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
     from hare.models import Model
@@ -38,11 +40,9 @@ class CombinedBranches:
             query: The set operation.
             branch: One branch of the set operation.
         """
-        # Local import: the combined query imports this module.
         # Local import: the queryset package imports the query statements.
         from hare.query.queryset.combination.queryset_combination import QuerySetCombination
         from hare.query.queryset.selection.statement_selection import StatementSelection
-        from hare.query.statements.select.combined_query import CombinedQuery
 
         if QuerySetCombination.selects_values(branch) != query._combines_values:
             raise QueryError(
@@ -51,15 +51,8 @@ class CombinedBranches:
             )
         # Made again for each set operation made from the queryset - its values come from the branch.
         branch._build_conditions_for_copies()
-        source_branch = branch
-        branch_query: SelectQuery[Any] | CombinedQuery
-        if branch._combination is not None:
-            branch_query = CombinedQuery(branch)
-        else:
-            branch_query = (
-                StatementSelection.get_values_query(branch) if query._combines_values else ModelRowsQuery(branch)
-            )
-        branch_query._plan_origin = source_branch
+        branch_query = StatementSelection.get_select_query(branch)
+        branch_query._plan_origin = branch
         return branch_query
 
     @staticmethod
@@ -192,39 +185,15 @@ class CombinedBranches:
                 "individual querysets - the loaded relation cannot survive being merged into "
                 "the combined result"
             )
-        # An .alias() key is never selected, so it can't collide.
-        colliding_keys = branch.model._meta.fields_map.keys() & (branch._annotations.keys() - branch._alias_keys)
-        if colliding_keys:
-            raise FieldError(
-                f"annotate() key(s) {sorted(colliding_keys)} collide with existing field(s) on "
-                f"model {branch.model.__name__} - fetching full model instances would silently "
-                "corrupt hydration. Use a different annotation name, or .values()/.values_list()."
-            )
+        InstanceHydration.check_no_annotation_field_collision(branch)
         # SQL string literals, not bound values: constant for the branch's model, so the plan of
         # the combined statement binds none of them.
         app_column, model_column = model_column_names
         branch._annotations = {
             **branch._annotations,
-            app_column: RawSQL(CombinedBranches.get_string_literal(branch.model._meta.app)),
-            model_column: RawSQL(CombinedBranches.get_string_literal(branch.model._meta._model.__name__)),
+            app_column: TermExpression(ValueWrapper(branch.model._meta.app, allow_parametrize=False)),
+            model_column: TermExpression(ValueWrapper(branch.model._meta._model.__name__, allow_parametrize=False)),
         }
-
-    @staticmethod
-    def get_string_literal(text: str | None) -> str:
-        """An SQL string literal of a text.
-
-        Args:
-            text: The text, None for none.
-
-        Returns:
-            The literal, its quotes doubled - ``NULL`` for None.
-        """
-        if text is None:
-            return "NULL"
-        # Local import: the dialect constants import the query layer through the dialect.
-        from hare.dialects.base.constants import SQL_DIALECT
-
-        return SQL_DIALECT.literals.get_string_literal_sql(text)
 
     @staticmethod
     def get_branch_statement(
@@ -476,7 +445,7 @@ class CombinedBranches:
         first_branch_query = (
             combined_query.base_query if isinstance(combined_query, SetOperationQuery) else combined_query
         )
-        column_names = [select.alias or select.name for select in first_branch_query._selects]
+        column_names = [select.alias or cast("Field", select).name for select in first_branch_query._selects]
         derived_table_query = query._connection.query_class.from_(combined_query).select(
             *(combined_query.field(column_name) for column_name in column_names)
         )

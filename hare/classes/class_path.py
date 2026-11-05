@@ -38,11 +38,11 @@ class ClassPath:
         return module_name
 
     @staticmethod
-    def get(class_: type) -> str:
-        """The dotted path of a class.
+    def get(class_: Any) -> str:
+        """The dotted path of a class or named function.
 
         Args:
-            class_: The class.
+            class_: The class or function.
 
         Returns:
             ``module.Name``.

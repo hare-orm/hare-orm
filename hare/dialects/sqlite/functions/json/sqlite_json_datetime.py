@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime
-from decimal import Decimal
 from typing import Any
 
 import aiosqlite
@@ -9,6 +8,7 @@ import aiosqlite
 from hare.dialects.sqlite.constants import SQLITE_JSON_DATETIME_FUNCTION_NAME
 from hare.dialects.sqlite.functions.constants import DATE_PART_EXTRACTORS, SQLITE_JSON_DATETIME_EPOCH
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
+from hare.fields.data.temporal.time_delta_field import TimeDeltaField
 from hare.lazy_loading.lazy_pattern import LazyPattern
 from hare.query.filters.constants import JSON_ISO_DATETIME_PATTERN
 from hare.sql.constants import MICROSECONDS_PER_DAY, MICROSECONDS_PER_SECOND
@@ -19,19 +19,10 @@ class SqliteJsonDatetime:
     microseconds since the Unix epoch - SQLite's own date functions read milliseconds only:
     ``wall`` mode as ``timestamp`` (the wall-clock digits, any offset ignored), ``instant`` mode as
     ``timestamptz`` (no offset means UTC). A ``DatePart`` name as the mode gives that part of the
-    wall-clock value. Fractional seconds are cut at microseconds."""
+    wall-clock value. Fractional seconds are cut at microseconds. The entire string must match
+    the ISO form, without leading or trailing whitespace."""
 
     ISO_DATETIME_PATTERN = LazyPattern(JSON_ISO_DATETIME_PATTERN)
-
-    @staticmethod
-    def get_offset_microseconds(offset_text: str) -> int:
-        """Microseconds east of UTC of an offset like ``Z``, ``+05``, ``-0530`` or ``+05:30``."""
-        if offset_text == "Z":
-            return 0
-        sign = -1 if offset_text[0] == "-" else 1
-        digits = offset_text[1:].replace(":", "")
-        minutes = int(digits[:2]) * 60 + (int(digits[2:4]) if len(digits) > 2 else 0)
-        return sign * minutes * 60 * MICROSECONDS_PER_SECOND
 
     @staticmethod
     def get_wall_microseconds(day: datetime.date, clock_microseconds: int) -> int:
@@ -46,29 +37,14 @@ class SqliteJsonDatetime:
         Returns:
             ``(wall_microseconds, offset_microseconds_or_None)``, or ``None``.
         """
-        if not cls.ISO_DATETIME_PATTERN.match(text):
+        if not cls.ISO_DATETIME_PATTERN.fullmatch(text):
             return None
         try:
-            day = datetime.date.fromisoformat(text[:10])
+            moment = datetime.datetime.fromisoformat(text)
         except ValueError:
             return None
-        time_text = text[11:]
-        offset_microseconds = None
-        if time_text.endswith("Z"):
-            offset_microseconds, time_text = 0, time_text[:-1]
-        else:
-            sign_index = max(time_text.rfind("+"), time_text.rfind("-"))
-            if sign_index > 0:
-                offset_microseconds = cls.get_offset_microseconds(time_text[sign_index:])
-                time_text = time_text[:sign_index]
-        clock_microseconds = 0
-        if time_text:
-            clock_parts = time_text.split(":")
-            seconds = Decimal(clock_parts[2]) if len(clock_parts) > 2 else Decimal(0)
-            clock_microseconds = (int(clock_parts[0]) * 60 + int(clock_parts[1])) * 60 * MICROSECONDS_PER_SECOND + int(
-                seconds * MICROSECONDS_PER_SECOND
-            )
-        return cls.get_wall_microseconds(day, clock_microseconds), offset_microseconds
+        offset = moment.utcoffset()
+        return cls.normalize_value(moment, "wall"), None if offset is None else TimeDeltaField.get_microseconds(offset)
 
     @staticmethod
     def get_date_part(wall_microseconds: int, date_part: str) -> int:

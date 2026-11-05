@@ -4,8 +4,8 @@ An async Python ORM for PostgreSQL, SQLite and ClickHouse, built with relations 
 classes, queries are built lazily through a `QuerySet`, and migrations are generated from the changes to
 the models. Coming from Django? See [Coming from Django](getting-started/coming-from-django.md).
 
-- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python, and every query
-  shape is built once: a repeated query only binds its new values — see
+- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python. Plans for
+  supported query shapes are cached: repeated executions bind new values while the plan remains cached — see
   [Benchmarks](benchmarks/index.md).
 - **Relations done right.** Composite primary keys everywhere — as foreign-key targets too — generic
   relations made of real foreign keys, `select_related()`/`prefetch_related()` with filters, recursive
@@ -14,12 +14,12 @@ the models. Coming from Django? See [Coming from Django](getting-started/coming-
 - **Your schema, declared.** Constraints, partial and expression indexes, triggers, views, materialized
   views, functions, sequences, row level security policies, grants and partitioning live in the model's
   `Meta` and are created and changed by migrations — see [The schema in `Meta`](#schema-in-meta).
-- **Application patterns built in.** Soft delete, versioned rows, multi-tenancy (by column, by schema or
+- **Application patterns built in.** Soft delete, multi-tenancy (by column, by schema or
   by row level security), optimistic locking, dirty-field tracking and a transactional outbox are `Meta`
-  options — see [Behavior declared in `Meta`](#behavior-in-meta).
+  options; versioned rows use `VersionedModel` — see [Behavior declared in `Meta`](#behavior-in-meta).
 - **Migrations you can trust.** Detected from the models, checked for operations that lock a busy table,
-  compared with the live database (`hare drift`), and generated from an existing database
-  (`hare inspectdb`) — see [Migrations](#migrations).
+  and compared with the live database (`hare drift`). `hare inspectdb` reconstructs models from an
+  existing database — see [Migrations](#migrations).
 - **Every database on its own terms.** SQLite, PostgreSQL and ClickHouse are dialects built on the public
   API a third-party package uses; PostgreSQL's types, indexes, PostGIS, pgvector, full-text search and
   `LISTEN`/`NOTIFY` come with it, and a database lacking a feature raises a clear error instead of
@@ -67,15 +67,16 @@ from library.models import Author, Book
 
 async def main() -> None:
     await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models": ["library.models"]}))
-    await Hare.generate_schemas()
+    try:
+        await Hare.generate_schemas()
 
-    author = await Author.objects.create(name="Ursula K. Le Guin")
-    await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
+        author = await Author.objects.create(name="Ursula K. Le Guin")
+        await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
 
-    async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
-        print(book.title, "—", book.author.name)
-
-    await Hare.close_connections()
+        async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
+            print(book.title, "—", book.author.name)
+    finally:
+        await Hare.close_connections()
 
 
 asyncio.run(main())
@@ -204,8 +205,8 @@ await Book.objects.bulk_create(books, on_conflict=["isbn"], update_fields=["pric
 - **Set operations** (`union()`, `intersection()`, `difference()`), `FilteredRelation`, `Lateral`,
   `JsonTable`, CTEs (`with_cte()`), `distinct(<fields>)`, random sampling and `iterator()`/`stream()`
   over large results.
-- **[The query plan cache](querying/query-plan-cache.md)** keeps the SQL of every query shape: the second
-  `filter(title__icontains=...)` with another value skips building the query and only binds the value.
+- **[The query plan cache](querying/query-plan-cache.md)** keeps compiled plans for supported query
+  shapes. Repeated executions bind new values while the plan remains in the bounded cache.
 - **[Raw SQL](querying/raw-sql.md)** when you need it: `RawSQL(...)` inside a query, `raw()` returning
   model instances, `execute_sql()`.
 
@@ -402,21 +403,38 @@ SQLite, PostgreSQL and ClickHouse are dialects of one API; what each database ha
 | `UPDATE` in place | ✓ | ✓ | a mutation finished before the call returns, or a lightweight `UPDATE` |
 | Full-text search (`__search`, `SearchRank`, `SearchHeadline`) | FTS5 | `tsvector` | — |
 | Vector search (`VectorField`, `CosineDistance`) | sqlite-vec | pgvector | — |
-| Geometry (`PointField`, `__dwithin`, `__contains`) | SpatiaLite | PostGIS | ClickHouse's geo types |
+| Geometry | SpatiaLite fields and predicates | PostGIS fields and predicates | ClickHouse geometry types and functions |
 
 ```python
-from hare import Connections
 from hare.dialects.postgresql.functions import TrigramSimilarity
 from hare.search import SearchQuery, SearchRank, SearchType
-from hare.vectors import CosineDistance
 
-await Book.objects.filter(description__search=SearchQuery("white whale", search_type=SearchType.PHRASE))
-await Book.objects.annotate(rank=SearchRank(("title", "description"), "white whale")).order_by("-rank")
-await Book.objects.annotate(distance=CosineDistance("embedding", query_vector)).order_by("distance")[:10]
+await Book.objects.filter(title__search=SearchQuery("white whale", search_type=SearchType.PHRASE))
+await Book.objects.annotate(rank=SearchRank("title", "white whale")).order_by("-rank")
 await Author.objects.annotate(score=TrigramSimilarity("name", "Gerard")).filter(score__gt=0.3)
-
-listener = await Connections.get("default").listen("book_returned", on_notify)   # PostgreSQL LISTEN/NOTIFY
 ```
+
+These text-search and trigram queries target PostgreSQL; the trigram query requires `pg_trgm`
+declared in `Author.Meta.extensions` (see [trigram search](dialects/postgresql/trigrams.md)).
+For vector search, declare a model in a
+configured model module before initialization and create its schema through migrations:
+
+```python
+from hare import fields
+from hare.models import Model
+from hare.vectors import CosineDistance, VectorField
+
+
+class BookVector(Model):
+    id = fields.IntField(primary_key=True)
+    embedding = VectorField(dimensions=3)
+
+
+query_vector = [0.1, 0.2, 0.3]
+await BookVector.objects.annotate(distance=CosineDistance("embedding", query_vector)).order_by("distance")[:10]
+```
+
+PostgreSQL also supports [listening for notifications](dialects/postgresql/listen-notify.md).
 
 PostgreSQL adds `ArrayField`, range and multirange fields, `HStoreField`, `CitextField`,
 [PostGIS](dialects/search-and-geodata/gis.md), trigram and `unaccent` lookups, and the GIN, GiST, BRIN,
@@ -471,7 +489,9 @@ validated, filtered, searched, ordered and paginated query. [Litestar](integrati
 app, can run every request in a transaction and turn ORM errors into HTTP statuses;
 [Pydantic](integrations/pydantic.md) schemas are generated from the models, and
 [taskiq](integrations/taskiq.md) workers run every task in the tenant scope of the code that sent it,
-with its queries tagged by the task, and a task is sent only once the transaction asking for it commits.
+with its queries tagged by the task.
+[`TaskiqDelivery.kiq_on_commit()`](integrations/taskiq.md#kiq-on-commit) sends tasks through the outbox
+after the requesting transaction commits.
 
 ## <a id="observability"></a>Observability
 
@@ -497,7 +517,7 @@ complete the picture. See [Observability](observability/observers.md).
 
 ## <a id="testing-and-type-checking"></a>Testing and type checking
 
-Factories make the objects of a test, the pytest plugin gives every test its database, and the mypy
+Factories make the objects of a test, pytest fixtures manage test databases and isolation, and the mypy
 plugin checks queries before they run — see [Test setup](testing/setup.md).
 
 ```python
@@ -529,10 +549,11 @@ rows = await Book.objects.values("id", "title", "author__name")
 reveal_type(rows[0])   # TypedDict({'id': int, 'title': str, 'author__name': str})
 ```
 
-The pytest plugin creates the test databases, isolates every test in a rolled-back transaction and runs a
-test only where the database has the features it needs; the
-[mypy plugin and pyright stubs](querying/type-checking.md) check filters, orderings and `values()`
-against the models.
+The pytest fixtures create session test databases. `hare_db` isolates changes by rolling back a
+transaction or cleaning tables; `hare_transactional_db` allows real commits and cleans tables afterward.
+`hare_requires` selects tests according to the database's features. The
+[mypy plugin](querying/type-checking.md) checks filters, orderings and `values()` against the models;
+the stubs also give pyright the types of models, fields and relations.
 
 ## <a id="where-to-go-next"></a>Where to go next
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import ClassVar
 
 
+@dataclass(frozen=True, slots=True)
 class WrittenConnections:
     """The connections the current asyncio task wrote through, each with when it last did - the
     reads of a model written there go to it, not to a replica that may not have the write yet
@@ -20,11 +23,20 @@ class WrittenConnections:
     #: The writes of the current task, None before its first one.
     current: ClassVar[ContextVar[WrittenConnections | None]] = ContextVar("hare_written_connections", default=None)
 
-    def __init__(self, written_at_by_connection: dict[str, float] | None = None) -> None:
-        #: ``time.monotonic()`` of the last write, by connection alias.
-        self.written_at_by_connection: dict[str, float] = dict(written_at_by_connection or {})
-        #: The task recording its writes here - a task started from it records in a copy.
-        self.task: asyncio.Task[object] | None = asyncio.current_task()
+    writes: Mapping[object, Mapping[str, float]] = field(default_factory=lambda: MappingProxyType({}))
+
+    @staticmethod
+    def get_time() -> float:
+        """Monotonic time used for the read-after-write window."""
+        return time.monotonic()
+
+    @property
+    def written_at_by_connection(self) -> Mapping[str, float]:
+        """Monotonic write times for the active application only."""
+        from hare.core.hare_context import HareContext
+
+        context = HareContext.get_current()
+        return self.writes.get(None if context is None else context.identity, MappingProxyType({}))
 
     @classmethod
     def record(cls, connection_alias: str) -> None:
@@ -41,10 +53,21 @@ class WrittenConnections:
         if context is None or not context.router.has_routers:
             return
         written = cls.current.get()
-        if written is None or written.task is not asyncio.current_task():
-            written = WrittenConnections(None if written is None else written.written_at_by_connection)
-            cls.current.set(written)
-        written.written_at_by_connection[connection_alias] = time.monotonic()
+        writes = {} if written is None else written.writes
+        application_writes = MappingProxyType({**writes.get(context.identity, {}), connection_alias: cls.get_time()})
+        cls.current.set(cls(MappingProxyType({**writes, context.identity: application_writes})))
+
+    @classmethod
+    def forget(cls) -> None:
+        """Forget this application's write history in the current task, retaining other applications."""
+        from hare.core.hare_context import HareContext
+
+        written = cls.current.get()
+        context = HareContext.get_current()
+        if written is None or context is None or context.identity not in written.writes:
+            return
+        writes = {identity: values for identity, values in written.writes.items() if identity is not context.identity}
+        cls.current.set(cls(MappingProxyType(writes)) if writes else None)
 
     def reads_from(self, connection_alias: str, window_seconds: float | None) -> bool:
         """Whether a read goes to a connection the task wrote through.
@@ -60,4 +83,4 @@ class WrittenConnections:
         written_at = self.written_at_by_connection.get(connection_alias)
         if written_at is None:
             return False
-        return window_seconds is None or time.monotonic() - written_at <= window_seconds
+        return window_seconds is None or self.get_time() - written_at <= window_seconds

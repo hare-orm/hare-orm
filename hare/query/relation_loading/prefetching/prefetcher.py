@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
@@ -8,14 +7,16 @@ from typing import TYPE_CHECKING, Any, cast
 from hare.dialects.base.clauses.enums import RowLockStrength
 from hare.fields.relations.fields.relational_field import RelationalField
 from hare.models.instances.instance_connections import InstanceConnections
-from hare.query.queryset.lazy_relation_names import LazyRelationNames
+from hare.query.relation_loading.prefetching.declarations import PrefetchNode
 from hare.query.relation_loading.prefetching.direct_relation_prefetch import DirectRelationPrefetch
+from hare.query.relation_loading.prefetching.enums import PrefetchRowsStrategy, PrefetchStrategy
 from hare.query.relation_loading.prefetching.many_to_many_prefetch import ManyToManyPrefetch
 from hare.query.relation_loading.prefetching.prefetch import Prefetch
 from hare.query.relation_loading.prefetching.prefetch_checks import PrefetchChecks
+from hare.query.relation_loading.prefetching.prefetch_plan import PrefetchPlan
 from hare.query.relation_loading.prefetching.prefetch_request import PrefetchRequest
+from hare.query.relation_loading.prefetching.prefetch_result import PrefetchResult
 from hare.query.relation_loading.prefetching.reverse_relation_prefetch import ReverseRelationPrefetch
-from hare.query.relation_loading.prefetching.sliced_prefetch import SlicedPrefetch
 
 if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
@@ -25,8 +26,8 @@ if TYPE_CHECKING:
 
 class Prefetcher:
     """Loads the relations ``prefetch_related()`` asks for onto already loaded instances of one
-    model, with one query per relation: a reverse foreign key, a reverse one-to-one, a
-    many-to-many or a forward relation, all run concurrently.
+    model. Independent relations are fetched concurrently; each can require multiple queries for
+    through-table reads, connection boundaries or key batches. Attachments are published together.
 
     Args:
         model: The instances' model.
@@ -126,93 +127,53 @@ class Prefetcher:
             related_query._instance_connection_alias = self.connection.connection_alias
         return related_query
 
-    @staticmethod
-    def _without_lazy_select_defaults(related_queryset: QuerySet[Any]) -> QuerySet[Any]:
-        """Opts a prefetch query out of its model's ``lazy=RelationLoadStrategy.SELECT`` defaults: a
-        prefetch loads one level - a self-referential relation would otherwise walk the whole chain.
-        Relations prefetched explicitly are unaffected.
-
-        Args:
-            related_queryset: The query a prefetch is about to run.
-
-        Returns:
-            ``related_queryset`` itself when there is nothing to opt out of, else a clone.
-        """
-        __, lazy_select_field_names = LazyRelationNames.get(related_queryset.model)
-        if lazy_select_field_names <= related_queryset._deferred_related_fields:
-            return related_queryset
-        related_queryset = related_queryset._clone()
-        related_queryset._deferred_related_fields = related_queryset._deferred_related_fields | lazy_select_field_names
-        return related_queryset
-
-    async def _do_prefetch(
-        self,
-        objs: Iterable[Model],
-        field: str,
-        related_query: tuple[str | None, QuerySet[Any]],
-    ) -> None:
-        # Nothing returned: the task asyncio.gather() runs this in keeps its result, and a finished
-        # task can wait for the garbage collector - the objs would wait with it.
-        to_attribute, related_queryset = related_query
-        meta = self.model._meta
-        row_slice = None
-        if (
-            (field in meta.backward_foreign_key_fields or field in meta.many_to_many_fields)
-            and SlicedPrefetch.is_sliced(related_queryset)
-            and SlicedPrefetch.reads_window(related_queryset)
-        ):
-            # A window reads every row of the parents, as without the slice - each parent's slice is
-            # taken of them.
-            row_slice = SlicedPrefetch.get_row_slice(related_queryset)
-            related_queryset = SlicedPrefetch.get_ordered_unsliced(related_queryset)
-        related_query = (to_attribute, self._without_lazy_select_defaults(related_queryset))
-        if field in self.model._meta.backward_foreign_key_fields:
-            await ReverseRelationPrefetch.prefetch_reverse_relation(self, objs, field, related_query)
-        elif field in self.model._meta.backward_one_to_one_fields:
-            await ReverseRelationPrefetch.prefetch_reverse_one_to_one_relation(self, objs, field, related_query)
-        elif field in self.model._meta.many_to_many_fields:
-            await ManyToManyPrefetch.prefetch_many_to_many_relation(self, objs, field, related_query)
+    async def _fetch_node(self, objs: Iterable[Model], node: PrefetchNode, request: PrefetchRequest) -> PrefetchResult:
+        """Fetches one prepared node into a detached result."""
+        if node.strategy is PrefetchStrategy.LOADED:
+            return await self.prefetch_through_loaded_relation(objs, node.field, request)
+        result = PrefetchResult()
+        if node.rows_strategy is PrefetchRowsStrategy.EMPTY:
+            for obj in objs:
+                if node.strategy is PrefetchStrategy.DIRECT:
+                    result.add_forward(obj, node.field, node.to_attribute, None)
+                else:
+                    result.add_reverse(obj, node.field, node.to_attribute, None)
+            return result
+        # Loaded and empty nodes returned above; every remaining fetch has a prepared query.
+        assert node.queryset is not None  # nosec B101
+        if node.strategy is PrefetchStrategy.REVERSE:
+            await ReverseRelationPrefetch.prefetch_reverse_relation(objs, node, result)
+        elif node.strategy is PrefetchStrategy.REVERSE_SINGLE:
+            await ReverseRelationPrefetch.prefetch_reverse_one_to_one_relation(objs, node, result)
+        elif node.strategy is PrefetchStrategy.MANY_TO_MANY:
+            await ManyToManyPrefetch.prefetch_many_to_many_relation(self, objs, node, result)
         else:
-            await DirectRelationPrefetch.prefetch_direct_relation(objs, field, related_query)
-        if row_slice is not None:
-            SlicedPrefetch.apply_row_slice(objs, field, to_attribute, row_slice)
+            await DirectRelationPrefetch.prefetch_direct_relation(objs, node, result)
+        if node.row_slice is not None:
+            result.take_slice(node.row_slice)
+        if node.dependent_request is not None:
+            related_by_id = {}
+            for attachment in result.attachments:
+                value = attachment.value
+                values = value if isinstance(value, list) else () if value is None else (value,)
+                for obj in values:
+                    related_by_id[id(obj)] = obj
+            # A dependent request belongs to the connection selected during node preparation.
+            assert node.target_connection is not None  # nosec B101
+            dependent_plan = PrefetchPlan.prepare(
+                Prefetcher(node.queryset.model, node.target_connection),
+                related_by_id.values(),
+                node.dependent_request,
+            )
+            result.extend(await dependent_plan.fetch())
+        return result
 
     async def prefetch(self, objs: Iterable[Model], prefetch: PrefetchRequest) -> Iterable[Model]:
-        """Loads the relations a prefetch request names onto the objects - each relation by its own query,
-        run concurrently.
-
-        Args:
-            objs: The objects.
-            prefetch: The relations and their querysets.
-
-        Returns:
-            The objects.
-        """
-        if objs and (prefetch.prefetch_map or prefetch.prefetch_queries):
-            loaded_fields = self.get_loaded_relation_names(objs, prefetch)
-            fetched_prefetch = replace(
-                prefetch,
-                prefetch_map={
-                    field: forwarded
-                    for field, forwarded in prefetch.prefetch_map.items()
-                    if field not in loaded_fields
-                },
-            )
-            prefetch_calls = [
-                self._do_prefetch(objs, field, related_query)
-                for field, related_queries in self._make_prefetch_queries(fetched_prefetch).items()
-                for related_query in related_queries
-            ]
-            prefetch_calls.extend(
-                self.prefetch_through_loaded_relation(objs, field, prefetch) for field in loaded_fields
-            )
-            if len(prefetch_calls) == 1:
-                # One prefetch - run as it is, no task made for it.
-                await prefetch_calls[0]
-            else:
-                await asyncio.gather(*prefetch_calls)
-
-        return objs
+        """Binds and fetches all requested relations, then attaches successful results together."""
+        plan = PrefetchPlan.prepare(self, objs, prefetch)
+        result = await plan.fetch()
+        result.attach()
+        return plan.objs
 
     def get_loaded_relation_names(self, objs: Iterable[Model], prefetch: PrefetchRequest) -> list[str]:
         """The forward relations a prefetch goes through that every obj has loaded already - by
@@ -245,7 +206,7 @@ class Prefetcher:
 
     async def prefetch_through_loaded_relation(
         self, objs: Iterable[Model], field: str, prefetch: PrefetchRequest
-    ) -> None:
+    ) -> PrefetchResult:
         """Runs the prefetches nested in a loaded forward relation on its loaded objects - the
         relation itself isn't read again, which would replace them.
 
@@ -254,23 +215,28 @@ class Prefetcher:
             field: The relation's name.
             prefetch: The request.
         """
+        result = PrefetchResult()
         related_by_id: dict[int, Model] = {}
         for obj in objs:
             if f"_{field}" not in vars(obj):
                 # A key of no related row - loaded as None, like a prefetch of the relation itself.
-                DirectRelationPrefetch.set_prefetched_foreign_key_object(obj, field, None)
+                result.add_forward(obj, field, None, None)
             elif (related := vars(obj)[f"_{field}"]) is not None:
                 related_by_id[id(related)] = related
         related_objs = list(related_by_id.values())
         if not related_objs:
-            return
+            return result
         related_model = cast("RelationalField[Any]", self.model._meta.fields_map[field]).related_model
         prefetch_map: dict[str, set[str | Prefetch]] = {}
         prefetch_queries: dict[str, list[tuple[str | None, QuerySet[Any]]]] = {}
         Prefetch.add_lookups(related_model, prefetch_map, prefetch_queries, prefetch.prefetch_map[field])
-        await Prefetcher(related_model, self.connection).prefetch(
-            related_objs, replace(prefetch, prefetch_map=prefetch_map, prefetch_queries=prefetch_queries)
+        plan = PrefetchPlan.prepare(
+            Prefetcher(related_model, self.connection),
+            related_objs,
+            replace(prefetch, prefetch_map=prefetch_map, prefetch_queries=prefetch_queries),
         )
+        result.extend(await plan.fetch())
+        return result
 
     async def load(
         self, objs: Iterable[Model], *args: str | Prefetch, db_explicitly_chosen: bool = False

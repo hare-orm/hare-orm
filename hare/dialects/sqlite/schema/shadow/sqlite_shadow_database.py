@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import TracebackType
 from typing import TYPE_CHECKING, Self, cast
 
+from hare.core.resource_completion import ResourceCompletion
+from hare.dialects.base.schema.constants import SCHEMA_CLEANUP_FAILED
 from hare.dialects.base.schema.shadow.shadow_database import ShadowDatabase
 from hare.dialects.sqlite.client.constants import SQLITE_ATTACHED_DATABASES_OPTION_NAME
 from hare.dialects.sqlite.constants import SQLITE_IN_MEMORY_FILENAME
@@ -33,4 +35,9 @@ class SqliteShadowDatabase(ShadowDatabase):
         traceback: TracebackType | None,
     ) -> None:
         if self.client is not None:
-            await self.client.close()
+            try:
+                await ResourceCompletion.wait(self.client.close())
+            except BaseException as cleanup_error:
+                if exception is not None:
+                    raise BaseExceptionGroup(SCHEMA_CLEANUP_FAILED, [exception, cleanup_error]) from None
+                raise

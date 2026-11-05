@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from copy import copy, deepcopy
+from copy import copy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -16,6 +16,9 @@ from hare.ddl.indexes.ordered_index_key import OrderedIndexKey
 from hare.ddl.indexes.partial_index import PartialIndex
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.base.schema.columns.column_renames import ColumnRenames
+from hare.dialects.base.schema.plans.enums import SchemaEffect
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_step import SchemaStep
 from hare.fields import Field
 from hare.fields.constants import FOREIGN_KEY_COLUMN_SUFFIX
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -27,9 +30,9 @@ from hare.migrations.operations.enums import DependencyType
 from hare.migrations.operations.fields.field_like import FieldLike
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state import State
-from hare.migrations.state.state_apps import StateApps
 from hare.models import Model
 from hare.models.enums import ModelOption
 
@@ -50,7 +53,7 @@ class RenameField(ModelBoundOperation):
         """The renamed field, when the operation carries it."""
         return [] if self.field is None else [self.field]
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """Renames of a field in a row become one rename - none when it ends at the first name."""
         if (
             isinstance(other, RenameField)
@@ -58,9 +61,11 @@ class RenameField(ModelBoundOperation):
             and other.old_name == self.new_name
         ):
             if other.new_name == self.old_name:
-                return []
-            return [RenameField(self.model_name, self.old_name, other.new_name, other.field or self.field)]
-        return super().reduce(other, app_label)
+                return OperationRewrite(())
+            return OperationRewrite(
+                (RenameField(self.model_name, self.old_name, other.new_name, other.field or self.field),)
+            )
+        return super().get_rewrite(other, app_label)
 
     def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
         return [
@@ -89,7 +94,7 @@ class RenameField(ModelBoundOperation):
             # before the rename - rendered now, while the model states are still unchanged.
             _ = state.apps
         self.rename_in_model_state(model_state)
-        changed_model_keys = self.get_changed_model_keys(app_label, old_field)
+        changed_model_keys = self.get_changed_model_keys(app_label, old_field, state)
         changed_model_keys |= self._rename_referencing_to_fields(app_label, state, old_field)
         changed_model_keys |= self._rename_relation_key_field_references(app_label, state)
         if isinstance(old_field, ForeignKeyFieldInstance):
@@ -107,7 +112,7 @@ class RenameField(ModelBoundOperation):
         old_field = model_state.fields.pop(self.old_name)
         # The given field keeps its real source_field; a hand-written migration without field=
         # carries the old field over.
-        new_field = cast("Field[Any]", deepcopy(self.field if self.field is not None else old_field))
+        new_field = cast("Field[Any]", self.field if self.field is not None else old_field).snapshot()
         model_state.set_field(self.new_name, new_field)
         self._rename_meta_field_references(model_state)
 
@@ -204,7 +209,7 @@ class RenameField(ModelBoundOperation):
             for field in model_state.fields.values():
                 if not isinstance(field, ForeignKeyFieldInstance):
                     continue
-                reference = SwappableModelReference.get_model_reference(field.model_name)
+                reference = state.get_model_reference(field.model_name)
                 if not isinstance(reference, str) or reference == model_reference:
                     return True
         return False
@@ -227,7 +232,7 @@ class RenameField(ModelBoundOperation):
             for field_name, field in list(referencing_model_state.fields.items()):
                 if not isinstance(field, ForeignKeyFieldInstance) or field.to_field is None:
                     continue
-                if StateApps.split_reference(field.model_name) != (app_label, self.model_name):
+                if state.get_model_key(field.model_name) != (app_label, self.model_name):
                     continue
                 renamed_field = self._get_relation_reading_new_name(field, old_field)
                 if renamed_field is not field:
@@ -258,7 +263,7 @@ class RenameField(ModelBoundOperation):
         renamed_to_field_names = tuple(new_names_by_old_name.get(name, name) for name in to_field_names)
         if renamed_to_field_names == to_field_names:
             return relation
-        renamed_relation = copy(relation)
+        renamed_relation = relation.snapshot()
         renamed_relation.to_field = (
             renamed_to_field_names if isinstance(relation.to_field, tuple) else renamed_to_field_names[0]
         )
@@ -279,9 +284,11 @@ class RenameField(ModelBoundOperation):
             of several - its key fields, named after the fields it reads, are renamed with it.
         """
         old_field = cast("Any", dict(fields)[self.old_name])
-        new_field = cast("Any", deepcopy(self.field if self.field is not None else old_field))
+        new_field = cast("Any", self.field if self.field is not None else old_field).snapshot()
         renamed_fields: list[tuple[str, FieldLike]] = []
         for field_name, field in fields:
+            if isinstance(field, ForeignKeyFieldInstance) and isinstance(field.model_name, SwappableModelReference):
+                return None
             if field_name == self.old_name:
                 renamed_fields.append((self.new_name, new_field))
                 continue
@@ -290,8 +297,7 @@ class RenameField(ModelBoundOperation):
                 renamed_field = field.with_renamed_generated_from_field(self.old_name, self.new_name)
             if (
                 isinstance(renamed_field, ForeignKeyFieldInstance)
-                and SwappableModelReference.get_model_reference(renamed_field.model_name)
-                == f"{app_label}.{self.model_name}"
+                and renamed_field.model_name == f"{app_label}.{self.model_name}"
             ):
                 relation = self._get_relation_reading_new_name(renamed_field, old_field)
                 if relation is not renamed_field and isinstance(relation.to_field, tuple):
@@ -569,22 +575,31 @@ class RenameField(ModelBoundOperation):
         """
         if not state_editor:
             return
+        steps: list[SchemaStep] = []
         renamed_models = []
         for old_model, new_model, field_pairs in self._get_renamed_column_fields(
             app_label, old_state, new_state, old_field_name, new_field_name
         ):
-            await state_editor.index_statements.drop_indexes_reading_columns_to_rename(old_model, new_model)
-            remade = await state_editor.column_renames.rename_model_columns(old_model, new_model, field_pairs)
-            await state_editor.index_statements.recreate_indexes_reading_renamed_columns(old_model, new_model)
-            if not remade:
+            steps.extend(
+                state_editor.index_statements.get_indexes_before_column_rename_plan(old_model, new_model).steps
+            )
+            columns = state_editor.column_renames.get_model_column_rename_plan(old_model, new_model, field_pairs)
+            steps.extend(columns.steps)
+            steps.extend(
+                state_editor.index_statements.get_indexes_after_column_rename_plan(old_model, new_model).steps
+            )
+            if SchemaEffect.REPLACE_TABLE not in columns.effects:
                 renamed_models.append((old_model, new_model, self.get_renamed_field_names(field_pairs)))
-        await self._rename_through_table_columns(old_state, new_state, state_editor)
+        steps.extend(self.get_through_table_column_rename_plan(old_state, new_state, state_editor).steps)
         # An index or a constraint named after its columns - or an expression reading them - takes the
         # name the renamed model gives it.
         for old_model, new_model, renamed_field_names in renamed_models:
-            await state_editor.generated_index_names.rename_generated_index_names(
-                old_model, new_model, renamed_field_names
+            steps.extend(
+                state_editor.generated_index_names.get_generated_index_names_change_plan(
+                    old_model, new_model, renamed_field_names
+                ).steps
             )
+        await SchemaChangePlan(tuple(steps)).execute(state_editor)
 
     @staticmethod
     def get_renamed_field_names(field_pairs: list[tuple[Field[Any], Field[Any]]]) -> dict[str, str]:
@@ -639,16 +654,17 @@ class RenameField(ModelBoundOperation):
         return [(old_model, new_model, pairs) for new_model, (old_model, pairs) in field_pairs_by_model.items()]
 
     @staticmethod
-    async def _rename_through_table_columns(
+    def get_through_table_column_rename_plan(
         old_state: State, new_state: State, state_editor: BaseSchemaEditor
-    ) -> None:
-        """Renames the columns automatic through tables name after the renamed field.
+    ) -> SchemaChangePlan:
+        """Prepares the columns and index names automatic through tables derive from a renamed field.
 
         Args:
             old_state: The state the columns are renamed from.
             new_state: The state they are renamed to.
             state_editor: The schema editor.
         """
+        steps: list[SchemaStep] = []
         # A through table is reached from both of its relations - renamed through the declared one,
         # whose keys name its index keys as they were created.
         for _old_model, new_model, old_field, new_field in RenameField._get_fields_of_both_states(
@@ -661,22 +677,28 @@ class RenameField(ModelBoundOperation):
                 and new_field.through_model_class is None
                 and old_field.through == new_field.through
             ):
-                await state_editor.column_renames.rename_table_columns(
-                    new_field.through,
-                    new_model._meta.schema,
-                    (*old_field.forward_keys, *old_field.backward_keys),
-                    (*new_field.forward_keys, *new_field.backward_keys),
+                steps.extend(
+                    state_editor.column_renames.get_table_column_rename_plan(
+                        new_field.through,
+                        new_model._meta.schema,
+                        (*old_field.forward_keys, *old_field.backward_keys),
+                        (*new_field.forward_keys, *new_field.backward_keys),
+                    ).steps
                 )
                 # Its key indexes and foreign keys are named after the columns.
-                await state_editor.many_to_many_through_tables.alter_many_to_many_through_indexes(
-                    new_model._meta.schema, old_field, new_field
+                steps.extend(
+                    state_editor.many_to_many_through_tables.get_through_index_change_plan(
+                        new_model._meta.schema, old_field, new_field
+                    ).steps
                 )
-                await state_editor.many_to_many_through_tables.rename_many_to_many_through_foreign_keys(
-                    state_editor.qualify_table_name(new_field.through, new_model._meta.schema),
-                    new_model,
-                    old_field,
-                    new_field,
+                steps.extend(
+                    state_editor.many_to_many_through_tables.get_through_foreign_key_rename_plan(
+                        state_editor.qualify_table_name(new_field.through, new_model._meta.schema),
+                        old_field,
+                        new_field,
+                    ).steps
                 )
+        return SchemaChangePlan(tuple(steps))
 
     @staticmethod
     def _get_fields_of_both_states(

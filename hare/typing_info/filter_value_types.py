@@ -109,7 +109,8 @@ class FilterValueTypes:
 
         Args:
             lookup_info: The description of the key.
-            accepts_raw_values: Whether an enum field takes its members' values too - a filter does.
+            accepts_raw_values: Whether to include the field's supported input conversions and enum
+                member values. Filters accept these representations; selected values use read types.
 
         Returns:
             The type, without None.
@@ -127,7 +128,8 @@ class FilterValueTypes:
         )
         if compares_field_value and field is not None and not isinstance(field, tuple):
             return ValueType(
-                classes=(lookup_info.value_type, *field.get_accepted_value_types()),
+                classes=(lookup_info.value_type,),
+                accepted_classes=field.get_accepted_value_types() if accepts_raw_values else (),
                 declared_in=(field.model, field.model_field_name),
                 accepts_enum_values=accepts_raw_values,
             )

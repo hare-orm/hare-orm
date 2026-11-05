@@ -21,15 +21,17 @@ ExtensionModelOptions.allow(NEW_VERSION_EXCLUDED_FIELDS_META_OPTION)
 
 
 class VersionedModel(Model):
-    """An append-only versioned model: every change creates a new row with the same ``id`` and a higher
-    ``version`` instead of changing a row in place. ``(id, version)`` is the composite primary key.
+    """Helpers for creating a new row with the same ``id`` and the next ``version``.
+
+    ``(id, version)`` is the composite primary key. Call ``create_new_version()`` for a versioned edit;
+    ordinary ``save()`` and queryset updates retain their normal behavior.
 
     ``Meta.new_version_excluded_fields`` names the fields, beyond ``id``/``version`` themselves, a new
     version leaves out instead of copying - fields that must always be reset (a single-use token).
 
     Example::
 
-        class AppVersionedModel(YourBaseModel, VersionedModel):
+        class AppVersionedModel(VersionedModel, YourBaseModel):
             class Meta(YourBaseModel.Meta, VersionedModel.Meta):
                 new_version_excluded_fields = ("single_use_token",)
     """

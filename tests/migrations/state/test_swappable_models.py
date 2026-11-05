@@ -23,9 +23,9 @@ import pytest
 
 from hare import Hare
 from hare.contrib.test.databases.model_truncation import truncate_all_models
+from hare.contrib.test.databases.test_database_config import TestDatabaseConfig as DatabaseConfig
 from hare.core.config import HareConfig
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 from hare.exceptions import ConfigurationError
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
 from hare.migrations import SwappableDependency, swappable_dependency
@@ -149,7 +149,7 @@ def get_connection_config(tmp_path: Path) -> Any:
     if not db_url or DatabaseUnderTest.is_file_database(db_url):
         scheme = (db_url or DatabaseUnderTest.DEFAULT_URL).split("://", 1)[0]
         db_url = f"{scheme}://{(tmp_path / 'swappable.sqlite3').as_posix()}"
-    return DbUrlConfigGenerator.expand(db_url, testing=True)
+    return DatabaseConfig.from_url(db_url).config
 
 
 def build_config(

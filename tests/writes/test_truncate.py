@@ -8,7 +8,7 @@ import pytest
 
 from hare import Hare
 from hare.contrib.test import requires_features, topological_sort_models, truncate_all_models
-from tests.multiple_connections.test_two_databases import (
+from tests.multiple_connections.conftest import (
     two_databases,  # noqa: F401 - used as a fixture by parameter name
 )
 from tests.shared_models import multi_database_models

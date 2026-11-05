@@ -7,8 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.matrix.constants import MATRIX_DATABASE_DRIVER_EXTRAS, REPOSITORY_DIRECTORY
-from tests.matrix.matrix_run import MatrixRun
+from tests.matrix.constants import MATRIX_DATABASE_DRIVER_EXTRAS
+from tests.matrix.paths import REPOSITORY_DIRECTORY
+from tests.matrix.run_spec import RunSpec
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,7 +30,7 @@ class MatrixVirtualenv:
     groups: tuple[str, ...]
 
     @classmethod
-    def get(cls, run: MatrixRun) -> MatrixVirtualenv:
+    def get(cls, run: RunSpec) -> MatrixVirtualenv:
         """The virtualenv of a run.
 
         Args:

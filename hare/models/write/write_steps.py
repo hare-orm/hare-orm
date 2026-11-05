@@ -5,6 +5,7 @@ import contextvars
 from collections.abc import Coroutine, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from hare.core.resource_completion import ResourceCompletion
 from hare.instrumentation.change_events import ChangeEvents
 
 if TYPE_CHECKING:
@@ -56,14 +57,7 @@ class WriteSteps:
         context = contextvars.copy_context()
         context.run(WriteSteps.IN_WHOLE_RUN.set, True)
         task = asyncio.get_running_loop().create_task(write, context=context)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await asyncio.wait([task])
-            if not task.cancelled():
-                # Read, so it isn't logged as never retrieved - the caller's cancel is what is raised.
-                task.exception()
-            raise
+        return await ResourceCompletion.wait(task)
 
     @staticmethod
     async def report(

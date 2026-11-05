@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from decimal import Decimal
-from typing import Any, ClassVar
+from typing import Any
 
 from clickhouse_driver.columns import service
+from clickhouse_driver.columns.datetimecolumn import DateTime64Column, DateTimeColumn
 from clickhouse_driver.columns.decimalcolumn import DecimalColumn
 from clickhouse_driver.columns.newjsoncolumn import NewJsonColumn
+from clickhouse_driver.columns.tuplecolumn import TupleColumn
 from clickhouse_driver.columns.util import get_inner_columns, get_inner_spec
 
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_dynamic_column import (
     ClickhouseDriverDynamicColumn,
+)
+from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_map_columns import (
+    ClickhouseDriverMapColumns,
+)
+from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_moment_columns import (
+    ClickhouseDriverMomentColumns,
+)
+from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_tuple_columns import (
+    ClickhouseDriverTupleColumns,
 )
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_variant_column import (
     ClickhouseDriverVariantColumn,
@@ -38,54 +49,67 @@ class ClickhouseDriverColumnTypes:
     scale - the library's division by the scale drops the zeros a value ends with. A ``JSON`` column's keys
     are read with their dots - the session escapes them (json_type_escape_dots_in_keys)."""
 
-    #: The library's own builder of a column of a type - kept to tell it was replaced.
-    library_getters: ClassVar[list[Callable[..., Any]]] = []
-
-    @classmethod
-    def install(cls) -> None:
-        """Teaches the library the types - once."""
-        if cls.library_getters:
-            return
-        cls.library_getters.append(service.get_column_by_spec)
-        service.get_column_by_spec = cls.get_column_by_specification
-        service.aliases.extend(CLICKHOUSE_DRIVER_GEOMETRY_ALIASES)
-
     @classmethod
     def get_column_by_specification(
         cls, specification: str, column_options: dict[str, Any], use_numpy: bool | None = None
     ) -> Any:
-        """The library's column of a type.
+        """Build a column tree without modifying the library's registry or classes.
 
-        Args:
-            specification: The type.
-            column_options: The library's column options.
-            use_numpy: Whether the column reads into NumPy arrays - the library's choice when None.
-
-        Returns:
-            The column.
+        Container constructors receive this factory explicitly. Each child receives a fresh
+        options mapping, so a temporal column's scale cannot leak into its siblings. Native
+        protocol framing and scalar codecs remain the library's responsibility.
         """
+        options = dict(column_options)
 
-        # A copy for each column: the library writes the scale of a DateTime64 into the options it is
-        # given, which a decimal built from the same options then takes twice.
-        column_options = dict(column_options)
+        def child(specification: str) -> Any:
+            return cls.get_column_by_specification(specification, options, use_numpy=use_numpy)
+
+        for alias, primitive in CLICKHOUSE_DRIVER_GEOMETRY_ALIASES:
+            if specification == alias:
+                return child(primitive)
         is_dynamic = specification == CLICKHOUSE_DYNAMIC_TYPE or specification.startswith(
             CLICKHOUSE_DRIVER_DYNAMIC_PREFIX
         )
-        if not is_dynamic and not specification.startswith(CLICKHOUSE_DRIVER_VARIANT_PREFIX):
-            column = cls.library_getters[0](specification, column_options, use_numpy=use_numpy)
-            if isinstance(column, DecimalColumn):
-                column.after_read_items = functools.partial(cls.read_decimals, column.scale)
-            elif isinstance(column, NewJsonColumn):
-                column.after_read_items = cls.read_json_objects
-            return column
-
-        def get_held_column(held_specification: str) -> Any:
-            return service.get_column_by_spec(held_specification, column_options, use_numpy=use_numpy)
-
         if is_dynamic:
-            return ClickhouseDriverDynamicColumn(get_held_column, **column_options)
-        variant_types = [part.strip() for part in get_inner_columns(get_inner_spec("Variant", specification))]
-        return ClickhouseDriverVariantColumn(variant_types, get_held_column, **column_options)
+            return ClickhouseDriverDynamicColumn(child, **options)
+        if specification.startswith(CLICKHOUSE_DRIVER_VARIANT_PREFIX):
+            types = [part.strip() for part in get_inner_columns(get_inner_spec("Variant", specification))]
+            return ClickhouseDriverVariantColumn(types, child, **options)
+        if specification.startswith("Map("):
+            return ClickhouseDriverMapColumns.create_map_column(specification, child, options)
+        if specification.startswith("Nullable("):
+            return service.create_nullable_column(specification, child)
+        if specification.startswith("SimpleAggregateFunction("):
+            return service.create_simple_aggregate_function_column(specification, child)
+        if specification.startswith("Array("):
+            column = service.create_array_column(specification, child, options)
+        elif specification.startswith("Tuple("):
+            column = service.create_tuple_column(specification, child, options)
+        elif specification.startswith("Nested("):
+            column = service.create_nested_column(specification, child, options)
+        elif specification.startswith("LowCardinality("):
+            column = service.create_low_cardinality_column(specification, child, options)
+        elif specification.startswith("Object('json')"):
+            column = service.create_json_column(specification, child, options)
+        elif specification.startswith("JSON"):
+            column = service.create_newjson_column(specification, child, options)
+        else:
+            # Geometry aliases supplied by the library can also contain hare's codecs.
+            for alias, primitive in service.aliases:
+                if specification == alias:
+                    return child(primitive)
+            column = service.get_column_by_spec(specification, options, use_numpy=use_numpy)
+        if isinstance(column, DecimalColumn):
+            column.after_read_items = functools.partial(cls.read_decimals, column.scale)
+        elif isinstance(column, NewJsonColumn):
+            column.after_read_items = cls.read_json_objects
+        elif isinstance(column, DateTime64Column):
+            column.after_read_items = functools.partial(ClickhouseDriverMomentColumns.read_moments, column)
+        elif isinstance(column, DateTimeColumn):
+            column.after_read_items = functools.partial(ClickhouseDriverMomentColumns.read_whole_seconds, column)
+        elif isinstance(column, TupleColumn):
+            column.write_data = functools.partial(ClickhouseDriverTupleColumns.write_data, column)
+        return column
 
     @classmethod
     def read_json_objects(cls, items: Sequence[Any], nulls_map: Sequence[bool] | None = None) -> tuple[Any, ...]:

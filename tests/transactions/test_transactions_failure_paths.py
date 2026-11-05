@@ -368,7 +368,7 @@ async def test_transaction_finished_error_from_a_callback_is_not_swallowed(db_tr
     with pytest.raises(TransactionManagementError) as commit_error:
         async with Transactions.atomic():
             Transactions.on_commit(failing_callback)
-    assert isinstance(commit_error.value.__context__, pg.TransactionFinishedError)
+    assert isinstance(commit_error.value.__cause__, pg.TransactionFinishedError)
 
     with pytest.raises(Boom):
         async with Transactions.atomic():

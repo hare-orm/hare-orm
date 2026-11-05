@@ -14,8 +14,10 @@ from hare.search.enums import SearchType
 
 
 class SqliteFullTextQuery:
-    """Search text as an FTS5 query - the SQLite function a full-text search binds its text
-    through, so a word is never read as FTS5 syntax."""
+    """Convert bound search text to an FTS5 query.
+
+    PLAIN, PHRASE and WEBSEARCH quote search terms; RAW preserves FTS5 query syntax.
+    """
 
     @staticmethod
     def quote_phrase(text: str) -> str:
@@ -96,11 +98,12 @@ class SqliteFullTextQuery:
         Raises:
             ValueError: An alternative has only phrases marked ``-``.
         """
-        if cls.has_excluding_alternative(text):
+        alternatives = cls.get_websearch_alternatives(text)
+        if any(excluded and not included for included, excluded in alternatives):
             raise ValueError(SQLITE_FULL_TEXT_EXCLUDING_ALTERNATIVE_MESSAGE)
         queries = [
             "(" + " AND ".join(included) + "".join(f" NOT {phrase}" for phrase in excluded) + ")"
-            for included, excluded in cls.get_websearch_alternatives(text)
+            for included, excluded in alternatives
             if included
         ]
         return " OR ".join(queries) if queries else None
@@ -115,7 +118,8 @@ class SqliteFullTextQuery:
             column_filter: The FTS5 column filter (``{"title" "body"}``), empty for every column.
 
         Returns:
-            The FTS5 query - one matching no row for NULL or text without a word.
+            The FTS5 query, matching no row for NULL, blank RAW input or parsed input without
+            search terms. Nonblank RAW input retains its FTS5 syntax.
         """
         if text is None:
             return SQLITE_FULL_TEXT_NO_MATCH_QUERY

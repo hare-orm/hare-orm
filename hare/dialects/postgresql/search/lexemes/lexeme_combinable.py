@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 
 from hare.query.expressions import ExpressionContext, ExpressionResult
+from hare.query.expressions.dialect_expressions import DialectExpressions
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -19,7 +20,7 @@ class LexemeCombinable(RawSearchQueryText, abstract=True):
     #: The raw tsquery text, bound - every attribute of a lexeme is part of it.
     plan_parts: ClassVar[DeclaredPlanParts] = (("_as_tsquery", PlanPartType.VALUE_METHOD),)
 
-    def get_tsquery_result(self, expression_context: ExpressionContext) -> ExpressionResult:
+    def get_result(self, expression_context: ExpressionContext) -> ExpressionResult:
         """Resolves the raw tsquery text, recording where it sits while a query records its plan.
 
         Args:
@@ -27,7 +28,11 @@ class LexemeCombinable(RawSearchQueryText, abstract=True):
 
         Returns:
             The text, bound as a parameter.
+
+        Raises:
+            UnSupportedError: The dialect does not support this lexeme expression.
         """
+        DialectExpressions.raise_if_dialect_lacks(self, expression_context.dialect)
         return ExpressionArguments.get_result(self, "_as_tsquery", self._as_tsquery(), expression_context)
 
     def _combine(self, other: LexemeCombinable, operator: str, reversed: bool) -> CombinedLexeme:

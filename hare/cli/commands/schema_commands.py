@@ -31,12 +31,8 @@ class SchemaCommands:
                 raise CLIUsageError(f"Unknown connection alias: {connection_alias}")
             inspected_connection_alias = connection_alias
         else:
-            # HareConfig itself already rejects an empty `connections` dict at config-load time
-            # (see HareConfig.__post_init__), so `hare_config.connections` is guaranteed non-empty
-            # here - next(iter(...)) can't actually raise StopIteration in practice.
             inspected_connection_alias = next(iter(hare_config.connections))
-        config_dict = hare_config.to_dict()
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict):
+        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config):
             connection = Connections.get(inspected_connection_alias)
             source = await SchemaInspector.inspect(connection, tables=list(tables) or None, schema=schema)
             print(source)
@@ -49,9 +45,8 @@ class SchemaCommands:
         schema: str | None,
         journal_tables: tuple[str, ...] = (),
     ) -> int | None:
-        """Compares the live database with the current models for every app on the checked connection,
-        by the diffing ``makemigrations`` uses with the database as the old state. Reports only -
-        generates no source.
+        """Compares the live catalog with a shadow schema generated from the current models of the
+        selected apps. Reports differences without writing migrations.
 
         Returns:
             1 if they disagree, None otherwise.
@@ -60,8 +55,6 @@ class SchemaCommands:
         # Every configured app - a model may relate to an unselected app's.
         full_apps_config = CommandContext.select_apps(hare_config, None)
         apps_dict = {label: app.to_dict() for label, app in full_apps_config.items()}
-        config_dict = hare_config.to_dict()
-        config_dict["apps"] = apps_dict
 
         if connection_alias:
             if connection_alias not in hare_config.connections:
@@ -79,7 +72,7 @@ class SchemaCommands:
         if not target_labels:
             raise CLIUsageError(f"No configured app uses connection {checked_connection_alias!r}")
 
-        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(config_dict) as context:
+        async with CommandContext.database_error_boundary(), CommandContext.hare_cli_context(hare_config) as context:
             if not context.apps:
                 raise CLIError("Hare apps are not initialized")
             result = await detect_drift_for_alias(
@@ -107,6 +100,11 @@ class SchemaCommands:
                 f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} Column {mismatch.column!r} in table "
                 f"{mismatch.table!r} "
                 f"({mismatch.app_label}.{mismatch.model_name}): {mismatch.detail}"
+            )
+        for mismatch in result.mismatched_objects:
+            print(
+                f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} {mismatch.part_type} {mismatch.name!r} "
+                f"in {mismatch.table or 'schema'!r}: {mismatch.detail}"
             )
         for table_name in result.untracked_tables:
             print(f"  {TerminalColors.YELLOW}~{TerminalColors.RESET} Untracked table in database: {table_name!r}")

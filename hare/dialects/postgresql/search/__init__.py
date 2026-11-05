@@ -12,4 +12,4 @@ __all__ = ["Lexeme"]
 
 # The search expressions only PostgreSQL has - a query on another database refuses each before any SQL;
 # lexemes joined with | and & too.
-DialectExpressions.register(PostgresqlDialect, (Lexeme, CombinedLexeme))
+DialectExpressions.declare(PostgresqlDialect, (Lexeme, CombinedLexeme))

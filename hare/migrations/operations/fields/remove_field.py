@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.ddl.conditions.field_condition import FieldCondition
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -9,7 +9,9 @@ from hare.ddl.constraints.foreign_key_constraint import ForeignKeyConstraint
 from hare.ddl.constraints.unique_constraint import UniqueConstraint
 from hare.ddl.indexes.index import Index
 from hare.ddl.indexes.partial_index import PartialIndex
+from hare.ddl.schema_references import SchemaReferences
 from hare.exceptions import ConfigurationError
+from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.dependencies.operation_dependency import OperationDependency
@@ -22,7 +24,6 @@ from hare.migrations.state.state import State
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
@@ -73,7 +74,7 @@ class RemoveField(FieldAddRemoveOperation):
     def describe(self) -> str:
         return f"Remove field {self.name} from {self.model_name}"
 
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect:
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
         field = self.get_model_state(state, app_label, self.model_name).fields.get(self.name)
         dropped = "table of links" if isinstance(field, ManyToManyFieldInstance) else "column"
         return OperationEffect(
@@ -87,15 +88,20 @@ class RemoveField(FieldAddRemoveOperation):
         model_state = self.get_model_state(state, app_label, self.model_name)
 
         # Before the pop below - a raised error must leave the state unchanged.
-        self._remove_meta_field_references(model_state, app_label)
+        removed_names = {self.name}
+        if isinstance(model_state.fields.get(self.name), ForeignKeyFieldInstance):
+            model = state.apps.get_model(f"{app_label}.{self.model_name}")
+            relation = cast("ForeignKeyFieldInstance[Any]", model._meta.fields_map[self.name])
+            removed_names.update(relation.source_fields)
+        self._remove_meta_field_references(model_state, app_label, removed_names)
 
         field = model_state.fields.pop(self.name, None)
         if not field:
             raise IncompatibleStateError(f"Field {self.name} is not present on model {app_label}.{self.model_name}")
 
-        state.mark_models_changed(self.get_changed_model_keys(app_label, field))
+        state.mark_models_changed(self.get_changed_model_keys(app_label, field, state))
 
-    def _remove_meta_field_references(self, model_state: ModelState, app_label: str) -> None:
+    def _remove_meta_field_references(self, model_state: ModelState, app_label: str, removed_names: set[str]) -> None:
         """Drops the ``Meta`` indexes and constraints naming only the removed field; one that also
         names other fields raises - narrowing it would change what it guarantees. Raises too for a
         generated field computed from the removed field.
@@ -103,6 +109,7 @@ class RemoveField(FieldAddRemoveOperation):
         Args:
             model_state: The state of the model the field is removed from.
             app_label: The model's app.
+            removed_names: The field and the key fields removed with its relation.
 
         Raises:
             ConfigurationError: A multi-field index or constraint, a ``Q`` condition, a trigger's or a
@@ -119,7 +126,7 @@ class RemoveField(FieldAddRemoveOperation):
                 "A model keeps its primary key - change it with a hand-written RunSQL migration, or delete the model.",
             )
         self._reject_generated_field_references(model_state, app_label)
-        self._remove_index_references(model_state, app_label)
+        self._remove_index_references(model_state, app_label, removed_names)
         self._remove_constraint_references(model_state, app_label)
         for trigger in model_state.get_option_list(ModelOption.TRIGGERS):
             if self.condition_reads_field(trigger.when, self.name):
@@ -184,12 +191,13 @@ class RemoveField(FieldAddRemoveOperation):
                     f"Remove or edit {other_field_name!r} first.",
                 )
 
-    def _remove_index_references(self, model_state: ModelState, app_label: str) -> None:
+    def _remove_index_references(self, model_state: ModelState, app_label: str, removed_names: set[str]) -> None:
         """Drops the ``Meta`` indexes on the removed field alone.
 
         Args:
             model_state: The state of the model the field is removed from.
             app_label: The model's app.
+            removed_names: The field and the key fields removed with its relation.
 
         Raises:
             ConfigurationError: An index of several fields, the included columns or the condition
@@ -198,22 +206,35 @@ class RemoveField(FieldAddRemoveOperation):
         indexes = model_state.get_option_list(ModelOption.INDEXES)
         remaining_indexes = []
         for index in indexes:
+            if (
+                isinstance(index, Index)
+                and index.declared_expressions
+                and not removed_names.isdisjoint(SchemaReferences.get_index_field_names(index))
+            ):
+                raise self._get_reference_error(
+                    app_label,
+                    f"referenced by expression index {self._get_label(index)}",
+                    "Remove that Index first.",
+                )
             fields = index.fields if isinstance(index, Index) else index
-            if isinstance(index, Index) and self.name in index.include:
+            field_names = {name.removeprefix("-") for name in fields}
+            if isinstance(index, Index) and not removed_names.isdisjoint(index.include):
                 raise self._get_reference_error(
                     app_label,
                     f"one of the include columns of Index {self._get_label(index)}",
                     "Remove that Index first.",
                 )
-            if self.name in fields:
-                if len(fields) > 1:
+            if not removed_names.isdisjoint(field_names):
+                if not field_names <= removed_names:
                     raise self._get_reference_error(
                         app_label, f"part of an Index on {tuple(fields)!r}", "Remove that Index first."
                     )
                 continue
             # A PartialIndex's Q condition can name a field that isn't among its own `.fields` - never
             # silently dropped: the index would then cover other rows.
-            if isinstance(index, PartialIndex) and self.condition_reads_field(index.condition, self.name):
+            if isinstance(index, PartialIndex) and any(
+                self.condition_reads_field(index.condition, name) for name in removed_names
+            ):
                 raise self._get_reference_error(
                     app_label,
                     f"referenced by the condition of PartialIndex {self._get_label(index)}",

@@ -39,7 +39,8 @@ class HareFastAPI(FastAPI):
         self,
         *,
         hare_config: Mapping[str, Any] | HareConfig | str,
-        atomic_requests: bool | Sequence[str] = False,
+        hare_context: HareContext | None = None,
+        atomic_requests: bool | Iterable[str] = False,
         lifespan: Lifespan | None = None,
         health_routes: HealthRoutes | None = None,
         **kwargs: Any,
@@ -55,8 +56,9 @@ what `FastAPI()` takes.
   models. A router declared in a module imported before the application is created needs
   `Hare.bind_models(HARE_CONFIG)` called before that import.
 - **The `HareContext`.** Opened when the application starts, before its own `lifespan` — which already
-  has the database — and closed when it stops. The context is the global fallback, so every request sees
-  it. On shutdown `Hare.close_connections()` also waits for the background observers still running.
+  has the database — and closed when it stops. Middleware activates this application's context for each
+  request. On shutdown `HareContext.close_connections()` also waits for the background observers still
+  running.
 - **Request queries are checked at startup.** `RequestQuery.check_declarations()` runs once the models
   are set up: a wrong [request query](request-queries.md) stops the application from starting.
 - **ORM errors as HTTP answers**, in FastAPI's own error format, unless the application answers the error
@@ -145,7 +147,13 @@ The readiness and liveness routes it adds — see [Web frameworks](web-framework
 ## <a id="tests"></a>Tests
 
 With hare's pytest plugin the application under test runs on the test databases: started in the test's
-event loop (its lifespan, with an httpx `ASGITransport` client), under `hare_app_db` it takes the test's
+event loop (its lifespan, with an httpx `ASGITransport` client), with `hare_context=hare_app_db` it takes the
+test's
 context and its writes are rolled back with the test's — see
 [Application tests](../testing/setup.md#application-tests). Starlette's `TestClient` runs the application
 in a thread of its own — take `hare_app_transactional_db` with it.
+
+An explicitly supplied `hare_context` is borrowed: the integration neither initializes nor closes it.
+The caller controls its lifetime. Without it, the application creates and closes a separate context.
+Application startup does not set a process-global fallback. Pass a test fixture explicitly as
+`hare_context=hare_app_db` or `hare_context=hare_app_transactional_db`.

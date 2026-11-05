@@ -9,8 +9,6 @@ import pytest
 from hare.dialects.sqlite.functions.sqlite_math_functions import SqliteMathFunctions
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]

@@ -26,11 +26,29 @@ concurrency:
 # through both of its drivers, and the oldest and newest Redis, RabbitMQ and Kafka hare supports. Every
 # run - a pull request, the weekly run, a run on demand, a release - runs the whole matrix; each
 # job is one part of it, each version of an axis in at least one job (each job's comment says which
-# combinations run). The version lists below are those of tests/matrix/constants.py and of the
-# Makefile's matrix_* variables. A pull request from dev into main runs none of it: every pull
+# combinations run). Versions and reduced profiles come from tests/matrix/catalog.toml, also
+# read by the Makefile's matrix_* variables. A pull request from dev into main runs no tests: every pull
 # request into dev ran the whole matrix, and the release runs it again on the tag - `ci-passed`
 # passes for it.
 jobs:
+  # Metadata only: test/build combinations remain the catalog's existing reduced profiles.
+  catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.catalog.outputs.matrix }}
+      python-versions: ${{ steps.catalog.outputs.python-versions }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: catalog
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from tests.matrix.matrix_catalog import MatrixCatalog
+          print("matrix=" + json.dumps(MatrixCatalog.get_ci_matrices()))
+          print("python-versions=" + json.dumps(MatrixCatalog.get("versions.python")))
+          PY
+
   # ruff format, ruff, mypy, bandit (on Python 3.12, the oldest supported), cargo fmt, clippy and
   # the Rust unit tests, actionlint on these workflows and the documentation built in strict mode -
   # `make check`.
@@ -40,10 +58,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - id: catalog
+        run: python3 -c 'from tests.matrix.matrix_catalog import MatrixCatalog; print("python=" + MatrixCatalog.get("versions.python")[0])' >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-poetry
         id: python
         with:
-          python-version: '3.12'
+          python-version: ${{ steps.catalog.outputs.python }}
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
@@ -76,7 +96,9 @@ jobs:
         run: make build_native_linux
       - name: The extension of every Python is built
         run: |
-          for version in 312 313 314; do
+          versions=$(python3 -m tests.matrix.matrix_catalog versions.python)
+          for python in $versions; do
+            version=${python//./}
             test -f "rust/native.cpython-$version-x86_64-linux-gnu.so" || { echo "::error::rust.native for cp$version is missing."; exit 1; }
           done
       - uses: actions/upload-artifact@v7
@@ -89,18 +111,12 @@ jobs:
   # for Apple silicon and Intel Macs), built on the runner on every run - `make build_native_windows`,
   # `make build_native_macos`. The jobs testing on Windows and macOS run them.
   build-native:
+    needs: [catalog]
     name: build-native (${{ matrix.os }})
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-2025
-            make_target: build_native_windows
-            extension_files: rust/native.cp3*-win_amd64.pyd
-          - os: macos-15
-            make_target: build_native_macos
-            extension_files: rust/native.cpython-3*-darwin.so
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['build-native'] }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     defaults:
@@ -108,20 +124,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      # Every supported Python, each one's path an output of its step; 3.14, set up last, is the
-      # `python` poetry runs on.
-      - uses: actions/setup-python@v7
-        id: python312
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-python@v7
-        id: python313
-        with:
-          python-version: '3.13'
+      # setup-python installs every catalog version; the final version is the default Python.
       - uses: ./.github/actions/setup-poetry
-        id: python314
         with:
-          python-version: '3.14'
+          python-version: ${{ join(fromJSON(needs.catalog.outputs.python-versions), fromJSON('"\n"')) }}
       # The toolchain rust-toolchain.toml pins.
       - name: Install Rust
         run: rustup toolchain install
@@ -134,20 +140,11 @@ jobs:
       - name: Install dependencies
         run: make deps
       - name: Build rust.native
-        env:
-          PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          PYTHON_314: ${{ steps.python314.outputs.python-path }}
-        run: make ${{ matrix.make_target }} native_interpreters="$PYTHON_312 $PYTHON_313 $PYTHON_314"
-      - name: The extension of every Python imports
-        env:
-          PYTHON_312: ${{ steps.python312.outputs.python-path }}
-          PYTHON_313: ${{ steps.python313.outputs.python-path }}
-          PYTHON_314: ${{ steps.python314.outputs.python-path }}
         run: |
-          for python in "$PYTHON_312" "$PYTHON_313" "$PYTHON_314"; do
-            "$python" -c "from rust.native import pg, rows; print(pg.__version__)"
-          done
+          interpreters=$(poetry run python -m tests.matrix.native_interpreters)
+          make ${{ matrix.make_target }} native_interpreters="$interpreters"
+      - name: The extension of every Python imports
+        run: poetry run python -m tests.matrix.native_interpreters --check-imports
       - uses: actions/upload-artifact@v7
         with:
           name: native-${{ runner.os }}
@@ -159,11 +156,10 @@ jobs:
   # once - `make matrix_venvs`, `make sqlite_versions`, `make test_matrix`.
   test-sqlite:
     name: test-sqlite (${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
-      matrix:
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-sqlite'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -205,12 +201,10 @@ jobs:
   # - `make matrix_venvs`, `make test_matrix`.
   test-database-independent:
     name: test-database-independent (${{ matrix.os }}, ${{ matrix.python }})
-    needs: [build-native-linux, build-native]
+    needs: [catalog, build-native-linux, build-native]
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-database-independent'] }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     defaults:
@@ -248,12 +242,10 @@ jobs:
   # `make matrix_venvs`, `make test_matrix`.
   test-postgres:
     name: test-postgres (${{ matrix.postgres }}, ${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
-      matrix:
-        postgres: ["14", "15", "16", "17", "18"]
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-postgres'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -289,11 +281,10 @@ jobs:
   # drivers - `make lowest_dependencies_venv`, `make test_db_up`, `make test_lowest_dependencies`.
   test-lowest-dependencies:
     name: test-lowest-dependencies (${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
-      matrix:
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-lowest-dependencies'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -302,7 +293,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install uv
-        run: pipx install uv==0.12.7
+        run: pipx install "uv==$(python -m tests.matrix.matrix_catalog tools.uv)"
       - uses: actions/download-artifact@v8
         with:
           name: native-Linux
@@ -318,11 +309,10 @@ jobs:
   # `make test_brokers_matrix_up`, `make matrix_venvs`, `make test_matrix`.
   test-brokers:
     name: test-brokers (${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
-      matrix:
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-brokers'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -353,23 +343,16 @@ jobs:
           path: .test-matrix/
           if-no-files-found: ignore
 
-  # The ClickHouse dialect's own tests on each ClickHouse version through both drivers, and the cluster
+  # ClickHouse dialect, shared and contract suites on each version through both drivers, and the cluster
   # tests on a cluster of that version, on each Python - `make test_clickhouse_matrix_up`,
   # `make test_clickhouse_cluster_matrix_up`, `make matrix_venvs`, `make test_matrix`.
   test-clickhouse:
     name: test-clickhouse (${{ matrix.clickhouse }}, ${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
       # Each ClickHouse on the newest Python, the oldest one on the other Pythons too.
-      matrix:
-        clickhouse: ["25.8", "25.10", "25.12", "26.3", "26.7", "26.8", "26.9"]
-        python: ["3.14"]
-        include:
-          - clickhouse: "25.8"
-            python: "3.12"
-          - clickhouse: "25.8"
-            python: "3.13"
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-clickhouse'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -412,18 +395,11 @@ jobs:
   # `make test_db_matrix_up`, `make test_pgbouncer_matrix_up`, `make matrix_venvs`, `make test_matrix`.
   test-pgbouncer:
     name: test-pgbouncer (${{ matrix.pgbouncer }}, ${{ matrix.postgres }}, ${{ matrix.python }})
-    needs: [build-native-linux]
+    needs: [catalog, build-native-linux]
     strategy:
       fail-fast: false
       # Each PgBouncer in front of the newest PostgreSQL, the newest one in front of the oldest too.
-      matrix:
-        pgbouncer: ["1.22", "1.23", "1.24", "1.25", "1.26"]
-        postgres: ["18"]
-        python: ["3.14"]
-        include:
-          - pgbouncer: "1.26"
-            postgres: "14"
-            python: "3.14"
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-pgbouncer'] }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -459,13 +435,12 @@ jobs:
   # A poetry project adding hare-orm from this checkout as its dependency, on each OS and Python -
   # `make test_poetry_add`.
   test-poetry-add:
+    needs: [catalog]
     name: test-poetry-add (${{ matrix.os }}, ${{ matrix.python }})
     if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main') }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025, macos-15]
-        python: ["3.12", "3.13", "3.14"]
+      matrix: ${{ fromJSON(needs.catalog.outputs.matrix)['test-poetry-add'] }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
@@ -488,6 +463,7 @@ jobs:
   # into main.
   ci-passed:
     needs:
+      - catalog
       - check
       - build-native-linux
       - build-native
@@ -503,8 +479,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Every job passed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: |
-          echo "::error::A job failed or was cancelled."
-          exit 1
+      - uses: actions/checkout@v7
+      - name: Verify every expected job result
+        env:
+          CI_JOB_RESULTS: ${{ toJSON(needs) }}
+          CI_SKIP_TESTS: ${{ github.event_name == 'pull_request' && github.head_ref == 'dev' && github.base_ref == 'main' }}
+        run: python3 -m tests.matrix.ci_results

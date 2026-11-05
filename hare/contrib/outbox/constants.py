@@ -3,6 +3,9 @@ from __future__ import annotations
 #: The longest topic, idempotency key, ordering key and relay name - the columns are VARCHARs of
 #: this size.
 OUTBOX_KEY_MAX_LENGTH = 255
+
+OUTBOX_RELEASE_FAILED = "Outbox operation and resource release failed"
+
 #: The Meta option of an outbox model naming the wakeup its events signal.
 OUTBOX_WAKEUP_META_OPTION = "outbox_wakeup"
 
@@ -22,5 +25,6 @@ RELAY_MANAGED_FIELD_NAMES = frozenset(
         "last_error",
         "lease_until",
         "leased_by",
+        "lease_token",
     }
 )

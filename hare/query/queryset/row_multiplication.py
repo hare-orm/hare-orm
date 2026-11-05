@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from hare.query.expressions import (
     Expression,
-    ExpressionContext,
 )
 from hare.query.expressions.aggregate_paths.aggregated_multi_valued_paths import AggregatedMultiValuedPaths
-from hare.query.query_connection import QueryConnection
 from hare.sql.builder.tables.selectable import Selectable
+from hare.sql.terms.node_traversal import NodeTraversal
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
@@ -72,16 +71,10 @@ class RowMultiplication:
             multi_valued_paths = AggregatedMultiValuedPaths()
             multi_valued_paths.is_recording_row_joins = True
             annotation.get_result(
-                ExpressionContext(
-                    model=specification.model,
-                    dialect=QueryConnection.get_analysis_dialect(specification),
-                    connection=specification._connection,
-                    table=specification._effective_basetable(),
-                    annotations=specification._annotations,
+                replace(
+                    specification._get_probe_expression_context(specification._annotations, multi_valued_paths),
                     annotation_names_in_progress={annotation_name},
-                    select_related_extra_conditions=specification._select_related_extra_conditions,
-                    aggregated_multi_valued_paths=multi_valued_paths,
-                    visibility=specification._visibility,
+                    window_function_filter_allowed=False,
                 )
             )
             if multi_valued_paths.row_paths:
@@ -165,13 +158,9 @@ class RowMultiplication:
         Returns:
             True when a window function call appears outside any subquery.
         """
-        boundary_node_ids: set[int] = set()
-        nodes: Iterator[Any] = term.nodes_()
-        for node in nodes:
-            if id(node) in boundary_node_ids:
-                continue
-            if node.is_analytic:
-                return True
-            if node.is_subquery or isinstance(node, Selectable):
-                boundary_node_ids.update(map(id, node.nodes_()))
-        return False
+        return any(
+            node.is_analytic
+            for node in NodeTraversal.walk(
+                term, descend=lambda node: not node.is_subquery and not isinstance(node, Selectable)
+            )
+        )

@@ -11,7 +11,6 @@ from typing import Any, cast
 
 import pytest
 
-from hare import Hare
 from hare.core.config.hare_config import HareConfig
 from hare.core.config.migrations_config import MigrationsConfig
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -116,27 +115,18 @@ def read_journal(tmp_path: Path) -> set[str]:
 async def test_sqlite_migration_fails_fast_behind_another_connections_lock(tmp_path, monkeypatch, atomic, from_config):
     monkeypatch.syspath_prepend(str(tmp_path))
     config = write_project(tmp_path, atomic=atomic, lock_timeout=0.2 if from_config else None)
-    try:
-        await migrate(config=config, target="app.0001_initial", lock_timeout=None if from_config else 0.2)
-    finally:
-        await Hare.close_connections()
+    await migrate(config=config, target="app.0001_initial", lock_timeout=None if from_config else 0.2)
     blocker = sqlite3.connect(tmp_path / "db.sqlite3", isolation_level=None)
     blocker.execute("BEGIN IMMEDIATE")
     try:
         started_at = time.perf_counter()
         with pytest.raises(Exception, match="locked"):
-            try:
-                await migrate(config=config, lock_timeout=None if from_config else 0.2)
-            finally:
-                await Hare.close_connections()
+            await migrate(config=config, lock_timeout=None if from_config else 0.2)
         # Well before SQLite's own five-second busy timeout.
         assert time.perf_counter() - started_at < 3
         assert read_journal(tmp_path) == {"0001_initial"}
     finally:
         blocker.execute("ROLLBACK")
         blocker.close()
-    try:
-        await migrate(config=config, lock_timeout=None if from_config else 0.2)
-    finally:
-        await Hare.close_connections()
+    await migrate(config=config, lock_timeout=None if from_config else 0.2)
     assert read_journal(tmp_path) == {"0001_initial", "0002_add_size"}

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import re
 
+from hare.dialects.clickhouse.types.constants import CLICKHOUSE_DECIMAL_TYPE_PRECISIONS
 from hare.sql.order import Order
+
+CLICKHOUSE_REBUILD_CHECK_PREVIEW = (
+    "-- Check database EXCHANGE support, storage-name availability, cluster placement and filled views before DDL."
+)
+CLICKHOUSE_REBUILD_TARGET_SQL = "SELECT name FROM system.tables WHERE database = $1 AND name = $2"
+CLICKHOUSE_EXCHANGE_DATABASE_ENGINES = frozenset({"Atomic", "Replicated", "Shared"})
+CLICKHOUSE_EXCHANGE_TABLES_TEMPLATE = "EXCHANGE TABLES {table} AND {replacement}{on_cluster}"
+CLICKHOUSE_FLUSH_DISTRIBUTED_TEMPLATE = "SYSTEM FLUSH DISTRIBUTED {table}{on_cluster}"
+CLICKHOUSE_REPLICA_CHECK_PREVIEW = "-- Check replica topology of cluster {cluster} before creating its tables."
+CLICKHOUSE_SCHEMA_MOVE_PREVIEW = (
+    "-- Read currentDatabase(); execute the following rename only if source and target databases differ."
+)
 
 #: The fields a ClickHouse container type maps to.
 CLICKHOUSE_ARRAY_FIELD_PATH = "hare.fields.data.containers.ArrayField"
@@ -35,14 +48,14 @@ CLICKHOUSE_CODEC_PATTERN = re.compile(
 CLICKHOUSE_PROJECTION_REBUILD_SETTINGS = ("lightweight_mutation_projection_mode", "deduplicate_merge_projection_mode")
 CLICKHOUSE_PROJECTION_REBUILD_MODE = "rebuild"
 #: A view - a table of the ``View`` engine.
-CLICKHOUSE_VIEW_CREATE_TEMPLATE = "CREATE {or_replace}VIEW {view} AS\n{query};"
+CLICKHOUSE_VIEW_CREATE_TEMPLATE = "CREATE {or_replace}VIEW {view}{on_cluster} AS\n{query};"
 #: A view of either type is dropped and renamed as a table.
-CLICKHOUSE_VIEW_DROP_TEMPLATE = "DROP VIEW {if_exists}{view};"
-CLICKHOUSE_VIEW_RENAME_TEMPLATE = "RENAME TABLE {view} TO {new_view};"
+CLICKHOUSE_VIEW_DROP_TEMPLATE = "DROP VIEW {if_exists}{view}{on_cluster};"
+CLICKHOUSE_VIEW_RENAME_TEMPLATE = "RENAME TABLE {view} TO {new_view}{on_cluster};"
 #: A materialized view - refreshed on a schedule or following the inserts of the table it reads,
 #: writing to a table or keeping a storage of its own.
 CLICKHOUSE_MATERIALIZED_VIEW_CREATE_TEMPLATE = (
-    "CREATE MATERIALIZED VIEW {if_not_exists}{view}{schedule}{storage}{empty} AS\n{query};"
+    "CREATE MATERIALIZED VIEW {if_not_exists}{view}{on_cluster}{schedule}{storage}{empty} AS\n{query};"
 )
 #: The settings of a materialized view's own sorted storage - its columns are its query's, and a
 #: nullable one may be a key: ``unique_columns`` of a column holding NULL.
@@ -56,8 +69,8 @@ CLICKHOUSE_MATERIALIZED_VIEW_CLUSTER_FILL_MESSAGE = (
     "(and name them in read_columns for raw SQL), or declare the view with_data=False and fill it on every server"
 )
 #: The query and the schedule of a materialized view changed in place.
-CLICKHOUSE_MATERIALIZED_VIEW_QUERY_TEMPLATE = "ALTER TABLE {view} MODIFY QUERY\n{query};"
-CLICKHOUSE_MATERIALIZED_VIEW_SCHEDULE_TEMPLATE = "ALTER TABLE {view} MODIFY REFRESH {schedule};"
+CLICKHOUSE_MATERIALIZED_VIEW_QUERY_TEMPLATE = "ALTER TABLE {view}{on_cluster} MODIFY QUERY\n{query};"
+CLICKHOUSE_MATERIALIZED_VIEW_SCHEDULE_TEMPLATE = "ALTER TABLE {view}{on_cluster} MODIFY REFRESH {schedule};"
 #: A refresh of a view refreshed on a schedule started now, and waited for.
 CLICKHOUSE_VIEW_REFRESH_TEMPLATE = "SYSTEM REFRESH VIEW {view};"
 CLICKHOUSE_VIEW_WAIT_TEMPLATE = "SYSTEM WAIT VIEW {view};"
@@ -71,31 +84,26 @@ CLICKHOUSE_REFRESH_SCHEDULE_PATTERN = re.compile(
 )
 #: A dictionary - its columns, its key, where it is loaded from, how it is kept and for how long.
 CLICKHOUSE_DICTIONARY_CREATE_TEMPLATE = (
-    "CREATE {or_replace}DICTIONARY {exists}{dictionary} ({columns}) PRIMARY KEY {key} SOURCE({source}) "
+    "CREATE {or_replace}DICTIONARY {exists}{dictionary}{on_cluster} ({columns}) PRIMARY KEY {key} SOURCE({source}) "
     "LAYOUT({layout}){lifetime};"
 )
 #: How long a dictionary keeps its rows before loading them again.
 CLICKHOUSE_DICTIONARY_LIFETIME_TEMPLATE = " LIFETIME(MIN {lifetime_minimum} MAX {lifetime_maximum})"
 #: The layouts that keep no rows - each lookup reads the source - and so take no ``LIFETIME``.
 CLICKHOUSE_DICTIONARY_DIRECT_LAYOUT_NAMES = frozenset({"DIRECT", "COMPLEX_KEY_DIRECT"})
-CLICKHOUSE_DICTIONARY_DROP_TEMPLATE = "DROP DICTIONARY {if_exists}{dictionary};"
-CLICKHOUSE_DICTIONARY_RENAME_TEMPLATE = "RENAME DICTIONARY {dictionary} TO {new_dictionary};"
-CLICKHOUSE_DICTIONARY_RELOAD_TEMPLATE = "SYSTEM RELOAD DICTIONARY {dictionary};"
-#: The source of a dictionary of a model's own table - read by the server from itself, as the user of
-#: the connection: without one it reads as the default user with no password.
-CLICKHOUSE_DICTIONARY_TABLE_SOURCE_TEMPLATE = "CLICKHOUSE(DB {database} TABLE {table} USER {user} PASSWORD {password})"
+CLICKHOUSE_DICTIONARY_DROP_TEMPLATE = "DROP DICTIONARY {if_exists}{dictionary}{on_cluster};"
+CLICKHOUSE_DICTIONARY_RENAME_TEMPLATE = "RENAME DICTIONARY {dictionary} TO {new_dictionary}{on_cluster};"
+CLICKHOUSE_DICTIONARY_RELOAD_TEMPLATE = "SYSTEM RELOAD DICTIONARY{on_cluster} {dictionary};"
 #: What stands for the password in a dictionary's SQL that is shown, not run.
 CLICKHOUSE_DICTIONARY_HIDDEN_PASSWORD = "[HIDDEN]"  # nosec B105
-#: An environment variable a dictionary's source reads when the dictionary is created.
-CLICKHOUSE_DICTIONARY_ENVIRONMENT_PATTERN = re.compile(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+CLICKHOUSE_DICTIONARY_SECRET_OPTIONS = frozenset({"PASSWORD", "TOKEN", "SECRET", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"})
 #: The layout of a dictionary keyed by fields of any types.
 CLICKHOUSE_DICTIONARY_DEFAULT_LAYOUT = "COMPLEX_KEY_HASHED()"
 #: A dictionary's layout with its arguments - ``CACHE(SIZE_IN_CELLS 1000)``.
 CLICKHOUSE_DICTIONARY_LAYOUT_PATTERN = re.compile(r"[A-Za-z_]+\([A-Za-z0-9_ '/.\-]*\)")
 #: The longest a dictionary waits to be loaded again, in seconds - ten years.
 CLICKHOUSE_DICTIONARY_LIFETIME_LIMIT = 315_360_000
-#: How the engines of the MergeTree family end, and the table options of theirs alone.
-CLICKHOUSE_MERGE_TREE_ENGINE_SUFFIX = "MergeTree"
+#: The table options specific to MergeTree-family engines.
 CLICKHOUSE_MERGE_TREE_OPTIONS = (
     "order_by",
     "sample_by",
@@ -152,29 +160,26 @@ CLICKHOUSE_TEXT_TYPE_NAME = "String"
 CLICKHOUSE_HELD_ELEMENT_NAME = "hare_element"
 #: A text column's type - a type change from it parses each value, and a value that doesn't parse fails
 #: the change's mutation after the column took its new type, or becomes NULL in a Nullable one.
-CLICKHOUSE_TEXT_COLUMN_TYPE_PATTERN = r"(?:Nullable\(|LowCardinality\()*(?:String|FixedString\(\d+\))\)*"
+CLICKHOUSE_TEXT_COLUMN_TYPES = frozenset({"String", "FixedString"})
 #: The type a column has and the server's name of the type it changes to - a field's type is declared
 #: by its SQL name (``INT``, ``VARCHAR(40)``); no row is read of an empty table.
 CLICKHOUSE_COLUMN_TYPES_QUERY = (
     "SELECT toTypeName({column}) AS old_type, toTypeName(defaultValueOfTypeName({new_type})) AS new_type "
     "FROM {table} LIMIT 1"
 )
-#: The precision and scale of a Decimal column's type.
-CLICKHOUSE_DECIMAL_COLUMN_TYPE_PATTERN = r"Decimal\((\d+),\s*(\d+)\)"
-#: A label of an Enum column's type, as the SQL literal it is declared with.
-CLICKHOUSE_ENUM_LABEL_PATTERN = r"('(?:[^'\\]|\\.)*')\s*=\s*-?\d+"
 #: The column types a column changes to unchecked - every text is one of a text type, a Dynamic holds a
 #: value of any type (past its max_types, as one of its shared types), and a container's values have no
 #: cast a check could read.
-CLICKHOUSE_UNCHECKED_CONVERSION_TYPE_PREFIXES = (
-    "String",
-    "Dynamic",
-    "FixedString",
-    "LowCardinality(String",
-    "Array(",
-    "Map(",
-    "Tuple(",
-    "Nested(",
+CLICKHOUSE_UNCHECKED_CONVERSION_TYPES = frozenset(
+    {
+        "String",
+        "Dynamic",
+        "FixedString",
+        "Array",
+        "Map",
+        "Tuple",
+        "Nested",
+    }
 )
 #: A text read as a value of a type - NULL for a text that isn't one.
 CLICKHOUSE_CONVERTED_VALUE_TEMPLATE = "accurateCastOrNull({column}, {type})"
@@ -200,10 +205,17 @@ CLICKHOUSE_VALUE_NOT_CONVERTED_MESSAGE = 'column {column} of table {table} holds
 CLICKHOUSE_TYPE_NOT_CONVERTED_MESSAGE = (
     "column {column} of table {table} is a {old_type}, which ClickHouse converts to no {new_type}: {error}"
 )
-#: The wrappers of a column type around the type of its values.
-CLICKHOUSE_TYPE_WRAPPER_PATTERN = r"(?:Nullable|LowCardinality)\((.*)\)"
 #: A number column's type - a change between two of them is checked by the narrowing check.
-CLICKHOUSE_NUMBER_COLUMN_TYPE_PATTERN = r"(?:U?Int\d+|Float\d+|Decimal(?:\d+)?\(.*\)|Bool)"
+CLICKHOUSE_NUMBER_COLUMN_TYPES = frozenset(
+    {
+        "Bool",
+        "Float32",
+        "Float64",
+        "Decimal",
+        *CLICKHOUSE_DECIMAL_TYPE_PRECISIONS,
+        *(f"{prefix}Int{bits}" for prefix in ("", "U") for bits in (8, 16, 32, 64, 128, 256)),
+    }
+)
 #: A column's comment changed - an empty one for none.
 CLICKHOUSE_COLUMN_COMMENT_CHANGE_TEMPLATE = "ALTER TABLE {table} COMMENT COLUMN {column} {comment}"
 #: A table's comment changed - an empty one for none.
@@ -216,9 +228,5 @@ CLICKHOUSE_SHADOW_DATABASE_ENGINE_SQL = (
 )
 #: Another database of the server a model is in, with its engine - its shadow takes the same engine.
 CLICKHOUSE_SHADOW_OTHER_DATABASE_ENGINE_SQL = "SELECT name, engine, engine_full FROM system.databases WHERE name = $1"
-#: The shadow database created - with an engine of its own, or the server's default one.
-CLICKHOUSE_SHADOW_DATABASE_CREATE_TEMPLATE = "CREATE DATABASE {database}{engine}"
-#: The shadow database dropped - its replicated tables' Keeper paths removed before it returns.
-CLICKHOUSE_SHADOW_DATABASE_DROP_TEMPLATE = "DROP DATABASE IF EXISTS {database} SYNC"
 #: The orders of a projection's ORDER BY - a sorting key, ascending with NULL last.
 CLICKHOUSE_PROJECTION_ORDERS = frozenset({None, Order.ASC, Order.ASC_NULLS_LAST})

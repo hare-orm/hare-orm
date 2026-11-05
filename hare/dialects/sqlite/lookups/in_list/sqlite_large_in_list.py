@@ -8,6 +8,8 @@ from hare.dialects.base.parameters.large_in_list import LargeInList
 from hare.dialects.sqlite.lookups.in_list.json_array_row_values import JsonArrayRowValues
 from hare.dialects.sqlite.lookups.in_list.json_array_values import JsonArrayValues
 from hare.dialects.sqlite.parameters.constants import SQLITE_IN_JSON_ARRAY_THRESHOLD
+from hare.dialects.sqlite.parameters.sqlite_encoded_text import SqliteEncodedText
+from hare.dialects.sqlite.parameters.sqlite_parameter_adapters import SqliteParameterAdapters
 from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.term import Term
 
@@ -23,6 +25,14 @@ class SqliteLargeInList(LargeInList):
     ``IN (?, ?, ...)`` form.
     """
 
+    def __init__(self, adapters: SqliteParameterAdapters | None = None, *, supports_unhex: bool | None = None) -> None:
+        self.adapters = adapters or SqliteParameterAdapters()
+        self.supports_unhex = supports_unhex
+
+    def can_decode_bytes(self) -> bool:
+        """Use the selected client's capability, or the local library for standalone SQL."""
+        return self.get_sqlite_client_features().supports_unhex if self.supports_unhex is None else self.supports_unhex
+
     @staticmethod
     def get_sqlite_client_features() -> SqliteFeatures:
         """The features of the SQLite driver of ``sqlite+aiosqlite://`` - its library is the server of every
@@ -34,8 +44,7 @@ class SqliteLargeInList(LargeInList):
         client_class = DialectRegistry.get_driver(SQLITE_AIOSQLITE_DRIVER_NAME).get_client_classes()[0]
         return cast("SqliteFeatures", client_class.features)
 
-    @classmethod
-    def get_container(cls, non_null_values: list[Any]) -> JsonArrayValues | None:
+    def get_container(self, non_null_values: list[Any]) -> JsonArrayValues | None:
         """The one-parameter JSON array container for a long value list.
 
         Args:
@@ -46,22 +55,25 @@ class SqliteLargeInList(LargeInList):
         """
         if len(non_null_values) < SQLITE_IN_JSON_ARRAY_THRESHOLD:
             return None
-        decode_hex = JsonArrayValues.holds_only_bytes(non_null_values)
-        if decode_hex and not cls.get_sqlite_client_features().supports_unhex:
+        adapted_values = [self.adapters.adapt(value) for value in non_null_values]
+        decode_hex = JsonArrayValues.holds_only_bytes(adapted_values)
+        if decode_hex and not self.can_decode_bytes():
             return None
-        values_json = JsonArrayValues.get_values_json(non_null_values, decode_hex)
-        return None if values_json is None else JsonArrayValues(values_json, decode_hex=decode_hex)
+        values_json = JsonArrayValues.get_values_json(adapted_values, decode_hex)
+        return (
+            None
+            if values_json is None
+            else JsonArrayValues(values_json, decode_hex=decode_hex, adapters=self.adapters)
+        )
 
-    @classmethod
     def get_membership_criterion(
-        cls, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
+        self, term: Term, values: Sequence[Any], non_null_values: list[Any], element_type: str | None
     ) -> Criterion | None:
-        container = cls.get_container(non_null_values)
+        container = self.get_container(non_null_values)
         return None if container is None else term.isin(container)
 
-    @classmethod
     def get_row_container(
-        cls, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
+        self, value_rows: list[tuple[Any, ...]], element_types: Sequence[str | None] | None = None
     ) -> JsonArrayRowValues | None:
         """The one-parameter JSON array-of-arrays container for a long list of value rows.
 
@@ -75,11 +87,12 @@ class SqliteLargeInList(LargeInList):
         """
         if not value_rows or len(value_rows) * len(value_rows[0]) < SQLITE_IN_JSON_ARRAY_THRESHOLD:
             return None
+        value_rows = [tuple(self.adapters.adapt(value) for value in row) for row in value_rows]
         column_count = len(value_rows[0])
         decode_hex_columns = tuple(
             all(isinstance(row[index], bytes) for row in value_rows) for index in range(column_count)
         )
-        if any(decode_hex_columns) and not cls.get_sqlite_client_features().supports_unhex:
+        if any(decode_hex_columns) and not self.can_decode_bytes():
             return None
         json_rows = []
         for row in value_rows:
@@ -96,4 +109,4 @@ class SqliteLargeInList(LargeInList):
                     return None
                 json_row.append(json_element)
             json_rows.append(json_row)
-        return JsonArrayRowValues(json.dumps(json_rows, separators=(",", ":")), decode_hex_columns)
+        return JsonArrayRowValues(SqliteEncodedText(json.dumps(json_rows, separators=(",", ":"))), decode_hex_columns)

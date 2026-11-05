@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
 import urllib.parse as urlparse
-from typing import Any
 
-from hare.core.constants import ENV_PYTEST_XDIST_WORKER
 from hare.dialects.base.connection.connection_options import ConnectionOptions
 from hare.dialects.base.connection.driver import Driver
 from hare.dialects.sqlite.connection.constants import SQLITE_BUSY_RESULT_CODE, SQLITE_PRIMARY_RESULT_CODE_MASK
@@ -47,13 +44,3 @@ class SqliteDriver(Driver):
         if not path:
             raise ConfigurationError("No path specified for DB_URL")
         return path
-
-    def get_testing_path(self, path: str, reuse_databases: bool) -> tuple[str, dict[str, Any]]:
-        # A fixed file is one file for every pytest-xdist worker, and SQLite lets one of them
-        # write at a time.
-        if path != ":memory:" and "{" not in path:
-            xdist_worker_id = os.environ.get(ENV_PYTEST_XDIST_WORKER)
-            if xdist_worker_id:
-                root, extension = os.path.splitext(path)
-                path = f"{root}.{xdist_worker_id}{extension}"
-        return super().get_testing_path(path, reuse_databases)

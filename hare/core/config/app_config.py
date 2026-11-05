@@ -22,9 +22,8 @@ class AppConfig(ConfigSection):
     migrations: str | None = None
 
     def __post_init__(self) -> None:
-        # Dotted paths or modules, normalized to a list of module names.
-        normalized_models = [model.__name__ if isinstance(model, ModuleType) else model for model in self.models]
-        object.__setattr__(self, "models", normalized_models)
+        # Consume generators once, retaining module objects that have no importable path.
+        object.__setattr__(self, "models", list(self.models))
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"models": self.models}

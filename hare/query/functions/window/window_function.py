@@ -6,6 +6,7 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import QueryError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
 from hare.query.expressions import Expression, F
+from hare.query.expressions.structure.expression_declaration import ExpressionDeclaration
 from hare.query.functions.window.constants import WINDOW_FUNCTION_ROW_COUNT_MAX
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.description.plannable import Plannable
@@ -18,8 +19,10 @@ if TYPE_CHECKING:
     from hare.query.expressions.expression_result import TableCriterionTuple
 
 
-class WindowFunction(Plannable, abstract=True):
+class WindowFunction(ExpressionDeclaration, Plannable, abstract=True):
     """Base for values usable as the ``expression`` of ``Window(...)``."""
+
+    unplanned_attributes = ("_constructor_arguments",)
 
     #: Whether the window gets an explicit ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
     #: frame - the default frame of an ordered window ends at the current row.
@@ -76,8 +79,10 @@ class WindowFunction(Plannable, abstract=True):
             )
 
     def _get_field_result(self, expression_context: ExpressionContext) -> tuple[ExpressionResult, Field[Any] | None]:
-        """Resolves the field or expression this window function reads, refusing an encrypted
-        field - the database would compute over its ciphertext.
+        """Gets the field or expression this window function reads.
+
+        Encrypted fields are accepted only by functions declaring ``accepts_encrypted_field``:
+        those passing through a value or counting rows without computing over ciphertext.
 
         Args:
             expression_context: The query's resolve context.
@@ -86,7 +91,7 @@ class WindowFunction(Plannable, abstract=True):
             The resolved field and the field describing its values.
 
         Raises:
-            QueryError: The field is encrypted.
+            FieldError: The field is encrypted and this function does not accept it.
         """
         field_expression = F(self.field) if isinstance(self.field, str) else self.field
         field_result = field_expression.get_result(expression_context)

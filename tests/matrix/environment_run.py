@@ -8,18 +8,18 @@ Usage:
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 
 from tests.matrix.constants import (
     MATRIX_DATABASE_DRIVER_EXTRAS,
-    REPOSITORY_DIRECTORY,
     SUITE_ENVIRONMENT_OPTION,
     SUITE_ENVIRONMENTS,
     WITHOUT_NATIVE_PLUGIN,
 )
-from tests.matrix.matrix_run import MatrixRun
 from tests.matrix.matrix_virtualenv import MatrixVirtualenv
+from tests.matrix.paths import REPOSITORY_DIRECTORY
+from tests.matrix.process_groups import ProcessGroups
+from tests.matrix.run_spec import RunSpec
 
 
 class EnvironmentRun:
@@ -64,7 +64,7 @@ class EnvironmentRun:
             raise SystemExit(f"No environment {environment_name} - known: {', '.join(environments)}")
         environment = environments[environment_name]
         database = EnvironmentRun.get_database(os.environ.get("HARE_TEST_DB", "sqlite+aiosqlite://:memory:"))
-        virtualenv = MatrixVirtualenv.get(MatrixRun(python_version, environment_name, environment, database, {}))
+        virtualenv = MatrixVirtualenv.get(RunSpec(python_version, environment_name, environment, database, {}))
         if not virtualenv.get_python_executable().exists():
             raise SystemExit(
                 f"{virtualenv.name} doesn't exist - make matrix_venvs MATRIX_OPTIONS=\"--python {python_version} "
@@ -78,7 +78,7 @@ class EnvironmentRun:
             f"{SUITE_ENVIRONMENT_OPTION}={environment_name}",
             *pytest_arguments,
         ]
-        return subprocess.run(command, cwd=REPOSITORY_DIRECTORY, check=False).returncode
+        return ProcessGroups().run(command, cwd=REPOSITORY_DIRECTORY, environment=dict(os.environ), output=sys.stdout)
 
 
 if __name__ == "__main__":

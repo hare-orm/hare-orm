@@ -134,6 +134,8 @@ site/
 /tests/sqlite_versions/*/
 # SpatiaLite downloaded by tests/spatialite/download_spatialite.py
 /tests/spatialite/mod_spatialite-*/
+/tests/spatialite/artifacts/
+/tests/spatialite/sources/
 
 # Logs of make test_matrix
 /.test-matrix/

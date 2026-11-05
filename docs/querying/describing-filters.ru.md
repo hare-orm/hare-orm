@@ -81,7 +81,6 @@ info.value_type     # str
 | `value_type` | Тип значения — каждого элемента списка или диапазона. Кортеж типов для составного ключа; `bool` для `isnull`/`not_isnull`; `int` для части даты или `len`; `str` для текстового оператора или ключа JSON/hstore; `object` для любого значения JSON. |
 | `crosses_to_many` | Проходит ли ключ через связь, у которой на одну строку приходится много строк (обратный внешний ключ или «многие-ко-многим»): фильтр соединяет её, и запрос может вернуть одну строку несколько раз. |
 | `requires_extension` | Расширение базы, нужное оператору (`"pg_trgm"` для операторов триграмм, `"unaccent"`), иначе `None`. |
-| `dialects` | Имена диалектов, на которых есть поле и оператор (`frozenset({"postgresql"})` у поля массива), `None` — на всех, а также у поля, тип колонки которого даёт каждый диалект (`GeometryField`, `VectorField`): его `is_supported()` проверяет на том диалекте, о котором спрашивают. |
 | `is_supported(dialect)` | Выполняет ли запрос на `dialect` этот оператор — см. ниже. |
 
 ### <a id="errors"></a>Ошибки
@@ -106,7 +105,7 @@ info.value_type     # str
 запрос на этом диалекте оператор. Оператор не поддерживается, если:
 
 - поля нет на этом диалекте (поле с `COLUMN_TYPE_FROM_DIALECT`, которому диалект не даёт типа колонки,
-  например поле массива или диапазона вне PostgreSQL);
+  например поле диапазона вне PostgreSQL);
 - оператор реализуют только диалекты (`search`, операторы триграмм, операторы вложенности для массивов,
   диапазонов и JSON, [оператор одной базы](../extending/custom-lookups.ru.md#one-database)), а этот
   диалект его не реализует;
@@ -116,7 +115,7 @@ info.value_type     # str
 from hare.dialects.dialect_registry import DialectRegistry
 
 sqlite = DialectRegistry.get_dialect("sqlite")
-info = Book._meta.get_lookup_info("title__search")
+info = Book._meta.get_lookup_info("title__trigram_similar")
 info.is_supported(sqlite)                                  # False
 info.is_supported(DialectRegistry.get_dialect("postgresql"))  # True
 ```
@@ -125,7 +124,7 @@ info.is_supported(DialectRegistry.get_dialect("postgresql"))  # True
 построения SQL:
 
 ```text
-Book.objects.filter(title__search=...) can't run on sqlite: the sqlite dialect doesn't implement the __search lookup
+Book.objects.filter(title__trigram_similar=...) can't run on sqlite: the sqlite dialect doesn't implement the __trigram_similar lookup
 ```
 
 ## <a id="get_lookups"></a>`get_lookups()`
@@ -141,7 +140,7 @@ lookups["year__gte"]   # LookupInfo(value_type=int, ...)
 его описание и содержит только операторы, которые диалект поддерживает. У самой связи — операторы её
 ключа (`""`, `in`, `not`, `not_in`, `isnull`, `not_isnull`); у прямой связи с ключом из одной колонки —
 операторы этой колонки (у `author` — те же, что у `author_id`, с учётом диалекта); у `pk` составного
-первичного ключа — `""` и `in`.
+первичного ключа — `""`, `in`, `not` и `not_in`.
 
 Оператору может понадобиться и возможность самого подключения, на котором выполняется запрос, а не только
 диалекта: `posix_regex`/`iposix_regex` требуют `features.supports_posix_regex` — в SQLite это

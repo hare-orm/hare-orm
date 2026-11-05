@@ -4,9 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from hare.core.connections.connection_handler import ConnectionHandler
+from hare.dialects.base.client.transaction_lifecycle.transaction_state import TransactionState
 from hare.dialects.base.transactions.contexts.nested_transaction_context import NestedTransactionContext
 from hare.dialects.base.transactions.savepoints.nested_savepoint_lock import NestedSavepointLock
 from hare.dialects.base.transactions.savepoints.savepoint_span import current_savepoint_span
+from hare.transactions.enums import TransactionOutcome, TransactionPhase
 
 pytestmark = pytest.mark.database_independent
 
@@ -21,7 +23,9 @@ async def test_abandoned_savepoint_span_release_is_kept_until_it_releases_the_sp
     span = await lock.acquire(None)
     still_running = asyncio.get_running_loop().create_future()
     client = SimpleNamespace(
-        connection_alias="default", _finalized=True, _shielded_savepoint_abandoned_task=still_running
+        connection_alias="default",
+        transaction_state=TransactionState(TransactionPhase.FINISHED, TransactionOutcome.RELEASED),
+        _shielded_savepoint_abandoned_task=still_running,
     )
     context = NestedTransactionContext(client, lock)
     context._span = span
@@ -49,11 +53,12 @@ async def test_stale_connection_close_is_kept_until_it_ends():
         await may_close.wait()
         closed.append(True)
 
-    ConnectionHandler()._schedule_stale_connection_close(SimpleNamespace(close=close, _bound_loop=None))
+    handler = ConnectionHandler()
+    handler._schedule_stale_connection_close(SimpleNamespace(close=close, _bound_loop=None))
 
-    closes = set(ConnectionHandler.stale_connection_closes)
+    closes = set(handler.stale_connection_closes)
     assert len(closes) == 1
     may_close.set()
     await asyncio.gather(*closes)
     assert closed == [True]
-    assert not closes & ConnectionHandler.stale_connection_closes
+    assert not closes & handler.stale_connection_closes

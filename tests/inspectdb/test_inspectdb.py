@@ -4,22 +4,26 @@ from hare.contrib.test import requires_features
 from hare.core.connections.connections import Connections
 from hare.ddl.raw_sql_term import RawSQLTerm
 from hare.dialects.dialect_registry import DialectRegistry
+from hare.dialects.sqlite.introspection.sqlite_column_declarations import SqliteColumnDeclarations
+from hare.dialects.sqlite.introspection.sqlite_constraint_clauses import SqliteConstraintClauses
 from hare.dialects.sqlite.sqlite_introspector import SqliteIntrospector
 from hare.fields.data.numeric.int_field import IntField
 from hare.fields.enums import OnDelete
+from hare.fields.relations.fields import ForeignKeyFieldInstance
 from hare.inspectdb import (
     DuplicateModelClassNameError,
     SchemaInspector,
     SchemaIntrospector,
     TableNotFoundError,
 )
-from hare.inspectdb.generation.column_type_mapper import ColumnTypeMapper
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 from hare.instrumentation.declarations import QueryExecuted
 from hare.instrumentation.observers.observers import Observers
 from hare.models.class_building.model_field_collection import ModelFieldCollection
 from tests.utils.model_source_generator import ModelSourceGenerator
 from tests.utils.operations import apply_operations
+from tests.utils.postgresql_extensions import PostgresqlExtensions
 
 
 @pytest.fixture
@@ -37,6 +41,11 @@ def connection(db):
         ('update of "mixedCol", plaincol', 'UPDATE OF "mixedCol", plaincol'),
         ('update of col1, "Col2", col3', 'UPDATE OF col1, "Col2", col3'),
         ("insert or update of Price_Col, delete_flag", "INSERT OR UPDATE OF Price_Col, delete_flag"),
+        ('update of "two  words"', 'UPDATE OF "two  words"'),
+        ('update of "line\nbreak"', 'UPDATE OF "line\nbreak"'),
+        ('update of "or "" delete"', 'UPDATE OF "or "" delete"'),
+        ("update of [two  words]", "UPDATE OF [two  words]"),
+        ("update of `two  words`", "UPDATE OF `two  words`"),
     ],
 )
 def test_normalize_event_clause_preserves_quoted_identifier_case(raw: str, expected: str) -> None:
@@ -308,14 +317,13 @@ def test_sqlite_type_map_orders_varchar_before_char():
 def test_sqlite_json_text_column_maps_back_to_jsonfield():
     """JSONField's own SQLite column type (JSON_TEXT, chosen for its TEXT affinity) must still
     read back as a JSONField, not a TextField."""
-    from hare.dialects.sqlite.enums import SqliteDialectName
     from hare.fields.data.json import JSONField
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     column_type = JSONField().get_column_type(DialectRegistry.get_dialect("sqlite"))
     column = ColumnInfo(name="payload", db_type=column_type, nullable=True, is_pk=False, is_unique=False)
 
-    field_path, _, is_ambiguous = ColumnTypeMapper.map_column_type(SqliteDialectName.SQLITE, column)
+    field_path, _, is_ambiguous = SqliteIntrospector.map_column_type(column)
 
     assert (field_path, is_ambiguous) == ("hare.fields.data.json.JSONField", False)
 
@@ -327,21 +335,17 @@ def test_postgres_naive_timestamp_is_ambiguous_not_datetimefield():
     without time zone", so a genuine naive-timestamp column used to map to DatetimeField too,
     silently changing its semantics (naive -> tz-aware) the next time a migration diffs
     against the real schema."""
-    from hare.dialects.postgresql.enums import PostgresqlDialectName
+    from hare.dialects.postgresql.postgresql_introspector import PostgresqlIntrospector
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     def column(db_type: str) -> ColumnInfo:
         return ColumnInfo(name="created_at", db_type=db_type, nullable=False, is_pk=False, is_unique=False)
 
-    naive_path, _, naive_ambiguous = ColumnTypeMapper.map_column_type(
-        PostgresqlDialectName.POSTGRESQL, column("timestamp without time zone")
-    )
+    naive_path, _, naive_ambiguous = PostgresqlIntrospector.map_column_type(column("timestamp without time zone"))
     assert naive_path == "hare.dialects.postgresql.fields.NaiveDatetimeField"
     assert naive_ambiguous is False
 
-    aware_path, _, aware_ambiguous = ColumnTypeMapper.map_column_type(
-        PostgresqlDialectName.POSTGRESQL, column("timestamp with time zone")
-    )
+    aware_path, _, aware_ambiguous = PostgresqlIntrospector.map_column_type(column("timestamp with time zone"))
     assert aware_path == "hare.fields.data.temporal.DatetimeField"
     assert aware_ambiguous is False
 
@@ -398,22 +402,17 @@ def test_sqlite_char_36_maps_to_uuidfield_not_charfield():
     UUIDField column round-tripped through inspectdb silently lost its real type. A genuine
     VARCHAR(36) (never what UUIDField itself declares) must still map to CharField, not get
     swept up by the same heuristic."""
-    from hare.dialects.sqlite.enums import SqliteDialectName
     from hare.inspectdb.introspection.column_info import ColumnInfo
 
     def column(db_type: str) -> ColumnInfo:
         return ColumnInfo(name="token", db_type=db_type, nullable=False, is_pk=False, is_unique=False, max_length=36)
 
-    uuid_path, uuid_kwargs, uuid_ambiguous = ColumnTypeMapper.map_column_type(
-        SqliteDialectName.SQLITE, column("CHAR(36)")
-    )
+    uuid_path, uuid_kwargs, uuid_ambiguous = SqliteIntrospector.map_column_type(column("CHAR(36)"))
     assert uuid_path == "hare.fields.data.uuid_field.UUIDField"
     assert uuid_kwargs == {}
     assert uuid_ambiguous is False
 
-    varchar_path, _, varchar_ambiguous = ColumnTypeMapper.map_column_type(
-        SqliteDialectName.SQLITE, column("VARCHAR(36)")
-    )
+    varchar_path, _, varchar_ambiguous = SqliteIntrospector.map_column_type(column("VARCHAR(36)"))
     assert varchar_path == "hare.fields.data.text.CharField"
     assert varchar_ambiguous is False
 
@@ -882,10 +881,8 @@ async def test_generate_model_source_reconstructs_hnsw_index(connection):
     through to the plain btree Index default, which a `vector` column has no default operator
     class for at all (re-running the generated migration would fail outright, not just lose
     tuning)."""
-    try:
-        await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
-    except Exception as exc:
-        pytest.skip(f"vector extension not available: {exc}")
+    await PostgresqlExtensions.require(connection, "vector")
+    await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
 
     await connection.execute_script("CREATE TABLE scratch_hnsw (id serial primary key, embedding vector(3))")
     await connection.execute_script(
@@ -906,10 +903,8 @@ async def test_generate_model_source_reconstructs_hnsw_index(connection):
 async def test_generate_model_source_reconstructs_vector_index_storage_parameters(connection):
     """An HnswIndex/IvfflatIndex's WITH (...) parameters were never read back - the generated
     model always carried the class defaults instead of the real m/ef_construction/lists."""
-    try:
-        await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
-    except Exception as exc:
-        pytest.skip(f"vector extension not available: {exc}")
+    await PostgresqlExtensions.require(connection, "vector")
+    await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
 
     await connection.execute_script("CREATE TABLE scratch_tuned (id serial primary key, embedding vector(3))")
     await connection.execute_script(
@@ -1099,7 +1094,7 @@ async def test_generate_model_source_reconstructs_postgres_trigger(connection):
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig")
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     assert len(table.triggers) == 1
     trigger = table.triggers[0]
     assert trigger.name == "scratch_trig_bump"
@@ -1140,7 +1135,7 @@ async def test_generate_model_source_reconstructs_postgres_constraint_trigger(co
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig_constraint")
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     assert len(table.triggers) == 1
     trigger = table.triggers[0]
     assert trigger.name == "scratch_trig_constraint_bump"
@@ -1184,7 +1179,7 @@ async def test_generate_model_source_reconstructs_postgres_constraint_trigger_in
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig_constraint_imm")
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     assert len(table.triggers) == 1
     trigger = table.triggers[0]
     assert trigger.deferrable is True
@@ -1216,8 +1211,8 @@ async def test_generate_model_source_falls_back_on_constraint_trigger_with_from_
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig_from_a")
     assert table.triggers == []
-    assert len(table.unparsed_triggers) == 1
-    assert table.unparsed_triggers[0][0] == "scratch_trig_from_bump"
+    assert len(table.get_diagnostics(CatalogDiagnosticCode.TRIGGER)) == 1
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER)[0].name == "scratch_trig_from_bump"
 
 
 @requires_features(dialect="postgresql")
@@ -1237,7 +1232,7 @@ async def test_generate_model_source_reconstructs_trigger_with_quoted_mixed_case
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig_case")
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     assert len(table.triggers) == 1
     trigger = table.triggers[0]
     assert trigger.on == 'UPDATE OF "mixedCol"'
@@ -1256,7 +1251,7 @@ async def test_generate_model_source_reconstructs_trigger_with_quoted_mixed_case
     )
     state = State()
     try:
-        await apply_operations("models", state, create_op, schema_editor=editor)
+        state = await apply_operations("models", state, create_op, schema_editor=editor)
         await connection.execute_script('ALTER TABLE scratch_trig_case_copy ADD COLUMN "mixedCol" int')
         renamed_trigger = trigger.__class__(
             name="scratch_trig_case_copy_bump", on=trigger.on, body=trigger.body, timing=trigger.timing
@@ -1282,7 +1277,7 @@ async def test_generate_model_source_reconstructs_sqlite_trigger(connection):
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig")
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     assert len(table.triggers) == 1
     trigger = table.triggers[0]
     assert trigger.name == "scratch_trig_bump"
@@ -1319,7 +1314,7 @@ async def test_generate_model_source_reconstructs_the_condition_of_a_sqlite_trig
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_trig_when")
 
-    assert table.unparsed_triggers == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.TRIGGER) == []
     [trigger] = table.triggers
     assert trigger.when.sql == expected_when
 
@@ -1812,12 +1807,10 @@ async def test_generate_model_source_reconstructs_postgis_geography_field(connec
     """A PostGIS geography(Point,4326) column reports as data_type == "USER-DEFINED" (same as an
     enum) with udt_name == "geography" - it used to fall into the same generic ambiguous/
     TextField fallback as any other unrecognized user-defined type, losing geospatial semantics
-    entirely. It's a real, unambiguous hare-orm field (PostGISField's only supported shape) and
+    entirely. It's a real, unambiguous hare-orm field (a geography point with SRID 4326) and
     must be reconstructed as one, not left as a TODO."""
-    try:
-        await connection.execute_script("CREATE EXTENSION IF NOT EXISTS postgis")
-    except Exception:
-        pytest.skip("PostGIS extension not installable on this Postgres")
+    await PostgresqlExtensions.require(connection, "postgis")
+    await connection.execute_script("CREATE EXTENSION IF NOT EXISTS postgis")
     await connection.execute_script(
         "CREATE TABLE scratch_geography (id serial primary key, location geography(Point,4326))"
     )
@@ -1826,14 +1819,17 @@ async def test_generate_model_source_reconstructs_postgis_geography_field(connec
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
 
     compile(source, "<generated>", "exec")
-    assert "from hare.dialects.postgresql.fields import PostGISField" in source
-    assert "location = PostGISField(null=True)" in source
+    assert "from hare.gis.fields import PointField" in source
+    assert "location = PointField(" in source
+    assert "geography=True" in source
     assert "TODO" not in source
 
     generated_cls = await _load_generated_model(source, "ScratchGeography")
-    from hare.dialects.postgresql.fields.postgis_field import PostGISField
+    from hare.gis import PointField
 
-    assert isinstance(generated_cls._meta.fields_map["location"], PostGISField)
+    field = generated_cls._meta.fields_map["location"]
+    assert isinstance(field, PointField)
+    assert field.geography and field.srid == 4326 and field.null
 
 
 @requires_features(dialect="postgresql")
@@ -1844,10 +1840,8 @@ async def test_generate_model_source_reconstructs_vector_field(connection):
     any other unrecognized user-defined type, losing both the real field type AND the dimension
     count (VectorField's dimensions= is a required constructor argument). Must be reconstructed
     as VectorField(dimensions=768), not left as a TODO."""
-    try:
-        await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
-    except Exception:
-        pytest.skip("pgvector extension not installable on this Postgres")
+    await PostgresqlExtensions.require(connection, "vector")
+    await connection.execute_script("CREATE EXTENSION IF NOT EXISTS vector")
     await connection.execute_script("CREATE TABLE scratch_vector (id serial primary key, embedding vector(768))")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_vector")
@@ -1870,7 +1864,7 @@ async def test_generate_model_source_reconstructs_vector_field(connection):
 # Postgres expression indexes: the indkey/pg_attribute join used to silently drop an
 # expression-index term (attnum = 0 never matches pg_attribute) with no fallback marker. Now
 # reconstructed via Index(RawSQLTerm(...), ...) - hare.ddl.raw_sql_term.RawSQLTerm was
-# already used elsewhere (MigrationWriter.render_value(), for any value with its own get_sql())
+# already used elsewhere (DeclarationValueSerializer.render_value(), for any value with its own get_sql())
 # but inspectdb itself never reached for it, falling back to a TODO comment unconditionally
 # instead of actually reconstructing the index.
 # ============================================================================
@@ -1887,7 +1881,7 @@ async def test_generate_model_source_reconstructs_pure_expression_index(connecti
     await connection.execute_script("CREATE INDEX idx_scratch_expr_lower ON scratch_expr_index (lower(name))")
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_expr_index")
-    assert table.unparsed_indexes == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.INDEX) == []
     assert len(table.indexes) == 1
     assert table.indexes[0].expression_terms == ["lower(name)"]
     assert table.indexes[0].columns == []
@@ -1899,7 +1893,7 @@ async def test_generate_model_source_reconstructs_pure_expression_index(connecti
 
     generated_cls = await _load_generated_model(source, "ScratchExprIndex")
     assert len(generated_cls._meta.indexes) == 1
-    assert generated_cls._meta.indexes[0].field_names == ["(lower(name))"]
+    assert generated_cls._meta.indexes[0].get_key_names(generated_cls) == ["(lower(name))"]
 
 
 @requires_features(dialect="postgresql")
@@ -1919,7 +1913,7 @@ async def test_generate_model_source_reconstructs_mixed_expression_index(connect
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_expr_mixed")
-    assert table.unparsed_indexes == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.INDEX) == []
     # must not show up as a (wrong, partial) Index(fields=['category'])
     assert not any(index.columns == ["category"] for index in table.indexes)
     assert len(table.indexes) == 1
@@ -1933,7 +1927,7 @@ async def test_generate_model_source_reconstructs_mixed_expression_index(connect
     ) in source
 
     generated_cls = await _load_generated_model(source, "ScratchExprMixed")
-    assert generated_cls._meta.indexes[0].field_names == ["(category)", "(lower(name))"]
+    assert generated_cls._meta.indexes[0].get_key_names(generated_cls) == ["(category)", "(lower(name))"]
 
 
 @requires_features(dialect="postgresql")
@@ -1942,7 +1936,7 @@ async def test_generate_model_source_falls_back_on_expression_index_with_opclass
     """An expression term combined with a non-default operator class can't round-trip through
     Index(*expressions) either: Postgres's own per-term ruleutils output
     (pg_get_indexdef(oid, colno, true)) never includes the opclass suffix, and there's no valid
-    way to splice it back in - Index.field_names wraps every expression term in its own parens,
+    way to splice it back in - Index.get_key_names() wraps every expression term in its own parens,
     and `(col opclass)` (opclass INSIDE the parens) is a Postgres syntax error; only `(col)
     opclass` (outside) is valid. Stays in unparsed_indexes, honestly flagged, rather than a
     silently wrong/truncated RawSQLTerm."""
@@ -1953,7 +1947,7 @@ async def test_generate_model_source_falls_back_on_expression_index_with_opclass
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_expr_opclass")
     assert table.indexes == []
-    names = {name for name, _ in table.unparsed_indexes}
+    names = {diagnostic.name for diagnostic in table.get_diagnostics(CatalogDiagnosticCode.INDEX)}
     assert "idx_scratch_expr_opclass" in names
 
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
@@ -2030,7 +2024,7 @@ async def test_generate_model_source_reconstructs_exclusion_constraint_with_expr
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_excl_expr")
-    assert table.unparsed_exclusion_constraints == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.EXCLUSION_CONSTRAINT) == []
     (constraint,) = table.exclusion_constraints
     assert constraint.name == "excl_expr_mixed"
     assert constraint.expressions[0] == ("resource", "=")
@@ -2256,7 +2250,7 @@ async def test_generate_model_source_reconstructs_composite_foreign_key(connecti
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_composite_fk_child2")
-    assert table.unparsed_foreign_keys == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY) == []
     assert "parent_a" not in table.foreign_keys
     assert "parent_b" not in table.foreign_keys
     assert len(table.composite_foreign_keys) == 1
@@ -2513,7 +2507,7 @@ async def test_generate_model_source_falls_back_when_composite_fk_targets_non_pk
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_composite_fk_child4")
     assert table.composite_foreign_keys == []
-    assert len(table.unparsed_foreign_keys) == 1
+    assert len(table.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY)) == 1
 
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
     compile(source, "<generated>", "exec")
@@ -2541,8 +2535,8 @@ async def test_composite_foreign_key_is_surfaced_as_unparsed(connection):
     assert "pa" not in table.foreign_keys
     assert "pb" not in table.foreign_keys
     assert table.composite_foreign_keys == []
-    assert len(table.unparsed_foreign_keys) == 1
-    _, columns = table.unparsed_foreign_keys[0]
+    assert len(table.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY)) == 1
+    columns = table.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY)[0].columns
     assert set(columns) == {"pa", "pb"}
 
     source = ModelSourceGenerator.generate_model_source(table, connection.dialect.name)
@@ -2621,10 +2615,8 @@ async def test_inspect_builds_a_model_without_primary_key_for_a_table_with_none(
     ],
 )
 @pytest.mark.asyncio
-async def test_inspect_skips_a_junction_table_shaped_table(connection, suffix, unique_clause):
-    """Every column is a foreign key, no other columns - hare-orm's own recognizable through-table
-    shape, so it's skipped with an explanatory comment instead of raising a model without a
-    primary key like an ordinary table would, regardless of a unique index being present."""
+async def test_inspect_keeps_a_junction_table_without_its_targets(connection, suffix, unique_clause):
+    """Without the target metadata, a junction remains an explicit keyless model."""
     junction_table = f"scratch_junction_{suffix}"
     await connection.execute_script("CREATE TABLE scratch_a (id INTEGER PRIMARY KEY)")
     await connection.execute_script("CREATE TABLE scratch_b (id INTEGER PRIMARY KEY)")
@@ -2635,7 +2627,10 @@ async def test_inspect_skips_a_junction_table_shaped_table(connection, suffix, u
     )
     try:
         source = await SchemaInspector.inspect(connection, tables=[junction_table])
-        assert "class " not in source
+        assert "class ScratchJunction" in source
+        assert "primary_key = None" in source
+        assert "ManyToManyField(" not in source
+        assert ("UniqueConstraint(" in source) is bool(unique_clause)
         assert junction_table in source
     finally:
         await connection.execute_script(f"DROP TABLE IF EXISTS {junction_table}")
@@ -2667,8 +2662,8 @@ async def test_a_unique_index_over_every_column_stays_a_unique_index_of_a_model_
 
 @pytest.mark.asyncio
 async def test_generate_model_source_skip_m2m_through_tables_false_builds_a_real_model(connection):
-    """generate_model_source()'s default (skip_many_to_many_through_tables=True, matching `hare
-    inspectdb`'s own CLI behavior) skips an M2M-through-shaped table with a NOTE comment. With
+    """generate_model_source()'s default (skip_many_to_many_through_tables=True) skips a table with a
+    possible M2M-through shape using only that table's metadata, with a NOTE comment. With
     skip_many_to_many_through_tables=False (for a caller like a runtime table browser that must be able to
     open ANY discovered table), the table - no PRIMARY KEY - becomes a usable model without one, its keys
     relations and its unique index kept."""
@@ -2800,7 +2795,7 @@ async def test_inspect_table_reconstructs_sqlite_stored_generated_column(connect
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_rect")
-    assert table.unparsed_generated_columns == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.GENERATED_COLUMN) == []
     column_names = {column.name for column in table.columns}
     assert column_names == {"id", "width", "height", "area"}
     area = next(column for column in table.columns if column.name == "area")
@@ -2832,7 +2827,7 @@ async def test_inspect_table_reconstructs_sqlite_virtual_generated_column(connec
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_rect_virtual")
-    assert table.unparsed_generated_columns == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.GENERATED_COLUMN) == []
     area = next(column for column in table.columns if column.name == "area")
     assert area.generated_expression == "width * height"
     assert area.generated_stored is False
@@ -2848,21 +2843,18 @@ async def test_inspect_table_reconstructs_sqlite_virtual_generated_column(connec
 
 @pytest.mark.database_independent
 def test_parse_sqlite_generated_column_expression_returns_none_on_unbalanced_parens():
-    """Direct unit test of the fallback path: table_xinfo's own "hidden" flag can say a column IS
-    generated even when this file's own best-effort text parsing can't confidently extract the
-    expression (e.g. genuinely unusual formatting this regex doesn't anticipate, or a truncated/
-    malformed CREATE TABLE text) - must return None (surfaced by the caller as an
-    unparsed_generated_columns comment), not raise or guess."""
+    """Incomplete catalog source does not invent a generated expression."""
     unbalanced_sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, area INTEGER GENERATED ALWAYS AS (a * b"
-    assert SqliteIntrospector._parse_sqlite_generated_column_expression(unbalanced_sql, "area") is None
-    assert SqliteIntrospector._parse_sqlite_generated_column_expression("CREATE TABLE t (id INTEGER)", "area") is None
+    assert SqliteColumnDeclarations.get_columns(unbalanced_sql, {"area"}) == {}
+    assert SqliteColumnDeclarations.get_generated_expression("INTEGER AS (a * b") is None
+    assert SqliteColumnDeclarations.get_generated_expression("INTEGER") is None
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_inspect_table_reconstructs_postgres_stored_generated_column(connection):
     """Unlike SQLite (whose PRAGMA table_info hides a generated column entirely, needing a
-    regex over the raw CREATE TABLE text to recover its expression), Postgres's own
+    catalog tokens to recover its expression), Postgres's own
     information_schema.columns reports a GENERATED ALWAYS AS (...) column's expression text
     directly - inspectdb used to never read it at all, silently reconstructing the column as an
     ordinary writable field the DB would reject the moment an INSERT actually named it."""
@@ -2925,7 +2917,7 @@ async def test_inspect_table_reconstructs_sqlite_named_check_constraint(connecti
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_product")
-    assert table.unparsed_check_constraints == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.CHECK_CONSTRAINT) == []
     assert len(table.check_constraints) == 1
     constraint = table.check_constraints[0]
     assert constraint.name == "price_positive"
@@ -2952,7 +2944,7 @@ async def test_inspect_table_reconstructs_sqlite_unnamed_check_constraint_synthe
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_product_unnamed")
-    assert table.unparsed_check_constraints == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.CHECK_CONSTRAINT) == []
     assert len(table.check_constraints) == 1
     assert table.check_constraints[0].check == RawSQLTerm("price > 0")
     assert table.check_constraints[0].name == "scratch_product_unnamed_check_1"
@@ -2972,7 +2964,7 @@ async def test_inspect_table_reconstructs_postgres_check_constraint(connection):
     )
 
     table = await DatabaseCatalog.inspect_table(connection, "scratch_product_pg")
-    assert table.unparsed_check_constraints == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.CHECK_CONSTRAINT) == []
     assert len(table.check_constraints) == 1
     constraint = table.check_constraints[0]
     assert constraint.name == "price_positive"
@@ -3089,11 +3081,12 @@ async def test_generate_model_source_renames_columns_reserved_by_model(connectio
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
-async def test_inspect_nonexistent_schema_raises(connection):
+@pytest.mark.parametrize("tables", [None, ["tournament"]])
+async def test_inspect_nonexistent_schema_raises(connection, tables):
     from hare.inspectdb import SchemaNotFoundError
 
     with pytest.raises(SchemaNotFoundError):
-        await SchemaInspector.inspect(connection, schema="no_such_schema_for_inspectdb")
+        await SchemaInspector.inspect(connection, tables=tables, schema="no_such_schema_for_inspectdb")
 
 
 @requires_features(dialect="sqlite")
@@ -3116,10 +3109,33 @@ def test_parse_sqlite_unique_constraint_names_reads_table_level_constraints():
         'CONSTRAINT "uq_t_ab" UNIQUE ("a", "b"), CONSTRAINT uq_t_b UNIQUE (b), CONSTRAINT "ck_t" CHECK (a > 0))'
     )
 
-    assert SqliteIntrospector._parse_sqlite_unique_constraint_names(table_sql) == {
+    assert SqliteConstraintClauses.get_unique_names(table_sql) == {
         ("a", "b"): ["uq_t_ab"],
         ("b",): ["uq_t_b"],
     }
+
+
+@pytest.mark.database_independent
+def test_sqlite_constraint_clauses_preserve_quoted_names_and_expressions():
+    table_sql = """CREATE TABLE records (
+        "a,b" INT CONSTRAINT "positive" CHECK ("a,b" > 0),
+        "right)" TEXT DEFAULT 'CONSTRAINT fake UNIQUE (missing) CHECK (0)',
+        /* CONSTRAINT ignored UNIQUE (missing) CHECK (0) */
+        CONSTRAINT "unique, pair" UNIQUE ("a,b", "right)"),
+        CHECK (coalesce("right)", 'CHECK (0)') <> '')
+    )"""
+    assert SqliteConstraintClauses.get_unique_names(table_sql) == {
+        ("a,b", "right)"): ["unique, pair"],
+    }
+    constraints, unparsed = SqliteConstraintClauses.get_checks("records", table_sql)
+    assert not unparsed
+    assert [(constraint.name, constraint.check.sql) for constraint in constraints] == [
+        ("positive", '"a,b" > 0'),
+        ("records_check_2", """coalesce("right)", 'CHECK (0)') <> ''"""),
+    ]
+    constraints, unparsed = SqliteConstraintClauses.get_checks("records", "CREATE TABLE records (a INT CHECK (a > 0")
+    assert not constraints
+    assert unparsed == [("records_check_1", "CHECK (a > 0")]
 
 
 @requires_features(dialect="sqlite")
@@ -3198,10 +3214,10 @@ async def test_inspect_whole_schema_reads_postgres_catalog_with_fixed_query_coun
         await SchemaInspector.inspect(connection, tables=["tournament"])
 
     assert "class Tournament(Model):" in source
-    # The whole schema reads its views, its functions and its sequences of no table, and the grants on
-    # them, once more each, to name them.
+    # The whole schema additionally lists table names, views, unattached functions and sequences,
+    # and the grants on those functions and sequences: six fixed reads.
     assert whole_schema_counter.query_count <= 19
-    assert whole_schema_counter.query_count == single_table_counter.query_count + 5
+    assert whole_schema_counter.query_count == single_table_counter.query_count + 6
 
 
 @requires_features(dialect="postgresql")
@@ -3218,16 +3234,10 @@ async def test_inspect_tables_matches_inspect_table_per_table(connection):
 
 
 @pytest.mark.asyncio
-async def test_inspect_tables_raises_on_missing_table(connection):
+@pytest.mark.parametrize("tables", [["scratch_no_such_table"], ["tournament", "scratch_no_such_table"]])
+async def test_inspect_tables_raises_on_missing_table(connection, tables):
     with pytest.raises(TableNotFoundError):
-        await DatabaseCatalog.inspect_tables(connection, ["tournament", "scratch_no_such_table"])
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_inspect_tables_raises_on_missing_table_without_existence_check(connection):
-    with pytest.raises(TableNotFoundError):
-        await DatabaseCatalog.inspect_tables(connection, ["scratch_no_such_table"], verify_exists=False)
+        await DatabaseCatalog.inspect_tables(connection, tables)
 
 
 @requires_features(dialect="postgresql")
@@ -3304,7 +3314,7 @@ async def test_inspect_foreign_keys_to_a_partitioned_table(connection):
             (composite_fk.field_name, composite_fk.columns, composite_fk.target_table)
             for composite_fk in table.composite_foreign_keys
         ] == [("target", ("target_id", "target_day"), "scratch_part_target")]
-        assert table.unparsed_foreign_keys == []
+        assert table.get_diagnostics(CatalogDiagnosticCode.FOREIGN_KEY) == []
         assert table.foreign_keys["code"].target_table == "scratch_by_code"
 
 
@@ -3363,17 +3373,36 @@ async def test_generate_model_source_reads_the_update_action_and_the_deferral_of
 
 @pytest.mark.asyncio
 async def test_a_through_table_of_the_run_is_rebuilt_as_a_many_to_many_field(connection):
-    """A many-to-many through table was skipped with a note, and the generated module drifted
-    ("Untracked table") until the field was declared by hand - it is declared on the model of its
-    first side, the table named in a note."""
+    """Collapse only when the reconstructed targets preserve the through columns' storage types."""
     source = await SchemaInspector.inspect(connection, tables=["event", "team", "event_team"])
-    assert "ManyToManyField('models.Team', through='event_team'" in source
-    assert "backward_key='idEvent'" in source
-    assert "# NOTE: table 'event_team' is the through table of the ManyToManyField Event." in source
-    assert "class EventTeam(" not in source
-    # Without the other side in the run, the table keeps its note.
+    if connection.dialect.name == "sqlite":
+        # INTEGER rowid metadata cannot distinguish Event's original BigIntField
+        # from IntField, but its referencing column is still declared BIGINT.
+        assert "class EventTeam(" in source
+        assert "the foreign key column has type 'BIGINT'" in source
+        assert "event.event_id supplies 'INT'" in source
+        namespace = {}
+        exec(source, namespace)  # noqa: S102 - source generated by inspectdb
+        through = namespace["EventTeam"]
+        relations = [
+            field for field in through._meta.fields_map.values() if isinstance(field, ForeignKeyFieldInstance)
+        ]
+        assert {field.model_name for field in relations} == {"models.Event", "models.Team"}
+        assert all(field.on_delete is OnDelete.CASCADE for field in relations)
+        assert next(field for field in relations if field.model_name == "models.Event").source_field == "idEvent"
+        assert any(
+            index.unique and set(index.fields) == {field.model_field_name for field in relations}
+            for index in through._meta.indexes
+        )
+        assert not through._meta.has_primary_key
+    else:
+        assert "ManyToManyField('models.Team', through='event_team'" in source
+        assert "backward_key='idEvent'" in source
+        assert "# NOTE: table 'event_team' is the through table of the ManyToManyField Event." in source
+        assert "class EventTeam(" not in source
+    # Without the other side in the run, the table remains an explicit model.
     alone = await SchemaInspector.inspect(connection, tables=["event", "event_team"])
-    assert "looks like a ManyToManyField through table" in alone
+    assert "class EventTeam(" in alone
 
 
 @pytest.mark.asyncio

@@ -87,7 +87,8 @@ class Prefetch:
     ) -> None:
         """Adds one ``prefetch_related()`` lookup to what a query prefetches: a path through a relation
         goes to the plain relation's prefetch, a path starting with a ``Prefetch``'s ``to_attribute`` to
-        that prefetch's query. A changed container is replaced, never changed in place.
+        a dependent request keyed by that attribute. Source querysets remain unchanged;
+        a changed request container is replaced, never changed in place.
 
         Args:
             model: The model the lookup starts from.
@@ -112,16 +113,15 @@ class Prefetch:
             else nested_path
         )
         if first_name not in meta.fetch_fields:
-            for field_name, entries in prefetch_queries.items():
-                for index, (to_attribute, queryset) in enumerate(entries):
+            for entries in prefetch_queries.values():
+                for to_attribute, queryset in entries:
                     if to_attribute != first_name:
                         continue
                     if nested_lookup:
-                        prefetch_queries[field_name] = [
-                            *entries[:index],
-                            (to_attribute, queryset.prefetch_related(nested_lookup)),
-                            *entries[index + 1 :],
-                        ]
+                        dependencies = {*prefetch_map.get(first_name, ()), nested_lookup}
+                        # Validate the complete dependent request without rewriting the source query.
+                        Prefetch.add_lookups(queryset.model, {}, {}, dependencies)
+                        prefetch_map[first_name] = dependencies
                     return
             if first_name in meta.fields_map:
                 raise FieldError(f"Field {first_name} on {meta.full_name} is not a relation")

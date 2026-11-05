@@ -13,8 +13,6 @@ from hare.dialects.sqlite.functions.datetime.sqlite_local_now import SqliteLocal
 from hare.dialects.sqlite.functions.sqlite_native_functions import SqliteNativeFunctions
 from hare.time import Timezone
 
-REQUIRES = ("native",)
-
 pytestmark = [
     pytest.mark.database_independent,
 ]

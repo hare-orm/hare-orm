@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import datetime
-from collections.abc import Callable, Sequence
-from typing import Any, ClassVar
+from collections.abc import Sequence
+from typing import Any
 
-from clickhouse_driver.columns.datetimecolumn import DateTime64Column, DateTimeColumn
+from clickhouse_driver.columns.datetimecolumn import DateTimeColumn
 
 from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import (
     CLICKHOUSE_DRIVER_MICROSECOND_DIGITS,
@@ -21,25 +21,12 @@ class ClickhouseDriverMomentColumns:
     is read by the library, from its ticks only where the library fails.
     """
 
-    #: The library's own reading of each column class.
-    library_readers: ClassVar[dict[type, Callable[..., Any]]] = {}
-
-    @classmethod
-    def install(cls) -> None:
-        """Replaces the reading of the library's ``DateTime64`` and ``DateTime`` columns - once."""
-        if cls.library_readers:
-            return
-        cls.library_readers[DateTimeColumn] = DateTimeColumn.__dict__["after_read_items"]
-        cls.library_readers[DateTime64Column] = DateTime64Column.__dict__["after_read_items"]
-        DateTimeColumn.after_read_items = cls.read_whole_seconds
-        DateTime64Column.after_read_items = cls.read_moments
-
     @staticmethod
     def read_whole_seconds(column: Any, items: Sequence[int], nulls_map: Sequence[int] | None = None) -> Any:
         """A ``DateTime`` column read by the library - from its ticks where Windows refuses a moment
         before 1970."""
         try:
-            return ClickhouseDriverMomentColumns.library_readers[DateTimeColumn](column, items, nulls_map)
+            return DateTimeColumn.after_read_items(column, items, nulls_map)
         except (OSError, OverflowError, ValueError):
             return ClickhouseDriverMomentColumns.read_moments(column, items, nulls_map)
 

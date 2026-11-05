@@ -11,25 +11,9 @@ import pytest
 import pytest_asyncio
 
 from hare.contrib.test import RollbackIsolation
+from hare.contrib.test.databases.postgresql.reusable_test_schemas import ReusableTestSchemas
 from hare.contrib.test.isolated_contexts import hare_test_context
-from hare.core.hare_context import HareContext
-
-
-async def _reset_shared_db_for_module(ctx: HareContext) -> None:
-    """Wipes every table in one batched TRUNCATE ... RESTART IDENTITY CASCADE, resetting every
-    sequence back to 1 - same helper as the root conftest.py's own db_module uses (duplicated
-    rather than imported: pytest's default "prepend" import mode can resolve a bare `import
-    conftest` to whichever same-named conftest.py module happens to load first across the whole
-    tree, not reliably this project's root one - confirmed live, a full-suite collection raised
-    ImportError under that import)."""
-    if not ctx.apps:
-        return
-    tables = list(dict.fromkeys(model._meta.db_table for model in ctx.apps.get_models_iterable()))
-    if not tables:
-        return
-    quote_char = next(iter(ctx.apps.get_models_iterable()))._meta.connection.query_class.SQL_CONTEXT.quote_char
-    quoted_tables = ", ".join(f"{quote_char}{table}{quote_char}" for table in tables)
-    await ctx.get_connection().execute_script(f"TRUNCATE TABLE {quoted_tables} RESTART IDENTITY CASCADE")  # nosec
+from tests.utils.postgresql_extensions import PostgresqlExtensions
 
 
 def skip_if_not_postgres():
@@ -48,7 +32,7 @@ async def db_module_postgres(_shared_test_db_url: str):
     conftest.py's own db_module - this fixture used to run its own independent
     hare_test_context() with a full CREATE DATABASE + schema generation per module, missed when
     that per-worker sharing was introduced for db_module itself (this file predates it and lives
-    outside its original scope). _reset_shared_db_for_module() gives the same "this file starts
+    outside its original scope). ReusableTestSchemas.reset_rows() gives the same "this file starts
     completely clean" guarantee a fresh-database-per-file used to give, at a fraction of the cost
     - see db_module's own docstring in the root conftest.py for the full rationale.
     """
@@ -62,7 +46,7 @@ async def db_module_postgres(_shared_test_db_url: str):
         _generate_schemas=False,
         _drop_db_on_exit=False,
     ) as ctx:
-        await _reset_shared_db_for_module(ctx)
+        await ReusableTestSchemas.reset_rows(ctx.get_connection())
         yield ctx
 
 
@@ -121,14 +105,14 @@ async def db_search(db_tsvector_module):
 @pytest_asyncio.fixture(scope="module")
 async def db_postgis_module():
     """
-    Module-scoped fixture for PostGISField/STDistance/STDWithin tests - creates the database,
+    Module-scoped fixture for geography PointField/Distance/DWithin tests - creates the database,
     schema and postgis extension ONCE per file instead of once per test.
 
     Uses models defined in tests.dialects.postgresql.models_postgis module. Same sequence as
     hare_test_context(), with one extra step (CREATE EXTENSION IF NOT EXISTS postgis) run
-    between database creation and schema generation - PostGISField's column type doesn't exist
-    until that runs. Skips (not fails) if the extension isn't installable, since most Postgres
-    test setups don't have it (needs the postgis/postgis image, not plain postgres).
+    between database creation and schema generation - PointField's column type doesn't exist
+    until that runs. Missing packages fail unless explicitly optional for a local run;
+    extension installation and connection errors always fail.
     """
     skip_if_not_postgres()
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
@@ -139,10 +123,8 @@ async def db_postgis_module():
         connection_label="models",
         _generate_schemas=False,
     ) as ctx:
-        try:
-            await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS postgis;")
-        except Exception as exc:
-            pytest.skip(f"postgis extension not available: {exc}")
+        await PostgresqlExtensions.require(ctx.get_connection(), "postgis")
+        await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS postgis;")
         await ctx.generate_schemas(safe=False)
         yield ctx
 
@@ -150,7 +132,7 @@ async def db_postgis_module():
 @pytest_asyncio.fixture(scope="module")
 async def db_gis_module():
     """Module-scoped database of the GeometryField models - generate_schemas() creates the postgis
-    extension; skips when the server can't install it."""
+    extension. The selected profile requires PostGIS unless explicitly optional locally."""
     skip_if_not_postgres()
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
     async with hare_test_context(
@@ -160,10 +142,8 @@ async def db_gis_module():
         connection_label="models",
         _generate_schemas=False,
     ) as ctx:
-        try:
-            await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS postgis;")
-        except Exception as exc:
-            pytest.skip(f"postgis extension not available: {exc}")
+        await PostgresqlExtensions.require(ctx.get_connection(), "postgis")
+        await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS postgis;")
         await ctx.generate_schemas(safe=False)
         yield ctx
 
@@ -177,7 +157,7 @@ async def db_gis(db_gis_module):
 
 @pytest_asyncio.fixture(scope="function")
 async def db_postgis(db_postgis_module):
-    """Fixture for PostGISField/STDistance/STDWithin tests, with transaction rollback cleanup
+    """Fixture for geography PointField/Distance/DWithin tests, with transaction rollback cleanup
     between tests."""
     async with RollbackIsolation(db_postgis_module) as ctx:
         yield ctx
@@ -406,9 +386,8 @@ async def db_vector_module():
 
     Uses models defined in tests.dialects.postgresql.models_vector module. Same sequence as
     db_postgis_module() (CREATE EXTENSION run manually between database creation and schema
-    generation - VectorField's column type doesn't exist until that runs). Skips (not fails) if
-    the extension isn't installable, since most Postgres test setups don't have pgvector
-    installed (needs the pgvector/pgvector image, not plain postgres).
+    generation - VectorField's column type doesn't exist until that runs). A missing package
+    skips only when explicitly optional for a local run; installation errors always fail.
     """
     skip_if_not_postgres()
     db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
@@ -419,10 +398,8 @@ async def db_vector_module():
         connection_label="models",
         _generate_schemas=False,
     ) as ctx:
-        try:
-            await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS vector;")
-        except Exception as exc:
-            pytest.skip(f"vector extension not available: {exc}")
+        await PostgresqlExtensions.require(ctx.get_connection(), "vector")
+        await ctx.get_connection().execute_script("CREATE EXTENSION IF NOT EXISTS vector;")
         await ctx.generate_schemas(safe=False)
         yield ctx
 

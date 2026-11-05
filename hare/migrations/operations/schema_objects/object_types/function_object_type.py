@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from hare.ddl.enums import GrantTarget
@@ -23,14 +22,11 @@ class FunctionObjectType(SchemaObjectType):
     reaches_other_tables: ClassVar[bool] = True
 
     @classmethod
-    def renamed(cls, schema_object: Any, new_name: str) -> Any:
-        return dataclasses.replace(schema_object, name=new_name)
-
-    @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
         cls.raise_if_unsupported(editor)
+        grants = editor.grants.get_grant_again_sqls(model, GrantTarget.FUNCTION, schema_object.name)
         await editor.database_functions.create_database_function(model, schema_object)
-        await editor.grants.grant_again(model, GrantTarget.FUNCTION, schema_object.name)
+        await editor.run_sqls(grants)
 
     @classmethod
     async def remove(

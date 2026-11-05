@@ -240,9 +240,6 @@ class ChangeEvents:
             events: The events.
         """
         # The writes an observer makes report their own events.
-        token = cls.reported_as_a_whole.set(False)
-        try:
+        with cls.reporting_separately():
             for event in events:
                 await Observers.deliver(event)
-        finally:
-            cls.reported_as_a_whole.reset(token)

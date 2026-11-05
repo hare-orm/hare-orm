@@ -26,6 +26,7 @@ class BinaryField(Field[TBinary]):
     argument_value_type = BINARY_VALUE_TYPE
 
     field_type = bytes
+    accepted_value_types = (bytearray, memoryview)
 
     SQL_TYPE = "BLOB"
     supported_lookups = BINARY_FIELD_SUPPORTED_LOOKUPS

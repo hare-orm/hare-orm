@@ -1,5 +1,17 @@
 from __future__ import annotations
 
+from hare.query.plans.enums import PlanKeyForm, PlanPartType
+
+#: Parts read after nested descriptions have prepared their structural state.
+KEY_ONLY_PLAN_PART_TYPES = frozenset(
+    {PlanPartType.KEY, PlanPartType.KEY_METHOD, PlanPartType.PLAN_KEY, PlanPartType.KEYS}
+)
+
+#: Query slots that contribute no bound parameters.
+KEY_ONLY_PLAN_KEY_FORMS = frozenset(
+    {PlanKeyForm.VALUE, PlanKeyForm.TUPLE, PlanKeyForm.SORTED_TUPLE, PlanKeyForm.PRESENCE, PlanKeyForm.METHOD}
+)
+
 #: Marks the origin of a value a build may bind nowhere - of a condition folded into JOINs it may not
 #: make (``PlanParts.get_optional_origins()``): such a value with no reference binds nothing.
 OPTIONAL_VALUE_ORIGIN = "optional"

@@ -17,7 +17,6 @@ from hare.dialects.sqlite.constants import (
 )
 from hare.dialects.sqlite.indexes.constants import (
     SQLITE_FULL_TEXT_DELETE_COMMAND,
-    SQLITE_FULL_TEXT_MAX_TOKENIZER_LENGTH,
     SQLITE_FULL_TEXT_REBUILD_COMMAND,
     SQLITE_FULL_TEXT_TOKENIZER_DESCRIPTION,
 )
@@ -57,15 +56,9 @@ class FullTextIndex(SeparateTableIndex):
         super().__init__(fields=tuple(fields), name=name)
         if any(self.field_orders):
             raise ConfigurationError("FullTextIndex has no key order - its fields are named without '-'")
-        if tokenizer is not None and (
-            not isinstance(tokenizer, str)
-            or not tokenizer.strip()
-            or len(tokenizer) > SQLITE_FULL_TEXT_MAX_TOKENIZER_LENGTH
-            or "\x00" in tokenizer
-        ):
+        if tokenizer is not None and (not isinstance(tokenizer, str) or not tokenizer.strip() or "\x00" in tokenizer):
             raise ConfigurationError(
-                "FullTextIndex tokenizer must be non-empty text of at most "
-                f"{SQLITE_FULL_TEXT_MAX_TOKENIZER_LENGTH} characters, got "
+                "FullTextIndex tokenizer must be non-empty text without null bytes, got "
                 f"{ValueDescriptions.get_shown_value(tokenizer)}"
             )
         self.tokenizer = tokenizer
@@ -108,7 +101,7 @@ class FullTextIndex(SeparateTableIndex):
         Raises:
             UnSupportedError: No ``features.supports_full_text_index``.
         """
-        if not features.supports_full_text_index:
+        if not getattr(features, "supports_full_text_index", False):
             raise UnSupportedError(
                 f"FullTextIndex(fields={list(self.fields)!r}) can't be created on {database_name}: it needs "
                 "features.supports_full_text_index - SQLite's FTS5"

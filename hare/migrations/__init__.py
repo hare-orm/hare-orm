@@ -1,4 +1,4 @@
-"""Vendored migrations package (experimental)."""
+"""Migration declarations, state and execution APIs."""
 
 from __future__ import annotations
 

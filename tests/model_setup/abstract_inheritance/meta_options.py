@@ -1,9 +1,4 @@
-"""Companion models for tests/model_setup/abstract_inheritance/test_abstract_model_inheritance.py.
-
-Meta.ordering / Meta.unique_together / Meta.constraints (CheckConstraint) declared on an
-abstract base and inherited, aliased (not deep-copied) by ModelMeta, by two concrete siblings -
-round M already fixed the same class of bug for Meta.indexes (Index objects memoize their own
-expression resolution in place against whichever model calls get_expressions() first)."""
+"""Mutable Meta declarations inherited by sibling models keep independent snapshots."""
 
 from hare import fields
 from hare.ddl import RawSQLTerm

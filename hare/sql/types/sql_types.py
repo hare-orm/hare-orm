@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from hare.sql.types.sql_type import SqlType
-
 
 class SqlTypes:
     """The SQL types the builder casts to by name."""
@@ -15,4 +13,4 @@ class SqlTypes:
     TIMESTAMP = "TIMESTAMP"
     TIMESTAMPTZ = "TIMESTAMPTZ"
 
-    VARCHAR = SqlType("VARCHAR")
+    VARCHAR = "VARCHAR"

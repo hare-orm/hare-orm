@@ -22,20 +22,13 @@ from hare.query.expressions.joins.named_join import NamedJoin
 from hare.query.expressions.raw_sql import RawSQL
 from hare.query.expressions.subqueries.subquery import Subquery
 from hare.query.expressions.value import Value
-from hare.query.expressions.value_references.array_value_reference import ArrayValueReference
-from hare.query.expressions.value_references.encoded_value_reference import EncodedValueReference
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
-from hare.query.expressions.value_references.like_value_reference import LikeValueReference
 from hare.query.expressions.value_references.list_parameter_value_reference import ListParameterValueReference
 from hare.query.expressions.value_references.list_value_reference import ListValueReference
 from hare.query.expressions.value_references.literal_value_reference import LiteralValueReference
-from hare.query.expressions.value_references.open_range_value_reference import OpenRangeValueReference
-from hare.query.expressions.value_references.range_value_reference import RangeValueReference
-from hare.query.expressions.value_references.rebuilt_criterion_value_reference import RebuiltCriterionValueReference
 from hare.query.expressions.value_references.related_key_value_reference import RelatedKeyValueReference
 from hare.query.expressions.value_references.related_value_reference import RelatedValueReference
 from hare.query.expressions.value_references.row_list_value_reference import RowListValueReference
-from hare.query.expressions.value_references.scalar_value_reference import ScalarValueReference
 from hare.query.filters import FieldLookups
 from hare.query.filters.resolution.annotation_filters import AnnotationFilters
 from hare.query.filters.resolution.composite_key_filters import CompositeKeyFilters
@@ -62,15 +55,12 @@ from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from hare.models import Model
     from hare.query.expressions.conditions.q import Q
     from hare.query.expressions.value_references.composite_key_value_reference import CompositeKeyValueReference
-    from hare.query.expressions.value_references.value_reference_types import ValueReference
+    from hare.query.expressions.value_references.value_reference_types import FilterValueReference, ValueReference
     from hare.query.filters.lookups.field_lookup import FieldLookup
     from hare.query.lookup_info.lookup_info import LookupInfo
-    from hare.sql.terms.node import Node
 
 
 class FilterKwargs:
@@ -242,7 +232,6 @@ class FilterKwargs:
         Callable[..., Any] | None,
         Callable[..., Any],
         Any,
-        Term | None,
     ]:
         """Builds the criterion of a lookup on a field's value, or on a many-to-many or backward
         relation itself (joined to its through or related table).
@@ -258,13 +247,13 @@ class FilterKwargs:
             The criterion; the join a relation's lookup adds; the field compared (None for a
             relation, or for a value that is a SQL term); the field the value was converted by;
             the lookup's value encoder (None for the field's own conversion); the operator; the
-            converted value the criterion embeds; and the term it compares (None for a relation).
+            converted value the criterion embeds.
         """
         if lookup_info.target == LookupTarget.RELATION:
             criterion, join, operator, value = RelationFilters.get_relation_lookup_criterion(
                 expression_context, lookup_info, value, table, join_table
             )
-            return criterion, join, None, None, None, operator, value, None
+            return criterion, join, None, None, None, operator, value
         model = expression_context.model
         field_lookup = cast("FieldLookup", lookup_info.field_lookup)
         model_field = cast("Field[Any]", lookup_info.field)
@@ -296,7 +285,9 @@ class FilterKwargs:
                 value = value_encoder(value, model, encoder_field, expression_context.dialect)
             else:
                 value = expression_context.dialect.types.get_lookup_value(value_field, value, model)
-        operator = expression_context.dialect.filter_operators.get_operator(field_lookup)
+        operator = expression_context.dialect.filter_operators.get_operator(
+            field_lookup, expression_context.connection
+        )
         term: Term = table[
             model_field.source_field
             or model._meta.fields_db_projection.get(model_field.model_field_name)
@@ -322,7 +313,7 @@ class FilterKwargs:
         # `value` is the converted value the criterion embeds - a plan binds a later value only
         # where the criterion holds the encoder's own output (identity, not equality), see
         # FilterKwargs.get_regular_kwarg().
-        return criterion, None, field_object, encoder_field, value_encoder, operator, value, term
+        return criterion, None, field_object, encoder_field, value_encoder, operator, value
 
     @staticmethod
     def is_related_key_value(lookup_info: LookupInfo, value: Any) -> bool:
@@ -357,7 +348,7 @@ class FilterKwargs:
         criteria = (modifier.where_criterion, modifier.having_criterion)
         # A sensitive column, a subquery selecting one's value, or a value already hidden.
         if SensitiveFilterKeys.reads_sensitive_values(model, key) or any(
-            node.sensitive for criterion in criteria for node in cast("Iterator[Node]", criterion.nodes_())
+            node.sensitive for criterion in criteria for node in criterion.nodes_()
         ):
             for criterion in criteria:
                 FilterKwargs.hide_sensitive_values(criterion)
@@ -386,20 +377,7 @@ class FilterKwargs:
         table: Table,
         *,
         bindable: bool,
-    ) -> tuple[
-        QueryModifier,
-        ScalarValueReference
-        | ListValueReference
-        | ListParameterValueReference
-        | RangeValueReference
-        | OpenRangeValueReference
-        | RebuiltCriterionValueReference
-        | RelatedValueReference
-        | LikeValueReference
-        | ArrayValueReference
-        | EncodedValueReference
-        | None,
-    ]:
+    ) -> tuple[QueryModifier, FilterValueReference | RelatedValueReference | None]:
         """The modifier of a filter over the model's lookup path: the criterion of its lookup on the
         column it ends at, with the joins of the relations it crosses.
 
@@ -426,7 +404,7 @@ class FilterKwargs:
             )
             return modifier, nested_reference if bindable else None
 
-        criterion, join, field_object, cache_reference_field, value_encoder, operator, encoded_value, term = (
+        criterion, join, field_object, cache_reference_field, value_encoder, operator, encoded_value = (
             FilterKwargs.process_filter_kwarg(expression_context, lookup_info, value, table)
         )
         joins = [join] if join else []
@@ -480,16 +458,6 @@ class FilterKwargs:
         value_reference = FilterValues.get_value_reference(
             expression_context, criterion, operator, value, encoded_value, cache_reference_field, value_encoder
         )
-        if (
-            value_reference is None
-            and term is not None
-            and cast("FieldLookup", lookup_info.field_lookup).binds_by_rebuild
-        ):
-            # The criterion derives what it compares from the value - a later value builds it again.
-            converting_field = cache_reference_field if value_encoder is not None else lookup_info.value_field
-            return modifier, RebuiltCriterionValueReference(
-                criterion, operator, term, cast("Field[Any]", converting_field), value_encoder
-            )
         return modifier, value_reference
 
     @staticmethod
@@ -550,7 +518,9 @@ class FilterKwargs:
                     raise FieldError(annotation_output_field.get_unsupported_lookup_message())
         if field_lookup is None:
             raise LookupSupport.get_unknown_key_error(expression_context, key)
-        operator = expression_context.dialect.filter_operators.get_operator(field_lookup)
+        operator = expression_context.dialect.filter_operators.get_operator(
+            field_lookup, expression_context.connection
+        )
         parameter_converter, encoder_field = AnnotationFilters.get_parameter_converter(
             expression_context, field_lookup, annotation_output_field, value
         )

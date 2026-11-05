@@ -13,6 +13,33 @@ from hare.native.native_modules import NativeModules
 pytestmark = pytest.mark.database_independent
 
 
+@pytest.mark.requires("clickhouse-connect")
+@pytest.mark.parametrize(
+    ("type_name", "timezone"),
+    [
+        ("DateTime", None),
+        ("DateTime64(6)", None),
+        ("DateTime('Europe/Berlin')", "Europe/Berlin"),
+        ("DateTime64(6, 'UTC')", "UTC"),
+        ("LowCardinality(Nullable(DateTime64(6, 'Europe/Berlin')))", "Europe/Berlin"),
+    ],
+)
+def test_json_compact_moments_use_the_declared_timezone(type_name, timezone):
+    from hare.dialects.clickhouse.drivers.clickhouse_connect.client.clickhouse_json_compact_values import (
+        ClickhouseJsonCompactValues,
+    )
+
+    text = "2024-01-02 03:04:05.123456"
+    expected = datetime.datetime(2024, 1, 2, 3, 4, 5, 123456)
+    if timezone is not None:
+        expected = expected.replace(tzinfo=zoneinfo.ZoneInfo(timezone))
+    assert ClickhouseJsonCompactValues.get_value(type_name, text) == expected
+    assert ClickhouseJsonCompactValues.get_value(f"Array({type_name})", [text]) == [expected]
+    assert ClickhouseJsonCompactValues.get_value(f"Tuple(`recorded at` {type_name})", {"recorded at": text}) == (
+        expected,
+    )
+
+
 class MomentSubclass(datetime.datetime):
     pass
 

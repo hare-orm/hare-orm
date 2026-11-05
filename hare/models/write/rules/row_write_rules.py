@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import copy
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from hare.core.caching.model_cache import ModelCache
+from hare.core.caching.cache import Cache
 from hare.exceptions import FieldError, QueryError
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
 from hare.fields.database_default import DatabaseDefault
@@ -39,9 +38,6 @@ if TYPE_CHECKING:
     from hare.models import Model
 
 
-TModel = TypeVar("TModel", bound="Model")
-
-
 class RowWriteRules:
     """What one write of rows of a model writes - built once per model, write type and named fields, and kept:
 
@@ -49,7 +45,6 @@ class RowWriteRules:
       generic foreign key's branches), refused with one set of messages when the write can't set them;
     - the blind index of each encrypted field written, written with it;
     - the ``auto_now``/``auto_now_add`` stamps and the version bump the write makes itself;
-    - the positions of the ``sensitive=True`` values among the written ones;
     - the fields a report of the write names as changed - the ones the caller named.
 
     Args:
@@ -70,8 +65,8 @@ class RowWriteRules:
         QueryError: The write type can't set a field.
     """
 
-    #: The rules of each model, by write type, names and options.
-    RULES_CACHE: ClassVar[ModelCache[dict[tuple[Any, ...], RowWriteRules]]] = ModelCache()
+    #: Bounded rules of each model, by write type, names and options.
+    RULES_CACHE: ClassVar[Cache[RowWriteRules]] = Cache(Cache.max_size_from_env(), holds_sql=False)
     #: The compiled ``rust.native.rows`` - sets the values of many objects in one call; None where it isn't
     #: built.
     native_rows: ClassVar[Any] = NativeModules.rows
@@ -212,9 +207,7 @@ class RowWriteRules:
         """
         names = None if field_names is None else tuple(field_names)
         key = (write_type, names, method_name, stamps_named_fields, single_column_relations, finds_rows_by_key)
-        rules_by_key = cls.RULES_CACHE.get(model)
-        if rules_by_key is None:
-            rules_by_key = cls.RULES_CACHE[model] = {}
+        rules_by_key = cls.RULES_CACHE.get_model_bucket(model)
         try:
             rules = rules_by_key.get(key)
             hashable = True
@@ -333,15 +326,38 @@ class RowWriteRules:
             QueryError: The field is a blind index, the primary key or a generated field an update can't
                 set, the version or the soft-delete field of an update, the tenant of a conflict update.
         """
-        meta = self.model._meta
+        reason = self.get_refusal_reason(
+            self.model, name, self.write_type, self.method_name, finds_rows_by_key=self.finds_rows_by_key
+        )
+        if reason is not None:
+            raise QueryError(REFUSED_FIELD_MESSAGE.format(name=name, method=self.method_name, reason=reason))
+
+    @staticmethod
+    def get_refusal_reason(
+        model: type[Model],
+        name: str,
+        write_type: WriteType,
+        method_name: str,
+        *,
+        finds_rows_by_key: bool,
+    ) -> str | None:
+        """Describe why a stored field cannot be assigned, without preparing a write.
+
+        Runtime writes and typing descriptions share this policy. ``name`` is a
+        column name after relation expansion, or the ``pk`` shortcut. Query updates
+        may change individual composite-key columns; writes locating rows by key may not.
+        A missing reason means this assignment is allowed, independently of its value.
+        """
+        if name == "pk" and write_type is not WriteType.INSERT:
+            return PRIMARY_KEY_REASON
+        meta = model._meta
         field = meta.fields_map[name]
-        write_type = self.write_type
         source_name = getattr(field, "blind_index_source_field_name", None)
         reason: str | None = None
         if source_name is not None and meta.blind_index_fields.get(source_name) == name:
             reason = BLIND_INDEX_REASON.format(source=source_name)
         elif write_type is not WriteType.INSERT and (
-            name in meta.primary_key_attribute_names if self.finds_rows_by_key else field.pk
+            name in meta.primary_key_attribute_names if finds_rows_by_key else field.pk
         ):
             reason = PRIMARY_KEY_REASON
         elif field.generated and not (write_type is WriteType.INSERT and field.pk):
@@ -351,11 +367,10 @@ class RowWriteRules:
         elif write_type in {WriteType.UPDATE, WriteType.CONFLICT_UPDATE} and name == meta.soft_delete_field:
             reason = SOFT_DELETE_REASON
         elif write_type is WriteType.CONFLICT_UPDATE and meta.tenant_field is not None:
-            tenant_names = RowWriteRules.get_stored_field_names(self.model, [meta.tenant_field], self.method_name)
+            tenant_names = RowWriteRules.get_stored_field_names(model, [meta.tenant_field], method_name)
             if name in tenant_names:
                 reason = CONFLICT_TENANT_REASON
-        if reason is not None:
-            raise QueryError(REFUSED_FIELD_MESSAGE.format(name=name, method=self.method_name, reason=reason))
+        return reason
 
     def get_stamped_fields(
         self, written_names: set[str], stamps_named_fields: bool
@@ -532,20 +547,6 @@ class RowWriteRules:
                 for obj in objs:
                     set_value(obj, index_name, index_field.get_blind_index(getattr(obj, source_name)))
 
-    def get_stamped_copies(self, objs: Sequence[TModel]) -> list[TModel]:
-        """Copies of the objects holding what the write would give them - for showing its statements without
-        changing the objects themselves.
-
-        Args:
-            objs: The objects.
-
-        Returns:
-            The copies.
-        """
-        copies = [copy.copy(obj) for obj in objs]
-        self.stamp(copies, InstanceValues())
-        return copies
-
     def add_blind_index_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
         """The values of a write given as values, with the blind index of each encrypted field written: the
         plaintext, which the index field turns into its index, or ``F()`` of another encrypted field's index.
@@ -619,17 +620,3 @@ class RowWriteRules:
                         value_type=value_type,
                     )
                 ) from error
-
-    def get_sensitive_positions(self, field_names: Sequence[str]) -> list[int]:
-        """The positions of the ``sensitive=True`` fields among a row's fields.
-
-        Args:
-            field_names: The fields of a row, in order.
-
-        Returns:
-            The positions - none for a model without sensitive fields.
-        """
-        sensitive_fields = self.model._meta.sensitive_fields
-        if not sensitive_fields:
-            return []
-        return [position for position, name in enumerate(field_names) if name in sensitive_fields]

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import nullcontext
 from typing import Any, ClassVar
 
+from hare.core.apps import Apps
 from hare.core.caching.cache import Cache
-from hare.core.connections.connections import Connections
+from hare.core.hare_context import HareContext
 from hare.core.log import logger
 from hare.dialects.base.client.database_client import DatabaseClient
 from hare.exceptions import QueryError
@@ -19,16 +21,17 @@ from hare.migrations.exceptions import TenantMigrationError, UnknownMigrationErr
 from hare.migrations.execution.constants import ZERO_MIGRATION
 from hare.migrations.execution.executor.migration_target import MigrationTarget
 from hare.migrations.execution.executor.plan_step import PlanStep
-from hare.migrations.execution.executor.rollback_walk import RollbackWalk
 from hare.migrations.execution.migration_runner import MigrationRunner
 from hare.migrations.execution.swappable_setting_check import SwappableSettingCheck
 from hare.migrations.loading.graph.migration_graph import MigrationGraph
 from hare.migrations.loading.graph.migration_key import MigrationKey
+from hare.migrations.loading.migration_definitions import MigrationDefinitions
 from hare.migrations.loading.migration_loader import MigrationLoader
 from hare.migrations.loading.recorder.migration_recorder import MigrationRecorder
 from hare.migrations.migration import Migration
 from hare.migrations.safety.migration_risk import MigrationRisk
 from hare.migrations.safety.migration_safety_checker import MigrationSafetyChecker
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.state.state import State
 from hare.models.tenancy.tenancy import Tenancy
 from hare.models.tenancy.tenant_schemas import TenantSchemas
@@ -41,8 +44,8 @@ class MigrationExecutor:
     """Applies and unapplies the migrations of one connection: their plan, the lock and the journal."""
 
     #: The full forwards plan of an executor's migration graph - kept on the executor in
-    #: ``_full_plan_cache``, dropped when the graph is built again.
-    full_plans: ClassVar[Cache[Any]] = Cache(holds_sql=False, keyed_by_model=False, owner_attribute="_full_plan_cache")
+    #: its ``cache_buckets``, dropped when the graph is built again.
+    full_plans: ClassVar[Cache[Any]] = Cache(holds_sql=False)
 
     def __init__(
         self,
@@ -51,6 +54,9 @@ class MigrationExecutor:
         *,
         full_apps_config: dict[str, dict[str, Any]] | None = None,
         lock_timeout: float | None = None,
+        definitions: MigrationDefinitions | None = None,
+        environment: MigrationEnvironment | None = None,
+        apps: Apps | None = None,
     ) -> None:
         """
         Args:
@@ -66,25 +72,44 @@ class MigrationExecutor:
                 MigrationLoader.build_graph()'s consistency check needs that other app's
                 migrations actually loaded to resolve the reference, not just named. Defaults to
                 `apps_config` itself for a caller with only one connection's worth of apps to
-                give in the first place (e.g. sqlmigrate(), already passing every configured app
-                as `apps_config` directly).
+                give in the first place. A MigrationSession supplies the complete configuration
+                separately from this connection's selected applications.
             lock_timeout: Seconds a migration's statement may wait for a lock - see
                 ``MigrationRunner``.
+            definitions: The session's declaration snapshot, shared by its executors. Graph
+                rebuilds copy these declarations and refresh the journal without reimporting files.
+            environment: Captured application settings and connection owner. When omitted,
+                capture the current application once, using the supplied connection's owner.
+            apps: The session's live model registry for swappable-relation checks. Without an
+                explicit environment, the current registry is captured when omitted.
         """
         self.connection = connection
+        if environment is None:
+            context = HareContext.get_current()
+            if apps is None and context is not None:
+                apps = context.apps
+            environment = (
+                MigrationEnvironment.from_apps(apps, connections=connection.connection_handler)
+                if apps is not None
+                else MigrationEnvironment.capture(connection.connection_handler)
+            )
+        self.environment = environment
+        self.apps = apps
         self.apps_config = apps_config
         self.recorder = MigrationRecorder(connection)
         self.runner = MigrationRunner(connection, recorder=self.recorder, lock_timeout=lock_timeout)
-        self.loader = MigrationLoader(full_apps_config if full_apps_config is not None else apps_config, self.recorder)
-        self._full_plan_cache: list[MigrationKey] | None = None
-        self._logger = logger
+        self.loader = MigrationLoader(
+            full_apps_config if full_apps_config is not None else apps_config, self.recorder, definitions=definitions
+        )
+        self.cache_buckets: dict[int, Any] = {}
 
     async def build_graph(self) -> None:
-        """Rebuilds ``self.loader.graph`` from disk and drops the cached full plan - every rebuild goes
-        through here.
+        """Refresh the graph and journal, retaining a supplied session's definitions.
+
+        Every rebuild clears the cached full plan and reads current applied migrations.
         """
         await self.loader.build_graph()
-        self._full_plan_cache = None
+        MigrationExecutor.full_plans.forget_holder(self)
 
     async def migrate(
         self,
@@ -113,8 +138,9 @@ class MigrationExecutor:
             applied: The migrations applied when the steps run - of every connection; the journal's
                 when None.
             fake: Record the migrations as applied or unapplied without running them.
-            dry_run: Run the operations without touching the database or the journal.
-            progress: Called with each migration's start and end.
+            dry_run: Plan without executing migration operations or changing the journal.
+                Connection setup and database reads may still occur.
+            progress: Called at migration start/end; awaitable results finish before execution continues.
             report: Called with the steps about to run in the shared schema, under the lock - the
                 ones another migrate ran meanwhile left out.
         """
@@ -130,10 +156,10 @@ class MigrationExecutor:
         # The migrations run in the context from before the lock's transaction opens - inside it the
         # connection alias resolves to that transaction, and every migration would run in it.
         migrations_context = contextvars.copy_context()
-        lock_connection = Connections.current().create_independent(self.connection.connection_alias)
+        lock_connection = self.connection.create_independent_client()
         try:
             async with lock_connection._in_transaction() as lock_client:
-                self._logger.debug("Taking the migration lock")
+                logger.debug("Taking the migration lock")
                 # Run as a script: a statement run with parameters keeps its snapshot until the
                 # transaction's next one, and an index built concurrently waits for every older one.
                 await lock_client.execute_script(lock_sql)
@@ -174,8 +200,9 @@ class MigrationExecutor:
                 journal of its own, plans the targets.
             applied: The migrations applied when the steps run.
             fake: Record without running.
-            dry_run: Run without touching the database or the journal.
-            progress: Called with each migration's start and end.
+            dry_run: Plan without executing migration operations or changing the journal.
+                Connection setup and database reads may still occur.
+            progress: Called at migration start/end; awaitable results finish before execution continues.
             report: Called with the steps about to run in the shared schema.
         """
         has_tenant_schemas = (
@@ -211,6 +238,9 @@ class MigrationExecutor:
                 self.apps_config,
                 full_apps_config=self.loader.apps_config,
                 lock_timeout=self.runner.lock_timeout,
+                definitions=self.loader.definitions,
+                environment=self.environment,
+                apps=self.apps,
             )
             # The tenant's scope sends every query of the connection - a migration's transaction, its
             # RunPython - to the tenant schema's client.
@@ -247,21 +277,22 @@ class MigrationExecutor:
             steps: The steps to run instead of a plan.
             applied: The migrations applied when they run; the journal's when None.
             fake: Record without running.
-            dry_run: Run without touching the database or the journal.
-            progress: Called with each migration's start and end.
+            dry_run: Plan without executing migration operations or changing the journal.
+                Connection setup and database reads may still occur.
+            progress: Called at migration start/end; awaitable results finish before execution continues.
             report: Called with the plan before it runs.
         """
-        self._logger.debug("Building migration graph")
+        logger.debug("Building migration graph")
         await self.build_graph()
 
         if not dry_run:
-            self._logger.debug("Ensuring migration schema")
+            logger.debug("Ensuring migration schema")
             await self.runner.ensure_journal()
 
-        self._logger.debug("Loading applied migrations")
+        logger.debug("Loading applied migrations")
         # The loader's view - a squashed migration whose replaced migrations are applied counts too.
         journal_applied = set(self.loader.applied_migrations)
-        await SwappableSettingCheck(self.connection, self.apps_config, self.loader.disk_migrations).check(
+        await SwappableSettingCheck(self.connection, self.apps_config, self.loader.disk_migrations, self.apps).check(
             journal_applied
         )
         if applied is None:
@@ -278,8 +309,8 @@ class MigrationExecutor:
                     is step.backward
                 ]
 
-        self._logger.debug("Building migration plan")
-        plan = steps if steps is not None else self.get_migration_plan(targets, applied, self.loader.graph)
+        logger.debug("Building migration plan")
+        plan = steps if steps is not None else self.get_migration_plan(targets, applied)
         if report is not None:
             await report(plan)
 
@@ -290,21 +321,6 @@ class MigrationExecutor:
                 if step.backward:
                     step.migration.raise_if_irreversible()
 
-        rollback_walk: RollbackWalk | None = None
-        state_cache_by_key: dict[MigrationKey, State] | None = None
-        state_positions: dict[MigrationKey, int] = {}
-        if not fake and any(step.backward for step in plan):
-            state_keys = self.get_state_keys(applied)
-            if RollbackWalk.fits(plan, state_keys):
-                self._logger.debug("Building rollback walk")
-                rollback_walk = RollbackWalk.build(self, applied)
-            else:
-                self._logger.debug("Building rollback state cache")
-                state_cache_by_key = await self._project_states_by_key(applied)
-                state_positions = {key: position for position, key in enumerate(state_keys)}
-        # Where the migrations unapplied so far stood - a cached state after one of them still holds its models.
-        unapplied_positions: list[int] = []
-
         state_cache: State | None = None
         for step in plan:
             key = MigrationKey(app_label=step.migration.app_label, name=step.migration.name)
@@ -312,33 +328,20 @@ class MigrationExecutor:
                 if fake:
                     if not dry_run:
                         await self.runner.record(step.migration, applied=False)
-                elif rollback_walk is not None:
-                    undos = rollback_walk.move_to_after(key)
-                    self._emit(progress, "rollback_start", key)
-                    await self.runner.unapply(step.migration, rollback_walk.state, dry_run=dry_run, undos=undos)
-                    self._emit(progress, "rollback_done", key)
                 else:
-                    position = state_positions.get(key, -1)
-                    if state_cache_by_key is not None and not any(
-                        unapplied_position < position for unapplied_position in unapplied_positions
-                    ):
-                        state_before = state_cache_by_key[key]
-                    else:
-                        # An app depending on this one was unapplied first - its models are gone.
-                        state_before = await self._project_state(applied, upto=key)
-                    unapplied_positions.append(position)
-                    self._emit(progress, "rollback_start", key)
+                    state_before = await self._project_state(applied, upto=key)
+                    await self._emit(progress, "rollback_start", key)
                     await self.runner.unapply(step.migration, state_before, dry_run=dry_run)
-                    self._emit(progress, "rollback_done", key)
+                    await self._emit(progress, "rollback_done", key)
                 applied.discard(key)
                 state_cache = None
             else:
                 if state_cache is None:
                     state_cache = await self._project_state(applied)
                 if not fake:
-                    self._emit(progress, "apply_start", key)
+                    await self._emit(progress, "apply_start", key)
                     state_cache = await self.runner.apply(step.migration, state_cache, dry_run=dry_run)
-                    self._emit(progress, "apply_done", key)
+                    await self._emit(progress, "apply_done", key)
                 elif not dry_run:
                     await self.runner.record(step.migration, applied=True)
                 applied.add(key)
@@ -397,13 +400,11 @@ class MigrationExecutor:
         applied = set(self.loader.applied_migrations)
         state = await self._project_state(applied)
         risks: list[MigrationRisk] = []
-        for step in self.get_migration_plan(None, applied, self.loader.graph):
+        for step in self.get_migration_plan(None, applied):
             risks.extend(
                 await checker.check(
                     step.migration,
                     state,
-                    dialect=self.connection.dialect,
-                    features=self.connection.features,
                     client=self.connection,
                 )
             )
@@ -411,13 +412,16 @@ class MigrationExecutor:
         return risks
 
     @staticmethod
-    def _emit(
+    async def _emit(
         progress: Callable[[str, str, str], object] | None,
         event: str,
         key: MigrationKey,
     ) -> None:
+        """Finish a synchronous or awaitable progress callback before the next migration step."""
         if progress is not None:
-            progress(event, key.app_label, key.name)
+            result = progress(event, key.app_label, key.name)
+            if inspect.isawaitable(result):
+                await result
 
     async def collect_sql(
         self,
@@ -439,65 +443,33 @@ class MigrationExecutor:
         # Every migration on disk - a squashed one and the ones it replaces alike - is a node, and
         # the state is that of the migration's own dependencies.
         await self.loader.build_graph(replaces_migrations=False)
-        self._full_plan_cache = None
+        MigrationExecutor.full_plans.forget_holder(self)
 
         # Resolve migration key — support prefix matching
-        key = self._get_migration_key(app_label, migration_name)
+        key = self.loader.graph.get_migration_key(app_label, migration_name)
         migration = self.loader.graph.nodes[key]
         if not isinstance(migration, Migration):
             raise UnknownMigrationError(MISSING_MIGRATION_MESSAGE_TEMPLATE.format(key=key))
 
-        state = State(default_connections=self.get_default_connections())
+        state = State(default_connections=self.get_default_connections(), environment=self.environment)
         for dependency_key in self.loader.graph.forwards_plan(key)[:-1]:
             dependency = self.loader.graph.nodes[dependency_key]
             if dependency is None:
                 raise UnknownMigrationError(MISSING_MIGRATION_MESSAGE_TEMPLATE.format(key=dependency_key))
-            await dependency.apply(state, dry_run=True, schema_editor=None)
+            state = await dependency.apply(state, dry_run=True, schema_editor=None)
 
         return await self.runner.collect_sql(migration, state, backward=backward)
 
-    def _get_migration_key(self, app_label: str, migration_name: str) -> MigrationKey:
-        """The key of a migration named in full or by the start of its name."""
-        exact_key = MigrationKey(app_label=app_label, name=migration_name)
-        if exact_key in self.loader.graph.nodes:
-            return exact_key
-
-        # Try prefix matching
-        matches = [
-            key
-            for key in self.loader.graph.nodes
-            if key.app_label == app_label and key.name.startswith(migration_name)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            names = ", ".join(migration.name for migration in matches)
-            raise UnknownMigrationError(
-                f"Ambiguous migration name {migration_name!r} for app {app_label!r}. Matches: {names}"
-            )
-        raise UnknownMigrationError(f"Cannot find migration {migration_name!r} in app {app_label!r}")
-
     async def _project_state(self, applied: set[MigrationKey], *, upto: MigrationKey | None = None) -> State:
-        state = State(default_connections=self.get_default_connections())
+        state = State(default_connections=self.get_default_connections(), environment=self.environment)
         for key in self.get_state_keys(applied):
             if upto and key == upto:
                 break
             migration = self.loader.graph.nodes[key]
             if migration is None:
                 raise UnknownMigrationError(MISSING_MIGRATION_MESSAGE_TEMPLATE.format(key=key))
-            await migration.apply(state, dry_run=True, schema_editor=None)
+            state = await migration.apply(state, dry_run=True, schema_editor=None)
         return state
-
-    async def _project_states_by_key(self, applied: set[MigrationKey]) -> dict[MigrationKey, State]:
-        state = State(default_connections=self.get_default_connections())
-        states_by_key: dict[MigrationKey, State] = {}
-        for key in self.get_state_keys(applied):
-            states_by_key[key] = state.clone()
-            migration = self.loader.graph.nodes[key]
-            if migration is None:
-                raise UnknownMigrationError(MISSING_MIGRATION_MESSAGE_TEMPLATE.format(key=key))
-            await migration.apply(state, dry_run=True, schema_editor=None)
-        return states_by_key
 
     def get_default_connections(self) -> dict[str, str]:
         """Each app's default connection alias."""
@@ -530,10 +502,11 @@ class MigrationExecutor:
         return state_keys
 
     def _full_plan(self) -> list[MigrationKey]:
-        if self._full_plan_cache is not None:
-            return list(self._full_plan_cache)
+        cached = MigrationExecutor.full_plans.get_value(self)
+        if cached is not None:
+            return list(cached)
         plan = self.loader.graph.full_forwards_plan()
-        MigrationExecutor.full_plans.set_owner_value(self, list(plan))
+        MigrationExecutor.full_plans.set_value(self, list(plan))
         return plan
 
     @staticmethod
@@ -554,7 +527,6 @@ class MigrationExecutor:
         self,
         targets: Iterable[MigrationTarget] | None,
         applied: set[MigrationKey],
-        graph: MigrationGraph,
         app_labels: Iterable[str] | None = None,
     ) -> list[PlanStep]:
         """The steps reaching the targets.
@@ -562,12 +534,12 @@ class MigrationExecutor:
         Args:
             targets: The migrations to reach - every app's latest when None.
             applied: The migrations applied.
-            graph: The migration graph.
             app_labels: The apps whose steps are planned - this executor's when None.
 
         Returns:
             The steps, in order.
         """
+        graph = self.loader.graph
         plan: list[PlanStep] = []
         # Each target is planned against the state the previous targets leave behind, not the
         # database's state before the whole run.
@@ -621,11 +593,8 @@ class MigrationExecutor:
                 root_target = MigrationTarget(app_label=root.app_label, name=root.name)
                 steps.extend(self._backward_plan(root_target, applied, graph, include_target=True))
             return steps
-        key = MigrationKey(app_label=target.app_label, name=target.name)
-        if key not in graph.nodes:
-            # A unique prefix of a migration's name names it (``0002``), as sqlmigrate takes it.
-            key = self._get_migration_key(target.app_label, target.name)
-            target = MigrationTarget(app_label=key.app_label, name=key.name)
+        key = graph.get_migration_key(target.app_label, target.name)
+        target = MigrationTarget(app_label=key.app_label, name=key.name)
         if key in applied:
             return self._backward_plan(target, applied, graph)
         return self._forward_plan(target, applied, graph)

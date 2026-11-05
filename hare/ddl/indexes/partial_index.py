@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from hare.dialects.base.client.database_client import DatabaseClient
     from hare.models import Model
 from hare.ddl.indexes.index import Index
+from hare.declarations.declaration_values import DeclarationValues
 
 
 class PartialIndex(Index):
@@ -66,7 +67,9 @@ class PartialIndex(Index):
 
     def get_name_parts(self) -> tuple[str, ...]:
         name_parts = super().get_name_parts()
-        return (*name_parts, repr(self.condition)) if isinstance(self.condition, Q) else name_parts
+        return (
+            (*name_parts, DeclarationValues.get_key(self.condition)) if isinstance(self.condition, Q) else name_parts
+        )
 
     def deconstruct(self) -> tuple[str, list[Any], dict[str, Any]]:
         path, args, kwargs = super().deconstruct()

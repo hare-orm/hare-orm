@@ -10,10 +10,11 @@ from hare.contrib.outbox import ChangeCapture, ChangePayload
 from hare.contrib.test import capture_queries, requires_features
 from hare.exceptions import ConfigurationError, StaleObjectError, ValidationError
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
-from hare.instrumentation.declarations import RowsChanged
+from hare.instrumentation.declarations import QueryExecuted, RowsChanged
 from hare.instrumentation.enums import RowOperation
 from hare.instrumentation.observers.observers import Observers
 from hare.models.tenancy.tenancy import Tenancy
+from hare.query.expressions import Value
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.capture_models import (
     AuditedOrder,
@@ -450,6 +451,25 @@ async def test_insert_from_is_captured(db_capture):
     (event,) = await get_events()
     assert event.topic == "models.capturedcustomer.inserted"
     assert event.payload["after"] == {"id": 4, "name": "from row"}
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.parametrize("supports_returning", [False, True])
+@pytest.mark.asyncio
+async def test_captured_insert_from_keeps_sensitive_parameters_masked(db_capture, monkeypatch, supports_returning):
+    await UncapturedRow.objects.create(id=4, name="source")
+    connection = CapturedOrder.get_connection()
+    monkeypatch.setattr(connection, "features", connection.features.replace(supports_returning=supports_returning))
+    source = UncapturedRow.objects.annotate(secret=Value("private-source-value")).values("id", "name", "secret")
+    statements = []
+    with Observers.observing(QueryExecuted, statements.append):
+        assert await CapturedOrder.objects.insert_from(source, fields=["id", "status", "secret"]) == 1
+        await Observers.wait_for_pending()
+    source_statements = [event for event in statements if "uncapturedrow" in event.sql and event.parameters]
+    assert len(source_statements) == (1 if supports_returning else 2)
+    assert all("private-source-value" not in repr(event.parameters) for event in source_statements)
+    assert (await CapturedOrder.objects.get(id=4)).secret == "private-source-value"
+    assert len(await get_events()) == 1
 
 
 @requires_features(supports_merge_returning=True)

@@ -11,26 +11,6 @@ from tests.shared_models.multi_database_models import Event, EventTwo, TeamTwo, 
 from tests.utils.multi_database_context import MultiDatabaseTestContext
 
 
-@pytest_asyncio.fixture(scope="function")
-async def two_databases():
-    """Fixture that sets up two separate databases for testing."""
-    db_url = os.getenv("HARE_TEST_DB", "sqlite+aiosqlite://:memory:")
-    async with MultiDatabaseTestContext.open(
-        db_url,
-        ["models", "events"],
-        apps={
-            "models": {"models": ["tests.shared_models.multi_database_models"], "default_connection": "models"},
-            "events": {"models": ["tests.shared_models.multi_database_models"], "default_connection": "events"},
-        },
-    ) as ctx:
-        await ctx.generate_schemas()
-
-        db = ctx.connections.get("models")
-        second_db = ctx.connections.get("events")
-
-        yield db, second_db
-
-
 @pytest.mark.asyncio
 async def test_two_databases(two_databases):
     db, second_db = two_databases

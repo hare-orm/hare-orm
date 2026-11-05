@@ -59,9 +59,7 @@ class SqliteTypes:
         types.register(BooleanField, TypeMapping(column_type="INT"))
         types.register(
             FloatField,
-            TypeMapping(
-                column_type="REAL", to_db=cls.to_db_float, to_db_refuses_only=True, to_lookup=cls.to_lookup_float
-            ),
+            TypeMapping(column_type="REAL", to_db=cls.to_db_float, to_lookup=cls.to_lookup_float),
         )
         # TEXT affinity (the declared type contains "TEXT") - a plain "JSON" column gets NUMERIC
         # affinity, which turns a stored top-level number into INTEGER/REAL.

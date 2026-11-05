@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.ddl.constraints.check_constraint import CheckConstraint
@@ -70,15 +69,11 @@ class ConstraintObjectType(SchemaObjectType):
             )
 
     @classmethod
-    def renamed(cls, schema_object: Any, new_name: str) -> Any:
-        return replace(schema_object, name=new_name)
-
-    @classmethod
     async def add(cls, editor: BaseSchemaEditor, model: type[Model], schema_object: Any, **options: Any) -> None:
         if options.get("not_valid"):
-            await editor.constraint_statements.add_check_constraint_not_valid(
+            await editor.constraint_statements.get_unvalidated_check_add_plan(
                 model, cast("CheckConstraint", schema_object)
-            )
+            ).execute(editor)
         else:
             await editor.add_constraint(model, schema_object)
 

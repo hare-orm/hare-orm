@@ -7,7 +7,7 @@ from hare.dialects.clickhouse.types.constants import CLICKHOUSE_LOW_CARDINALITY_
 class ClickhouseNullableTypes:
     """How ClickHouse writes a type holding NULL - ``Nullable(T)``, inside a ``LowCardinality(...)``
     (``LowCardinality(Nullable(String))``), and not at all for a type that is never ``Nullable`` (a
-    container, whose NULL is written as an empty one)."""
+    container). Container value handling rejects None rather than replacing it with an empty value."""
 
     @staticmethod
     def get_nullable_type(type_sql: str) -> str:

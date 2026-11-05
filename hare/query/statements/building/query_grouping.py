@@ -2,21 +2,25 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hare.exceptions import FieldError, UnSupportedError
 from hare.fields.encrypted.encrypted_field_base import EncryptedFieldBase
+from hare.query.expressions.expression_context import ExpressionContext
+from hare.query.lookup_info.bound_lookup_path import BoundLookupPath
 from hare.query.queryset.concrete_field_paths import ConcreteFieldPaths
 from hare.query.queryset.constants import AGGREGATE_GROUP_NAME_MESSAGE
 from hare.query.statements.building.query_annotations import QueryAnnotations
 from hare.query.statements.building.query_joins import QueryJoins
 from hare.sql.terms.field import Field
+from hare.sql.terms.node_structure import NodeStructure
 from hare.sql.terms.select_reference import SelectReference
 from hare.sql.terms.term import Term
 
 if TYPE_CHECKING:
     from hare.query.statements.awaitable_query import AwaitableQuery
-    from hare.sql.sql_context import SqlContext
+    from hare.sql.builder.tables.declarations import SourceBinding
+    from hare.sql.builder.tables.table import Table
 
 
 class QueryGrouping:
@@ -38,22 +42,22 @@ class QueryGrouping:
             query: The query.
         """
         if query._has_aggregate:
-            namespaced_context = query.query._sql_context_with_namespace(query.query.query_class.SQL_CONTEXT)
-            grouped_sql: set[str] = set()
+            source_bindings = NodeStructure.get_source_bindings(query.query)
+            grouped_keys: set[tuple[Any, ...]] = set()
             group_by_terms: list[Term] = []
             for select_term in query.query._selects:
                 QueryGrouping.add_group_by_terms(
                     group_by_terms,
-                    grouped_sql,
+                    grouped_keys,
                     QueryGrouping.get_select_group_by_terms(select_term),
-                    namespaced_context,
+                    source_bindings,
                 )
             aggregates_per_model_row = query._aggregates_per_model_row()
             if not aggregates_per_model_row and not query.group_by_must_include_primary_key:
                 QueryGrouping.raise_if_grouped_by_encrypted(query)
             if aggregates_per_model_row or query.group_by_must_include_primary_key:
                 QueryGrouping.add_group_by_terms(
-                    group_by_terms, grouped_sql, QueryGrouping.get_orderby_group_by_terms(query), namespaced_context
+                    group_by_terms, grouped_keys, QueryGrouping.get_orderby_group_by_terms(query), source_bindings
                 )
             if not group_by_terms and not aggregates_per_model_row:
                 if not query.query._havings:
@@ -66,20 +70,20 @@ class QueryGrouping:
                 effective_table = query._effective_basetable()
                 QueryGrouping.add_group_by_terms(
                     group_by_terms,
-                    grouped_sql,
+                    grouped_keys,
                     [
                         effective_table[query.model._meta.fields_db_projection[attribute_name]]
                         for attribute_name in query.model._meta.primary_key_attribute_names
                     ],
-                    namespaced_context,
+                    source_bindings,
                 )
             if query.query._havings and (aggregates_per_model_row or query.group_by_must_include_primary_key):
                 # A column HAVING reads outside its aggregates (Q(n__gte=2) | Q(dept__name="ops"),
                 # an aggregate compared with a column) must be grouped too - a database rejects it
                 # otherwise, or picks an arbitrary row's value.
-                grouped_sql = {QueryGrouping.get_group_by_sql(term, namespaced_context) for term in group_by_terms}
+                grouped_keys = {QueryGrouping.get_group_by_key(term, source_bindings) for term in group_by_terms}
                 QueryGrouping.add_group_by_terms(
-                    group_by_terms, grouped_sql, query.query._havings.get_group_by_column_terms(), namespaced_context
+                    group_by_terms, grouped_keys, query.query._havings.get_group_by_column_terms(), source_bindings
                 )
             # Grouped by without their SELECT alias: a bare alias like "id" would be ambiguous next
             # to a joined table's column of that name.
@@ -167,122 +171,115 @@ class QueryGrouping:
         Args:
             query: The query, its GROUP BY built.
         """
-        namespaced_context = query.query._sql_context_with_namespace(query.query.query_class.SQL_CONTEXT)
-        grouped_sql = QueryGrouping.get_grouped_sql(query, namespaced_context)
+        source_bindings = NodeStructure.get_source_bindings(query.query)
+        grouped_keys = QueryGrouping.get_grouped_keys(query, source_bindings)
         effective_table = query._effective_basetable()
         meta = query.model._meta
-        primary_key_sql = {
-            QueryGrouping.get_group_by_sql(
-                effective_table[meta.fields_db_projection[attribute_name]], namespaced_context
-            )
+        primary_key_keys = {
+            QueryGrouping.get_group_by_key(effective_table[meta.fields_db_projection[attribute_name]], source_bindings)
             for attribute_name in meta.primary_key_attribute_names
         }
-        primary_key_grouped = query._grouping_set is None and bool(primary_key_sql) and primary_key_sql <= grouped_sql
+        primary_key_grouped = (
+            query._grouping_set is None and bool(primary_key_keys) and primary_key_keys <= grouped_keys
+        )
+        if not primary_key_grouped:
+            return
         read_terms = [*query.query._selects, *(term for term, _order in query.query._orderbys)]
         if query.query._havings:
             read_terms.append(query.query._havings)
         dependent_terms: list[Term] = []
-        for column_term, column_sql in QueryGrouping.get_ungrouped_columns(
-            read_terms, grouped_sql, namespaced_context
-        ):
-            if primary_key_grouped and isinstance(column_term, Field) and column_term.table == effective_table:
+        for column_term in QueryGrouping.get_ungrouped_columns(read_terms, grouped_keys, source_bindings):
+            if isinstance(column_term, Field) and column_term.table == effective_table:
                 dependent_terms.append(column_term)
         if dependent_terms:
             query.query._groupbys = [*query.query._groupbys, *dependent_terms]
 
     @staticmethod
     def get_ungrouped_columns(
-        read_terms: list[Term], grouped_sql: set[str], namespaced_context: SqlContext
-    ) -> list[tuple[Term, str]]:
+        read_terms: list[Term], grouped_keys: set[tuple[Any, ...]], source_bindings: dict[Any, SourceBinding]
+    ) -> list[Term]:
         """The columns the terms read outside an aggregate that aren't grouped by - a term grouped as a
         whole reads none.
 
         Args:
             read_terms: The selected, ordering or HAVING terms.
-            grouped_sql: The SQL of what the query groups by.
-            namespaced_context: The query's namespaced SQL context.
+            grouped_keys: The structural identities of the grouping terms.
+            source_bindings: The source bindings of this statement scope.
 
         Returns:
-            Each column once, with its SQL.
+            Each column once, deduplicated by its structural identity.
         """
-        ungrouped_columns: dict[str, Term] = {}
+        ungrouped_columns: dict[tuple[Any, ...], Term] = {}
         for read_term in read_terms:
             # A table-less field names a selected term, checked itself.
             if isinstance(read_term, Field) and read_term.table is None:
                 continue
-            if QueryGrouping.get_group_by_sql(read_term, namespaced_context) in grouped_sql:
+            if QueryGrouping.get_group_by_key(read_term, source_bindings) in grouped_keys:
                 continue
             for column_term in read_term.get_group_by_column_terms():
-                column_sql = QueryGrouping.get_group_by_sql(column_term, namespaced_context)
-                if column_sql not in grouped_sql:
-                    ungrouped_columns.setdefault(column_sql, column_term)
-        return [(column_term, column_sql) for column_sql, column_term in ungrouped_columns.items()]
+                column_key = QueryGrouping.get_group_by_key(column_term, source_bindings)
+                if column_key not in grouped_keys:
+                    ungrouped_columns.setdefault(column_key, column_term)
+        return list(ungrouped_columns.values())
 
     @staticmethod
-    def get_grouped_sql(query: AwaitableQuery[Any], namespaced_context: SqlContext) -> set[str]:
-        """The SQL of what a ``.group_by()`` query groups by - each GROUP BY term, the columns of its
+    def get_grouped_keys(
+        query: AwaitableQuery[Any], source_bindings: dict[Any, SourceBinding]
+    ) -> set[tuple[Any, ...]]:
+        """The structural identities of what a ``.group_by()`` query groups by - each GROUP BY term, the columns of its
         grouping set, and a grouped annotation's expression as selected.
 
         Args:
             query: The query, its GROUP BY built.
-            namespaced_context: The query's namespaced SQL context.
+            source_bindings: The source bindings of this statement scope.
 
         Returns:
-            The SQL texts.
+            The structural keys.
         """
         group_by_terms = query.query._groupbys
-        grouped_sql = {QueryGrouping.get_group_by_sql(term, namespaced_context) for term in group_by_terms}
+        grouped_keys = {QueryGrouping.get_group_by_key(term, source_bindings) for term in group_by_terms}
         if query._grouping_set is not None:
-            grouped_sql.update(
-                QueryGrouping.get_group_by_sql(column_term, namespaced_context)
+            grouped_keys.update(
+                QueryGrouping.get_group_by_key(column_term, source_bindings)
                 for column_term in group_by_terms[-1].get_group_by_column_terms()
             )
         grouped_aliases: set[str] = set()
         for term in group_by_terms:
             nodes: Iterator[Any] = term.nodes_()
             grouped_aliases.update(node.name for node in nodes if isinstance(node, Field) and node.table is None)
-        grouped_sql.update(
-            QueryGrouping.get_group_by_sql(term, namespaced_context)
+        grouped_keys.update(
+            QueryGrouping.get_group_by_key(term, source_bindings)
             for term in query.query._selects
             if term.alias is not None and term.alias in grouped_aliases
         )
-        return grouped_sql
+        return grouped_keys
 
     @staticmethod
-    def get_group_by_sql(term: Term, namespaced_context: SqlContext) -> str:
-        """A group-by term's aliasless SQL - a term already grouped by is skipped by it.
-
-        Args:
-            term: The group-by term.
-            namespaced_context: The query's namespaced SQL context.
-
-        Returns:
-            The SQL.
-        """
+    def get_group_by_key(term: Term, source_bindings: dict[Any, SourceBinding]) -> tuple[Any, ...]:
+        """The grouped value's structural identity, independent of alias or SELECT position."""
         if isinstance(term, SelectReference):
-            return term.get_sql(namespaced_context)
-        aliasless_term = term
-        if term.alias is not None:
-            aliasless_term = copy(term)
-            aliasless_term.alias = None
-        return aliasless_term.get_sql(namespaced_context.copy(with_alias=False))
+            term = term.term
+        return NodeStructure.get_key(term, source_bindings)
 
     @staticmethod
     def add_group_by_terms(
-        group_by_terms: list[Term], grouped_sql: set[str], new_terms: list[Term], namespaced_context: SqlContext
+        group_by_terms: list[Term],
+        grouped_keys: set[tuple[Any, ...]],
+        new_terms: list[Term],
+        source_bindings: dict[Any, SourceBinding],
     ) -> None:
-        """Appends the terms whose SQL isn't grouped by yet.
+        """Append values whose structural keys are not grouped yet.
 
         Args:
             group_by_terms: The GROUP BY terms collected so far, extended in place.
-            grouped_sql: Their SQL, extended in place.
+            grouped_keys: Their structural keys, extended in place.
             new_terms: The candidate terms.
-            namespaced_context: The query's namespaced SQL context.
+            source_bindings: The source bindings of this statement scope.
         """
         for term in new_terms:
-            term_sql = QueryGrouping.get_group_by_sql(term, namespaced_context)
-            if term_sql not in grouped_sql:
-                grouped_sql.add(term_sql)
+            term_key = QueryGrouping.get_group_by_key(term, source_bindings)
+            if term_key not in grouped_keys:
+                grouped_keys.add(term_key)
                 group_by_terms.append(term)
 
     @staticmethod
@@ -328,6 +325,15 @@ class QueryGrouping:
         """
         group_bys: list[Term] = []
         effective_table = query._effective_basetable()
+        context = ExpressionContext(
+            model=query.model,
+            table=effective_table,
+            annotations=query._annotations,
+            dialect=query.dialect,
+            connection=query._connection,
+            visibility=query._visibility,
+            select_related_extra_conditions=query._select_related_extra_conditions,
+        )
         for field_name in field_names:
             EncryptedFieldBase.raise_if_encrypted(
                 QueryAnnotations.get_field_object_by_path(query, field_name), "GROUP BY"
@@ -345,23 +351,13 @@ class QueryGrouping:
                 if select_alias is not None:
                     group_bys.append(Field(select_alias))
                 else:
-                    group_bys.append(
-                        QueryAnnotations.get_annotation_expression_term(
-                            query, field_name, query._annotations, effective_table
-                        )
-                    )
+                    group_bys.append(annotation_term)
                 continue
             # A composite key (pk, or a relation to one) groups by every one of its columns.
             for concrete_field_name in ConcreteFieldPaths.get_paths(query.model, field_name):
-                field, __, forwarded_fields = concrete_field_name.partition("__")
-                related_table, related_db_field = QueryJoins.join_table_with_forwarded_fields(
-                    query,
-                    model=query.model,
-                    table=effective_table,
-                    field=field,
-                    forwarded_fields=forwarded_fields,
-                )
-                group_bys.append(
-                    related_table[related_db_field].as_(f"{related_table.get_table_name()}__{concrete_field_name}")
-                )
+                bound_path = BoundLookupPath.bind(context, concrete_field_name)
+                for join in bound_path.joins:
+                    QueryJoins.join_table(query, join)
+                column = bound_path.columns[0]
+                group_bys.append(column.as_(f"{cast('Table', column.table).get_table_name()}__{concrete_field_name}"))
         return group_bys

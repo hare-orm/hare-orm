@@ -49,22 +49,9 @@ class SqliteTriggerStatements(TriggerStatements):
             )
         ]
 
-    async def add_trigger(self, model: type[Model], trigger: Trigger) -> None:
-        for statement in self.get_trigger_create_sqls(model, trigger):
-            await self.run_ddl_statement(statement)
-
     async def remove_trigger(self, model: type[Model], trigger: Trigger) -> None:
         await self.editor.run_sql(
             self.editor.TRIGGER_DROP_TEMPLATE.format(
                 trigger_name=self.editor.qualify_table_name(trigger.name, model._meta.schema)
             )
         )
-
-    async def run_ddl_statement(self, sql: str) -> None:
-        """Runs one DDL statement whole - ``run_sql()`` would split a ``CREATE TRIGGER ... BEGIN ...;
-        END`` at its inner semicolons.
-        """
-        if self.editor.collect_sql:
-            self.editor.collected_sql.append(sql)
-            return
-        await self.editor.client.execute(sql)

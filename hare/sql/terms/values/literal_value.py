@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.term import Term
@@ -8,6 +8,9 @@ from hare.sql.terms.term import Term
 
 class LiteralValue(Term):
     """A value written into the SQL as it is."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ("_value",)
+    literal_attributes = ("_value",)
 
     # A constant, like ValueWrapper - abstains from the aggregate vote, so ROUND(AVG(x), 1) is
     # still an aggregate.

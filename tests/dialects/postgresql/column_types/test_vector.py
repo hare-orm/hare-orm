@@ -2,7 +2,7 @@
 
 Uses the db_vector fixture (tests/dialects/postgresql/conftest.py), which manually creates the
 vector extension and runs generate_schemas() against tests.dialects.postgresql.models_vector - same
-pattern as db_postgis for PostGISField.
+pattern as db_postgis for PointField.
 """
 
 import pytest

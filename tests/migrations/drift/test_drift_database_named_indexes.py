@@ -39,7 +39,8 @@ async def test_a_unique_the_database_named_is_the_fields_own():
         connection = Connections.get("models")
         # INTEGER is a column SQLite reads as the INT an IntField declares - the same column.
         await connection.execute_script(
-            "CREATE TABLE drift_inline_unique (id int PRIMARY KEY, name text NOT NULL UNIQUE, count INTEGER NOT NULL)"
+            "CREATE TABLE drift_inline_unique "
+            "(id int NOT NULL PRIMARY KEY, name text NOT NULL UNIQUE, count INTEGER NOT NULL)"
         )
         apps_config = {APP_LABEL: {"models": [], "default_connection": "models"}}
         new_state = MigrationAutodetector(ctx.apps, apps_config).current_state()

@@ -120,6 +120,7 @@ class ConflictClause:
             return [objects]
         types = bulk_create.dialect.types
         key_fields = [bulk_create.model._meta.fields_map[name] for name in key_field_names]
+        nulls_distinct = ConflictClause.has_distinct_nulls(bulk_create, key_field_names)
         field_native_types = [types.get_native_key_type(field) for field in key_fields]
         native_key_types = tuple(field_native_types) if None not in field_native_types else ()
         single_field_name = key_field_names[0] if len(key_field_names) == 1 else None
@@ -144,10 +145,10 @@ class ConflictClause:
                 groups.append([])
                 seen_keys = set()
                 continue
-            if key is None or (single_field_name is None and any(value is None for value in key)):
-                # A NULL never conflicts with anything.
-                key = None
-            elif native_key_types and (
+            if nulls_distinct and (key is None or (single_field_name is None and any(value is None for value in key))):
+                groups[-1].append(obj)
+                continue
+            if native_key_types and (
                 type(key) is native_key_types[0]
                 if single_field_name is not None
                 else all(type(value) is expected for value, expected in zip(key, native_key_types, strict=True))
@@ -156,10 +157,27 @@ class ConflictClause:
                 pass
             else:
                 key = ReturnedValues.get_stored_key(types, key_fields, key_field_names, obj)
-            if key is not None and key in seen_keys:
+            if key in seen_keys:
                 groups.append([])
                 seen_keys = set()
             groups[-1].append(obj)
-            if key is not None:
-                seen_keys.add(key)
+            seen_keys.add(key)
         return groups if groups[-1] else groups[:-1]
+
+    @staticmethod
+    def has_distinct_nulls(bulk_create: BulkCreateQuery[Any], field_names: list[str]) -> bool:
+        """Whether NULL keys can share an upsert statement without conflicting.
+
+        A named target follows that constraint. Column inference can select more than one
+        unique index: split NULL keys when any matching declaration compares NULLs as equal.
+        For a partial index this may split more rows than necessary, while preserving order.
+        """
+        for constraint in bulk_create.model._meta.constraints:
+            if not isinstance(constraint, UniqueConstraint) or constraint.nulls_distinct is not False:
+                continue
+            if bulk_create._on_conflict_constraint:
+                if constraint.name == bulk_create._on_conflict_constraint:
+                    return False
+            elif set(bulk_create.get_conflict_field_names(bulk_create.model, constraint.fields)) == set(field_names):
+                return False
+        return True

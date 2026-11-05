@@ -400,8 +400,8 @@ class RelatedRows:
         Returns:
             ``(the through table's connection, the through table, criteria)``.
         """
-        owning_model = many_to_many_field.related_model if many_to_many_field._generated else model
-        chosen_connection = RelatedRows.get_connection_for(owning_model, connection) or owning_model.get_connection(
+        through_model = many_to_many_field.related_model if many_to_many_field._generated else model
+        chosen_connection = RelatedRows.get_connection_for(through_model, connection) or through_model.get_connection(
             for_write=True
         )
         through_table = Table(many_to_many_field.through, schema=many_to_many_field.through_schema)

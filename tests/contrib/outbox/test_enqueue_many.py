@@ -5,6 +5,7 @@ import pytest
 
 from hare.contrib.outbox import OutboxMessage, OutboxWakeup
 from hare.contrib.test import capture_queries, requires_features
+from hare.core.resource_completion import ResourceCompletion
 from hare.exceptions import ValidationError
 from hare.transactions.transactions import Transactions
 from tests.contrib.outbox.models import DemoOutboxEvent, TenantScopedOutboxEvent
@@ -50,6 +51,22 @@ async def test_the_events_given_back_are_the_rows_written(db_outbox):
     stored = await DemoOutboxEvent.objects.order_by("sequence").values_list("sequence", "id")
     assert [(event.sequence, event.id) for event in events] == stored
     await events[0].refresh_from_db()
+
+
+@requires_features(dialect="postgresql")
+@pytest.mark.asyncio
+async def test_enqueue_many_uses_the_explicit_independent_client(db_outbox):
+    client = DemoOutboxEvent._meta.connection.create_independent_client()
+    wakeup = RecordingWakeup()
+    try:
+        events = await DemoOutboxEvent.enqueue_many(
+            [OutboxMessage("widget.a", {}), OutboxMessage("widget.b", {})], using=client, wakeup=wakeup
+        )
+        stored = await DemoOutboxEvent.objects.using(client).order_by("sequence").values_list("id", flat=True)
+        assert stored == [event.id for event in events]
+        assert wakeup.written == [{"widget.a", "widget.b"}]
+    finally:
+        await ResourceCompletion.wait(client.close())
 
 
 @pytest.mark.asyncio

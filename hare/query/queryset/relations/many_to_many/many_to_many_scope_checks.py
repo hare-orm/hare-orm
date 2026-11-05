@@ -7,6 +7,7 @@ from hare.models.tenancy.tenancy import Tenancy
 from hare.query.key_columns import KeyColumns
 from hare.query.lookup_info.lookup_paths import LookupPaths
 from hare.query.queryset.relations.many_to_many.many_to_many_members import ManyToManyMembers
+from hare.query.queryset.relations.many_to_many.through_rows import ThroughRows
 from hare.query.scopes.row_visibility import RowVisibility
 from hare.sql.builder.queries.query_builder import QueryBuilder
 from hare.sql.builder.tables.table import Table
@@ -45,13 +46,15 @@ class ManyToManyScopeChecks:
         """
         owning_tenant_field = type(relation.instance)._meta.tenant_field
         if owning_tenant_field:
-            await ManyToManyScopeChecks.check_instance_tenant(relation.instance, owning_tenant_field, connection)
+            await ManyToManyScopeChecks.check_instance_tenant(
+                relation, relation.instance, owning_tenant_field, connection
+            )
         if not instances:
             return
         related_tenant_field = type(instances[0])._meta.tenant_field
         if related_tenant_field:
             for instance in instances:
-                await ManyToManyScopeChecks.check_instance_tenant(instance, related_tenant_field, connection)
+                await ManyToManyScopeChecks.check_instance_tenant(relation, instance, related_tenant_field, connection)
 
     @staticmethod
     async def check_visible_scope(
@@ -87,7 +90,7 @@ class ManyToManyScopeChecks:
                 )
                 .select(*KeyColumns.get_source_columns(owning_meta))
             )
-            _, rows = await owning_connection.execute(*query.get_parameterized_sql())
+            _, rows = await owning_connection.execute(*ThroughRows.get_statement(relation, query, owning_connection))
             if not rows:
                 raise IntegrityError(
                     f"{type(relation.instance).__name__} instance (pk={relation.instance.pk!r}) is soft-deleted - "
@@ -114,12 +117,13 @@ class ManyToManyScopeChecks:
                     [related_table[column] for column in pk_columns],
                     list(instances_by_pk_values),
                     ManyToManyMembers.get_forward_key_fields(relation),
+                    connection=connection,
                 )
                 & visible_criterion
             )
             .select(*pk_columns)
         )
-        _, rows = await connection.execute(*query.get_parameterized_sql())
+        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
         related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
         types = connection.dialect.types
         # Read as the field reads it, then written back - compared with the instances' written values.
@@ -139,11 +143,14 @@ class ManyToManyScopeChecks:
                 )
 
     @staticmethod
-    async def check_instance_tenant(obj: Model, tenant_field: str, connection: DatabaseClient) -> None:
+    async def check_instance_tenant(
+        relation: ManyToManyRelation[Any], obj: Model, tenant_field: str, connection: DatabaseClient
+    ) -> None:
         """Verifies the row of an instance belongs to the active tenant, its tenant read from the database
         by its primary key - an instance built by hand can claim any tenant.
 
         Args:
+            relation: The relation whose keys the statement binds.
             obj: The instance.
             tenant_field: Its model's ``Meta.tenant_field``.
             connection: The connection the write runs on.
@@ -168,7 +175,7 @@ class ManyToManyScopeChecks:
         pk_columns = [table[column] for column in KeyColumns.get_source_columns(meta)]
         condition = KeyColumns.row_equality(pk_columns, KeyColumns.get_db_values(meta, obj, connection.dialect.types))
         query = connection.query_class.from_(table).where(condition).select(tenant_db_column)
-        _, rows = await connection.execute(*query.get_parameterized_sql())
+        _, rows = await connection.execute(*ThroughRows.get_statement(relation, query, connection))
         # A database keeping no key unique may hold another tenant's row of the key too.
         stored_tenants = [
             connection.dialect.types.get_python_value(meta.fields_map[tenant_field], row[tenant_db_column])
@@ -280,7 +287,7 @@ class ManyToManyScopeChecks:
             )
             .select(*forward_keys)
         )
-        _, link_rows = await connection.execute(*links_query.get_parameterized_sql())
+        _, link_rows = await connection.execute(*ThroughRows.get_statement(relation, links_query, connection))
         related_pk_fields = related_meta.pk_fields if related_meta.has_composite_primary_key else (related_meta.pk,)
         forward_columns = [through_table[column] for column in forward_keys]
         # Each key read as its field reads it, then written as the other connection writes it.
@@ -309,12 +316,13 @@ class ManyToManyScopeChecks:
                             for key in linked_keys
                         ],
                         ManyToManyMembers.get_forward_key_fields(relation),
+                        connection=related_connection,
                     )
                     & visible_criterion
                 )
                 .select(*pk_columns)
             )
-            _, rows = await related_connection.execute(*query.get_parameterized_sql())
+            _, rows = await related_connection.execute(*ThroughRows.get_statement(relation, query, related_connection))
             visible_keys = [
                 tuple(
                     connection.dialect.types.get_db_value(
@@ -328,5 +336,5 @@ class ManyToManyScopeChecks:
             # No visible linked row - a condition no through row meets.
             return forward_columns[0].isnull() & forward_columns[0].notnull()
         return connection.dialect.filter_operators.get_row_membership_criterion(
-            forward_columns, visible_keys, ManyToManyMembers.get_forward_key_fields(relation)
+            forward_columns, visible_keys, ManyToManyMembers.get_forward_key_fields(relation), connection=connection
         )

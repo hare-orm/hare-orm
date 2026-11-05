@@ -52,7 +52,7 @@ class CreateOrUpdate:
         from hare.models import Model
 
         create_values = CreateOrUpdate.get_create_values(queryset.model, defaults, kwargs)
-        pinned_connection = queryset._connection
+        pinned_connection = cast("DatabaseClient", queryset._connection)
         try:
             if isinstance(pinned_connection, TransactionClient) or queryset.model.save is not Model.save:
                 async with pinned_connection._in_transaction() as connection:
@@ -186,7 +186,7 @@ class CreateOrUpdate:
         Returns:
             The queryset itself when a connection is pinned already.
         """
-        if cast("DatabaseClient | None", queryset._connection) is not None:
+        if queryset._connection is not None:
             return queryset
         clone = queryset._clone()
         clone._apply_connection(queryset.get_connection(for_write=True))

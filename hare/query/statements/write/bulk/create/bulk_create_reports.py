@@ -7,6 +7,7 @@ from hare.exceptions import HareError, UnSupportedError
 from hare.fields.database_default import DatabaseDefault
 from hare.fields.encrypted.blind_index_field import BlindIndexField
 from hare.instrumentation.capture.captured_write import CapturedWrite
+from hare.instrumentation.capture.change_capturing import ChangeCapturing
 from hare.instrumentation.change_events import ChangeEvents
 from hare.instrumentation.enums import RowOperation
 from hare.models.write.returned_values import ReturnedValues
@@ -145,15 +146,16 @@ class BulkCreateReports:
                 changed=bulk_create._update_fields,
             )
         )
-        values_before: dict[str, Any] = {}
+        before_by_pk: dict[Any, dict[str, Any]] | None = None
 
         async def read_before_write() -> None:
+            nonlocal before_by_pk
             # Read once the insert has given the objects the values it writes - a tenant, an async default,
             # a blind index of a conflict key.
             if reads_existing_keys:
                 await BulkCreateReports.read_existing_primary_keys(bulk_create)
             if captured is not None:
-                values_before["by_pk"] = await BulkCreateReports.read_values_before(bulk_create, captured)
+                before_by_pk = await BulkCreateReports.read_values_before(bulk_create, captured)
 
         bulk_create._read_before_write = read_before_write
         try:
@@ -169,9 +171,11 @@ class BulkCreateReports:
             raise
         if captured is not None:
             inserted_pks, updated_pks = BulkCreateReports.get_written_keys(bulk_create)
-            await BulkCreateReports.capture_keys(captured, values_before.get("by_pk"), inserted_pks, updated_pks)
+            await BulkCreateReports.capture_keys(captured, before_by_pk, inserted_pks, updated_pks)
         if bulk_create._reported_rows is None:
-            await BulkCreateReports.report_inserted_objects(bulk_create, list(bulk_create._objects))
+            await WriteSteps.report(
+                bulk_create._connection, bulk_create.model, RowOperation.INSERT, instances=bulk_create._objects
+            )
             if bulk_create._update_fields and listened and bulk_create._objects:
                 await WriteSteps.report(
                     bulk_create._connection, bulk_create.model, RowOperation.UPDATE, fields=bulk_create._update_fields
@@ -303,22 +307,25 @@ class BulkCreateReports:
         if capture_needs.reads_values or capture_needs.tenant_field_name:
             values_by_pk = await captured.read(pks)
         before_by_pk = before_by_pk or {}
-        await captured.capture(
-            [
-                captured.build_change(
-                    pk,
-                    before=before_by_pk.get(pk),
-                    after=values_by_pk.get(pk, (None, None))[0],
-                    tenant=values_by_pk.get(pk, (None, None))[1],
-                    operation=operation,
+        types = captured.connection.dialect.types
+        changes = []
+        for operation, operation_pks in (
+            (RowOperation.INSERT, inserted_pks),
+            (RowOperation.UPDATE, updated_pks),
+        ):
+            for pk in operation_pks:
+                previous = ChangeCapturing.get_read_row(captured.model, types, pk, before_by_pk)
+                current = ChangeCapturing.get_read_row(captured.model, types, pk, values_by_pk)
+                changes.append(
+                    captured.build_change(
+                        pk,
+                        before=previous,
+                        after=None if current is None else current[0],
+                        tenant=None if current is None else current[1],
+                        operation=operation,
+                    )
                 )
-                for operation, operation_pks in (
-                    (RowOperation.INSERT, inserted_pks),
-                    (RowOperation.UPDATE, updated_pks),
-                )
-                for pk in operation_pks
-            ]
-        )
+        await captured.capture(changes)
 
     @staticmethod
     async def report_returned_rows(bulk_create: BulkCreateQuery[Any]) -> None:
@@ -338,13 +345,3 @@ class BulkCreateReports:
                 pks=updated_pks,
                 fields=bulk_create._update_fields,
             )
-
-    @staticmethod
-    async def report_inserted_objects(bulk_create: BulkCreateQuery[Any], objects: list[TModel]) -> None:
-        """Reports the rows of inserted objects (``ChangeEvents``).
-
-        Args:
-            bulk_create: The bulk insert.
-            objects: The objects.
-        """
-        await WriteSteps.report(bulk_create._connection, bulk_create.model, RowOperation.INSERT, instances=objects)

@@ -18,17 +18,18 @@ from hare.sql.terms.term import Term
 
 @dataclass
 class IndexInfo:
-    """A multi-column index or constraint, or a single-column one with what a field flag can't express
-    (an opclass, another method, a condition) - rebuilt as a UniqueConstraint or a Meta.indexes
-    entry. A plain single-column one is on ColumnInfo.
+    """The full metadata of an index or its backing constraint, including plain column indexes.
+
+    Simple index flags are also reflected on ColumnInfo; declarations retain details such as
+    expressions, conditions and access methods.
     """
 
     columns: list[str]
     is_unique: bool
-    #: The index's own name, as declared in the database - preserved so a reconstructed Index
-    #: can be matched/removed by name (RemoveIndex requires a name or field list; an unnamed,
-    #: expression-based reconstruction has neither) instead of only ever comparing by shape.
+    #: The name retained in a reconstructed index or constraint declaration, when explicitly named.
     name: str = ""
+    #: Physical identity before a declaration mapper substitutes a named constraint.
+    catalog_name: str = dataclass_field(default="", compare=False, kw_only=True)
     #: The index's access method, lowercase - "" for the default one.
     index_type: str = ""
     #: Every column's opclass, set once any is non-default - Index.opclasses takes one per field.
@@ -58,7 +59,7 @@ class IndexInfo:
     #: access method and opclasses are the constraint's own, not declared.
     without_overlaps: bool = False
     #: Whether the index is complete - False for one whose build didn't finish (a failed concurrent
-    #: build), which the database keeps but doesn't use.
+    #: build), which the database keeps but its query planner doesn't use for reads.
     is_valid: bool = True
     #: Each key's direction and NULL placement (an ``Order`` value, the database's defaults spelled
     #: out) - an expression key's too; empty for

@@ -10,10 +10,10 @@ seconds under a parallel test run — more than creating and filling the databas
 `reuse_databases=True`, a PostgreSQL `db_url` whose database name contains the `{}` placeholder takes a
 database from a per-process pool (`ReusableTestDatabases`) instead of a new random name:
 
-- the placeholder is filled with the id of a pool slot — 32 hex characters derived from the slot's number
-  (and the `pytest-xdist` worker), so `test_{}` gives the same names on every run;
+- the placeholder is filled with a slot id derived from a random run namespace, process id, worker and
+  slot number. Names stay stable within a process; independent runs never share slots;
 - on entering, the slot's database is created when it doesn't exist yet, reset when it is left over from
-  an earlier run, and used as is when this process has already reset it;
+  an interrupted use in this process, and used as is when this process has already reset it;
 - on exit, instead of `DROP DATABASE`, the database is reset and the slot goes back to the pool — also
   when the block raises or the reset itself fails (the database is then reset before its next use);
 - a context entered while every slot is taken (nested contexts, several connections in one config) gets a
@@ -43,6 +43,12 @@ PostgreSQL URLs without `{}`, are never pooled.
 HARE_TEST_REUSE_DATABASES=1 pytest -n 8
 ```
 
-Pooled databases are not dropped when the process ends — the next run takes them over, since `test_{}`
-gives the same names again. A test that checks the database lifecycle itself — `CREATE DATABASE` refusing
+The pool retains databases after release. Test-run infrastructure must clean up its completed run's
+databases; a later independent run uses a different namespace. A test checking the database lifecycle —
+`CREATE DATABASE` refusing
 an existing name, `DROP DATABASE` with an active connection — should pass `reuse_databases=False`.
+
+Lease bookkeeping lives in `hare.contrib.test`, not in production clients or connection credentials.
+Each scope retains its exact leases, identified by endpoint and database with an opaque acquisition
+token. Releasing a stale token cannot release another scope's slot. Taking a retained schema also
+consumes the clean marker atomically, before any database work starts.

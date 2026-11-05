@@ -12,6 +12,7 @@ from hare.dialects.sqlite.declarations import SqliteFeatures
 from hare.dialects.sqlite.enums import SqliteDialectName
 from hare.dialects.sqlite.literals.sqlite_literals import SqliteLiterals
 from hare.dialects.sqlite.parameters.sqlite_parameters import SqliteParameters
+from hare.dialects.sqlite.search_feature_constants import SQLITE_TEXT_SEARCH_OPERATIONS
 from hare.dialects.sqlite.server_versions import (
     SQLITE_MAX_EXPRESSION_DEPTH,
     SQLITE_MINIMUM_SERVER_VERSION,
@@ -41,6 +42,7 @@ class SqliteDialect(Dialect):
     name = SqliteDialectName.SQLITE
     otel_system_name = "sqlite"
     features = SqliteFeatures(
+        text_search_operations=SQLITE_TEXT_SEARCH_OPERATIONS,
         inline_comments=True,
         # "Note" and "note" name one table, "Name" and "name" one column.
         names_ignore_letter_case=True,

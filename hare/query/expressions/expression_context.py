@@ -61,3 +61,6 @@ class ExpressionContext:
     dialect: Dialect = dataclass_field(kw_only=True)
     #: The connection the query runs on; None when compiling DDL or SQL for no particular database.
     connection: DatabaseClient | None = dataclass_field(kw_only=True)
+    #: Defaults of a computed search vector; explicit configurations on expressions take precedence.
+    text_search_config: str | None = None
+    requires_search_config: bool = False

@@ -9,8 +9,8 @@ from collections.abc import Callable
 from copy import copy
 from typing import TYPE_CHECKING, Any, ClassVar, ParamSpec, TypeVar, cast
 
+from hare.core.constants import HARE_PACKAGE_DIRECTORY
 from hare.exceptions import ConfigurationError, HareError
-from hare.query.queryset.options.query_options import QueryOptions
 from hare.query.queryset.specification_copying import SpecificationCopying
 
 if TYPE_CHECKING:
@@ -30,18 +30,14 @@ class CallsBeforeSetup:
         root: The query the first kept call was made on.
         calls: Each call - its method, positional and keyword arguments - in order.
         location: Where in the application's code the last call was made - ``file:line``.
-        error: Why applying the calls failed - the query raises it when it is used.
     """
 
     #: Every query keeping calls, until ``Hare.init()`` applies them.
     PENDING: ClassVar[list[QuerySpecification[Any]]] = []
-    #: The directory of the hare package - frames inside it aren't the application's code.
-    PACKAGE_DIRECTORY: ClassVar[str] = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     root: QuerySpecification[Any]
     calls: tuple[tuple[str, tuple[Any, ...], dict[str, Any]], ...]
     location: str
-    error: HareError | None = None
 
     @staticmethod
     def recorded(method: Callable[P, T]) -> Callable[P, T]:
@@ -58,9 +54,6 @@ class CallsBeforeSetup:
 
         @functools.wraps(method)
         def call_or_keep(query: Any, /, *args: Any, **kwargs: Any) -> Any:
-            # Kept calls are a query option - a query with default options keeps none.
-            if query._options is not QueryOptions.DEFAULT:
-                CallsBeforeSetup.raise_if_invalid(query)
             if query.model._meta._inited:
                 return call_method(query, *args, **kwargs)
             return CallsBeforeSetup.keep(query, method.__name__, args, kwargs)
@@ -84,9 +77,6 @@ class CallsBeforeSetup:
 
         @functools.wraps(method)
         def call_and_keep(query: Any, /, *args: Any, **kwargs: Any) -> Any:
-            # Kept calls are a query option - a query with default options keeps none.
-            if query._options is not QueryOptions.DEFAULT:
-                CallsBeforeSetup.raise_if_invalid(query)
             result = call_method(query, *args, **kwargs)
             if not query.model._meta._inited:
                 result._calls_before_setup = CallsBeforeSetup(
@@ -124,21 +114,7 @@ class CallsBeforeSetup:
         return kept
 
     @staticmethod
-    def raise_if_invalid(query: QuerySpecification[Any]) -> None:
-        """Raises why the calls kept on ``query`` before ``Hare.init()`` couldn't be applied.
-
-        Args:
-            query: The query.
-
-        Raises:
-            HareError: The error applying them raised.
-        """
-        kept = query._calls_before_setup
-        if kept is not None and kept.error is not None:
-            raise kept.error
-
-    @classmethod
-    def get_caller_location(cls) -> str:
+    def get_caller_location() -> str:
         """Where the application's code called into hare - the first frame outside the package.
 
         Returns:
@@ -147,7 +123,7 @@ class CallsBeforeSetup:
         frame: types.FrameType | None = sys._getframe(1)
         while frame is not None:
             filename = frame.f_code.co_filename
-            if not os.path.abspath(filename).startswith(cls.PACKAGE_DIRECTORY + os.sep):
+            if not os.path.abspath(filename).startswith(HARE_PACKAGE_DIRECTORY + os.sep):
                 return f"{filename}:{frame.f_lineno}"
             frame = frame.f_back
         return ""
@@ -159,27 +135,36 @@ class CallsBeforeSetup:
 
         Raises:
             ConfigurationError: Kept calls of some queries are invalid - each is named with
-                where it was made; such a query raises its error when it is used.
+                where it was made. No pending query changes when preparation fails.
         """
+        pending = list(cls.PENDING)
+        previous_states = [(query, copy(query)) for query in pending]
         still_pending: list[QuerySpecification[Any]] = []
         errors: list[str] = []
-        for query in cls.PENDING:
-            kept = query._calls_before_setup
-            if kept is None:
-                continue
-            if not query._model_is_set_up():
-                still_pending.append(query)
-                continue
-            applied: Any = kept.root
-            try:
-                for method_name, args, kwargs in kept.calls:
-                    applied = getattr(applied, method_name)(*args, **kwargs)
-            except HareError as error:
-                query._calls_before_setup = dataclasses.replace(kept, error=error)
-                if not any(kept.location in line and str(error) in line for line in errors):
-                    errors.append(f"  {kept.location}: {error}")
-                continue
-            SpecificationCopying.compile_copy(type(query))(applied, query)
+        try:
+            for query in pending:
+                kept = query._calls_before_setup
+                if kept is None:
+                    continue
+                if not query._model_is_set_up():
+                    still_pending.append(query)
+                    continue
+                applied: Any = kept.root
+                try:
+                    for method_name, args, kwargs in kept.calls:
+                        applied = getattr(applied, method_name)(*args, **kwargs)
+                except HareError as error:
+                    if not any(kept.location in line and str(error) in line for line in errors):
+                        errors.append(f"  {kept.location}: {error}")
+                    continue
+                # Later result queries and nested expressions may refer to this query.
+                # Expose its prepared state while completing the synchronous graph.
+                SpecificationCopying.copy_state(applied, query, type(query))
+            if errors:
+                raise ConfigurationError("Queries built before Hare.init() are invalid:\n" + "\n".join(errors))
+        except BaseException:
+            for query, previous in previous_states:
+                SpecificationCopying.copy_state(previous, query, type(query))
+            cls.PENDING[:] = pending
+            raise
         cls.PENDING[:] = still_pending
-        if errors:
-            raise ConfigurationError("Queries built before Hare.init() are invalid:\n" + "\n".join(errors))

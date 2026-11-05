@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-from types import ModuleType
+from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar
 
 from hare import Hare
@@ -16,11 +15,9 @@ class ShellLauncher:
 
     Attributes:
         interactive_shell_class: IPython's embeddable shell, None without IPython installed.
-        nest_asyncio: The ``nest_asyncio`` module IPython's cells run on the open event loop with.
     """
 
     interactive_shell_class: ClassVar[type[Any] | None] = None
-    nest_asyncio: ClassVar[ModuleType | None] = None
 
     @staticmethod
     def build_namespace(hare_context: HareContext) -> dict[str, Any]:
@@ -41,14 +38,14 @@ class ShellLauncher:
         # Every model goes into the namespace. Two apps' models of one name: the plain name is the
         # last one's, each is also reachable app-qualified, and a warning is printed.
         if hare_context.apps:
-            owning_app_label_by_model_name: dict[str, str] = {}
+            seen_model_names: set[str] = set()
             colliding_model_names: set[str] = set()
             for app_label, models_dict in hare_context.apps.items():
                 for model_name, model_class in models_dict.items():
-                    if model_name in owning_app_label_by_model_name:
+                    if model_name in seen_model_names:
                         colliding_model_names.add(model_name)
                     else:
-                        owning_app_label_by_model_name[model_name] = app_label
+                        seen_model_names.add(model_name)
                     namespace[model_name] = model_class
                     namespace[f"{app_label}_{model_name}"] = model_class
             if colliding_model_names:
@@ -66,49 +63,29 @@ class ShellLauncher:
         model_names = [name for name in namespace if name not in {"Hare", "hare", "apps"}]
         return f"Available models: {', '.join(model_names)}" if model_names else "No models loaded"
 
-    @staticmethod
-    def get_current_task(loop: asyncio.AbstractEventLoop | None = None) -> asyncio.Task[Any] | None:
-        """The task running now - one of asyncio's Python tasks the shell's cells run in, or one of its C
-        tasks.
-
-        Args:
-            loop: The loop - the running one when None.
-
-        Returns:
-            The task, None outside of one.
-        """
-        tasks_module: Any = asyncio.tasks
-        return tasks_module._py_current_task(loop) or tasks_module._c_current_task(loop)
-
     @classmethod
-    def launch_ipython(cls, namespace: dict[str, Any]) -> None:
+    def launch_ipython(cls, namespace: dict[str, Any], loop_runner: Callable[[Awaitable[Any]], Any]) -> None:
         """Runs IPython with top-level ``await`` on the event loop the Hare context was opened on.
 
         Args:
             namespace: The shell's namespace.
+            loop_runner: The session's callable for evaluating an asynchronous cell.
         """
-        assert cls.interactive_shell_class is not None and cls.nest_asyncio is not None  # nosec B101
-        cls.nest_asyncio.apply()
-        # nest_asyncio runs the cells in tasks of asyncio's Python implementation, which mark themselves
-        # current where only the Python current_task() looks - asyncio.timeout(), wait_for() and the
-        # connections waiting with them found no task. Both are asked.
-        asyncio.current_task = asyncio.tasks.current_task = ShellLauncher.get_current_task
+        assert cls.interactive_shell_class is not None  # nosec B101
         banner = (
             "Hare ORM Shell (IPython with async support)\n"
             f"{cls._shell_models_info(namespace)}\n"
             "Use 'await' directly for async operations (e.g., 'await YourModel.objects.all()').\n"
         )
-        with contextlib.suppress(EOFError, ValueError):
-            shell = cls.interactive_shell_class(user_ns=namespace, banner1=banner)
+        with contextlib.suppress(EOFError):
+            shell = cls.interactive_shell_class(user_ns=namespace, banner1=banner, loop_runner=loop_runner)
             shell.autoawait = True
             shell()
 
 
 try:
-    import nest_asyncio
     from IPython.terminal.embed import InteractiveShellEmbed
 
     ShellLauncher.interactive_shell_class = InteractiveShellEmbed
-    ShellLauncher.nest_asyncio = nest_asyncio
 except ImportError:
     pass

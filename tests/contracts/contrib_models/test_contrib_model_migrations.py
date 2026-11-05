@@ -14,17 +14,6 @@ from tests.utils.database_under_test import DatabaseUnderTest
 PARAMETERS = [case.get_parameter() for case in CONTRIB_MODEL_CASES]
 
 
-def skip_unless_supported(case, models) -> None:
-    """Skips the test when the database under test lacks a column or a constraint the case needs."""
-    dialect = DatabaseUnderTest.get_dialect()
-    unsupported = SampleDatabase.get_unsupported_field_names(models, dialect.name)
-    if unsupported:
-        pytest.skip(f"{dialect.name} has no column for {', '.join(unsupported)}")
-    features = dialect.features
-    if case.needs_constraints and not (features.supports_unique_constraints and features.supports_foreign_keys):
-        pytest.skip(f"{dialect.name} keeps no key the models declare")
-
-
 @pytest.mark.database_independent
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", PARAMETERS)
@@ -38,7 +27,9 @@ async def test_a_written_migration_of_the_models_reads_back_as_the_models(case):
 @pytest.mark.parametrize("case", PARAMETERS)
 async def test_a_migration_of_the_models_is_applied_and_reversed_on_the_database(contract_database, case):
     models = case.make_models()
-    skip_unless_supported(case, models)
+    dialect_name = DatabaseUnderTest.get_dialect().name
+    if dialect_name not in case.dialects:
+        pytest.skip(f"{case.name} is not supported on {dialect_name}")
     migration, _ = SampleDatabase.get_written_migration(models)
     connection = contract_database.get_connection()
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)

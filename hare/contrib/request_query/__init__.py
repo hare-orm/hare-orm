@@ -9,7 +9,7 @@ from hare.contrib.request_query.api_getter.api_getter_retry import ApiGetterRetr
 from hare.contrib.request_query.api_getter.api_getter_triggers import ApiGetterTriggers
 from hare.contrib.request_query.api_getter.api_source import ApiSource
 from hare.contrib.request_query.api_getter.api_value_mapping import ApiValueMapping
-from hare.contrib.request_query.api_getter.declarations import ApiRequestExecuted
+from hare.contrib.request_query.api_getter.declarations import ApiAssignment, ApiRequestExecuted
 from hare.contrib.request_query.api_getter.enums import ApiGetterTrigger, ApiRequestMode, ApiValueMappingMode
 from hare.contrib.request_query.descriptions.parameter_choice import ParameterChoice
 from hare.contrib.request_query.descriptions.parameter_description import ParameterDescription
@@ -51,6 +51,7 @@ from hare.contrib.request_query.types.key_columns import KeyColumns
 from hare.contrib.request_query.types.text_parameter import TextParameter
 
 __all__ = (
+    "ApiAssignment",
     "ApiDataNotFoundError",
     "ApiGetter",
     "ApiGetterError",

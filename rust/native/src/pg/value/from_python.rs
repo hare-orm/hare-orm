@@ -10,17 +10,26 @@ use pyo3::types::{
 use pyo3::Borrowed;
 
 use crate::pg::error::{to_pyerr, DriverError};
-use crate::pg::types::json::write_python_json;
+use crate::pg::types::json::write_python_json_with_context;
 use crate::pg::types::numeric::NonFiniteNumeric;
 use crate::pg::value::python_classes::{is_ip_address_object, range_type};
 use crate::pg::value::{IntervalValue, RangeValue, Value};
 use crate::python::objects::{decimal_type, uuid_type};
+use crate::python::value_traversal::PythonValueTraversal;
 
 impl<'a, 'py> FromPyObject<'a, 'py> for Value {
     type Error = PyErr;
 
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> Result<Self, PyErr> {
-        let object: &Bound<'py, PyAny> = &obj;
+        Self::extract_with_context(&obj, &mut PythonValueTraversal::default())
+    }
+}
+
+impl Value {
+    pub(crate) fn extract_with_context(
+        object: &Bound<'_, PyAny>,
+        context: &mut PythonValueTraversal,
+    ) -> PyResult<Self> {
         if object.is_none() {
             return Ok(Value::Null);
         }
@@ -98,18 +107,20 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Value {
             return Ok(Value::Decimal(text));
         }
         if object.is_instance(range_type(py)?.as_any())? {
-            return extract_range(object);
+            return context.visit(object, |context| extract_range(object, context));
         }
         if object.is_instance_of::<PyList>() {
-            let mut items = Vec::new();
-            for item in object.try_iter()? {
-                items.push(item?.extract::<Value>()?);
-            }
-            return Ok(Value::Array(items));
+            return context.visit(object, |context| {
+                let mut items = Vec::new();
+                for item in object.try_iter()? {
+                    items.push(Self::extract_with_context(&item?, context)?);
+                }
+                Ok(Value::Array(items))
+            });
         }
         if object.is_instance_of::<PyDict>() {
             let mut text = String::new();
-            write_python_json(object, &mut text)?;
+            write_python_json_with_context(object, &mut text, context)?;
             return Ok(Value::Json(text));
         }
         // An ipaddress object is sent as its text, which the server parses as inet/cidr.
@@ -139,17 +150,14 @@ fn get_utc_instant(datetime: &Bound<'_, PyDateTime>, offset: &Bound<'_, PyDelta>
 
 /// Extracts a `hare.dialects.postgresql.fields.ranges.Range(lower, upper, lower_inc, upper_inc, is_empty)`
 /// dataclass instance into a `Value::Range`.
-fn extract_range(object: &Bound<'_, PyAny>) -> PyResult<Value> {
+fn extract_range(object: &Bound<'_, PyAny>, context: &mut PythonValueTraversal) -> PyResult<Value> {
     let py = object.py();
     let lower = object.getattr(intern!(py, "lower"))?;
     let upper = object.getattr(intern!(py, "upper"))?;
     let lower_inc = object.getattr(intern!(py, "lower_inc"))?.extract::<bool>()?;
     let upper_inc = object.getattr(intern!(py, "upper_inc"))?.extract::<bool>()?;
-    let empty = match object.getattr(intern!(py, "is_empty")) {
-        Ok(value) => value.extract::<bool>()?,
-        Err(_) => false,
-    };
-    let lower = if lower.is_none() { None } else { Some(Box::new(lower.extract::<Value>()?)) };
-    let upper = if upper.is_none() { None } else { Some(Box::new(upper.extract::<Value>()?)) };
+    let empty = object.getattr(intern!(py, "is_empty"))?.extract::<bool>()?;
+    let lower = if lower.is_none() { None } else { Some(Box::new(Value::extract_with_context(&lower, context)?)) };
+    let upper = if upper.is_none() { None } else { Some(Box::new(Value::extract_with_context(&upper, context)?)) };
     Ok(Value::Range(RangeValue { lower, upper, lower_inc, upper_inc, empty }))
 }

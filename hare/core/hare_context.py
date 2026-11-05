@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 from hare.core.caching.caches import Caches
 from hare.core.config import ConfigSecrets, HareConfig
 from hare.core.connections.connection_handler import ConnectionHandler
-from hare.core.constants import DEFAULT_CONNECTION_NAME
+from hare.core.constants import DEFAULT_CONNECTION_NAME, INITIALIZATION_RELEASE_FAILED
 from hare.core.log import logger
+from hare.core.resource_completion import ResourceCompletion
 from hare.core.routing.connection_router import ConnectionRouter
 from hare.dialects.base.constants import SLOW_QUERY_THRESHOLD_MS
 from hare.exceptions import ConfigurationError
@@ -191,6 +192,10 @@ class HareContext:
                 current._apps.bind_models()
 
     def __init__(self) -> None:
+        from hare.fields.encrypted.field_encryption import FieldEncryption
+
+        self.identity = object()
+        self.encryption_keyring = FieldEncryption.default_keyring
         self._connections: ConnectionHandler | None = None
         self._apps: Apps | None = None
         # Whether this context bound the model classes to its configuration - kept after
@@ -204,7 +209,7 @@ class HareContext:
         self._use_timezone: bool = True
         self._timezone: str = DEFAULT_TIMEZONE
         # Routers
-        self._routers: list[type] = []
+        self._routers: list[Callable[[], object]] = []
         self._router: ConnectionRouter | None = None
         self.observers = ObserverSet()
 
@@ -285,8 +290,8 @@ class HareContext:
         return self._timezone
 
     @property
-    def routers(self) -> list[type]:
-        """The router classes configured for this context."""
+    def routers(self) -> list[Callable[[], object]]:
+        """The router factories configured for this context."""
         return self._routers
 
     async def init(
@@ -296,7 +301,7 @@ class HareContext:
         _create_db: bool = False,
         use_timezone: bool = True,
         timezone: str = DEFAULT_TIMEZONE,
-        routers: list[str | type] | None = None,
+        routers: list[str | Callable[[], object]] | None = None,
         table_name_generator: Callable[[type[Model]], str] | None = None,
         connect: bool = True,
         slow_query_threshold_ms: float = SLOW_QUERY_THRESHOLD_MS,
@@ -309,7 +314,7 @@ class HareContext:
             _create_db: Create the database if it doesn't exist.
             use_timezone: Make datetime fields timezone-aware.
             timezone: The timezone, "UTC" by default.
-            routers: Router paths or classes.
+            routers: Router classes or zero-argument factories, directly or by import path.
             table_name_generator: A callable generating table names.
             connect: False sets the models and connections up without connecting - the connection
                 names are still checked.
@@ -342,9 +347,9 @@ class HareContext:
         if _enable_global_fallback:
             HareContext.check_global_available(self)
 
-        router_classes = self._get_router_classes(effective_routers)
+        router_factories = self._get_router_factories(effective_routers)
         previous_connections = await self._set_up_registries(
-            typed_config, router_classes, table_name_generator, connect=connect, create_db=_create_db
+            typed_config, router_factories, table_name_generator, connect=connect, create_db=_create_db
         )
 
         self._table_name_generator = table_name_generator
@@ -368,7 +373,7 @@ class HareContext:
     async def _set_up_registries(
         self,
         typed_config: HareConfig,
-        router_classes: list[type],
+        router_factories: list[Callable[[], object]],
         table_name_generator: Callable[[type[Model]], str] | None,
         *,
         connect: bool,
@@ -382,7 +387,7 @@ class HareContext:
 
         Args:
             typed_config: The configuration.
-            router_classes: The router classes.
+            router_factories: The zero-argument router factories.
             table_name_generator: A callable generating table names.
             connect: Whether the connections are opened.
             create_db: Whether a missing database is created.
@@ -394,12 +399,16 @@ class HareContext:
         # Genuinely circular: hare.core.apps -> hare.models -> hare.transactions ->
         # hare.core.hare_context -> hare.core.apps.
         from hare.core.apps import Apps
+        from hare.core.apps.model_binding_graph import ModelBindingGraph
 
         config_dict = typed_config.to_dict()
         connections_config = config_dict["connections"]
         apps_config = config_dict["apps"]
         previous_connections = self._connections
         previous_apps = self._apps
+        previous_models_bound = self._models_bound
+        previous_router = self._router
+        previous_router_factories = self._routers
         new_connections = ConnectionHandler()
         self._connections = new_connections
         # The models' connections are read through the current context - this one, while it is
@@ -414,30 +423,36 @@ class HareContext:
 
                 self._models_bound = True
                 self._apps = Apps(
-                    apps_config,
+                    None,
                     new_connections,
                     table_name_generator,
                     validate_connections=connect,
                     swappable=typed_config.swappable,
                 )
-                # The labels observers name, looked up now that the models are bound.
-                for observer_set in (Observers.process_observers, self.observers):
-                    observer_set.find_model_labels(self._apps)
-                # router.init_routers() replaces the routers only once every one is instantiated.
-                self._init_routers(router_classes)
-                self.router.read_your_writes_seconds = typed_config.read_your_writes_seconds
-            except BaseException:
+                self._apps._config = apps_config
+                from hare.core.apps.model_discovery import ModelDiscovery
+
+                with ModelBindingGraph(self._apps):
+                    ModelDiscovery.load_from_config(self._apps)
+                    # The labels observers name, looked up now that the models are bound.
+                    for observer_set in (Observers.process_observers, self.observers):
+                        observer_set.find_model_labels(self._apps)
+                    prepared_router = ConnectionRouter()
+                    prepared_router.init_routers(router_factories)
+                    prepared_router.read_your_writes_seconds = typed_config.read_your_writes_seconds
+                    self._router = prepared_router
+                    self._routers = router_factories
+            except BaseException as error:
                 self._connections = previous_connections
                 self._apps = previous_apps
-                if previous_apps is not None:
-                    # Apps() binds the model classes themselves (their connection, tables and
-                    # relations) - bound back to the previous registry so they run on it again, not
-                    # on the configuration this call failed to set up.
-                    with suppress(Exception):
-                        previous_apps.bind_models()
+                self._models_bound = previous_models_bound
+                self._router = previous_router
+                self._routers = previous_router_factories
                 if new_connections._db_config is not None:
-                    with suppress(Exception):
+                    try:
                         await new_connections.close_all(discard=True)
+                    except BaseException as release_error:
+                        raise BaseExceptionGroup(INITIALIZATION_RELEASE_FAILED, [error, release_error]) from None
                 raise
         finally:
             if setup_token is not None:
@@ -468,41 +483,29 @@ class HareContext:
         self._timezone = timezone
 
     @staticmethod
-    def _get_router_classes(routers: list[str | type] | None) -> list[type]:
-        """The router classes ``routers`` names - each an import path or the class itself.
+    def _get_router_factories(routers: list[str | Callable[[], object]] | None) -> list[Callable[[], object]]:
+        """The router factories ``routers`` names - each an import path, class or callable.
 
         Args:
             routers: The configured routers, None for none.
 
         Returns:
-            The classes, in order.
+            The factories, in order.
 
         Raises:
-            ConfigurationError: A path can't be imported, or an item is neither a path nor a class.
+            ConfigurationError: A path can't be imported.
         """
-        router_classes: list[type] = []
+        router_factories: list[Callable[[], object]] = []
         for router in routers or []:
             if isinstance(router, str):
                 try:
-                    module_name, class_name = router.rsplit(".", 1)
-                    router_classes.append(getattr(importlib.import_module(module_name), class_name))
+                    module_name, factory_name = router.rsplit(".", 1)
+                    router_factories.append(getattr(importlib.import_module(module_name), factory_name))
                 except Exception as error:
                     raise ConfigurationError(f"Can't import router from {router!r}: {error}") from error
-            elif isinstance(router, type):
-                router_classes.append(router)
             else:
-                raise ConfigurationError("Router must be either str or type")
-        return router_classes
-
-    def _init_routers(self, router_classes: list[type]) -> None:
-        """Puts ``router_classes`` in place as this context's routers - all of them, or none when
-        one can't be instantiated.
-
-        Args:
-            router_classes: The router classes (``_get_router_classes()``).
-        """
-        self.router.init_routers(router_classes)
-        self._routers = router_classes
+                router_factories.append(router)
+        return router_factories
 
     async def generate_schemas(self, *, safe: bool = True) -> None:
         """
@@ -568,11 +571,21 @@ class HareContext:
 
     async def close_connections(self) -> None:
         """Closes this context's connections, clears the global fallback if it is this context, and
-        marks the context as not inited.
+        marks the context as not inited. Once started, shutdown drains observers and releases
+        pools before propagating caller cancellation.
 
         Raises:
             Exception: What ``close_all()`` raised - after the context forgot its connections.
         """
+        await ResourceCompletion.wait(self._close_connections())
+
+    async def _close_connections(self) -> None:
+        """Finish observer delivery before releasing the resources it may still use."""
+        # Observers may still use this context's pools; drain before discarding them.
+        try:
+            await self.observers.wait_for_pending(timeout_seconds=OBSERVER_SHUTDOWN_WAIT_TIMEOUT_SECONDS)
+        except Exception:
+            logger.exception("Observer failure surfaced during shutdown")
         try:
             if self._connections is not None and self._connections._db_config is not None:
                 await self._connections.close_all(discard=True)
@@ -581,13 +594,6 @@ class HareContext:
             # Clear global context if this context was set as the global fallback
             HareContext.clear_global_if(self)
             self._inited = False
-        # Background observers still flushing a metric or trace finish before the loop stops - what
-        # one raised is logged already and never aborts a clean shutdown; one that never finishes
-        # is cancelled with a warning.
-        try:
-            await Observers.wait_for_pending(timeout_seconds=OBSERVER_SHUTDOWN_WAIT_TIMEOUT_SECONDS)
-        except Exception:
-            logger.exception("Observer failure surfaced during shutdown")
 
     @classmethod
     def bind_models(
@@ -689,6 +695,7 @@ class HareContext:
         from hare.core.apps import Apps
         from hare.core.apps.cross_connection_checks import CrossConnectionChecks
         from hare.core.apps.enum_member_checks import EnumMemberChecks
+        from hare.core.apps.model_binding_graph import ModelBindingGraph
         from hare.core.apps.relation_linking import RelationLinking
 
         if connection_alias not in self.connections.db_config:
@@ -716,23 +723,12 @@ class HareContext:
                     f"registered under {app_label!r}."
                 )
         new_models = [model for model in models if registered_models.get(model.__name__) is not model]
-        # A model whose relations were already wired (e.g. by another context) gets nothing
-        # added by this call beyond its registry entry, so a rollback must not unwire it.
-        fresh_models = [
-            model
-            for model in new_models
-            if not model._meta._inited and not model._meta._foreign_key_or_one_to_one_inited
-        ]
-        previous_state_by_model = {
-            model: (model._meta.app, model._meta.managed, model._meta.default_connection, model._meta.db_table)
-            for model in models
-        }
         module = ModuleType(f"hare.register_live_models.{app_label}")
         module.__models__ = models  # type: ignore[attr-defined]
         # Like loading the configured apps: the models are registered first (their relations
         # set up later), then bound to the connection, then the relations are set up - so the
         # table-name collision check sees the models' real connection.
-        try:
+        with ModelBindingGraph(apps, models):
             if managed is not None:
                 for model in models:
                     model._meta.managed = managed
@@ -745,18 +741,6 @@ class HareContext:
             EnumMemberChecks.add_to_models(models, self.connections)
             CrossConnectionChecks.check_change_capture_connections(apps)
             apps.build_initial_querysets()
-        except BaseException:
-            apps.discard_models(fresh_models)
-            for model, (app, model_managed, default_connection, db_table) in previous_state_by_model.items():
-                if model in new_models:
-                    apps.drop_registry_entry(model)
-                    model._meta.app = app
-                    model._meta.registered_live = False
-                if model in fresh_models:
-                    model._meta.db_table = db_table
-                model._meta.managed = model_managed
-                model._meta.default_connection = default_connection
-            raise
         # The targets gained backward relations; caches of the registered model set are stale too,
         # including when a newly registered model has no relations.
         Caches.forget_model_caches(

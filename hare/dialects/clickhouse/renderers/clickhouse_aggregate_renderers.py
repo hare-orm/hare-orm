@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import copy
 from typing import TYPE_CHECKING, cast
 
+from hare.dialects.clickhouse.functions.aggregates.parametric_aggregate_function import ParametricAggregateFunction
+from hare.dialects.clickhouse.functions.aggregates.parametric_analytic_function import ParametricAnalyticFunction
 from hare.dialects.clickhouse.renderers.constants import (
     CLICKHOUSE_ARRAY_AGGREGATE_NAME,
     CLICKHOUSE_GROUP_ARRAY_FUNCTION_NAME,
@@ -42,6 +44,17 @@ class ClickhouseAggregateRenderers:
         for function_name in CLICKHOUSE_NULL_FOR_NO_ROWS_AGGREGATE_NAMES:
             renderers.register_function(function_name, cls.render_null_for_no_rows_aggregate)
         renderers.register_function(CLICKHOUSE_ARRAY_AGGREGATE_NAME, cls.render_array_aggregate)
+        renderers.register_name(ParametricAggregateFunction, cls.get_parametric_name)
+        renderers.register_name(ParametricAnalyticFunction, cls.get_parametric_name)
+
+    @staticmethod
+    def get_parametric_name(
+        function: ParametricAggregateFunction | ParametricAnalyticFunction, sql_context: SqlContext
+    ) -> str:
+        """Append aggregate parameters to the current name, including an applied combinator."""
+        if not function.parameters:
+            return function.name
+        return f"{function.name}({','.join(repr(parameter) for parameter in function.parameters)})"
 
     @staticmethod
     def render_array_aggregate(function: Function, sql_context: SqlContext) -> str:

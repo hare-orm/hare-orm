@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import operator
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hare.dialects.clickhouse.lookups.constants import (
     CLICKHOUSE_DYNAMIC_COMPARED_DECIMAL_FUNCTION_NAME,
@@ -14,12 +14,10 @@ from hare.dialects.clickhouse.types.declarations import ClickhouseTypedValue
 from hare.query.filters.lookups.field_lookup import FieldLookup
 from hare.query.filters.lookups.lookups import Lookups
 from hare.query.filters.lookups.value_encoders import ValueEncoders
+from hare.sql.terms.criteria.criterion import Criterion
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.term import Term
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-
-if TYPE_CHECKING:
-    from hare.sql.terms.criteria.criterion import Criterion
 
 
 class ClickhouseTypedValueLookups:
@@ -50,17 +48,17 @@ class ClickhouseTypedValueLookups:
             The lookups.
         """
         return {
-            "": FieldLookup(partial(self.compare, comparison=operator.eq), binds_by_rebuild=True),
-            "not": FieldLookup(self.not_equal, binds_by_rebuild=True),
-            "in": FieldLookup(self.is_in, ValueEncoders.encode_list, binds_by_rebuild=True),
-            "not_in": FieldLookup(self.not_in, ValueEncoders.encode_list, binds_by_rebuild=True),
+            "": FieldLookup(partial(self.compare, comparison=operator.eq)),
+            "not": FieldLookup(self.not_equal),
+            "in": FieldLookup(self.is_in, ValueEncoders.encode_list),
+            "not_in": FieldLookup(self.not_in, ValueEncoders.encode_list),
             "isnull": FieldLookup(Lookups.is_null, ValueEncoders.encode_bool),
             "not_isnull": FieldLookup(Lookups.not_null, ValueEncoders.encode_bool),
-            "gt": FieldLookup(partial(self.compare, comparison=operator.gt), binds_by_rebuild=True),
-            "gte": FieldLookup(partial(self.compare, comparison=operator.ge), binds_by_rebuild=True),
-            "lt": FieldLookup(partial(self.compare, comparison=operator.lt), binds_by_rebuild=True),
-            "lte": FieldLookup(partial(self.compare, comparison=operator.le), binds_by_rebuild=True),
-            "range": FieldLookup(self.between, ValueEncoders.encode_list, binds_by_rebuild=True),
+            "gt": FieldLookup(partial(self.compare, comparison=operator.gt)),
+            "gte": FieldLookup(partial(self.compare, comparison=operator.ge)),
+            "lt": FieldLookup(partial(self.compare, comparison=operator.lt)),
+            "lte": FieldLookup(partial(self.compare, comparison=operator.le)),
+            "range": FieldLookup(self.between, ValueEncoders.encode_list),
         }
 
     def compare(self, term: Term, value: Any, comparison: Any) -> Criterion:
@@ -113,13 +111,10 @@ class ClickhouseTypedValueLookups:
         Returns:
             The condition.
         """
-        criterion = None
-        for type_name, _, _ in CLICKHOUSE_DYNAMIC_INTEGER_TYPES:
-            type_comparison = self.get_held_comparison(
-                term, ValueWrapper(type_name, allow_parametrize=False), value, comparison
-            )
-            criterion = type_comparison if criterion is None else criterion | type_comparison
-        return criterion  # type: ignore[return-value]
+        return Criterion.any(
+            self.get_held_comparison(term, ValueWrapper(type_name, allow_parametrize=False), value, comparison)
+            for type_name, _, _ in CLICKHOUSE_DYNAMIC_INTEGER_TYPES
+        )
 
     def get_decimal_comparison(self, term: Term, value: Any, comparison: Any) -> Criterion:
         """The held values of every decimal type compared with a decimal - each read as a decimal of
@@ -148,8 +143,7 @@ class ClickhouseTypedValueLookups:
         )
 
     def not_equal(self, term: Term, value: Any) -> Criterion:
-        """A held value that isn't the value - of another type, or another value of its type; NULL
-        matches nothing but a value.
+        """A held value that isn't the value, including NULL unless the compared value is NULL.
 
         Args:
             term: The column.
@@ -158,9 +152,9 @@ class ClickhouseTypedValueLookups:
         Returns:
             The condition.
         """
-        if value is None:
-            return term.notnull()
-        return term.notnull() & self.compare(term, value, operator.eq).negate()
+        if isinstance(value, Term):
+            return Lookups.not_equal(term, value)
+        return self.compare(term, value, operator.eq).is_not_true()
 
     def is_in(self, term: Term, value: Any) -> Criterion:
         """A held value equal to one of the values - a None matching the NULL held.
@@ -176,13 +170,10 @@ class ClickhouseTypedValueLookups:
             return Lookups.is_in(term, value)
         if not value:
             return Lookups.is_in(term, [])
-        criterion = self.compare(term, value[0], operator.eq)
-        for element in value[1:]:
-            criterion |= self.compare(term, element, operator.eq)
-        return criterion
+        return Criterion.any(self.compare(term, element, operator.eq) for element in value)
 
     def not_in(self, term: Term, value: Any) -> Criterion:
-        """A held value equal to none of the values - NULL matches nothing.
+        """A held value equal to none of the values; NULL matches unless included in the list.
 
         Args:
             term: The column.
@@ -193,9 +184,7 @@ class ClickhouseTypedValueLookups:
         """
         if isinstance(value, Term):
             return Lookups.not_in(term, value)
-        if not value:
-            return term.notnull()
-        return term.notnull() & self.is_in(term, value).negate()
+        return self.is_in(term, value).is_not_true()
 
     def between(self, term: Term, value: list[Any]) -> Criterion:
         """A held value from the lower bound to the upper one - of the bounds' type.

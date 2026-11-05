@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from hare.ddl.indexes.index import Index
 from hare.ddl.schema_objects.enum_type import EnumType
 from hare.exceptions import ConfigurationError
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
@@ -13,16 +13,15 @@ from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyF
 from hare.fields.relations.swappable_model_reference import SwappableModelReference
 from hare.migrations.exceptions import InconsistentMigrationStateError
 from hare.migrations.reports.operation_plan import OperationPlan
+from hare.migrations.state.migration_environment import MigrationEnvironment
 from hare.migrations.state.model_state import ModelState
 from hare.migrations.state.state_apps import StateApps
 from hare.migrations.state.state_rendering import StateRendering
-from hare.migrations.state.tracked_dict import TrackedDict
 from hare.models import Model
 from hare.models.enums import ModelOption
 
 if TYPE_CHECKING:
     from hare.migrations.autodetection.rename_questions import RenameQuestions
-    from hare.migrations.state.declarations import OperationUndo
 
 
 @dataclass
@@ -43,29 +42,18 @@ class State:
     schemas: set[str] = dataclasses.field(default_factory=set)
     #: The ``ENUM`` types the operations created, by schema and name.
     enum_types: dict[tuple[str | None, str], EnumType] = dataclasses.field(default_factory=dict)
+    environment: MigrationEnvironment = dataclasses.field(
+        default_factory=MigrationEnvironment.capture, repr=False, compare=False, kw_only=True
+    )
     rendering: StateRendering = dataclasses.field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        self.models = TrackedDict(self.models, owner=self)
-        self.rendering = StateRendering(self.default_connections)
+        self.rendering = StateRendering(self.default_connections, self.environment)
 
     @property
     def apps(self) -> StateApps:
         """The model classes rendered from the state, up to date with every change made so far."""
         return self.rendering.get_apps(self.models)
-
-    def build_index_expressions(self) -> None:
-        """Builds the key expressions of the state's indexes from their declared form - a migration file
-        keeps them as declared - against the rendered models, for their generated names and comparisons;
-        renders the models only when an expression is still unbuilt."""
-        if not any(
-            isinstance(index, Index) and index.has_unresolved_expressions
-            for model_state in self.models.values()
-            for index in model_state.options.get(ModelOption.INDEXES, ())
-        ):
-            return
-        apps = self.apps
-        StateRendering.build_index_expressions(model for app in apps.apps.values() for model in app.values())
 
     def mark_model_added(self, app_label: str, model_name: str) -> None:
         """Records that a model was added to ``models`` - rendered when the classes are next asked for.
@@ -96,28 +84,6 @@ class State:
         """
         self.rendering.mark_removed((app_label, model_name))
 
-    def undo(self, undo: OperationUndo) -> None:
-        """Takes the state back to before an operation - its model states, extensions, schemas and enum
-        types as the state change journal recorded them; the rendered classes follow when next asked for.
-
-        Args:
-            undo: What the journal recorded of the operation.
-        """
-        for key, model_state in undo.model_states.items():
-            if model_state is None:
-                if key in self.models:
-                    del self.models[key]
-                    self.mark_model_removed(*key)
-            elif key in self.models:
-                self.models[key] = model_state
-                self.mark_models_changed([key])
-            else:
-                self.models[key] = model_state
-                self.mark_model_added(*key)
-        self.extensions = set(undo.extensions)
-        self.schemas = set(undo.schemas)
-        self.enum_types = dict(undo.enum_types)
-
     @classmethod
     def from_models(
         cls,
@@ -125,6 +91,7 @@ class State:
         *,
         app_label: str | None = None,
         default_connections: dict[str, str] | None = None,
+        environment: MigrationEnvironment | None = None,
     ) -> State:
         """The state of model classes as they are declared - for a migration built in memory, the
         models its operations relate to, or the new version of the models it brings.
@@ -138,6 +105,7 @@ class State:
             models: The model classes.
             app_label: The app of a model that names none (``Meta.app``) and isn't registered.
             default_connections: Each app's default connection alias.
+            environment: Captured application inputs; captures the current application when omitted.
 
         Returns:
             The state.
@@ -151,7 +119,11 @@ class State:
             if model_app_label is None:
                 raise ConfigurationError(f"Model {model.__name__} names no app - pass app_label")
             model_states[(model_app_label, model.__name__)] = ModelState.make_from_model(model_app_label, model)
-        return cls(models=model_states, default_connections=dict(default_connections or {}))
+        return cls(
+            models=model_states,
+            default_connections=dict(default_connections or {}),
+            environment=environment if environment is not None else MigrationEnvironment.capture(),
+        )
 
     def get_operations(
         self, new_state: State, app_label: str, rename_questions: RenameQuestions | None = None
@@ -162,8 +134,8 @@ class State:
         Args:
             new_state: The state to reach.
             app_label: The app.
-            rename_questions: The answers whether a removed field or model is renamed - none renamed
-                without them.
+            rename_questions: Answers for candidate renames that cannot be inferred from
+                unambiguous field-column identity or relation signatures.
 
         Returns:
             The operations, the warnings and the warnings of what the change can lose.
@@ -225,20 +197,20 @@ class State:
                 field, "_generated", False
             ):
                 continue
-            references: list[object] = [SwappableModelReference.get_model_reference(field.model_name)]
+            references: list[object] = [self.get_model_reference(field.model_name)]
             if isinstance(field, ManyToManyFieldInstance):
-                references.append(SwappableModelReference.get_model_reference(field.through_model))
+                references.append(self.get_model_reference(field.through_model))
             for reference in references:
                 if not isinstance(reference, str) or "." not in reference:
                     continue
                 target_key = tuple(reference.split(".", 1))
-                if target_key not in self.models and not StateApps.is_unmanaged_live_model(*target_key):
+                if target_key not in self.models and target_key not in self.environment.unmanaged_models:
                     missing_targets_by_field.append((field_name, reference))
         return missing_targets_by_field
 
     def get_swappable_label(self, setting: str) -> str:
-        """The ``app_label.ModelName`` label a ``swappable`` setting points at - read from the live
-        app registry, else the one model of this state declaring ``Meta.swappable = setting``.
+        """The label a ``swappable`` setting points at in the captured environment, else the
+        one model of this state declaring ``Meta.swappable = setting``.
 
         Args:
             setting: The setting name.
@@ -246,7 +218,21 @@ class State:
         Raises:
             ConfigurationError: The setting is neither configured nor declared by exactly one model.
         """
-        return StateApps.get_live_swappable_label(setting) or self.get_declared_swappable_label(setting)
+        return self.environment.get_swappable_label(setting) or self.get_declared_swappable_label(setting)
+
+    def get_model_reference(self, reference: Any) -> Any:
+        """Bind a swappable reference using this state's captured environment."""
+        return (
+            self.get_swappable_label(reference.setting)
+            if isinstance(reference, SwappableModelReference)
+            else reference
+        )
+
+    def get_model_key(self, reference: str | type[Model] | SwappableModelReference) -> tuple[str, str]:
+        """Read a model key without consulting the current application."""
+        if isinstance(reference, SwappableModelReference):
+            reference = self.get_swappable_label(reference.setting)
+        return StateApps.split_reference(reference)
 
     def get_declared_swappable_label(self, setting: str) -> str:
         """The label of the one model of this state declaring ``Meta.swappable = setting``.
@@ -318,5 +304,6 @@ class State:
             ignores_missing_swappable_relations=self.ignores_missing_swappable_relations,
             extensions=set(self.extensions),
             schemas=set(self.schemas),
-            enum_types=dict(self.enum_types),
+            enum_types=deepcopy(self.enum_types),
+            environment=self.environment,
         )

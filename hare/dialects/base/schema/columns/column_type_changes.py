@@ -81,23 +81,10 @@ class ColumnTypeChanges(SchemaEditorPart):
             for old_column, new_column in cls.get_altered_columns(old_model, new_model, field_name)
         )
 
-    @classmethod
-    def rewrites_table_on_alter(
-        cls, old_model: type[Model], new_model: type[Model], field_name: str, dialect: Dialect
-    ) -> bool:
-        """Whether the database rewrites the whole table to alter a field - the time it takes grows
-        with the table's rows. Changing a column's type does.
-
-        Args:
-            old_model: The model rendered from the state before the change.
-            new_model: The model rendered from the state after it.
-            field_name: The altered field's name.
-            dialect: The database's dialect.
-
-        Returns:
-            True when the table is rewritten.
-        """
-        return cls.changes_column_type(old_model, new_model, field_name, dialect)
+    @staticmethod
+    def column_type_change_rewrites_table(old_type: str, new_type: str) -> bool:
+        """Whether the prepared type-change statement rewrites stored rows."""
+        return old_type != new_type
 
     def get_type_change_sql(self, old_field: Field[Any], new_field: Field[Any], column: str, sql_type: str) -> str:
         """The ``ALTER TABLE`` change giving a field's column its new type.

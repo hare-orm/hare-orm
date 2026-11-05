@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
+from hare.dialects.base.schema.plans.enums import SchemaEffect
 from hare.fields import Field
 from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.operations.declared_uniqueness_checks import DeclaredUniquenessChecks
@@ -13,11 +13,11 @@ from hare.migrations.operations.fields.field_like import FieldLike
 from hare.migrations.operations.fields.remove_field import RemoveField
 from hare.migrations.operations.model_bound_operation import ModelBoundOperation
 from hare.migrations.operations.operation import Operation
+from hare.migrations.operations.operation_rewrite import OperationRewrite
 from hare.migrations.reports.operation_effect import OperationEffect
 from hare.migrations.state.state import State
 
 if TYPE_CHECKING:
-    from hare.dialects.base.dialect import Dialect
     from hare.dialects.base.schema.base_schema_editor import BaseSchemaEditor
 
 
@@ -33,22 +33,22 @@ class AlterField(ModelBoundOperation):
         """The field's new definition."""
         return [self.field]
 
-    def reduce(self, other: Operation, app_label: str) -> list[Operation] | bool:
+    def get_rewrite(self, other: Operation, app_label: str) -> OperationRewrite | None:
         """A later change or removal of the same field takes this one's place."""
         if (
             isinstance(other, (AlterField, RemoveField))
             and self.is_same_model_name(self.model_name, other.model_name)
             and other.name == self.name
         ):
-            return [other]
-        return super().reduce(other, app_label)
+            return OperationRewrite((other,))
+        return super().get_rewrite(other, app_label)
 
     def get_provided_dependencies(self, app_label: str) -> list[OperationDependency]:
         return [OperationDependency.of_field(app_label, self.model_name, self.name, DependencyType.CHANGED)]
 
     def get_required_dependencies(self, app_label: str, state: State) -> list[OperationDependency]:
         """The model and fields the relation needs, and the field's ENUM type."""
-        dependencies = RelationDependencies.get_required_for_relation(app_label, self.model_name, self.field)
+        dependencies = RelationDependencies.get_required_for_relation(app_label, self.model_name, self.field, state)
         enum_type = getattr(self.field, "requires_enum_type", None)
         if enum_type is not None:
             dependencies.append(
@@ -65,20 +65,18 @@ class AlterField(ModelBoundOperation):
         if self.name not in model_state.fields:
             raise IncompatibleStateError(f"Field {self.name} is not present on model {app_label}.{self.model_name}")
 
-        model_state.set_field(self.name, cast("Field[Any]", deepcopy(self.field)))
-        state.mark_models_changed(self.get_changed_model_keys(app_label, self.field))
+        model_state.set_field(self.name, cast("Field[Any]", self.field).snapshot())
+        state.mark_models_changed(self.get_changed_model_keys(app_label, self.field, state))
 
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect:
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect:
         new_state = state.clone()
         self.state_forward(app_label, new_state)
         old_model = self._model(state, app_label)
         new_model = self._model(new_state, app_label)
-        editor_class = dialect.schema_editor_class
-        rewrites_table = editor_class.column_type_changes_class.rewrites_table_on_alter(
-            old_model, new_model, self.name, dialect
-        )
-        loses_data = editor_class.column_type_changes_class.changes_column_type(
-            old_model, new_model, self.name, dialect
+        plan = schema_editor.get_alter_field_plan(old_model, new_model, self.name, new_state.get_models_with_tables())
+        rewrites_table = SchemaEffect.REWRITE_ROWS in plan.effects
+        loses_data = schema_editor.column_type_changes.changes_column_type(
+            old_model, new_model, self.name, schema_editor.client.dialect
         )
         reasons = []
         if loses_data:

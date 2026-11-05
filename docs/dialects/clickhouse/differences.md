@@ -3,8 +3,9 @@
 ClickHouse lacks parts of SQL hare would otherwise rely on: unique and foreign key constraints, an
 `UPDATE` in place, `RETURNING`, `ON CONFLICT`, row locks, a count of the rows a write changed.
 Transactions and generated keys exist only on a server with a ClickHouse Keeper. Each row below says what
-hare does: where ClickHouse has another form of the same SQL, hare writes it; where the language has none,
-the call is refused before any SQL is sent.
+hare does: where ClickHouse has another form of the same SQL, hare writes it. Unsupported forms known
+from the declaration are refused during preparation; capability checks that depend on the server may
+read metadata before DDL is sent.
 
 `NullIf()` needs a result type that ClickHouse can wrap in `Nullable`. It raises `UnSupportedError`
 before SQL for arrays, tuples, maps, nested values, Dynamic, Variant and other types that cannot be
@@ -31,7 +32,7 @@ still requires the unsupported `Nullable` wrapper.
 | A recursive query adding rows by `UNION DISTINCT` | `with_recursive()` needs `max_depth`, which ends a cycle in the rows — see [Recursive queries and CTEs](../../querying/queryset-methods.md#recursive). Without it the walk raises `UnSupportedError`. |
 | `NULL` first in a descending ordering | ClickHouse puts `NULL` last in both directions — see [`NULL` first in a descending ordering](#null-first-in-a) |
 | A key with a `NULL` part in `__in` | `Q(relation__in=[...])` of a relation to a composite key compares a tuple of columns: for a row whose key holds `NULL` ClickHouse gives false where SQLite and PostgreSQL give `NULL` — `filter()` takes the same rows, an annotated condition (`annotate(x=Q(...))`) holds `False`, not `None` |
-| A cursor of a transaction | `stream()` reads rows outside a transaction too: the server sends them as it computes them. Leaving the `async for` early closes the stream and gives the connection back. |
+| A cursor of a transaction | `stream()` reads rows outside a transaction too: the server sends them as it computes them. Exhaustion or `aclose()` releases the connection; use `contextlib.aclosing()` for an early `break` — see [Streaming](../../querying/queryset-methods.md#stream). |
 | A zone's UTC offset with seconds | Read without its seconds — see [A zone's UTC offset with seconds](#zone-offset-seconds). |
 
 ## <a id="zone-offset-seconds"></a>A zone's UTC offset with seconds
@@ -47,9 +48,11 @@ PostgreSQL's by those seconds; `Trunc()` to an hour, a minute or a second takes 
 before the call returns. A table of `ClickhouseTableOptions(lightweight_updates=True)` takes a
 lightweight `UPDATE` instead — see [Models](models.md#lightweight-updates). A
 `delete()` runs a lightweight `DELETE`, and an `ALTER TABLE ... DELETE` mutation when its condition reads
-a `union()`/`intersection()`/`difference()` — the server's lightweight `DELETE` fails on one. A mutation
-that fails is stopped (`KILL MUTATION`) before the error is raised: the server would retry it, fail every
-later mutation of the table behind it, and could still apply it after the call raised. A mutation runs no
+a `union()`/`intersection()`/`difference()` — the server's lightweight `DELETE` fails on one. Outside a
+transaction, a local ORM mutation carrying a recovery target attempts `KILL MUTATION` for the failed
+IDs reported by the server. This cleanup is best effort and does not roll back changed rows or replace
+the original error. Distributed and raw mutations require caller-managed inspection and cleanup — see
+[Schema objects](schema-objects.md). A mutation runs no
 correlated subquery: an `update()` setting a field to a `Subquery` of `OuterReference`, or filtered or
 deleted by one, raises `UnSupportedError`. From ClickHouse 26.7 the server refuses a mutation setting a
 field without `NULL` to an expression that may be `NULL` — a `Subquery` of a nullable field
@@ -164,7 +167,8 @@ ClickHouse's own, and differs from PostgreSQL's:
   is refused, 0 gives `\x00`) and the code point of the first character for `Ord`. The text
   functions have no 32-bit limit on a length, a position or a count, and take an expression of any type;
   a literal of the wrong type is refused.
-- **`FIRST_VALUE` and `LAST_VALUE`** are ClickHouse's own, as is the order of a UUID (lower 64 bits
+- **`FIRST_VALUE` and `LAST_VALUE`** skip NULL values, whereas PostgreSQL and SQLite retain them.
+  UUID ordering also follows ClickHouse (lower 64 bits
   first — a `uuid7` key doesn't sort by time, so order by a date column) and of an `IPv6` address. An enum
   orders by its label, which hare stores that way. A time of day orders and compares as its stored text:
   `10:00:00+03:00` sorts after `08:00:00+00:00`, though it is the earlier moment.

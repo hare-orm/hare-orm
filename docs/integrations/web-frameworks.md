@@ -4,10 +4,18 @@ The integrations for [Litestar](litestar.md), [FastAPI](fastapi.md) and [Robyn](
 request runs in a transaction and the health routes they add; FastAPI and Robyn also the schemas of a
 response. This page describes what they share; each framework's page says how to plug hare into it.
 
+If application startup or lifespan work fails and closing its Hare context also fails, both errors are
+preserved in an exception group. A borrowed context remains under its caller's control and is not closed
+by the integration. Robyn applies the same error handling to its startup and shutdown callbacks.
+
 ## <a id="atomic-requests"></a>A transaction per request: `atomic_requests`
 
-`atomic_requests=True` runs each HTTP request in a transaction on the default connection; a sequence of
-connection aliases opens one on each of them. The transaction:
+`atomic_requests=True` runs each HTTP request in one automatically selected transaction. Selection tries
+in order: the only configured connection, the common connection of all registered models, then the alias
+`default`. An ambiguous configuration raises `QueryError`. An iterable of connection aliases opens a
+transaction on each named connection. Its iteration order is captured when the application is constructed;
+lists, tuples and one-shot iterators are supported, but a single string is not a collection of aliases.
+The transaction:
 
 - commits when the response has a status below 500 — before the response is sent, so a failed commit is
   still answered with an error; the body of a streaming response (Litestar, FastAPI) is sent after the
@@ -15,11 +23,18 @@ connection aliases opens one on each of them. The transaction:
 - rolls back on a response with a status of 500 or more, and on an exception, handled or not;
 - runs the `Transactions.on_commit()` callbacks after the commit, as usual.
 
-With several connections the transactions commit one after another; a failure to commit one rolls back
+With several connections the transactions commit in reverse configuration order (the last opened first);
+for `atomic_requests=["first", "second"]`, `second` commits before `first`. A failure to commit one rolls back
 those not committed yet, not those already committed. An alias the configuration doesn't have stops the
 application from starting. So does a connection that runs no transactions — a ClickHouse one opened
 without `transactions=true` — with `ConfigurationError` once its database answers, instead of failing
 every request.
+
+Request shutdown waits for every transaction exit even if one fails or the request is cancelled
+repeatedly. Cancellation stops commits which have not started; an already submitted commit can still
+succeed. A cleanup error does not imply rollback, and independent connections are not one atomic
+transaction. If cleanup also fails while a request error is propagating, both errors are preserved in
+an exception group. Streaming and background work run after this transaction boundary.
 
 What runs without the transaction:
 

@@ -18,6 +18,9 @@ class FloatMod(Function):
         alias: Optional alias for the term.
     """
 
+    structure_attributes = ()
+    has_repeatable_value = True
+
     def __init__(self, term: Term, modulus: Any, alias: str | None = None) -> None:
         super().__init__("MOD", term, modulus, alias=alias)
 

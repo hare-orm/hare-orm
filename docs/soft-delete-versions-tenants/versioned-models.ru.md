@@ -1,8 +1,8 @@
 # Версии записей
 
-`VersionedModel` из `hare.contrib.versioning` — основа для хранения версий записей, в которую только
-добавляют: каждое изменение создаёт новую строку с тем же `id`, но большим `version`, а не меняет строку
-на месте.
+`VersionedModel` из `hare.contrib.versioning` предоставляет методы создания новой строки с тем же `id`
+и следующим `version`. Для версионных изменений вызывайте `create_new_version()`; обычные `save()`
+и обновления QuerySet сохраняют своё стандартное поведение.
 
 ```python
 class VersionedModel(Model):
@@ -76,8 +76,9 @@ revised = await current.create_new_version(title="Updated title")
 полей, если они не переданы как переопределения; колонки, которые вычисляет база, и колонки `auto_now`
 загружать не нужно никогда.
 
-`create_new_version()` от версии, которая не наибольшая, даёт `IntegrityError` — следующий номер уже
-занят.
+`create_new_version()` создаёт новую строку с версией переданного объекта плюс один,
+не меняя сам объект и не запрашивая наибольшую версию.
+Если `(id, version + 1)` уже существует, база с ограничением уникальности этого ключа даёт `IntegrityError`.
 
 ## <a id="soft-delete"></a>Вместе с мягким удалением
 
@@ -89,9 +90,8 @@ revised = await current.create_new_version(title="Updated title")
 
 ## <a id="clickhouse"></a>Запись версий (ClickHouse)
 
-ClickHouse не хранит уникальность: ключ `(id, version)` не проверяется, поэтому `create_new_version()`
-не самой старшей версии ничего не бросает, а два одновременных `create_new_version()` одной версии
-пишут оба — и то и другое оставляет две строки с одним ключом (см. [модели
+ClickHouse не проверяет уникальность `(id, version)`. Повтор существующего номера или одновременные
+вызовы `create_new_version()` от одной версии могут записать дубли ключа (см. [модели
 ClickHouse](../dialects/clickhouse/models.ru.md#uniqueness-and-relations)). Там пишите версии одной
 записи из одной задачи за раз.
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hare.ddl.schema_objects.materialized_view import MaterializedView
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
 from hare.dialects.base.schema.schema_objects.materialized_views import MaterializedViews
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_INDEX_RENAME_TEMPLATE,
     POSTGRESQL_MATERIALIZED_VIEW_CREATE_TEMPLATE,
+    POSTGRESQL_MATERIALIZED_VIEW_DROP_IF_EXISTS_TEMPLATE,
     POSTGRESQL_MATERIALIZED_VIEW_DROP_TEMPLATE,
     POSTGRESQL_MATERIALIZED_VIEW_REFRESH_TEMPLATE,
     POSTGRESQL_MATERIALIZED_VIEW_RENAME_TEMPLATE,
@@ -53,9 +55,18 @@ class PostgresqlMaterializedViews(MaterializedViews):
         return statements
 
     async def drop_materialized_view(self, model: type[Model], view: MaterializedView) -> None:
-        await self.editor.run_sql(
-            POSTGRESQL_MATERIALIZED_VIEW_DROP_TEMPLATE.format(view=self.editor.qualify_object_name(model, view.name))
+        await self.editor.run_sql(self.get_materialized_view_drop_sql(model, view))
+
+    def get_materialized_view_drop_sql(
+        self, model: type[Model], view: MaterializedView, *, if_exists: bool = False
+    ) -> str:
+        """Compile removal without changing the catalog."""
+        template = (
+            POSTGRESQL_MATERIALIZED_VIEW_DROP_IF_EXISTS_TEMPLATE
+            if if_exists
+            else POSTGRESQL_MATERIALIZED_VIEW_DROP_TEMPLATE
         )
+        return template.format(view=self.editor.qualify_object_name(model, view.name))
 
     async def rename_materialized_view(
         self, model: type[Model], old_view: MaterializedView, new_view: MaterializedView
@@ -99,9 +110,9 @@ class PostgresqlMaterializedViews(MaterializedViews):
         """The name of the unique index of a materialized view's ``unique_columns``."""
         return Identifiers.get_within_limit(f"{view.name}{POSTGRESQL_MATERIALIZED_VIEW_UNIQUE_INDEX_SUFFIX}")
 
-    async def move_to_schema(
+    def get_schema_move_plan(
         self, model: type[Model], materialized_view: MaterializedView, old_schema: str | None, new_schema: str | None
-    ) -> None:
-        await self.editor.schemas.move_object_to_schema(
+    ) -> SchemaChangePlan:
+        return self.editor.schemas.get_object_schema_move_plan(
             "MATERIALIZED VIEW", self.editor.qualify_table_name(materialized_view.name, old_schema), new_schema
         )

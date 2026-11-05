@@ -5,6 +5,7 @@ import pytest
 
 from hare.dialects.sqlite.drivers.aiosqlite.client import AiosqliteClient
 from hare.inspectdb.introspection.database_catalog import DatabaseCatalog
+from hare.inspectdb.introspection.enums import CatalogDiagnosticCode
 
 pytestmark = pytest.mark.sqlite_only
 
@@ -35,7 +36,7 @@ async def test_names_in_every_quoting_are_read_back():
     assert total.generated_expression == "[price] * `qty`"
     assert [constraint.name for constraint in table.check_constraints] == ["stock_qty_positive"]
     assert [index.name for index in table.indexes if index.name == "stock_total_expression"]
-    assert table.unparsed_indexes == []
+    assert table.get_diagnostics(CatalogDiagnosticCode.INDEX) == []
     assert [trigger.name for trigger in table.triggers] == ["stock_touch"]
     assert "stock_price_qty" in {index.name for index in (*table.indexes, *table.column_indexes)}
 

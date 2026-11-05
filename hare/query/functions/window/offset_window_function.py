@@ -7,6 +7,8 @@ from hare.exceptions import QueryError, UnSupportedError
 from hare.query.expressions import Expression
 from hare.query.expressions.compatibility.output_field_compatibility import OutputFieldCompatibility
 from hare.query.expressions.expression_result import ExpressionResult
+from hare.query.expressions.structure.enums import ArgumentRole
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
 from hare.query.plans.enums import PlanPartType
@@ -22,6 +24,8 @@ from hare.query.functions.window.window_function import WindowFunction
 
 class OffsetWindowFunction(WindowFunction):
     """Base for ``LAG``/``LEAD`` - a field value read from a neighboring row."""
+
+    structure = ExpressionStructure(positions=((0, ArgumentRole.FIELD),), keywords=(("field", ArgumentRole.FIELD),))
 
     field: str | Expression
 

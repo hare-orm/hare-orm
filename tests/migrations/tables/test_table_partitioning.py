@@ -9,6 +9,8 @@ import pytest
 from hare.ddl.constraints import ExclusionConstraint, UniqueConstraint
 from hare.ddl.generated_names import GeneratedNames
 from hare.ddl.indexes import Index, PartialIndex
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
+from hare.declarations.import_manager import ImportManager
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.dialects.postgresql.partitioning import (
     DefaultPartition,
@@ -19,7 +21,6 @@ from hare.dialects.postgresql.partitioning import (
     RangePartition,
     RangePartitioning,
 )
-from hare.dialects.postgresql.partitioning.constants import HASH_PARTITION_COUNT_LIMIT
 from hare.dialects.postgresql.postgresql_table_options import PostgresqlTableOptions
 from hare.dialects.sqlite.constants import SQLITE_DIALECT
 from hare.exceptions import ConfigurationError, IntegrityError, UnSupportedError
@@ -32,7 +33,6 @@ from hare.migrations.exceptions import IncompatibleStateError
 from hare.migrations.migration import Migration
 from hare.migrations.operations import AddPartition, AlterModelTable, RemovePartition
 from hare.migrations.state.model_state import ModelState
-from hare.migrations.writer import ImportManager, MigrationWriter
 from hare.models import Model
 from hare.query.expressions import Q
 from tests.migrations.round_trips.test_round_trip_real_db import APP_LABEL, RoundTrip, build_live_state, build_model
@@ -191,10 +191,8 @@ def test_sqlite_creates_a_plain_table_for_a_postgresql_partitioning():
         (lambda: HashPartitioning(fields=("tenant", "tenant"), partition_count=2), "named twice"),
         (lambda: HashPartitioning(fields=("tenant",), partition_count=0), "partition_count must be a whole number"),
         (lambda: HashPartitioning(fields=("tenant",), partition_count=True), "partition_count must be a whole number"),
-        (
-            lambda: HashPartitioning(fields=("tenant",), partition_count=HASH_PARTITION_COUNT_LIMIT + 1),
-            f"from 1 to {HASH_PARTITION_COUNT_LIMIT}",
-        ),
+        (lambda: HashPartitioning(fields=("tenant",), partition_count=-1), "partition_count must be a whole number"),
+        (lambda: HashPartitioning(fields=("tenant",), partition_count=1.5), "partition_count must be a whole number"),
         (lambda: ListPartition("bad name", values=[1]), "letters, digits and underscores"),
         (lambda: ListPartition("empty", values=[]), "at least one value"),
         (lambda: RangePartition("back", from_values=(5,), to_values=(5,)), "isn't below to_values"),
@@ -217,6 +215,30 @@ def test_sqlite_creates_a_plain_table_for_a_postgresql_partitioning():
 def test_a_wrong_declaration_is_refused(build, message):
     with pytest.raises(ConfigurationError, match=message):
         build()
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("count", [1, 1025])
+def test_hash_partition_bounds_follow_the_declared_count(count):
+    partitioning = HashPartitioning(fields=("tenant",), partition_count=count)
+    bounds = partitioning.get_partition_bound_sqls(lambda position, value: repr(value))
+    assert len(bounds) == count
+    assert bounds["p0"] == f"FOR VALUES WITH (MODULUS {count}, REMAINDER 0)"
+    assert bounds[f"p{count - 1}"] == f"FOR VALUES WITH (MODULUS {count}, REMAINDER {count - 1})"
+
+
+@pytest.mark.parametrize("text", ["MINVALUE", "MAXVALUE"])
+def test_range_partition_treats_text_as_values_even_when_named_like_a_sentinel(text):
+    partition = RangePartition("letters", from_values=("A",), to_values=(text,))
+    assert partition.get_bound_sql(lambda position, value: repr(value)) == f"FOR VALUES FROM ('A') TO ('{text}')"
+    assert RangePartition.get_sort_key((RangeBound.MINVALUE,)) < RangePartition.get_sort_key((text,))
+    assert RangePartition.get_sort_key((text,)) < RangePartition.get_sort_key((RangeBound.MAXVALUE,))
+
+
+@pytest.mark.parametrize("bound", [RangeBound.MINVALUE, RangeBound.MAXVALUE])
+def test_range_partition_sentinel_requires_the_same_sentinel_in_following_columns(bound):
+    with pytest.raises(ConfigurationError, match="every column after"):
+        RangePartition("letters", from_values=(bound, str(bound)), to_values=("Z", "Z"))
 
 
 @pytest.mark.parametrize(
@@ -324,7 +346,7 @@ def test_unique_guarantees_including_the_key_are_accepted():
 def test_partitioning_is_written_into_migrations():
     imports = ImportManager()
 
-    rendered = MigrationWriter.render_value(
+    rendered = DeclarationValueSerializer.render_value(
         (
             PostgresqlTableOptions(partitioning=HASH, storage_parameters={"fillfactor": 70}),
             PostgresqlTableOptions(partitioning=LIST),
@@ -495,7 +517,7 @@ def test_partition_operations_are_written_into_migrations():
     path, args, kwargs = operation.deconstruct()
 
     assert (path, args) == ("hare.migrations.operations.AddPartition", [])
-    assert MigrationWriter.render_value(kwargs["partition"], imports) == (
+    assert DeclarationValueSerializer.render_value(kwargs["partition"], imports) == (
         "RangePartition(name='high', from_values=[20], to_values=[30])"
     )
     assert "with its rows" in RemovePartition(model_name="PartitionedLedger", partition=operation.partition).describe()
@@ -1026,7 +1048,7 @@ async def test_storage_and_tablespace_changes_go_to_every_partition():
     )
     new_options = PostgresqlTableOptions(partitioning=HASH, storage_parameters={"fillfactor": 80}, tablespace="fast")
 
-    await editor.table_partitions.alter_table_options(build_ledger([new_options]), old_options, new_options)
+    await editor.table_partitions.alter_table_options(build_ledger([old_options]), build_ledger([new_options]))
 
     partitions = [f'"partitioned_ledger_p{remainder}"' for remainder in range(3)]
     assert editor.collected_sql == [
@@ -1076,12 +1098,15 @@ async def test_recreating_a_table_sets_the_foreign_keys_referencing_it_again_fro
     )
     rendered_ledger = build_live_state(ledger, entry).apps.get_model(f"{APP_LABEL}.PartitionedLedger")
 
-    await editor.table_partitions.alter_table_options(
-        rendered_ledger, PostgresqlTableOptions(partitioning=HASH), PostgresqlTableOptions(partitioning=LIST)
-    )
+    previous_ledger = build_live_state(
+        build_ledger([PostgresqlTableOptions(partitioning=HASH)]),
+        entry,
+    ).apps.get_model(f"{APP_LABEL}.PartitionedLedger")
+    await editor.table_partitions.alter_table_options(previous_ledger, rendered_ledger)
 
     foreign_key_name = GeneratedNames.get_foreign_key_name("ledger_entry", ("ledger_tenant", "ledger_id"))
-    assert editor.collected_sql[0] == f'ALTER TABLE "ledger_entry" DROP CONSTRAINT "{foreign_key_name}"'
+    assert editor.collected_sql[0] == 'LOCK TABLE "partitioned_ledger" IN ACCESS EXCLUSIVE MODE'
+    assert editor.collected_sql[1] == f'ALTER TABLE "ledger_entry" DROP CONSTRAINT "{foreign_key_name}"'
     assert editor.collected_sql[-1].startswith(f'ALTER TABLE "ledger_entry" ADD CONSTRAINT "{foreign_key_name}"')
     # Nothing is read from the catalog - sqlmigrate shows what migrate runs.
     assert client.executed == []

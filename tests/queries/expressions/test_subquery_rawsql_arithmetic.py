@@ -4,6 +4,7 @@ import pytest
 import pytest_asyncio
 
 from hare.query.expressions import F, OuterReference, RawSQL, Subquery
+from hare.query.expressions.expression_context import ExpressionContext
 from tests.shared_models.testmodels import Author, Book, IntFields, TimeDeltaFields
 
 
@@ -22,6 +23,34 @@ def best_rating_of_author(author_reference: str) -> Subquery:
     return Subquery(
         Book.objects.filter(author_id=OuterReference(author_reference)).order_by("-rating").limit(1).values("rating")
     )
+
+
+def test_reused_subquery_keeps_each_outer_table_binding(db):
+    declaration = best_rating_of_author("id")
+    connection = Author._meta.connection
+    first_context = ExpressionContext(
+        model=Author,
+        table=Author._meta.basetable.as_("first_author"),
+        annotations={},
+        dialect=connection.dialect,
+        connection=connection,
+    )
+    second_context = ExpressionContext(
+        model=Author,
+        table=Author._meta.basetable.as_("second_author"),
+        annotations={},
+        dialect=connection.dialect,
+        connection=connection,
+    )
+    first = declaration.get_result(first_context).term
+    first_sql = first.get_sql(connection.dialect.sql_context)
+    second = declaration.get_result(second_context).term
+    second_sql = second.get_sql(connection.dialect.sql_context)
+    assert "first_author" in first_sql and "second_author" not in first_sql
+    assert "second_author" in second_sql and "first_author" not in second_sql
+    assert first.get_sql(connection.dialect.sql_context) == first_sql
+    assert first is not second
+    assert declaration.get_nested_query() is None
 
 
 @pytest.mark.asyncio

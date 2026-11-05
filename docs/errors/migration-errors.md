@@ -26,8 +26,8 @@ HareError
 | `MigrationLoadError` | A migration file can't be loaded: it doesn't import, has no `Migration` class, a migration is defined twice, a dependency names a migration or app that doesn't exist, or a squashed migration replaces migrations only some of which are applied while the files of the others are gone. |
 | `CircularDependencyError` | The dependencies of the migrations form a cycle. |
 | `IncompatibleStateError` | An operation can't run on the state the migrations before it leave. |
-| `IrreversibleMigrationError` | A migration is unapplied while one of its operations can't be reversed — raised before the first migration of the run is unapplied, so the later ones stay applied. |
-| `PartiallyAppliedMigrationError` | A non-atomic migration failed partway through — some of its operations already ran. One refused before its first statement ran (no `RunPython` in it) raises its own error instead: nothing of it landed. |
+| `IrreversibleMigrationError` | An operation cannot be reversed. Checked before executing the current connection's rollback group; completed groups and tenant schemas are not undone. See [Migration execution](../migrations/migrations.md#migration-lock). |
+| `PartiallyAppliedMigrationError` | A failed migration may have changed data or schema while its journal remains unchanged. One refused before any statement starts, with no `RunPython`, raises its original error instead. |
 | `TenantMigrationError` | With `tenant_schema_template`, the migrations failed in the schemas of some tenants. The other tenants' schemas are migrated; the error names each failed schema with its error, and the next `migrate` runs in each schema what its own journal lacks. |
 | `FieldNarrowingDataLossError` | An `AlterField` narrowing a column would cut stored values. |
 | `ForeignKeyTargetChangeError` | An `AlterField` points a relation at another target column (`to_field`) while rows store key values of the old one. |

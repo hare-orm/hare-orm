@@ -27,9 +27,14 @@ class TopLevelTransactionContext(TransactionContext):
 
     async def __aenter__(self) -> TransactionClient:
         self._mark_entered()
+        connections = self.client.connection_handler
+        if connections is None:
+            connections = Connections.current()
+            self.client.connection_handler = connections
         await self.client._take_transaction_resources()
         # Set before BEGIN, so the current task sees the transaction's client from the start.
-        self.token = Connections.current().set(self.connection_alias, self.client)
+        application = connections.application
+        self.token = connections.set(self.connection_alias, self.client)
         try:
             await self.client.begin()
         except BaseException:
@@ -40,6 +45,11 @@ class TopLevelTransactionContext(TransactionContext):
             finally:
                 await self._release_resources()
             raise
+        if connections.application is not application:
+            # A reconnect while BEGIN waited acquired a connection of the new lifetime.
+            # Its old frame was invalidated; publish the successfully begun client again.
+            self.token.reset()
+            self.token = connections.set(self.connection_alias, self.client)
         self._record_transaction_begin(self.client)
         await self._apply_transaction_restrictions(self.client)
         return self.client

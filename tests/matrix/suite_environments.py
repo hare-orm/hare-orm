@@ -20,15 +20,13 @@ from tests.matrix.suite_requirements import SuiteRequirements
 
 class SuiteEnvironments:
     """Which environment of ``SUITE_ENVIRONMENTS`` each test belongs to, and the tests of the one a run is
-    in. A test module declares what it requires in ``REQUIRES = ("litestar",)`` - read without importing
-    it, so a run without the package doesn't import it either - and so does a ``conftest.py`` for its
-    directory; a test adds its own with ``@pytest.mark.requires("encryption")``. A test runs in the
+    in. The selection manifest declares module and directory import requirements without importing
+    tests. A cell adds its declared requirements with ``@pytest.mark.requires("encryption")``.
+    A test runs in the
     environment installing exactly the packages of what it requires - requiring pydantic and litestar is
     requiring litestar, whose extra installs pydantic - and, unless it requires ``native`` (hare's
     ``rust.native`` extension), in the environment of the same packages without the extension."""
 
-    #: What the tests of the run's environment require - set as pytest is configured.
-    current_requirements: ClassVar[frozenset[str]] = frozenset()
     #: The packages and groups the run's environment installs - set as pytest is configured.
     current_installed: ClassVar[frozenset[str]] = frozenset()
     #: Whether the run's environment has rust.native - set as pytest is configured.
@@ -48,18 +46,15 @@ class SuiteEnvironments:
             pytest.UsageError: No environment has the name given, two environments install the same, or
                 rust.native is there in an environment without it, or missing in one with it.
         """
+        try:
+            SuiteRequirements.manifest.check_inventory()
+        except ValueError as error:
+            raise pytest.UsageError(str(error)) from None
         name = config.getoption(SUITE_ENVIRONMENT_OPTION)
         cls.runs_every_environment = name == EVERY_SUITE_ENVIRONMENT
-        if cls.runs_every_environment:
-            environment = SuiteEnvironment(
-                EVERY_SUITE_ENVIRONMENT,
-                tuple(dict.fromkeys(extra for known in SUITE_ENVIRONMENTS for extra in known.extras)),
-                tuple(dict.fromkeys(group for known in SUITE_ENVIRONMENTS for group in known.groups)),
-            )
-        else:
-            environment = cls.get(name)
-        cls.current_requirements = SuiteRequirements.get_requirements(environment)
-        cls.current_installed = SuiteRequirements.get_installed(cls.current_requirements)
+        environment = cls.get(name)
+        requirements = SuiteRequirements.get_requirements(environment)
+        cls.current_installed = SuiteRequirements.get_installed(requirements)
         cls.current_native = environment.native
         environment_names_by_installation: dict[tuple[frozenset[str], bool], str] = {}
         for known_environment in SUITE_ENVIRONMENTS:
@@ -130,7 +125,7 @@ class SuiteEnvironments:
             The names.
 
         Raises:
-            pytest.UsageError: A ``REQUIRES`` isn't a tuple of texts.
+            pytest.UsageError: A test module is absent from the selection manifest.
         """
         try:
             return SuiteRequirements.get_path_requirements(path)
@@ -175,14 +170,21 @@ class SuiteEnvironments:
         }
         other_items = []
         for item in items:
-            requirements = cls.get_path_requirements(item.path) | {
+            module_requirements = cls.get_path_requirements(item.path)
+            if module_requirements:
+                item.add_marker(getattr(pytest.mark, REQUIRES_MARKER)(*sorted(module_requirements)))
+            requirements = module_requirements | {
                 name for marker in item.iter_markers(REQUIRES_MARKER) for name in marker.args
             }
+            try:
+                SuiteRequirements.manifest.check_cell_requirements(item.path, requirements)
+            except ValueError as error:
+                raise pytest.UsageError(f"{item.nodeid}: {error}") from None
             installed = SuiteRequirements.get_installed(requirements - {NATIVE_REQUIREMENT})
             if installed not in known_installed:
                 raise pytest.UsageError(
                     f"{item.nodeid} requires {sorted(requirements)} - no environment of SUITE_ENVIRONMENTS installs "
-                    "exactly that; add one to tests/matrix/constants.py"
+                    "exactly that; add one to tests/matrix/catalog.toml [[environments]]"
                 )
             if cls.runs_every_environment:
                 continue

@@ -7,8 +7,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
+from hare.classes.container_traversal import ContainerTraversal
 from hare.dialects.enums import ParameterPosition
-from hare.exceptions import QueryError, UnSupportedError
+from hare.exceptions import UnSupportedError
 from hare.fields.data.binary_field import BinaryField
 from hare.fields.data.boolean_field import BooleanField
 from hare.fields.data.json.json_field import JSONField
@@ -28,9 +29,9 @@ from hare.query.expressions.constants import (
     INTEGER_LITERAL_RANGE,
     NO_CAST_SQL_TYPES,
     SMALL_INTEGER_LITERAL_RANGE,
-    VALUE_PARAMETER_MAX_DEPTH,
 )
 from hare.query.expressions.numeric.numeric_typing import NumericTyping
+from hare.query.expressions.structure.expression_structure import ExpressionStructure
 from hare.query.expressions.temporal.temporal_arithmetic import TemporalArithmetic
 from hare.query.expressions.value_references.expression_arguments import ExpressionArguments
 from hare.query.plans.description.declared_plan_parts import DeclaredPlanParts
@@ -51,6 +52,8 @@ class Value(Expression):
     """A Python value used as an expression - written as a bound parameter, or a literal where the SQL
     can't take one."""
 
+    structure = ExpressionStructure(opaque=True)
+
     #: SQL type of a number literal - what it is cast to where its own type has to win over the
     #: type of the term next to it.
     NUMBER_LITERAL_SQL_TYPE: ClassVar[dict[type, str]] = {
@@ -59,7 +62,7 @@ class Value(Expression):
         Decimal: SqlTypes.NUMERIC,
     }
 
-    #: Long-lived output fields of bare literals - the plans hold an output field weakly. Checked in
+    #: Shared output fields of bare literals avoid repeated allocation. Checked in
     #: order: `bool` subclasses `int`, `datetime` subclasses `date`.
     LITERAL_OUTPUT_FIELDS: ClassVar[tuple[tuple[type, Field[Any]], ...]] = (
         (bool, BooleanField()),
@@ -96,31 +99,8 @@ class Value(Expression):
 
     def __init__(self, value: Any) -> None:
         if isinstance(value, (list, tuple, dict)):
-            Value.raise_if_nested_too_deeply(value, "Value()")
+            ContainerTraversal.check(value, "Value()")
         self.value = value
-
-    @staticmethod
-    def raise_if_nested_too_deeply(value: list[Any] | tuple[Any, ...] | dict[Any, Any], owner: str) -> None:
-        """Refuses a list, tuple or dict value nesting deeper than ``VALUE_PARAMETER_MAX_DEPTH`` - or holding
-        itself, which nests without end: binding or writing it would never finish.
-
-        Args:
-            value: The value.
-            owner: What it is given to, for the message.
-
-        Raises:
-            QueryError: The value nests too deeply.
-        """
-        pending: list[tuple[Any, int]] = [(value, 1)]
-        while pending:
-            container, depth = pending.pop()
-            if depth > VALUE_PARAMETER_MAX_DEPTH:
-                raise QueryError(
-                    f"{owner}: a list, tuple or dict nesting deeper than {VALUE_PARAMETER_MAX_DEPTH} levels, or "
-                    "holding itself, can't be a value"
-                )
-            items = container.values() if isinstance(container, dict) else container
-            pending.extend((item, depth + 1) for item in items if isinstance(item, (list, tuple, dict)))
 
     @classmethod
     def get_literal_output_field(cls, value: Any) -> Field[Any] | None:
@@ -165,20 +145,20 @@ class Value(Expression):
         if isinstance(value, Decimal) and not NumericTyping.DECIMAL_QUOTIENT_OUTPUT_FIELD.exists_on(dialect):
             raise UnSupportedError(DECIMAL_WITHOUT_TYPE_MESSAGE.format(value=value, dialect=dialect.name))
         if isinstance(value, datetime):
-            return TemporalArithmetic.get_field_encoder(TemporalArithmetic.DATETIME_OUTPUT_FIELD, dialect)
+            return dialect.types.get_field_encoder(TemporalArithmetic.DATETIME_OUTPUT_FIELD)
         if isinstance(value, time):
-            return TemporalArithmetic.get_field_encoder(TemporalArithmetic.TIME_OUTPUT_FIELD, dialect)
+            return dialect.types.get_field_encoder(TemporalArithmetic.TIME_OUTPUT_FIELD)
         if isinstance(value, timedelta):
-            return TemporalArithmetic.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD, dialect)
+            return dialect.types.get_field_encoder(TemporalArithmetic.TIMEDELTA_OUTPUT_FIELD)
         if isinstance(value, UUID):
             # As a UUIDField writes it - its text, or the UUID itself where the dialect writes one
             # (a UUID compared with a UUID column as one).
-            return TemporalArithmetic.get_field_encoder(cls.UUID_LITERAL_FIELD, dialect)
+            return dialect.types.get_field_encoder(cls.UUID_LITERAL_FIELD)
         if isinstance(value, dict):
-            return TemporalArithmetic.get_field_encoder(cls.JSON_LITERAL_FIELD, dialect)
+            return dialect.types.get_field_encoder(cls.JSON_LITERAL_FIELD)
         if isinstance(value, bytes) and dialect.types.get_db_converter(BinaryField) is not None:
             # Read back as a binary column's value is - from the dialect's stored form of it.
-            return TemporalArithmetic.get_field_encoder(cls.BINARY_LITERAL_FIELD, dialect)
+            return dialect.types.get_field_encoder(cls.BINARY_LITERAL_FIELD)
         return None
 
     @classmethod

@@ -57,7 +57,7 @@ class ModelQuery:
 
         if self.model is None:
             raise ConfigurationError("ModelQuery is a queryset of the model whose Meta declares it - use it there")
-        queryset: Any = self.model._meta.manager.get_queryset()
+        queryset: Any = self.model._meta.manager.create_queryset()
         for name, args, kwargs in self.calls:
             method = getattr(queryset, name, None)
             if not callable(method):

@@ -81,9 +81,6 @@ class IPAddressField(Field[Any]):
     def to_python(self, value: Any) -> Any:
         return None if value is None else self.get_address(value)
 
-    def from_db_value(self, value: Any) -> Any:
-        return self.to_python(value)
-
     def to_db_value(self, value: Any, instance: type[Model] | Model | None) -> Any:
         if value is None:
             self.validate(value)

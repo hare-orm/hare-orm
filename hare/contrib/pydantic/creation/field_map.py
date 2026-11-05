@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, MutableMapping
+from collections import UserDict
 from typing import TYPE_CHECKING, Any
 
 from hare import (
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from hare.models import Model
 
 
-class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
+class FieldMap(UserDict[str, Field[Any] | ComputedFieldDescription]):
     """The fields a Pydantic schema of a model holds, by name - the model's fields and computed fields as
     ``PydanticMetaData`` includes and excludes them, a relation as its key field when
     ``relations_as_ids``."""
@@ -27,7 +27,7 @@ class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
         model_fields_map: dict[str, Field[Any]] | None = None,
         relations_as_ids: bool = False,
     ) -> None:
-        self._field_map: dict[str, Field[Any] | ComputedFieldDescription] = {}
+        super().__init__()
         #: model_field_name of every PK component (plural to also cover a composite PK) - a
         #: raw FK shadow column matching one of these is the PK itself, not a plain relation's
         #: raw column, so exclude_raw_fields must not strip it (see field_map_update below).
@@ -38,25 +38,9 @@ class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
         self.relations_as_ids: bool = relations_as_ids
         if pk_fields:
             self.field_map_update(pk_fields, meta)
-        self.computed_fields: dict[str, ComputedFieldDescription] = {}
-
-    def __delitem__(self, __key: str) -> None:
-        self._field_map.__delitem__(__key)
-
-    def __getitem__(self, __key: str) -> Field[Any] | ComputedFieldDescription:
-        return self._field_map.__getitem__(__key)
-
-    def __len__(self) -> int:
-        return self._field_map.__len__()
-
-    def __iter__(self) -> Iterator[str]:
-        return self._field_map.__iter__()
-
-    def __setitem__(self, __key: str, __value: Field[Any] | ComputedFieldDescription) -> None:
-        self._field_map.__setitem__(__key, __value)
 
     def sort_alphabetically(self) -> None:
-        self._field_map = {field_name: self._field_map[field_name] for field_name in sorted(self._field_map)}
+        self.data = {field_name: self.data[field_name] for field_name in sorted(self.data)}
 
     def sort_definition_order(self, cls: type[Model], computed: tuple[str, ...]) -> None:
         """Orders the map as the model declares its fields, the computed ones after them - a relation's key
@@ -73,9 +57,7 @@ class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
                 # A shadow id field takes its relation's place in definition order.
                 ordered_names.extend(field.source_fields)
             ordered_names.append(name)
-        self._field_map = {
-            name: self._field_map[name] for name in dict.fromkeys(ordered_names) if name in self._field_map
-        }
+        self.data = {name: self.data[name] for name in dict.fromkeys(ordered_names) if name in self.data}
 
     def add_relation_id_fields(self, field: ForeignKeyFieldInstance[Any], meta: PydanticMetaData) -> None:
         """Puts a forward FK/O2O's shadow id field(s) into the map in place of the relation.
@@ -84,7 +66,7 @@ class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
 
         Args:
             field: The forward FK/O2O relation.
-            meta: The finalized PydanticMeta settings.
+            meta: The finalized Meta.pydantic settings.
         """
         names = (field.model_field_name, *field.source_fields)
         excluded = any(name in meta.exclude for name in names)
@@ -132,7 +114,4 @@ class FieldMap(MutableMapping[str, Field[Any] | ComputedFieldDescription]):
         for name in computed:
             if not meta.selects(name):
                 continue
-            self[name] = ComputedFieldDescription(
-                function=getattr(cls, name),
-                description=None,
-            )
+            self[name] = ComputedFieldDescription(function=getattr(cls, name))

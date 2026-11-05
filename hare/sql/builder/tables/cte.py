@@ -14,5 +14,4 @@ class Cte(AliasedQuery):
 
     def __init__(self, name: str, query: Selectable | None = None, *terms: Term) -> None:
         super().__init__(name, query)
-        self.query = query
         self.terms = terms

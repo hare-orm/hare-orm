@@ -65,6 +65,7 @@ class OutboxEvent(Model):
             change - carried into the headers of a Kafka, RabbitMQ or HTTP message.
         next_attempt_at: When a failed event is tried again; None for at once.
         lease_until, leased_by: The relay delivering the event and until when it may.
+        lease_token: The claim identity protecting attempt metadata and failures during lease handoff.
         dead_lettered_at: When the event ran out of attempts - it is no longer delivered.
     """
 
@@ -83,6 +84,7 @@ class OutboxEvent(Model):
     next_attempt_at = fields.DatetimeField(null=True)
     lease_until = fields.DatetimeField(null=True)
     leased_by = fields.CharField(max_length=OUTBOX_KEY_MAX_LENGTH, null=True)
+    lease_token = fields.UUIDField(null=True)
     published_at = fields.DatetimeField(null=True)
     dead_lettered_at = fields.DatetimeField(null=True)
 
@@ -128,10 +130,11 @@ class OutboxEvent(Model):
             topic: The event's topic - a delivery routes on it.
             payload: The event's payload - JSON values, or values ``OutboxJsonEncoding`` writes.
             using: The connection to write on instead of the model's.
-            idempotency_key: At most one event ever exists per key: when one already exists, it is
+            idempotency_key: At most one stored event exists per key: while it is retained, it is
                 returned unchanged instead of writing a new one - no error, no duplicate. Written as
                 ``INSERT ... ON CONFLICT (idempotency_key) DO NOTHING`` and a ``SELECT``, so a key
-                conflict never aborts an enclosing transaction.
+                conflict never aborts an enclosing transaction. After cleanup removes the event, the
+                same key may create a new one; retention determines the deduplication window.
             ordering_key: Events of one key are delivered strictly in the order they were written.
             headers: Metadata of the event besides its payload.
             extra_field_values: Values of the columns a subclass declares on top of
@@ -201,7 +204,8 @@ class OutboxEvent(Model):
             ConfigurationError: As ``enqueue()``.
         """
         # Deferred import: the transactions package imports the models.
-        from hare.transactions.transactions import Transactions
+        from hare.transactions.atomic.atomic import Atomic
+        from hare.transactions.transaction_options import TransactionOptions
 
         messages = list(messages)
         if not messages:
@@ -218,8 +222,7 @@ class OutboxEvent(Model):
         cls.raise_if_wakeup_unsupported(write_connection, wakeup)
         events: list[Self] = []
         inserted_topics: set[str] = set()
-        async with Transactions.atomic(using=write_connection.connection_alias):
-            transaction_connection = Connections.get(write_connection.connection_alias)
+        async with Atomic(lambda: write_connection, TransactionOptions.DEFAULT) as transaction_connection:
             for (has_idempotency_key, _), run in itertools.groupby(messages, key=cls.get_enqueue_run_key):
                 run_messages = list(run)
                 run_events, run_topics = await cls.write_enqueue_run(

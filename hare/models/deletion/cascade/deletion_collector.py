@@ -10,6 +10,7 @@ from hare.fields.relations.fields.backward_foreign_key_relation import BackwardF
 from hare.fields.relations.fields.declarations import BackwardOneToOneRelation
 from hare.fields.relations.fields.foreign_key_field_instance import ForeignKeyFieldInstance
 from hare.fields.relations.fields.many_to_many_field_instance import ManyToManyFieldInstance
+from hare.models.deletion.cascade.cascade_policy import CascadePolicy
 from hare.models.deletion.cascade.deletion_graph import DeletionGraph
 from hare.models.deletion.cascade.deletion_plan import DeletionPlan, RowKey
 from hare.models.deletion.cascade.related_rows import RelatedRows
@@ -45,7 +46,7 @@ class DeletionCollector:
     #: While set, every cascade adds the ``(type, pk)`` of each row it reached (its root rows
     #: included) - lets a multi-row ``QuerySet.delete()`` skip rows an earlier row's cascade
     #: already removed.
-    reached_keys_collector: ClassVar[ContextVar[set[tuple[type[Model], Any]] | None]] = ContextVar(
+    reached_keys_collector: ClassVar[ContextVar[set[tuple[Any, ...]] | None]] = ContextVar(
         "hare_cascade_reached_keys_collector", default=None
     )
 
@@ -59,14 +60,15 @@ class DeletionCollector:
         reads_versions: bool = False,
         only_toward_protect: bool = False,
         locks_rows: bool = False,
+        defers_querysets: bool = True,
     ) -> None:
         self.connection = connection
         self.locks_rows = locks_rows
         self.root_action = root_action
-        self.only_unconstrained = only_unconstrained
-        self.hands_over_rows = hands_over_rows
         self.reads_versions = reads_versions
-        self.only_toward_protect = only_toward_protect
+        self.policy = CascadePolicy(
+            only_unconstrained, hands_over_rows, only_toward_protect, defers_querysets=defers_querysets
+        )
 
     async def collect(self, model: type[Model], pks: list[Any]) -> DeletionPlan:
         """Walks the rows deleting the ``model`` rows ``pks`` reaches.
@@ -137,7 +139,11 @@ class DeletionCollector:
             for relation in DeletionGraph.get_backward_relations(model)
             if relation[1].on_delete == OnDelete.CASCADE
         ]
-        if self.only_toward_protect or len(cascading_relations) != 1 or len(meta.primary_key_attribute_names) != 1:
+        if (
+            self.policy.only_toward_protect
+            or len(cascading_relations) != 1
+            or len(meta.primary_key_attribute_names) != 1
+        ):
             return False
         backward_field, foreign_key_field = cascading_relations[0]
         to_field_names = tuple(to_field.model_field_name for to_field in foreign_key_field.to_field_instances)
@@ -193,20 +199,10 @@ class DeletionCollector:
             Whether the rows are walked through as rows of the same type, and their action.
         """
 
-        parent_soft = parent_action in {DeletionAction.SOFT_DELETE, DeletionAction.UNCHANGED}
-        parent_hard = parent_action in {DeletionAction.DELETE, DeletionAction.DELETE_BY_DATABASE}
-        meta = model._meta
-        if parent_soft and not meta.soft_delete_field and not meta.soft_delete_hard_cascade:
+        transition = self.policy.get_transition(model, model, foreign_key_field, parent_action, self.connection)
+        if transition is None or transition.by_database or transition.action in HANDED_OVER_ACTIONS:
             return False, None
-        if parent_hard and self.only_unconstrained and foreign_key_field.has_database_constraint:
-            return False, None
-        if parent_action is None:
-            return True, None
-        # A row deleted for real takes its children with it, a soft-delete one too.
-        child_soft = bool(meta.soft_delete_field) and not parent_hard
-        if self.hands_over_rows and (DeletionGraph.overrides_delete(model) or child_soft == parent_hard):
-            return False, None
-        return True, DeletionAction.SOFT_DELETE if child_soft else DeletionAction.DELETE
+        return True, transition.action
 
     async def _collect_children(
         self,
@@ -229,50 +225,32 @@ class DeletionCollector:
             next_wave: The next wave being built.
         """
         parent_soft = parent_action in {DeletionAction.SOFT_DELETE, DeletionAction.UNCHANGED}
-        parent_hard = parent_action in {DeletionAction.DELETE, DeletionAction.DELETE_BY_DATABASE}
         for backward_field, foreign_key_field in DeletionGraph.get_backward_relations(model):
-            if foreign_key_field.on_delete != OnDelete.CASCADE:
-                continue
             related_model = backward_field.related_model
-            if not DeletionGraph.reaches_table(related_model, self.connection):
-                # Another tenant schema's rows - visited apart (TenantSchemaVisits).
-                continue
-            if parent_soft and not related_model._meta.soft_delete_field and not model._meta.soft_delete_hard_cascade:
-                # restore() brings a soft-deleted row back: a row that can't be soft-deleted
-                # itself is kept, still pointing at it - unless Meta.soft_delete_hard_cascade.
-                continue
-            if self.only_toward_protect and not (
-                DeletionGraph.has_protecting_relations(related_model)
-                or DeletionGraph.has_transitive_protect(related_model)
-            ):
-                continue
-            by_database = (
-                parent_hard
-                and self.only_unconstrained
-                and foreign_key_field.has_database_constraint
-                # A row of a model overriding delete() goes through that override.
-                and not (self.hands_over_rows and DeletionGraph.overrides_delete(related_model))
+            transition = self.policy.get_transition(
+                model,
+                related_model,
+                foreign_key_field,
+                parent_action,
+                self.connection,
             )
-            if by_database and not DeletionGraph.needs_python_cascade(related_model):
-                # A purely database-enforced subtree from here on - the database deletes every
-                # row down there on its own and backstops its PROTECT/RESTRICT itself too.
+            if transition is None:
                 continue
+            by_database = transition.by_database
             target_values = await RelatedRows.get_target_values(model, foreign_key_field, pks, self.connection)
             if not target_values:
                 continue
             if (
                 parent_action is not None
                 and not by_database
-                and self.hands_over_rows
+                and self.policy.hands_over_rows
                 and not related_model._meta.has_primary_key
             ):
                 # No key to list its rows by - they're deleted by the relation's condition, as
                 # the database's own ON DELETE CASCADE would.
                 plan.rows_without_key.append((backward_field, target_values))
                 continue
-            child_action = self._get_child_action(
-                related_model, foreign_key_field, parent_action, by_database=by_database
-            )
+            child_action = transition.action
             related_wave = next_wave.setdefault(related_model, {})
             child_rows = await self._get_child_rows(plan, backward_field, target_values, child_action)
             self._add_child_rows(
@@ -280,47 +258,6 @@ class DeletionCollector:
             )
             if not related_wave:
                 del next_wave[related_model]
-
-    def _get_child_action(
-        self,
-        related_model: type[Model],
-        foreign_key_field: ForeignKeyFieldInstance[Any],
-        parent_action: DeletionAction | None,
-        *,
-        by_database: bool,
-    ) -> DeletionAction | None:
-        """What the delete does to the rows an ``on_delete=CASCADE`` relation leads to. A hard delete
-        removes the row physically, a soft-delete one too, as the database's cascade would; a soft
-        delete deletes the row the way its own model deletes.
-
-        Args:
-            related_model: The model of the rows.
-            foreign_key_field: The relation.
-            parent_action: What the delete does to the rows they point at.
-            by_database: Whether the database's own cascade removes them.
-
-        Returns:
-            The action.
-        """
-        from hare.models import Model
-
-        if parent_action is None:
-            return None
-        if by_database:
-            return DeletionAction.DELETE_BY_DATABASE
-        parent_hard = parent_action in {DeletionAction.DELETE, DeletionAction.DELETE_BY_DATABASE}
-        # A row deleted for real takes its children with it, a soft-delete one too.
-        child_soft = bool(related_model._meta.soft_delete_field) and not parent_hard
-        if self.hands_over_rows and parent_hard and not child_soft and related_model._meta.soft_delete_field:
-            # Deleted for real - its delete() would only mark it deleted: its own hard_delete() takes
-            # it, or the cascade goes on below it to the overrides there.
-            if related_model.hard_delete is not Model.hard_delete:
-                return DeletionAction.OVERRIDDEN_HARD_DELETE
-        elif self.hands_over_rows and related_model.delete is not Model.delete:
-            return DeletionAction.OVERRIDDEN_DELETE
-        if self.hands_over_rows and child_soft == parent_hard:
-            return DeletionAction.QUERYSET_DELETE
-        return DeletionAction.SOFT_DELETE if child_soft else DeletionAction.DELETE
 
     @staticmethod
     def _add_child_rows(

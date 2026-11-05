@@ -90,14 +90,14 @@ class TransactionContext:
             exception: The exception the block raised, if any. A failure while rolling back never
                 replaces it - it is logged and attached as a note.
         """
-        if client._finalized:
+        if client.transaction_state.finished:
             return
         if not exception_type:
             try:
                 await client.commit()
             except Exception as commit_error:
                 # A COMMIT that failed before reaching the server leaves the transaction open.
-                if not client._finalized and not client._shielded_operation_abandoned:
+                if not client.transaction_state.finished and not client._shielded_operation_abandoned:
                     await TransactionContext._roll_back_keeping_error(client, commit_error)
                 raise
             return
@@ -119,7 +119,7 @@ class TransactionContext:
         except Exception as rollback_error:
             if error is None:
                 raise
-            if client._finalized:
+            if client.transaction_state.finished:
                 # The ROLLBACK itself landed - only an on_rollback() callback failed.
                 client.log.error("on_rollback() callback failed", exc_info=rollback_error)
                 error.add_note(f"on_rollback() callback failed after the rollback: {rollback_error!r}")

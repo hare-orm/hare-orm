@@ -5,6 +5,14 @@ builds its migrations in memory, keeps them where it likes (as text in its own d
 them itself. Everything below is imported from `hare.migrations`: `Migration`, `State`,
 `MigrationRunner`, `MigrationRecorder`, `MigrationWriter`, `OperationEffect`, `OperationPlan`.
 
+Each `State` captures its application's connection handler, swappable settings and unmanaged model
+declarations when created. Deferred rendering and `clone()` retain this `MigrationEnvironment`, even
+if another `HareContext` becomes current. State copies share connections without owning or closing
+them; their model declarations and rendered classes remain independent. To work with an explicit
+environment, import `MigrationEnvironment` from `hare.migrations.state.migration_environment` and
+pass `environment=` to `State` or `State.from_models()`. `MigrationEnvironment()` is an empty offline
+environment; `MigrationEnvironment.capture()` captures the current application.
+
 ```python
 class Migration:
     def __init__(
@@ -16,8 +24,8 @@ class Migration:
         dependencies: Iterable[tuple[str, str]] | None = None,
     ) -> None: ...
 
-    @classmethod
-    def from_source(cls, source: str, *, name: str, app_label: str) -> Migration: ...
+    @staticmethod
+    def from_source(source: str, *, name: str, app_label: str) -> Migration: ...
 
 class State:
     @classmethod
@@ -27,6 +35,7 @@ class State:
         *,
         app_label: str | None = None,
         default_connections: dict[str, str] | None = None,
+        environment: MigrationEnvironment | None = None,
     ) -> State: ...
 
     def get_operations(
@@ -34,7 +43,7 @@ class State:
     ) -> OperationPlan: ...
 
 class Operation(ABC):
-    def get_effect(self, app_label: str, state: State, dialect: Dialect) -> OperationEffect: ...
+    def get_effect(self, app_label: str, state: State, schema_editor: BaseSchemaEditor) -> OperationEffect: ...
 
 class MigrationRunner:
     def __init__(
@@ -49,7 +58,7 @@ class MigrationRunner:
 
     async def apply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State: ...
 
-    async def unapply(self, migration: Migration, state: State, *, dry_run: bool = False) -> State: ...
+    async def unapply(self, migration: Migration, state_before: State, *, dry_run: bool = False) -> State: ...
 
     async def record(
         self,
@@ -81,24 +90,37 @@ class MigrationRecorder:
   `hare.migrations.exceptions.MigrationLoadError`.
 - `State.from_models()` is the schema state of model classes as they are declared. A model's app is its
   `Meta.app`, else `app_label`; a model with neither raises `ConfigurationError`.
+  Accessing `state.apps` publishes the rendered graph only after binding succeeds. If an added or
+  changed model fails to bind, the previous rendered classes and pending change marks are retained;
+  correcting the declaration allows the next access to retry the same changes.
 - `old_state.get_operations(new_state, app_label)` returns an
   `OperationPlan(operations, warnings, data_loss_warnings)` — the operations `makemigrations` would write
-  for the app, with its warnings. A rename is made only as `rename_questions` answers it
-  (`RenameQuestions({"content.Book.title": "name"})` — see [Renames](migrations.md#renames)); without
-  them a renamed field or model is removed and added.
+  for the app, with its warnings. Unambiguous field matches by column identity or relation signature
+  are recognized automatically. Other candidates need `rename_questions`
+  (`RenameQuestions({"content.Book.title": "name"})` — see [Renames](migrations.md#renames)); an
+  unconfirmed candidate is removed and added.
 - `Operation.get_effect()` returns an
   `OperationEffect(operation, reversible, rewrites_table, loses_data, reason)`: whether the operation can
   be unapplied, whether the database rewrites the whole table (the time grows with its rows), whether
-  values or rows can be lost, and why. `RemoveField` and `DeleteModel` lose data. `AlterField` loses data
-  when it changes a column's type, and rewrites the table when the dialect does that for this change —
+  values or rows can be lost, and why. `RemoveField` and `DeleteModel` lose data. For `AlterField`,
+  `loses_data` conservatively flags every declared column-type change, including widening; it does not
+  prove that existing values will be lost. Pass a configured `BaseSchemaEditor`; the method prepares
+  the same plan as execution without database IO or runtime defaults. Rewrite effects include
+  dependent tables and stored-value conversions —
   see [`alter_field_rewrites_table`](zero-downtime.md#alter-field-rewrites-table).
 - `MigrationRunner` applies one migration on `connection` exactly as `hare migrate` does: an atomic
   migration in one transaction together with its journal record, constraint checks before the commit.
   `lock_timeout` is the [lock timeout](migrations.md#lock-timeout) its statements run under.
+  The runner retains the supplied client's connection handler, capturing the current handler only
+  for a standalone client without one. An active transaction is reused only when it belongs to that
+  exact client; an independent client or schema client is not replaced by another with the same alias.
     - `ensure_journal()` creates the recorder's table when it doesn't exist.
     - `apply()` returns the state after the migration; `unapply()` takes the state before it was applied
-      and returns it. With `dry_run=True` either runs the operations without touching the database or the
-      journal.
+      and returns a new copy of it. Both leave the supplied state unchanged, including on failure.
+      With `dry_run=True` either returns the simulated state without executing migration operations
+      or changing the journal. It may still open a connection or transaction.
+      The same input can subsequently be used for the real run. Pass that preserved before-state
+      explicitly as `unapply(migration, state_before=before)` when reversing the migration.
     - `record()` marks a migration applied or unapplied in the journal. It does nothing without a
       `recorder`, and so do the journal steps of `apply()`/`unapply()`.
     - `collect_sql()` returns the migration's SQL (or its rollback's, with `backward=True`) without

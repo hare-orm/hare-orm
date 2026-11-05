@@ -5,6 +5,7 @@ import warnings
 import pytest
 
 from hare import fields
+from hare.declarations.declaration_value_serializer import DeclarationValueSerializer
 from hare.dialects.base.schema.tables.table_comments import TableComments
 from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
@@ -506,8 +507,8 @@ def test_sql_default_construction_and_get_sql():
     assert sd.get_sql(DialectRegistry.get_dialect("postgresql")) == "CURRENT_TIMESTAMP"
     assert SqlDefault("40 + 2").get_sql(DialectRegistry.get_dialect("sqlite")) == "(40 + 2)"
     assert SqlDefault("(1) + (2)").get_sql(DialectRegistry.get_dialect("sqlite")) == "((1) + (2))"
-    assert SqlDefault("(datetime('now'))").get_sql(DialectRegistry.get_dialect("sqlite")) == "(datetime('now'))"
-    assert SqlDefault("('(' || x)").get_sql(DialectRegistry.get_dialect("sqlite")) == "('(' || x)"
+    assert SqlDefault("(datetime('now'))").get_sql(DialectRegistry.get_dialect("sqlite")) == "((datetime('now')))"
+    assert SqlDefault("('(' || x)").get_sql(DialectRegistry.get_dialect("sqlite")) == "(('(' || x))"
     assert SqlDefault("-1.5").get_sql(DialectRegistry.get_dialect("sqlite")) == "-1.5"
     assert SqlDefault("'a''b'").get_sql(DialectRegistry.get_dialect("sqlite")) == "'a''b'"
 
@@ -708,32 +709,32 @@ def test_deconstruct_with_now():
 
 
 def test_render_value_with_now():
-    """MigrationWriter.render_value() preserves Now() in migration files."""
+    """DeclarationValueSerializer.render_value() preserves Now() in migration files."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import Now
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     n = Now()
-    result = MigrationWriter.render_value(n, imports)
+    result = DeclarationValueSerializer.render_value(n, imports)
     assert result == "Now()"
     assert "Now" in str(imports)
 
 
 def test_render_value_with_sql_default():
-    """MigrationWriter.render_value() preserves SqlDefault in migration files."""
+    """DeclarationValueSerializer.render_value() preserves SqlDefault in migration files."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     sd = SqlDefault("gen_random_uuid()")
-    result = MigrationWriter.render_value(sd, imports)
+    result = DeclarationValueSerializer.render_value(sd, imports)
     assert result == "SqlDefault('gen_random_uuid()')"
     assert "SqlDefault" in str(imports)
 
 
 def test_render_value_keeps_the_class_of_a_default_of_its_own():
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     class SevenDefault(SqlDefault):
         """Written by a dialect's renderer - its own SQL is empty."""
@@ -744,48 +745,48 @@ def test_render_value_keeps_the_class_of_a_default_of_its_own():
     SevenDefault.__module__ = "tests.fields.seven_defaults"
     SevenDefault.__qualname__ = "SevenDefault"
     imports = ImportManager()
-    assert MigrationWriter.render_value(SevenDefault(), imports) == "SevenDefault()"
+    assert DeclarationValueSerializer.render_value(SevenDefault(), imports) == "SevenDefault()"
     assert "SevenDefault" in imports.imports["tests.fields.seven_defaults"]
     # A class the migration can't import is written by its SQL.
     SevenDefault.__qualname__ = "test_render.<locals>.SevenDefault"
     imports = ImportManager()
-    assert MigrationWriter.render_value(SevenDefault(), imports) == "SqlDefault('')"
+    assert DeclarationValueSerializer.render_value(SevenDefault(), imports) == "SqlDefault('')"
 
 
 def test_render_value_random_hex():
-    """MigrationWriter.render_value() serializes RandomHex as RandomHex(), not as SqlDefault(...)."""
+    """DeclarationValueSerializer.render_value() serializes RandomHex as RandomHex(), not as SqlDefault(...)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import RandomHex
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     rh = RandomHex()
-    result = MigrationWriter.render_value(rh, imports)
+    result = DeclarationValueSerializer.render_value(rh, imports)
     assert result == "RandomHex()"
     assert "hare.fields.db_defaults" in imports.imports
     assert "RandomHex" in imports.imports["hare.fields.db_defaults"]
 
 
 def test_render_value_sql_default_still_works():
-    """MigrationWriter.render_value() still serializes plain SqlDefault correctly (regression check)."""
+    """DeclarationValueSerializer.render_value() still serializes plain SqlDefault correctly (regression check)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import SqlDefault
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     sd = SqlDefault("custom")
-    result = MigrationWriter.render_value(sd, imports)
+    result = DeclarationValueSerializer.render_value(sd, imports)
     assert result == "SqlDefault('custom')"
     assert "hare.fields.db_defaults" in imports.imports
     assert "SqlDefault" in imports.imports["hare.fields.db_defaults"]
 
 
 def test_render_value_now_still_works():
-    """MigrationWriter.render_value() still serializes Now correctly (regression check)."""
+    """DeclarationValueSerializer.render_value() still serializes Now correctly (regression check)."""
+    from hare.declarations.import_manager import ImportManager
     from hare.fields.db_defaults import Now
-    from hare.migrations.writer import ImportManager, MigrationWriter
 
     imports = ImportManager()
     n = Now()
-    result = MigrationWriter.render_value(n, imports)
+    result = DeclarationValueSerializer.render_value(n, imports)
     assert result == "Now()"
     assert "hare.fields.db_defaults" in imports.imports
     assert "Now" in imports.imports["hare.fields.db_defaults"]

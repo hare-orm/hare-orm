@@ -1,35 +1,8 @@
-"""Tests for QuerySet's `QUERY_SHAPE_CACHE` (hare/query/queryset/queryset.py) - the fast path
-that reuses a fully-built hare.sql query (selects/orderby/distinct/WHERE all applied) across
-repeated calls of the SAME `.filter(...)` shape, binding only the leaf `ValueWrapper` values into
-the shape's SQL text (`StatementPlan.bind()`). Unlike `DECODE_PLAN_CACHE` (query SHAPE
-only), this cache stores real query structure keyed on filter KEYS - so its primary risk is
-silent data corruption: reusing the wrong criterion structure, or a stale/shared value, for a
-different call. Every test below therefore checks actual RESULTS, not just cache bookkeeping -
-proving the fast path is both taken (via a spy) AND correct (via the returned rows), for the
-full matrix the design docs mandate: repeated-different-values, every eligible lookup shape,
-every remaining excluded shape (fk-shortcut/CTE/an __in list with an embedded None - OR,
-nested/multi-kwarg Q, non-join negation, __in/__not_in, select_related, a
-CombinedExpression/Value/F literal annotate(), .after_cursor() keyset pagination, a single-hop
-related__field=value join-crossing filter (plain or negated via .exclude()'s NOT EXISTS
-rewrite), every __contains/__startswith/__endswith LIKE-family lookup (case-sensitive AND
-case-insensitive - the latter's pattern embeds one level deeper, inside an UPPER(...) SQL
-function call), JSON __contains/__contained_by (already covered for free, no new code - see
-test_json_contains_and_contained_by_already_fast_pathed_and_stay_correct), and ArrayField
-__contains/__contained_by/__overlap/__len (the first two/three substitute the WHOLE Array node,
-not a leaf value inside it - see ArrayValueReference's own docstring) are now covered by the fast path;
-Function/Aggregate/Window/Case annotations, an F() cross-reference to another annotation, a NULL
-.after_cursor() boundary value, a multi-value/non-scalar related-field filter
-(related__field__in=[...]), and the JSON __filter lookup (its value_encoder is an identity
-pass-through on the WHOLE raw dict, but the criterion it builds embeds a decomposed PIECE of that
-dict instead) stay excluded), None/isnull's special rewrite, dialect non-collision, and concurrent
-access. Also covers `register_lookup()`-registered custom filters generically (no lookup-specific
-code) - a lookup whose own operator embeds `encoded_value` unchanged is automatically eligible
-through the SAME ScalarValueReference/RangeValueReference/ListValueReference mechanisms every built-in lookup uses,
-gated by an `is` identity check against the encoder's own direct output (not just a structural
-isinstance check) - this identity check was ADDED to those three ref shapes after a live-verified
-silent-wrong-result bug: a custom lookup whose operator TRANSFORMS the value (e.g. reverses it)
-used to be wrongly treated as a plain reusable scalar, substituting `to_db_value(new_raw)` in
-place of whatever the operator actually embedded.
+"""Statement plans reuse query structure while binding each call's current values.
+
+The scenarios cover filters, annotations, relations, scopes, subqueries and pagination.
+They check returned rows, plan hits and the model-local templates retained for later calls.
+Caches are cleared between tests so cold-build and reuse assertions remain independent.
 """
 
 import asyncio
@@ -124,19 +97,21 @@ def _unsafe_custom_lookup(field: CharField | None) -> FieldLookup:
     return FieldLookup(_operator)
 
 
-def _rebuilt_custom_lookup(field: CharField | None) -> FieldLookup:
-    """The transforming custom filter of `_unsafe_custom_lookup`, declaring that its SQL text depends
-    on nothing of the value but its type - a plan builds its criterion again from a later value."""
+def _encoded_custom_lookup(field: CharField | None) -> FieldLookup:
+    """A transforming lookup declares its input conversion separately from SQL construction."""
 
-    def _operator(term: Term, value: str) -> Term:
-        return term == value[::-1]
+    def encode(value, model, field, dialect):
+        return dialect.types.get_lookup_value(field, value, model)[::-1]
 
-    return FieldLookup(_operator, binds_by_rebuild=True)
+    def operator(term, value):
+        return term == value
+
+    return FieldLookup(operator, encode)
 
 
 CharField.register_lookup("safe_custom", _safe_custom_lookup)
 CharField.register_lookup("unsafe_custom", _unsafe_custom_lookup)
-CharField.register_lookup("rebuilt_custom", _rebuilt_custom_lookup)
+CharField.register_lookup("encoded_custom", _encoded_custom_lookup)
 
 
 def _value_wrapper_ids(criterion: Criterion | None) -> set[int]:
@@ -150,9 +125,7 @@ def _value_wrapper_ids(criterion: Criterion | None) -> set[int]:
 
 @pytest.fixture(autouse=True)
 def clear_query_shape_cache():
-    """Module-level and never invalidated in production (same policy as DECODE_PLAN_CACHE) -
-    must be cleared between tests or an earlier test's cached shape silently answers a later
-    test's "cold cache" assumptions with stale data."""
+    """Clear every model's statement plans and dependent call signatures before and after a test."""
     StatementPlans.plans.clear()
     yield
     StatementPlans.plans.clear()
@@ -288,14 +261,14 @@ async def test_order_by_is_part_of_the_cache_key(db):
     assert spy.call_count > 0
     assert first == ["alpha", "beta"]
     assert second == ["alpha", "beta"]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     reverse = [b.name async for b in Book.objects.filter(rating__gt=0).order_by("-name").all()]
     assert reverse == ["beta", "alpha"]
-    assert len(StatementPlans.plans) == 2, "a different order_by direction must be a separate cache entry"
+    assert StatementPlans.plans.entry_count == 2, "a different order_by direction must be a separate cache entry"
 
     await Book.objects.filter(rating__gt=0).order_by("rating").all()
-    assert len(StatementPlans.plans) == 3, "a different order_by field must be a separate cache entry"
+    assert StatementPlans.plans.entry_count == 3, "a different order_by field must be a separate cache entry"
 
 
 @pytest.mark.asyncio
@@ -312,19 +285,19 @@ async def test_order_by_null_placement_is_part_of_the_cache_key(db):
     nulls_first = F("intnum_null").asc(nulls_first=True)
     nulls_last = F("intnum_null").asc(nulls_last=True)
     assert await numbers(nulls_first) == [2, 4, 1, 3]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
     assert await numbers(nulls_last) == [1, 3, 2, 4]
-    assert len(StatementPlans.plans) == 2, "NULLS LAST must not reuse the NULLS FIRST template"
+    assert StatementPlans.plans.entry_count == 2, "NULLS LAST must not reuse the NULLS FIRST template"
     await numbers(F("intnum_null").asc())
-    assert len(StatementPlans.plans) == 3, "the dialect default must not reuse an explicit placement's template"
+    assert StatementPlans.plans.entry_count == 3, "the dialect default must not reuse an explicit placement's template"
     await numbers(F("intnum_null").desc(nulls_last=True))
-    assert len(StatementPlans.plans) == 4
+    assert StatementPlans.plans.entry_count == 4
 
     with _spy_on_plan_hits() as spy:
         assert await numbers(nulls_first) == [2, 4, 1, 3]
         assert await numbers(nulls_last) == [1, 3, 2, 4]
     assert spy.call_count == 2, "repeating each placement still hits its own cache entry"
-    assert len(StatementPlans.plans) == 4
+    assert StatementPlans.plans.entry_count == 4
 
 
 @requires_features(supports_select_for_update=True)
@@ -337,20 +310,20 @@ async def test_select_for_update_now_fast_pathed(db):
     one, not silently reuse/corrupt the plain FOR UPDATE template."""
     qs_first = Book.objects.filter(name="alpha")
     qs_first._select_for_update = True
-    key_before = set(StatementPlans.plans)
+    cache_size_before = StatementPlans.plans.entry_count
     qs_first.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 1
+    assert StatementPlans.plans.entry_count == cache_size_before + 1
 
     qs_second = Book.objects.filter(name="beta")
     qs_second._select_for_update = True
     qs_second.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 1, "same lock shape must reuse one entry"
+    assert StatementPlans.plans.entry_count == cache_size_before + 1, "same lock shape must reuse one entry"
 
     qs_nowait = Book.objects.filter(name="alpha")
     qs_nowait._select_for_update = True
     qs_nowait._select_for_update_nowait = True
     qs_nowait.sql()
-    assert len(StatementPlans.plans) == len(key_before) + 2, "a different lock mode must be a separate entry"
+    assert StatementPlans.plans.entry_count == cache_size_before + 2, "a different lock mode must be a separate entry"
     assert "NOWAIT" in qs_nowait.sql().upper()
     assert "NOWAIT" not in qs_first.sql().upper()
 
@@ -443,7 +416,7 @@ async def test_or_combination_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"alpha", "beta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -501,31 +474,7 @@ async def test_deeply_nested_and_inside_or_now_fast_pathed_and_stays_correct(db)
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"beta", "delta"}
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_tree(db):
-    """The symmetry-principle regression test: after a cache HIT for an OR/nested shape, walk the
-    freshly built WHERE tree and confirm none of its `ValueWrapper` leaves are the SAME objects
-    (by `id()`) as the cached template's own leaves - a shared object here would mean two
-    concurrent/sequential calls silently alias each other's filter values."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-
-    qs_first = Book.objects.filter(Q(name="alpha") | Q(name="gamma"))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids  # sanity: the OR shape really did populate the cache with real leaves
-
-    qs_second = Book.objects.filter(Q(name="alpha") | Q(name="beta"))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -564,7 +513,7 @@ async def test_join_crossing_negated_child_deep_inside_or_tree_now_fast_pathed(d
             names = {b.name async for b in Book.objects.filter(~Q(author__name="a1") | Q(name="nonexistent")).all()}
             assert names == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -585,7 +534,7 @@ async def test_exclude_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0  # second call: hit
     assert first == {"beta", "gamma"}
     assert second == {"alpha", "beta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -627,7 +576,7 @@ async def test_exclude_nullable_column_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0  # second call: hit
     assert first == {no_subject.name, beta.name}
     assert second == {no_subject.name, alpha.name}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -648,30 +597,7 @@ async def test_join_crossing_exclude_now_fast_pathed_and_stays_correct(db):
             names = {b.name async for b in Book.objects.all().exclude(author__name="a1")}
             assert names == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_negated_tree(db):
-    """The symmetry-principle regression test for negation specifically: after a cache HIT on a
-    `~Q(...)` shape, the freshly built `Not(...)`-wrapped tree must not share any `ValueWrapper`
-    leaf (by `id()`) with the cached template's own tree."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-
-    qs_first = Book.objects.filter(~Q(name="alpha"))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(~Q(name="beta"))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -693,11 +619,11 @@ async def test_in_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"alpha", "gamma"}
     assert second == {"beta", "delta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     third = {b.name async for b in Book.objects.filter(name__in=["alpha", "beta", "gamma"]).all()}
     assert third == {"alpha", "beta", "gamma"}
-    assert len(StatementPlans.plans) == 2, "a different list length must be a SEPARATE cache entry"
+    assert StatementPlans.plans.entry_count == 2, "a different list length must be a SEPARATE cache entry"
 
 
 @pytest.mark.asyncio
@@ -733,7 +659,7 @@ async def test_in_with_embedded_none_runs_on_its_plan(db):
             names = {b.name async for b in Book.objects.filter(subject__in=["fiction", None]).all()}
             assert names == {"has-subject", "no-subject"}
     assert spy.call_count == 2
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -748,33 +674,7 @@ async def test_in_empty_list_runs_on_its_plan_and_stays_correct(db):
             names = [b.name async for b in Book.objects.filter(name__in=[]).all()]
             assert names == []
     assert spy.call_count == 2
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_in_list_tree(db):
-    """The symmetry-principle regression test for `__in` specifically: after a cache HIT, none of
-    the freshly built `Tuple(...)` container's `ParameterizedValueWrapper` leaves may share an
-    `id()` with the CACHED template's own container - and the cached template's own container
-    must stay untouched (never mutated in place) after serving a hit."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-    await Book.objects.create(name="delta", author=author, rating=4.0)
-
-    qs_first = Book.objects.filter(name__in=["alpha", "gamma"])
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(name__in=["beta", "delta"])
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
-    assert _value_wrapper_ids(cached_query._wheres) == cached_ids, "the cached template must never be mutated"
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -795,7 +695,7 @@ async def test_range_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"alpha", "beta"}
     assert second == {"gamma", "delta"}
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -850,31 +750,7 @@ async def test_ranges_open_on_different_sides_keep_plans_of_their_own(db):
     for _ in range(2):
         for bounds, expected in calls:
             assert {b.name async for b in Book.objects.filter(rating__range=bounds).all()} == expected
-    assert len(StatementPlans.plans) == 4
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_range_tree(db):
-    """The symmetry-principle regression test for `__range`: after a cache HIT, neither the fresh
-    lower nor upper `ValueWrapper` may share an `id()` with the CACHED template's own bounds."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-    await Book.objects.create(name="gamma", author=author, rating=3.0)
-    await Book.objects.create(name="delta", author=author, rating=4.0)
-
-    qs_first = Book.objects.filter(rating__range=(0.5, 2.5))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids
-
-    qs_second = Book.objects.filter(rating__range=(2.5, 4.5))
-    built_qs_second = _built(qs_second)
-    new_ids = _value_wrapper_ids(built_qs_second.query._wheres)
-
-    assert new_ids.isdisjoint(cached_ids)
-    assert _value_wrapper_ids(cached_query._wheres) == cached_ids
+    assert StatementPlans.plans.entry_count == 4
 
 
 @pytest.mark.asyncio
@@ -918,7 +794,7 @@ async def test_select_related_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first.author.name == "a1"
     assert second.author.name == "a2"
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -952,10 +828,10 @@ async def test_different_select_related_sets_are_separate_cache_entries(db):
     await Book.objects.create(name="alpha", author=author, rating=1.0)
 
     await Book.objects.filter(rating__gt=0).select_related("author").all()
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     await Book.objects.filter(rating__gt=0).all()
-    assert len(StatementPlans.plans) == 2, "no-select_related must be a separate entry from select_related"
+    assert StatementPlans.plans.entry_count == 2, "no-select_related must be a separate entry from select_related"
 
 
 @pytest.mark.asyncio
@@ -986,7 +862,7 @@ async def test_select_related_extra_condition_now_fast_pathed_and_stays_correct(
     # extra_condition filters the JOIN itself (LEFT JOIN), not the row - a non-matching value
     # means .author resolves to None (no matching related row), not an exception.
     assert second.author is None
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1142,7 +1018,7 @@ async def test_function_aggregate_annotate_now_fast_pathed_and_stays_correct(db)
             result = (await Author.objects.annotate(book_count=Count("books")).filter(name="a").all())[0]
             assert result.book_count == 2
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1158,7 +1034,7 @@ async def test_combined_expression_annotate_now_fast_pathed_and_stays_correct(db
     # A nonzero count is the signal the fast path actually activated (see
     # _spy_on_plan_hits()'s own docstring).
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
 
@@ -1166,7 +1042,7 @@ async def test_combined_expression_annotate_now_fast_pathed_and_stays_correct(db
     beta = await Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="beta").all()
     assert abs(alpha[0].bumped - 1.5) < 1e-9
     assert abs(beta[0].bumped - 3.0) < 1e-9
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1183,11 +1059,13 @@ async def test_combined_expression_int_vs_float_literal_are_separate_cache_entri
     StatementPlans.plans.clear()
     int_result = await IntFields.objects.annotate(result=F("intnum") + 1).values("result")
     assert int_result == [{"result": 8}]
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     float_result = await IntFields.objects.annotate(result=F("intnum") + 0.5).values("result")
     assert float_result == [{"result": 7.5}]
-    assert len(StatementPlans.plans) == 2, "a float literal must not reuse an int literal's uncast SQL structure"
+    assert StatementPlans.plans.entry_count == 2, (
+        "a float literal must not reuse an int literal's uncast SQL structure"
+    )
 
 
 @pytest.mark.asyncio
@@ -1211,41 +1089,11 @@ async def test_annotate_f_cross_reference_runs_on_its_plan(db):
 
 
 @pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_annotation_tree(db):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=2.0)
-
-    first_query = Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="alpha")
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_select_ids = {
-        id(node) for select in cached_query._selects for node in select.nodes_() if isinstance(node, ValueWrapper)
-    }
-    cached_where_ids = _value_wrapper_ids(cached_query._wheres)
-    cached_ids = cached_select_ids | cached_where_ids
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached annotation template"
-
-    second_query = Book.objects.annotate(bumped=F("rating") * 1.5).filter(name="beta")
-    built_second_query = _built(second_query)
-    fresh_query = built_second_query.query
-    fresh_select_ids = {
-        id(node) for select in fresh_query._selects for node in select.nodes_() if isinstance(node, ValueWrapper)
-    }
-    fresh_where_ids = _value_wrapper_ids(fresh_query._wheres)
-    fresh_ids = fresh_select_ids | fresh_where_ids
-
-    assert not (cached_ids & fresh_ids), "a cloned annotation query must never reuse the cached template's own nodes"
-
-
-@pytest.mark.asyncio
 async def test_dialect_is_part_of_the_cache_key(db):
-    """Two otherwise-identical shapes under different dialects must occupy different cache
-    entries - same principle EXECUTOR_CACHE already relies on (see its own key), verified here
-    directly against the key/value hare.sql object rather than via a second live connection
-    (this file runs against both sqlite and postgres in CI, so "the other dialect" is picked
-    relative to whichever one this particular run is actually using, not hardcoded - hardcoding
-    "postgres" here once silently made this a same-dialect no-op under a postgres test run)."""
+    """Changing only the dialect in a shape's description cannot find the existing plan.
+
+    Describe the other dialect without executing its compiler on an incompatible driver.
+    """
     await Author.objects.create(name="a")
     # Register both dialects' lazy SQL helpers before measuring separate plan entries.
     for dialect_name in ("postgresql", "sqlite"):
@@ -1254,38 +1102,42 @@ async def test_dialect_is_part_of_the_cache_key(db):
     qs = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
     real_dialect = qs.dialect.name
     qs._make_query()
-    real_key = next(iter(StatementPlans.plans))
+    real_key = next(iter(StatementPlans.plans.get_model_bucket(Author)))
 
     other_dialect = DialectRegistry.get_dialect("postgresql" if real_dialect != "postgresql" else "sqlite")
     qs2 = Author.objects.filter(name="a")._get_compiler()._get_execution_query()
     with patch.object(type(qs2), "dialect", other_dialect):
-        qs2._make_query()
+        description, other_plan = qs2._get_plan()
 
-    assert len(StatementPlans.plans) == 2
-    other_key = next(key for key in StatementPlans.plans if key != real_key)
-    # The model, the query class, its declaration, the model again, then the dialect.
-    assert real_key[4] != other_key[4]
+    assert description is not None
+    assert other_plan is None
+    other_key = description.structure
+    assert other_key != real_key
+    assert StatementPlans.find(Author, real_key) is not None
+    assert StatementPlans.find(Author, other_key) is None
+    # The dialect identity is part of each model-local statement key.
+    assert qs.dialect in real_key
+    assert other_dialect not in real_key
+    assert other_dialect in other_key
 
 
 @pytest.mark.asyncio
 async def test_concurrent_calls_with_different_values_do_not_cross_talk(db):
-    """asyncio, not threading - but still worth proving directly: many concurrent
-    `.filter(name=<distinct value>).all()` calls for the same shape, interleaved by the
-    event loop across real DB round-trips, must each get back their OWN row, never another
-    coroutine's rebound value. Deliberately not `.first()`/`.get()` - those set `_limit` and
-    never take the fast path at all (see test_limit_offset_and_select_for_update_excluded_
-    from_fast_path), which would make this test pass trivially regardless of whether the new
-    caching mechanism is actually safe under interleaving."""
+    """Concurrent queries bind independent values without modifying the published plan."""
     authors = [await Author.objects.create(name=f"author-{i}") for i in range(20)]
 
     async def fetch(expected_name: str) -> str:
         rows = await Author.objects.filter(name=expected_name).order_by("id")
         return rows[0].name
 
+    assert await fetch(authors[0].name) == authors[0].name
+    plans = list(StatementPlans.plans.get_model_bucket(Author).values())
+    initial_parameters = [list(plan.parameters) for plan in plans]
     with _spy_on_plan_hits() as spy:
         results = await asyncio.gather(*(fetch(a.name) for a in authors))
     assert results == [a.name for a in authors]
     assert spy.call_count > 0
+    assert [plan.parameters for plan in plans] == initial_parameters
 
 
 @pytest.mark.asyncio
@@ -1310,7 +1162,7 @@ async def test_after_cursor_now_fast_pathed_and_stays_correct(db):
         page2 = await Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(4.0).limit(2).all()
         assert [b.rating for b in page2] == [5.0]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1323,7 +1175,7 @@ async def test_after_cursor_vs_no_cursor_same_ordering_are_distinct_cache_entrie
     assert len(no_cursor) == 3
     with_cursor = await Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(1.0).all()
     assert [b.rating for b in with_cursor] == [2.0, 3.0]
-    assert len(StatementPlans.plans) == 2
+    assert StatementPlans.plans.entry_count == 2
 
 
 @pytest.mark.asyncio
@@ -1345,7 +1197,7 @@ async def test_after_cursor_multi_field_mixed_ordering_now_fast_pathed(db):
             assert "book1" not in names
             assert "book2" in names
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1376,28 +1228,6 @@ async def test_after_cursor_null_boundary_keeps_a_plan_of_its_own(db):
     hits = StatementPlans.hits
     assert (await names(after(None)), await names(after("fiction"))) == built
     assert StatementPlans.hits - hits == 2
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_cursor_tree(db):
-    author = await Author.objects.create(name="a")
-    for i in range(1, 6):
-        await Book.objects.create(name=f"book{i}", author=author, rating=float(i))
-
-    first_query = Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(2.0)
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached cursor template"
-
-    second_query = Book.objects.filter(author_id=author.id).order_by("rating").after_cursor(4.0)
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned cursor query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.rating for b in results] == [5.0]
 
 
 @requires_features(identifier_quote_char='"')
@@ -1439,8 +1269,8 @@ async def test_with_cte_raw_sql_reference_keeps_one_plan_with_its_cte(db):
         rows = await outer_qs.all()
         assert [b.name for b in rows] == ["book1"]
 
-    assert len(StatementPlans.plans) == 1
-    plan = next(iter(StatementPlans.plans.values()))
+    assert StatementPlans.plans.entry_count == 1
+    plan = next(iter(StatementPlans.plans.get_model_bucket(Book).values()))
     assert plan.sql is not None and '"cheap"' in plan.sql
 
 
@@ -1478,7 +1308,7 @@ async def test_a_join_crossing_filter_is_fast_pathed_and_stays_correct(
     assert [b.name for b in first] == expected_first
     assert [b.name for b in second] == expected_second
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1497,7 +1327,7 @@ async def test_negated_join_crossing_filter_null_fk_row_stays_included(db):
             excluded = await Event.objects.exclude(reporter__name="John")
             assert {e.name for e in excluded} == {event_without_reporter.name}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     excluded_other = await Event.objects.exclude(reporter__name="Nobody Matches This")
     assert {e.name for e in excluded_other} == {event_with_reporter.name, event_without_reporter.name}
@@ -1534,29 +1364,6 @@ async def test_any_lookup_across_a_relation_runs_on_its_plan(db):
 
 
 @pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_not_exists_tree(db):
-    alice = await Author.objects.create(name="alice")
-    bob = await Author.objects.create(name="bob")
-    await Book.objects.create(name="alpha", author=alice, rating=1.0)
-    await Book.objects.create(name="beta", author=bob, rating=2.0)
-
-    first_query = Book.objects.exclude(author__name="alice")
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids_including_exists(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached NOT EXISTS template"
-
-    second_query = Book.objects.exclude(author__name="bob")
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids_including_exists(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned NOT EXISTS query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.name for b in results] == ["alpha"]
-
-
-@pytest.mark.asyncio
 async def test_like_family_lookups_now_fast_pathed_and_stay_correct(db):
     """Case-sensitive __contains/__startswith/__endswith all resolve through the SAME
     Like(BasicCriterion) shape (hare.query.filters.lookups.lookups.Lookups._get_like_pattern()) - one test covers
@@ -1572,7 +1379,7 @@ async def test_like_family_lookups_now_fast_pathed_and_stay_correct(db):
     assert [b.name for b in first] == ["the great gatsby"]
     assert [b.name for b in second] == ["moby dick"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1581,7 +1388,7 @@ async def test_like_family_lookups_now_fast_pathed_and_stay_correct(db):
     assert [b.name for b in first] == ["the great gatsby"]
     assert [b.name for b in second] == ["dune"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1590,7 +1397,7 @@ async def test_like_family_lookups_now_fast_pathed_and_stay_correct(db):
     assert [b.name for b in first] == ["moby dick"]
     assert [b.name for b in second] == ["dune"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1608,7 +1415,7 @@ async def test_like_family_lookup_escapes_literal_wildcard_characters(db):
         underscore_match = await Book.objects.filter(name__contains="_").all()
         assert underscore_match == []
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1626,7 +1433,7 @@ async def test_like_family_case_insensitive_variants_now_fast_pathed_and_stay_co
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1635,7 +1442,7 @@ async def test_like_family_case_insensitive_variants_now_fast_pathed_and_stay_co
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1644,36 +1451,7 @@ async def test_like_family_case_insensitive_variants_now_fast_pathed_and_stay_co
     assert [b.name for b in first] == ["the GREAT gatsby"]
     assert [b.name for b in second] == ["moby DICK"]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
-
-
-@pytest.mark.parametrize(
-    "lookup",
-    [
-        pytest.param("icontains", id="no_stale_value_ids_survive_in_cloned_case_insensitive_like_tree"),
-        pytest.param("contains", id="no_stale_value_ids_survive_in_cloned_like_tree"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_a_cloned_like_tree(db, lookup):
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="the great gatsby", author=author, rating=1.0)
-    await Book.objects.create(name="moby dick", author=author, rating=2.0)
-
-    first_query = Book.objects.filter(**{f"name__{lookup}": "great"})
-    await first_query.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids(cached_query._wheres)
-    assert cached_ids, "expected at least one ValueWrapper leaf in the cached LIKE template"
-
-    second_query = Book.objects.filter(**{f"name__{lookup}": "dick"})
-    built_second_query = _built(second_query)
-    fresh_ids = _value_wrapper_ids(built_second_query.query._wheres)
-
-    assert not (cached_ids & fresh_ids), "a cloned LIKE query must never reuse the cached template's own nodes"
-
-    results = await second_query.all()
-    assert [b.name for b in results] == ["moby dick"]
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
@@ -1695,7 +1473,7 @@ async def test_json_contains_and_contained_by_already_fast_pathed_and_stay_corre
     assert [obj.id for obj in first] == [a.id]
     assert [obj.id for obj in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1704,17 +1482,14 @@ async def test_json_contains_and_contained_by_already_fast_pathed_and_stay_corre
     assert [obj.id for obj in first] == [a.id]
     assert [obj.id for obj in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_contains_contained_by_overlap_now_fast_pathed_and_stay_correct(db_array_fields):
-    """`ArrayField.__contains`/`__contained_by`/`__overlap` (`array_encoder` -> `Cast(Array(...),
-    type)`) - unlike every other ref shape in this file, a cache hit substitutes the WHOLE
-    `Array` node, not a value leaf inside it (see `ArrayValueReference`'s own docstring for why - Array
-    holds its own list as ONE lazily-parameterized bind value, not a per-element `ValueWrapper`
-    a normal `__in` list would)."""
+    """Typed container lookups bind each new array through the field conversion and retain
+    the SQL type cast. The complete array is one parameter, independent of its length."""
     from tests.shared_models.testmodels_postgres import ArrayFields
 
     a = await ArrayFields.objects.create(array=[1, 2, 3])
@@ -1726,7 +1501,7 @@ async def test_array_contains_contained_by_overlap_now_fast_pathed_and_stay_corr
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1735,7 +1510,7 @@ async def test_array_contains_contained_by_overlap_now_fast_pathed_and_stay_corr
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -1744,14 +1519,14 @@ async def test_array_contains_contained_by_overlap_now_fast_pathed_and_stay_corr
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_array_len_now_fast_pathed_and_stays_correct(db_array_fields):
     """`ArrayField.__len` (`int_encoder`, then a plain `Coalesce(array_length(...), 0).eq(value)`
-    comparison) - an ordinary `EncodedValueReference` shape, not `ArrayValueReference`."""
+    comparison) - an ordinary `EncodedValueReference` shape, not `ContainerValueReference`."""
     from tests.shared_models.testmodels_postgres import ArrayFields
 
     a = await ArrayFields.objects.create(array=[1, 2, 3])
@@ -1763,15 +1538,15 @@ async def test_array_len_now_fast_pathed_and_stays_correct(db_array_fields):
     assert [o.id for o in first] == [a.id]
     assert [o.id for o in second] == [b.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @requires_features(dialect="postgresql")
 @pytest.mark.asyncio
 async def test_json_filter_runs_on_its_plan_and_stays_correct(db):
     """The JSON `__filter` lookup compares one piece of its dict - its plan key holds the dict's
-    keys and the types of its values, and a later dict of that shape builds the criterion again and
-    binds its pieces (`FieldLookup.binds_by_rebuild`). Another path or operator keeps another plan."""
+    keys and the types of its values, and later inputs bind their declared paths. Another path or operator
+    keeps another plan."""
     a = await JSONFields.objects.create(data={"breed": "labrador", "age": 3})
     b = await JSONFields.objects.create(data={"breed": "poodle", "age": 7})
 
@@ -1802,65 +1577,6 @@ async def test_json_has_keys_run_on_their_plan_and_stay_correct(db):
     assert spy.call_count == 3
 
 
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_array_contains_tree(db_array_fields):
-    from tests.shared_models.testmodels_postgres import ArrayFields
-
-    a = await ArrayFields.objects.create(array=[1, 2, 3])
-    b = await ArrayFields.objects.create(array=[4, 5, 6])
-
-    first_query = ArrayFields.objects.filter(array__contains=[1, 2])
-    first_results = await first_query.all()
-    assert [o.id for o in first_results] == [a.id]
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_array_id = id(cached_query._wheres.args[1].value_wrapper)
-
-    second_query = ArrayFields.objects.filter(array__contains=[4, 5])
-    built_second_query = _built(second_query)
-    fresh_array_id = id(built_second_query.query._wheres.args[1].value_wrapper)
-
-    assert cached_array_id != fresh_array_id, "the Array node must be a FRESH object on a cache hit, not reused"
-    assert cached_query._wheres.args[1].value == [1, 2]
-    assert built_second_query.query._wheres.args[1].value == [4, 5]
-
-    results = await second_query.all()
-    assert [o.id for o in results] == [b.id]
-
-
-@requires_features(dialect="postgresql")
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_array_len_tree(db_array_fields):
-    """`array_length(field, 1)`'s own `1` argument and `Coalesce(..., 0)`'s own `0` default are
-    STRUCTURAL constants, fixed for every call of this shape regardless of the `__len` value being
-    filtered on - correctly, safely SHARED (unchanged) across a cache hit, unlike the actual
-    compared value's own `ValueWrapper`, which must always be a fresh object. This test checks
-    identity of the SPECIFIC compared-value node directly (`criterion.right`), not a blanket
-    "no ValueWrapper anywhere in the tree is shared" sweep, which would incorrectly flag those
-    harmless shared constants as a symmetry violation."""
-    from tests.shared_models.testmodels_postgres import ArrayFields
-
-    a = await ArrayFields.objects.create(array=[1, 2, 3])
-    b = await ArrayFields.objects.create(array=[1, 2])
-
-    first_query = ArrayFields.objects.filter(array__len=3)
-    first_results = await first_query.all()
-    assert [o.id for o in first_results] == [a.id]
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_value_id = id(cached_query._wheres.right)
-
-    second_query = ArrayFields.objects.filter(array__len=2)
-    built_second_query = _built(second_query)
-    fresh_value_id = id(built_second_query.query._wheres.right)
-
-    assert cached_value_id != fresh_value_id, "the compared ValueWrapper must be a FRESH object on a cache hit"
-    assert cached_query._wheres.right.value == 3
-    assert built_second_query.query._wheres.right.value == 2
-
-    results = await second_query.all()
-    assert [o.id for o in results] == [b.id]
-
-
 @pytest.mark.asyncio
 async def test_safe_custom_register_lookup_now_fast_pathed_and_stays_correct(db):
     """A `register_lookup()`-registered custom filter whose operator embeds `encoded_value`
@@ -1877,7 +1593,7 @@ async def test_safe_custom_register_lookup_now_fast_pathed_and_stays_correct(db)
     assert {c.char for c in first} == {"alpha"}
     assert {c.char for c in second} == {"beta"}
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -1907,16 +1623,15 @@ async def test_unsafe_custom_register_lookup_stays_excluded_from_fast_path(db):
 
 
 @pytest.mark.asyncio
-async def test_transforming_custom_lookup_declaring_a_rebuild_runs_on_its_plan(db):
-    """A custom filter transforming its value runs on its plan once it declares `binds_by_rebuild` -
-    each later value builds the criterion again, the reversal included."""
+async def test_transforming_custom_lookup_declaring_an_encoder_runs_on_its_plan(db):
+    """A prepared conversion binds each new value without reconstructing the operator."""
     a = await CharFields.objects.create(char="moo")
     b = await CharFields.objects.create(char="oom")
 
     with _spy_on_plan_hits() as spy:
         for _ in range(2):
-            assert [c.id for c in await CharFields.objects.filter(char__rebuilt_custom="oom")] == [a.id]
-            assert [c.id for c in await CharFields.objects.filter(char__rebuilt_custom="moo")] == [b.id]
+            assert [c.id for c in await CharFields.objects.filter(char__encoded_custom="oom")] == [a.id]
+            assert [c.id for c in await CharFields.objects.filter(char__encoded_custom="moo")] == [b.id]
     assert spy.call_count == 3
 
 
@@ -1938,7 +1653,7 @@ async def test_exists_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first is True
     assert second is True
     assert third is False
-    exists_entries = [key for key in StatementPlans.plans if key[0] is ExistsQuery]
+    exists_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ExistsQuery]
     assert len(exists_entries) == 1
 
 
@@ -1963,7 +1678,7 @@ async def test_count_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == 2
     assert second == 2
     assert third == 1
-    count_entries = [key for key in StatementPlans.plans if key[0] is CountQuery]
+    count_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is CountQuery]
     assert len(count_entries) == 1
 
 
@@ -1982,7 +1697,7 @@ async def test_count_query_group_by_shares_the_plain_cache_entry(db):
     assert spy.call_count > 0
     assert first == 3
     assert second == 3
-    count_entries = [key for key in StatementPlans.plans if key[0] is CountQuery]
+    count_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is CountQuery]
     assert len(count_entries) == 1
 
 
@@ -2030,7 +1745,7 @@ async def test_contains_query_runs_on_its_own_plan_and_stays_correct(db):
         assert await queryset.contains(delta) is False
         assert await queryset.exists() is True
     assert spy.call_count == 2
-    contains_entries = [key for key in StatementPlans.plans if key[0] is ContainsQuery]
+    contains_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ContainsQuery]
     assert len(contains_entries) == 1
 
 
@@ -2123,7 +1838,7 @@ async def test_values_query_is_a_cache_hit_on_second_call_and_stays_correct(db):
     assert first == [{"name": "alpha", "rating": 1.0}]
     assert second == [{"name": "alpha", "rating": 1.0}]
     assert third == [{"name": "beta", "rating": 2.0}]
-    values_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    values_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
     assert len(values_entries) == 1
 
 
@@ -2170,7 +1885,7 @@ async def test_values_list_query_is_a_cache_hit_on_second_call_and_stays_correct
     assert first == [("alpha", 1.0)]
     assert second == [("alpha", 1.0)]
     assert third == [("beta", 2.0)]
-    values_list_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    values_list_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
     assert len(values_list_entries) == 1
 
 
@@ -2250,7 +1965,7 @@ async def test_values_query_select_related_extra_condition_binds_each_calls_cond
         .values("name", "left__left__name")
     )
     assert rows_no_match == [{"name": "root", "left__left__name": None}]
-    extra_condition_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    extra_condition_entries = [key for key in StatementPlans.plans.get_model_bucket(DoubleFK) if key[0] is ValuesQuery]
     assert len(extra_condition_entries) == 1
 
 
@@ -2310,7 +2025,7 @@ async def test_aggregate_query_literal_metric_is_a_cache_hit_and_stays_correct(d
     assert first == {"doubled": 2.0}
     assert second == {"doubled": 2.0}
     assert third == {"doubled": 4.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2333,7 +2048,7 @@ async def test_aggregate_query_real_aggregate_function_now_fast_pathed_and_stays
     assert first == {"total": 1.0}
     assert second == {"total": 1.0}
     assert third == {"total": 2.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2508,7 +2223,7 @@ async def test_aggregate_distinct_flag_is_part_of_the_cache_key(db):
     assert spy.call_count == 0
     assert distinct_count == {"cnt": 1}
     assert plain_count == {"cnt": 2}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 2
 
     # Each shape independently hits on a repeat call.
@@ -2541,7 +2256,7 @@ async def test_aggregate_filter_kwarg_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == {"total": 9.0}
     assert second == {"total": 9.0}
-    aggregate_entries = [key for key in StatementPlans.plans if key[0] is AggregateQuery]
+    aggregate_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is AggregateQuery]
     assert len(aggregate_entries) == 1
 
 
@@ -2646,10 +2361,10 @@ async def test_window_partition_by_is_part_of_the_cache_key(db):
         .order_by("id")
         .values("rn")
     )
-    with_partition_entries = len(StatementPlans.plans)
+    with_partition_entries = StatementPlans.plans.entry_count
 
     await Book.objects.annotate(rn=Window(RowNumber(), order_by=["rating"])).order_by("id").values("rn")
-    without_partition_entries = len(StatementPlans.plans)
+    without_partition_entries = StatementPlans.plans.entry_count
 
     assert without_partition_entries == with_partition_entries + 1
 
@@ -2679,7 +2394,7 @@ async def test_window_ntile_now_fast_pathed_and_stays_correct(db):
     assert spy.call_count > 0
     assert first == [{"bucket": 1}, {"bucket": 2}]
     assert second == [{"bucket": 1}, {"bucket": 2}]
-    ntile_entries = [key for key in StatementPlans.plans if key[0] is ValuesQuery]
+    ntile_entries = [key for key in StatementPlans.plans.get_model_bucket(Book) if key[0] is ValuesQuery]
     assert len(ntile_entries) == 1
 
 
@@ -2959,10 +2674,10 @@ async def test_rawsql_different_sql_text_is_part_of_the_cache_key(db):
 
     StatementPlans.plans.clear()
     await Book.objects.annotate(bumped=RawSQL("rating + %s", [1])).filter(name="alpha").values("bumped")
-    entries_add = len(StatementPlans.plans)
+    entries_add = StatementPlans.plans.entry_count
 
     await Book.objects.annotate(bumped=RawSQL("rating * %s", [1])).filter(name="alpha").values("bumped")
-    entries_mul = len(StatementPlans.plans)
+    entries_mul = StatementPlans.plans.entry_count
 
     assert entries_mul == entries_add + 1
 
@@ -3100,7 +2815,7 @@ async def test_independent_exists_annotation_now_fast_pathed_and_stays_correct(d
     assert len(rows1) == 1 and rows1[0].any_gt
     assert len(rows2) == 1 and rows2[0].any_gt
     assert len(rows3) == 1 and not rows3[0].any_gt
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -3132,7 +2847,7 @@ async def test_correlated_exists_outer_ref_runs_on_its_plan(db):
             )
             assert len(rows_none) == 1 and not rows_none[0].has_event
     assert resolve_spy.call_count == 1, "a correlated OuterReference(...) Exists() runs on the outer query's plan"
-    assert [k for k in StatementPlans.plans if k[0] is Tournament]
+    assert StatementPlans.plans.get_model_bucket(Tournament)
 
 
 @pytest.mark.asyncio
@@ -3187,33 +2902,6 @@ async def test_self_referential_exists_annotation_aliases_correctly(db):
     built_qs2 = _built(qs2)
     sql2 = built_qs2.query.get_sql()
     assert "book__exists_inner" in sql2
-
-
-@pytest.mark.asyncio
-async def test_no_stale_value_ids_survive_in_cloned_exists_tree(db):
-    """The symmetry-principle regression test for `Exists(...)` annotations specifically: after a
-    cache HIT with a DIFFERENT outer+inner value combination, no `ValueWrapper` `id()` from the
-    FIRST call's cached template (living inside the `ExistsTerm`'s own `inner_query`) may survive
-    into the SECOND call's actual query."""
-    author = await Author.objects.create(name="a")
-    await Book.objects.create(name="alpha", author=author, rating=1.0)
-    await Book.objects.create(name="beta", author=author, rating=5.0)
-
-    qs_first = Book.objects.filter(name="alpha").annotate(any_gt=Exists(Book.objects.filter(rating__gt=0.5)))
-    await qs_first.all()
-    cached_query = next(iter(StatementPlans.plans.values())).template
-    cached_ids = _value_wrapper_ids_including_exists(cached_query._wheres)
-    for select_term in cached_query._selects:
-        cached_ids |= {id(node) for node in select_term.nodes_() if isinstance(node, ValueWrapper)}
-    assert cached_ids
-
-    qs_second = Book.objects.filter(name="beta").annotate(any_gt=Exists(Book.objects.filter(rating__gt=4.0)))
-    built_qs_second = _built(qs_second)
-    fresh_ids = _value_wrapper_ids_including_exists(built_qs_second.query._wheres)
-    for select_term in built_qs_second.query._selects:
-        fresh_ids |= {id(node) for node in select_term.nodes_() if isinstance(node, ValueWrapper)}
-
-    assert fresh_ids.isdisjoint(cached_ids), "a cloned Exists() tree must never reuse the cached template's own nodes"
 
 
 @pytest.mark.asyncio
@@ -3325,7 +3013,7 @@ async def test_nested_exists_inside_exists_now_fast_pathed(db):
     assert resolve_spy.call_count == 2, "second call (same shape) must hit the OUTER's own cache"
     assert len(rows1) == 1 and rows1[0].mid_has_any
     assert len(rows2) == 1 and rows2[0].mid_has_any
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
 
 @pytest.mark.asyncio
@@ -3606,7 +3294,7 @@ async def test_json_has_key_lookups_stay_correct_across_cached_calls(db):
     assert [obj.id for obj in second] == [b.id]
     assert [obj.id for obj in third] == [a.id]
     assert spy.call_count > 0
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
 
     StatementPlans.plans.clear()
     with _spy_on_plan_hits() as spy:
@@ -3620,7 +3308,7 @@ async def test_json_has_key_lookups_stay_correct_across_cached_calls(db):
     assert [obj.id for obj in fourth] == [b.id]
     # The fourth call runs on the plan of the third: __has_any_keys of two keys.
     assert spy.call_count == 1
-    assert len(StatementPlans.plans) == 3
+    assert StatementPlans.plans.entry_count == 3
 
 
 @pytest.mark.asyncio
@@ -3684,7 +3372,7 @@ async def test_select_related_idx_survives_query_shape_cache_hit(db):
     qs2 = Author.objects.filter(name="a")
     built_qs2 = _built(qs2)
 
-    assert len(StatementPlans.plans) == 1
+    assert StatementPlans.plans.entry_count == 1
     assert built_qs2._select_related_positions == miss_idx
     assert built_qs2._select_related_positions != []
 

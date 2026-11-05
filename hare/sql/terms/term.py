@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from copy import copy
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.constants import DEFAULT_SQL_CONTEXT
 from hare.sql.enums import Arithmetic, Equality, Matching
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.node import TNode
+from hare.sql.terms.node_structure import NodeStructure
 
 if TYPE_CHECKING:
     from typing import Self
@@ -20,6 +21,8 @@ from hare.sql.terms.node import Node
 
 class Term(Node):
     """The base of the terms of a statement - what its SQL is written of, combined by operators."""
+
+    structure_attributes: ClassVar[tuple[str, ...]] = ()
 
     is_aggregate: bool | None = False
     #: Whether the term writes its subquery without correlation itself where the database has no
@@ -41,24 +44,30 @@ class Term(Node):
             True when every term that isn't None is an aggregate, False when one of them isn't,
             None when all of them are None.
         """
-        decided = [value for value in values if value is not None]
-        if decided:
-            return all(decided)
-        return None
+        result = None
+        for value in values:
+            if value is not None:
+                if not value:
+                    return False
+                result = True
+        return result
 
     def __init__(self, alias: str | None = None) -> None:
         self.alias = alias
+        self.expression_identity = object()
 
     def __copy__(self) -> Self:
-        # A shallow __dict__ copy without copy.copy()'s generic path - a hot path.
-        new_term = type(self).__new__(type(self))
-        new_term.__dict__.update(self.__dict__)
+        new_term = self._copy_state()
+        new_term.expression_identity = object()
         return new_term
 
-    @BuilderMethods.builder
-    def as_(self, alias: str) -> Self:
-        self.alias = alias
-        return self
+    def as_(self, alias: str | None) -> Self:
+        """Name the same value without changing its opaque expression identity."""
+        renamed = copy(self) if getattr(self, "immutable", True) else self
+        renamed.alias = alias
+        renamed.expression_identity = vars(self).setdefault("expression_identity", object())
+        renamed.__dict__.pop("_hash_cache", None)
+        return renamed
 
     @property
     def tables_(self) -> set[Table]:
@@ -100,19 +109,34 @@ class Term(Node):
         return wrapper_class(value)  # type:ignore[return-value]
 
     def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
+        """Replace table references through the declared expression structure.
 
-        Useful when reusing fields across queries. The base implementation returns self because
-        not all terms have a table property.
+        Specialized children keep their own replacement boundaries. Undeclared subclasses retain
+        their nearest declared base's behavior; arbitrary extra state is not traversed. Mutable
+        builders change in place, and unchanged structural references may retain their identity.
 
         Args:
             current_table: The table to be replaced.
             new_table: The table to replace with.
 
         Returns:
-            Self.
+            The rewritten term.
         """
-        return self
+
+        def replace(node: Node) -> Node | None:
+            if node is not self and isinstance(node, Term) and type(node).replace_table is not Term.replace_table:
+                return node.replace_table(current_table, new_table)
+            return None
+
+        return cast(
+            "Self",
+            NodeStructure.rewrite(
+                self,
+                replace,
+                get_attributes=NodeStructure.get_table_replacement_attributes,
+                rebuild_node=NodeStructure.rebuild_table_references,
+            ),
+        )
 
     def eq(self, other: Any) -> criteria_terms.BasicCriterion:
         return self == other

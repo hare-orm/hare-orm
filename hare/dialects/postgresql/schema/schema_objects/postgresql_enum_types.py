@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hare.ddl.schema_objects.enum_type import EnumType
+from hare.dialects.base.schema.plans.schema_change_plan import SchemaChangePlan
+from hare.dialects.base.schema.plans.schema_statement import SchemaStatement
 from hare.dialects.base.schema.schema_objects.enum_types import EnumTypes
 from hare.dialects.postgresql.schema.constants import (
     POSTGRESQL_ENUM_ARRAY_LABELS_HELD_SQL,
     POSTGRESQL_ENUM_LABELS_HELD_SQL,
     POSTGRESQL_ENUM_TYPE_COLUMNS_SQL,
-    POSTGRESQL_REPLACE_ENUM_TYPE_SQL,
-    POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX,
-    POSTGRESQL_SAFE_CREATE_TYPE_SQL,
+    POSTGRESQL_SAFE_CREATE_TYPE_BODY,
 )
+from hare.dialects.postgresql.schema.schema_objects.postgresql_enum_replacement import PostgresqlEnumReplacement
 from hare.migrations.exceptions import FieldNarrowingDataLossError
-from hare.sql.identifiers import Identifiers
 
 if TYPE_CHECKING:
     from hare.dialects.postgresql.schema.postgresql_schema_editor import PostgresqlSchemaEditor
@@ -42,39 +41,29 @@ class PostgresqlEnumTypes(EnumTypes):
 
     def get_enum_type_create_sql(self, enum_type: EnumType, safe: bool = False) -> str:
         create_sql = f"CREATE TYPE {self.get_type_sql(enum_type)} AS ENUM ({self.get_enum_labels_sql(enum_type)})"
-        return POSTGRESQL_SAFE_CREATE_TYPE_SQL.format(create_sql=create_sql) if safe else f"{create_sql};"
+        if safe:
+            return (
+                self.editor.get_anonymous_block_sql(POSTGRESQL_SAFE_CREATE_TYPE_BODY.format(create_sql=create_sql))
+                + ";"
+            )
+        return f"{create_sql};"
 
     async def drop_enum_type(self, enum_type: EnumType) -> None:
         await self.editor.run_sql(f"DROP TYPE {self.get_type_sql(enum_type)};")
 
     async def alter_enum_type(self, old_type: EnumType, new_type: EnumType) -> None:
         """Adds the new labels in place (``ALTER TYPE ... ADD VALUE``) when the old ones keep their
-        order; otherwise replaces the type, converting its columns (``POSTGRESQL_REPLACE_ENUM_TYPE_SQL``)."""
+        order; otherwise replaces it from a locked catalog snapshot of columns and defaults."""
         old_labels = set(old_type.labels)
         kept_in_order = [label for label in new_type.labels if label in old_labels] == list(old_type.labels)
         if kept_in_order:
             await self.add_enum_labels(old_type, new_type)
             return
-        await self.check_removed_labels_unused(old_type, new_type)
-        literals = self.editor.client.dialect.literals
-        old_name = Identifiers.get_within_limit(f"{new_type.name}{POSTGRESQL_REPLACED_ENUM_TYPE_SUFFIX}")
-        # A default names the old type with its schema when the search path doesn't find it.
-        schema_pattern = "" if new_type.schema is None else f'(?:"?{re.escape(new_type.schema)}"?\\.)?'
-        await self.editor.run_sql(
-            POSTGRESQL_REPLACE_ENUM_TYPE_SQL.format(
-                type_sql=self.get_type_sql(new_type),
-                old_type_name_sql=self.editor.quote(old_name),
-                old_type_sql=self.get_type_sql(new_type, old_name),
-                labels_sql=self.get_enum_labels_sql(new_type),
-                type_literal=literals.get_string_literal_sql(self.get_type_sql(new_type)),
-                old_type_literal=literals.get_string_literal_sql(self.get_type_sql(new_type, old_name)),
-                old_type_pattern_literal=literals.get_string_literal_sql(
-                    f'::{schema_pattern}"?{re.escape(old_name)}"?'
-                ),
-            )
-        )
+        await SchemaChangePlan((PostgresqlEnumReplacement(old_type, new_type),)).execute(self.editor)
 
-    async def check_removed_labels_unused(self, old_type: EnumType, new_type: EnumType) -> None:
+    async def check_removed_labels_unused(
+        self, old_type: EnumType, new_type: EnumType, *, columns: list[dict[str, Any]] | None = None
+    ) -> None:
         """Refuses to drop labels a row still holds - in a column of the type or of an array of it.
 
         Args:
@@ -89,7 +78,8 @@ class PostgresqlEnumTypes(EnumTypes):
         if not removed_labels or self.editor.collect_sql:
             return
         client = self.editor.client
-        columns = await client.execute_dicts(POSTGRESQL_ENUM_TYPE_COLUMNS_SQL, [self.get_type_sql(old_type)])
+        if columns is None:
+            columns = await client.execute_dicts(POSTGRESQL_ENUM_TYPE_COLUMNS_SQL, [self.get_type_sql(old_type)])
         for column in columns:
             table_sql = f"{self.editor.quote(column['schema_name'])}.{self.editor.quote(column['table_name'])}"
             column_sql = self.editor.quote(column["column_name"])
@@ -118,13 +108,17 @@ class PostgresqlEnumTypes(EnumTypes):
         literals = self.editor.client.dialect.literals
         present = set(old_type.labels)
         labels = new_type.labels
+        statements = []
         for index, label in enumerate(labels):
             if label in present:
                 continue
             next_label = next((later for later in labels[index + 1 :] if later in present), None)
             position_sql = f" BEFORE {literals.get_string_literal_sql(next_label)}" if next_label is not None else ""
-            await self.editor.run_sql(
-                f"ALTER TYPE {self.get_type_sql(new_type)} ADD VALUE {literals.get_string_literal_sql(label)}"
-                f"{position_sql};"
+            statements.append(
+                SchemaStatement(
+                    f"ALTER TYPE {self.get_type_sql(new_type)} ADD VALUE {literals.get_string_literal_sql(label)}"
+                    f"{position_sql};"
+                )
             )
             present.add(label)
+        await SchemaChangePlan(tuple(statements)).execute(self.editor)

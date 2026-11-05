@@ -1,15 +1,31 @@
 """The checks of a query running on the plan an earlier query of its structure kept."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import patch
 
+from hare.models import Model
 from hare.query.plans.statement.statement_plan_runs import StatementPlanRuns
 from hare.query.plans.statement.statement_plans import StatementPlans
 
 
 class StatementPlanChecks:
     """A query on a kept plan gives what the query built in full gives."""
+
+    @staticmethod
+    @contextmanager
+    def assert_decode_plans_reused(*models: type[Model]) -> Generator[None, None, None]:
+        """Require populated model caches and preserve each plan's identity across a repeated read."""
+        previous = []
+        for model in models:
+            bucket = StatementPlans.decode_plans.get_model_bucket(model)
+            assert bucket, f"{model.__name__} has no decode plans to reuse"
+            previous.append((bucket, dict(bucket)))
+        yield
+        for bucket, plans in previous:
+            assert bucket.keys() == plans.keys()
+            assert all(bucket[key] is plan for key, plan in plans.items())
 
     @staticmethod
     def full_build() -> Any:

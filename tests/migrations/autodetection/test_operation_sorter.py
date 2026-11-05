@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from hare import fields
+from hare.declarations.declaration_values import DeclarationValues
 from hare.exceptions import ConfigurationError
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.autodetection.operation_sorter import OperationSorter
@@ -44,7 +45,9 @@ def test_operations_keep_their_order_when_nothing_needs_another():
         CreateModel("Apple", [("id", fields.IntField(primary_key=True))]),
     ]
     sorted_entries = OperationSorter(State()).sort([("shop", operation) for operation in operations])
-    assert [operation for _app_label, operation in sorted_entries] == operations
+    assert DeclarationValues.get([operation for _app_label, operation in sorted_entries]) == DeclarationValues.get(
+        operations
+    )
 
 
 def test_an_operation_runs_after_the_model_its_relation_needs():
@@ -57,7 +60,42 @@ def test_an_operation_runs_after_the_model_its_relation_needs():
     )
     author = CreateModel("Author", [("id", fields.IntField(primary_key=True))])
     sorted_entries = OperationSorter(State()).sort([("shop", book), ("shop", author)])
-    assert [operation for _app_label, operation in sorted_entries] == [author, book]
+    assert DeclarationValues.get([operation for _app_label, operation in sorted_entries]) == DeclarationValues.get(
+        [author, book]
+    )
+
+
+def test_cycle_splitting_preserves_input_declarations_and_repeats_deterministically():
+    entries = [
+        (
+            "shop",
+            CreateModel(
+                "Author",
+                [
+                    ("id", fields.IntField(primary_key=True)),
+                    ("book", fields.ForeignKeyField("shop.Book", related_name="authors")),
+                ],
+            ),
+        ),
+        (
+            "shop",
+            CreateModel(
+                "Book",
+                [
+                    ("id", fields.IntField(primary_key=True)),
+                    ("author", fields.ForeignKeyField("shop.Author", related_name="books")),
+                ],
+            ),
+        ),
+    ]
+    original = DeclarationValues.get(entries)
+    sorter = OperationSorter(State())
+    first = sorter.sort(entries)
+    second = sorter.sort(entries)
+    assert len(first) == 3
+    assert DeclarationValues.get(first) == DeclarationValues.get(second)
+    assert DeclarationValues.get(entries) == original
+    assert all(len(operation.fields) == 2 for _, operation in entries)
 
 
 @pytest.mark.parametrize("declared_first", ["Author", "Book"])

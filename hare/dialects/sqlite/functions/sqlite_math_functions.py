@@ -35,7 +35,7 @@ class SqliteMathFunctions:
         return float(cls.get_number(value))
 
     @classmethod
-    def absolute(cls, value: Any) -> int | float | str | None:
+    def absolute(cls, value: Any) -> int | float | None:
         """``ABS`` - an integer of an integer."""
         if value is None:
             return None
@@ -43,7 +43,7 @@ class SqliteMathFunctions:
         return abs(number)
 
     @classmethod
-    def round_to_integral(cls, value: Any, rounding: str) -> int | float | str | None:
+    def round_to_integral(cls, value: Any, rounding: str) -> int | float | None:
         """``CEIL``/``FLOOR`` - an integer of an integer, a float of a float."""
         if value is None:
             return None
@@ -56,12 +56,12 @@ class SqliteMathFunctions:
         return math.copysign(float(math.ceil(number) if rounding == ROUND_CEILING else math.floor(number)), number)
 
     @classmethod
-    def ceiling(cls, value: Any) -> int | float | str | None:
+    def ceiling(cls, value: Any) -> int | float | None:
         """``CEIL``."""
         return cls.round_to_integral(value, ROUND_CEILING)
 
     @classmethod
-    def floor(cls, value: Any) -> int | float | str | None:
+    def floor(cls, value: Any) -> int | float | None:
         """``FLOOR``."""
         return cls.round_to_integral(value, ROUND_FLOOR)
 
@@ -74,7 +74,7 @@ class SqliteMathFunctions:
         return (number > 0) - (number < 0)
 
     @classmethod
-    def remainder(cls, dividend: Any, divisor: Any) -> int | float | str | None:
+    def remainder(cls, dividend: Any, divisor: Any) -> int | float | None:
         """``MOD`` - the dividend's sign, as SQLite's ``%``; NULL of a zero divisor."""
         if dividend is None or divisor is None:
             return None

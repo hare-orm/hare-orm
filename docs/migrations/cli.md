@@ -24,25 +24,43 @@ prints hare's version.
 | `hare distributed-recover --coordinator ALIAS [--finish] [--older-than SECONDS]` | Reports or finishes `Transactions.distributed()` prepared transactions that never resolved — see [`hare distributed-recover`](#distributed-recover). |
 | `hare stubs [--output DIRECTORY] [--relation-depth N] [--check]` | Writes the stubs pyright and Pylance check the models with — see [`hare stubs`](#stubs). |
 
+## <a id="shell"></a>`hare shell`
+
+The shell opens one application and one asyncio event loop for the whole session. Every asynchronous
+cell runs on that loop; connections are reused between cells. `asyncio.timeout()`, `wait_for()` and
+`TaskGroup` use ordinary asyncio tasks. Keep each `async with` transaction or tenant scope inside
+one cell. An exception or cancellation in a cell leaves the session available for the next cell.
+Exiting the shell cancels remaining cell tasks, closes the application and then closes the loop.
+Importing or running the shell does not patch asyncio globally.
+
+Programmatic interactive entry uses synchronous `HareCLI.run_cli(["shell"])` outside a running loop.
+`HareCLI.run_cli_async()` is for noninteractive commands on an existing loop.
+
 ## <a id="makemigrations"></a>`hare makemigrations`
 
 Generate migrations by diffing model state; an app label given twice counts once. `--empty` needs an app
 label and creates a blank migration depending on the current heads. `--merge` needs an app label and
-writes one migration joining the app's forked history (two heads); without it a forked history is an
+writes one migration joining the app's forked history (multiple heads); without it a forked history is an
 error. `--dry-run` prints what would be written without writing; `--check` does the same and exits `1`
 when there is anything to write (neither combines with `--empty`). `-n`/`--name` renames every migration
 generated in the run, dependencies between them included. A removed field or model declared exactly like
 an added one is asked about in the terminal — `Was field 'title' of shop.Item renamed to 'name'? [y/N]`;
 `--rename` answers beforehand (repeatable: `--rename shop.Item.title=name`, `--rename shop.Item=Product`,
 `--rename blog.Tag=catalog.Tag` for a model moved keeping its table — see
-[Renames](migrations.md#renames)); `--no-input`, or input not from a terminal, asks nothing — only the
-`--rename` answers rename anything. An answer that renames nothing — a misspelt name, a model renamed while
+[Renames](migrations.md#renames)); `--no-input`, or input not from a terminal, disables questions.
+Automatic unambiguous field matches and explicit `--rename` answers still apply.
+An answer that renames nothing — a misspelt name, a model renamed while
 its fields change — fails the command, and nothing is written: the field or model it meant would be removed
 and added, its rows dropped. Without an explicit `migrations` module, an app
 whose models live in a top-level `models.py` (no package) gets a top-level `migrations` package next to
 it. Two apps that would end up with the same migrations package (two such single-file apps in one
 directory, or the same explicit `migrations` value) are refused with an error by every migration command
 — set a distinct `migrations` module for each (e.g. `"migrations_billing"`).
+
+When a generated column must be replaced, its declared dependent indexes and constraints are removed
+before the column and restored afterward. Dependencies include structured expressions, conditions and
+included columns. Selectors use the field names that exist at each step, including when a field or table
+is renamed. Raw SQL remains opaque: order its dependencies explicitly in a handwritten migration.
 
 ## <a id="squashmigrations"></a>`hare squashmigrations`
 
@@ -86,9 +104,10 @@ database. See [Checking migrations](zero-downtime.md#checking-migrations).
 ## <a id="drift"></a>`hare drift`
 
 Compare the live database of a connection (default: the first one configured) against current model state
-of the given apps (default: every app) that use it — tables/columns present in the database but not in
-any migration, and operations that would be needed to reconcile the rest. Exits `1` if anything is found.
-`Meta.managed = False` models are skipped entirely, same as `makemigrations`. `--schema` picks the schema
+of the given apps (default: every app) that use it — tables/columns not represented by those current
+models, supported differences and suggested reconciliation operations. Exits `1` if anything is found.
+Models with `Meta.managed = False` are not compared, but their tables count as known and are built in
+the shadow for foreign keys that reference them. `--schema` picks the schema
 swept for untracked tables — an attached database on SQLite, a database of the server on ClickHouse
 (default: the connection's current schema). hare's own bookkeeping tables
 (`hare_migrations`, `Transactions.distributed()`'s `hare_distributed_decisions`) are never reported as
@@ -108,8 +127,10 @@ found (report mode) or left unresolved after `--finish`.
 ## <a id="stubs"></a>`hare stubs`
 
 Write the stubs pyright and Pylance type-check the modules of models with, into `typings/` by default.
+The command imports the configuration and binds models without opening database connections.
 `--relation-depth` (0 to 5, default 2) is how many relations a filter key crosses at most; `--check`
-writes nothing and exits `1` when a stub is missing or outdated. See
+writes nothing and exits `1` when an expected stub is missing or outdated. Files for modules no longer
+in the configuration are not checked or removed. See
 [pyright and Pylance](../querying/type-checking.md#pyright).
 
 ```bash
@@ -148,6 +169,10 @@ class ExportCommand(CLICommand):
             ...                                         # models and connections are ready here
         return 0                                        # exit code; None also means 0
 ```
+
+`add_arguments(parser)` runs once for each registration, on the parser used to execute the command.
+It can add arguments, defaults and help text. If it raises, the incomplete command is removed from
+parsing and help, a warning is printed, and the remaining commands are registered.
 
 `cli_context` is a `CLIContext` (`hare.cli.plugins`) holding the global option `config` — the
 `-c`/`--config` value (`module.VARIABLE` or a file path), `None` when not given: then

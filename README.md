@@ -18,8 +18,8 @@ An async Python ORM for PostgreSQL, SQLite and ClickHouse, built with relations 
 plain classes, queries are built lazily through a `QuerySet`, and migrations are generated from the
 changes to the models. Coming from Django? See [Coming from Django](https://hare-orm.github.io/hare-orm/getting-started/coming-from-django/).
 
-- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python, and every
-  query shape is built once: a repeated query only binds its new values — see
+- **Fast.** A Rust PostgreSQL driver decodes rows and converts values outside Python. Plans for
+  supported query shapes are cached: repeated executions bind new values while the plan remains cached — see
   [Benchmarks](#benchmarks).
 - **Relations done right.** Composite primary keys everywhere — as foreign-key targets too — generic
   relations made of real foreign keys, `select_related()`/`prefetch_related()` with filters, recursive
@@ -29,12 +29,13 @@ changes to the models. Coming from Django? See [Coming from Django](https://hare
   materialized views, functions, sequences, row level security policies, grants and partitioning
   live in the model's `Meta` and are created and changed by migrations — see
   [The schema in `Meta`](https://hare-orm.github.io/hare-orm/#schema-in-meta).
-- **Application patterns built in.** Soft delete, versioned rows, multi-tenancy (by column, by
+- **Application patterns built in.** Soft delete, multi-tenancy (by column, by
   schema or by row level security), optimistic locking, dirty-field tracking and a transactional
-  outbox are `Meta` options — see [Behavior declared in `Meta`](https://hare-orm.github.io/hare-orm/#behavior-in-meta).
-- **Migrations you can trust.** Detected from the models, checked for operations that lock a busy
-  table, compared with the live database (`hare drift`), and generated from an existing database
-  (`hare inspectdb`) — see [Migrations](https://hare-orm.github.io/hare-orm/#migrations).
+  outbox are `Meta` options; versioned rows use `VersionedModel` — see
+  [Behavior declared in `Meta`](https://hare-orm.github.io/hare-orm/#behavior-in-meta).
+- **Migrations you can trust.** Generated from models and checked for operations that lock a busy
+  table. `hare drift` compares the schema with the live database; `hare inspectdb` reconstructs
+  models from an existing database — see [Migrations](https://hare-orm.github.io/hare-orm/#migrations).
 - **Every database on its own terms.** SQLite, PostgreSQL and ClickHouse are dialects built on the
   public API a third-party package uses; PostgreSQL's types, indexes, PostGIS, pgvector, full-text
   search and `LISTEN`/`NOTIFY` come with it, and a database lacking a feature raises a clear error
@@ -92,15 +93,16 @@ from library.models import Author, Book
 
 async def main() -> None:
     await Hare.init(HareConfig.from_db_url("sqlite+aiosqlite://db.sqlite3", {"models": ["library.models"]}))
-    await Hare.generate_schemas()
+    try:
+        await Hare.generate_schemas()
 
-    author = await Author.objects.create(name="Ursula K. Le Guin")
-    await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
+        author = await Author.objects.create(name="Ursula K. Le Guin")
+        await Book.objects.create(author=author, title="The Left Hand of Darkness", rating=5)
 
-    async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
-        print(book.title, "—", book.author.name)
-
-    await Hare.close_connections()
+        async for book in Book.objects.filter(author__name__icontains="le guin").select_related("author"):
+            print(book.title, "—", book.author.name)
+    finally:
+        await Hare.close_connections()
 
 
 asyncio.run(main())
@@ -115,7 +117,7 @@ A real project keeps its schema in migrations instead of `generate_schemas()`:
 ```bash
 pip install hare-orm
 
-pip install hare-orm[asyncpg]        # the pure-Python PostgreSQL driver, instead of the Rust one
+pip install hare-orm[asyncpg]        # PostgreSQL through asyncpg
 pip install hare-orm[clickhouse-connect]  # the ClickHouse dialect over HTTP (clickhouse-connect)
 pip install hare-orm[clickhouse-driver]   # the ClickHouse dialect over the native TCP protocol (clickhouse-driver)
 pip install hare-orm[sqlite-vec]     # vector search on SQLite

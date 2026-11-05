@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-import ast
 import tomllib
 from pathlib import Path
 from typing import ClassVar
 
-from tests.matrix.constants import REPOSITORY_DIRECTORY, REQUIRES_MODULE_NAME, TESTS_DIRECTORY
+from tests.matrix.constants import NATIVE_REQUIREMENT, SUITE_ENVIRONMENTS
+from tests.matrix.paths import REPOSITORY_DIRECTORY
 from tests.matrix.suite_environment import SuiteEnvironment
+from tests.matrix.test_selection_manifest import TestSelectionManifest
 
 
 class SuiteRequirements:
-    """What the tests of a module or an environment require and what that installs - read from the sources
+    """What the tests of a module or an environment require and what that installs - read from the manifest
     and pyproject.toml with the standard library alone, so the matrix runner, which runs without pytest,
     reads them too."""
 
-    #: ``REQUIRES`` of each module read.
-    module_requirements: ClassVar[dict[Path, frozenset[str]]] = {}
+    manifest: ClassVar[TestSelectionManifest] = TestSelectionManifest.read(
+        REPOSITORY_DIRECTORY / "tests/matrix/selection.toml"
+    )
     #: The packages each extra of hare installs, read from pyproject.toml.
     extra_packages: ClassVar[dict[str, frozenset[str]]] = {}
 
@@ -64,59 +66,20 @@ class SuiteRequirements:
         return frozenset(installed)
 
     @classmethod
-    def get_module_requirements(cls, path: Path) -> frozenset[str]:
-        """``REQUIRES`` of a module - read from its source, not imported.
-
-        Args:
-            path: The module's file.
-
-        Returns:
-            The names it requires, none without the declaration.
-
-        Raises:
-            ValueError: ``REQUIRES`` isn't a tuple of texts.
-        """
-        cached_requirements = cls.module_requirements.get(path)
-        if cached_requirements is not None:
-            return cached_requirements
-        requirements: frozenset[str] = frozenset()
-        if path.is_file():
-            for statement in ast.parse(path.read_text(encoding="utf-8")).body:
-                if not (
-                    isinstance(statement, ast.Assign)
-                    and any(
-                        isinstance(target, ast.Name) and target.id == REQUIRES_MODULE_NAME
-                        for target in statement.targets
-                    )
-                ):
-                    continue
-                try:
-                    value = ast.literal_eval(statement.value)
-                except ValueError:
-                    value = None
-                if not (isinstance(value, tuple) and all(isinstance(name, str) for name in value)):
-                    raise ValueError(f"{path}: {REQUIRES_MODULE_NAME} is a tuple of extras and groups")
-                requirements = frozenset(value)
-        cls.module_requirements[path] = requirements
-        return requirements
+    def get_path_requirements(cls, path: Path) -> frozenset[str]:
+        """Get a path's declared import requirements without evaluating Python sources."""
+        return cls.manifest.get_path_requirements(path)
 
     @classmethod
-    def get_path_requirements(cls, path: Path) -> frozenset[str]:
-        """What the tests of a file or directory require - its own ``REQUIRES`` and those of the
-        ``conftest.py`` of each directory above it, up to the test suite's.
-
-        Args:
-            path: A test module or a directory of tests.
-
-        Returns:
-            The names.
-
-        Raises:
-            ValueError: A ``REQUIRES`` isn't a tuple of texts.
-        """
-        requirements = cls.get_module_requirements(path) if path.suffix == ".py" else frozenset()
-        directory = path if path.is_dir() else path.parent
-        while directory.is_relative_to(TESTS_DIRECTORY):
-            requirements |= cls.get_module_requirements(directory / "conftest.py")
-            directory = directory.parent
-        return requirements
+    def get_test_paths(cls, environment: SuiteEnvironment) -> tuple[str, ...]:
+        """Select candidate modules from their declared optional cell requirements."""
+        installed = cls.get_installed(cls.get_requirements(environment))
+        known_names = {name for known in SUITE_ENVIRONMENTS for name in (*known.extras, *known.groups)}
+        environment_names = {name for name in known_names if cls.get_installed(frozenset({name})) <= installed}
+        return tuple(
+            path
+            for path, module in sorted(cls.manifest.modules.items())
+            if (module.cells | cls.get_path_requirements(REPOSITORY_DIRECTORY / path)) & environment_names
+            and cls.get_installed(cls.get_path_requirements(REPOSITORY_DIRECTORY / path) - {NATIVE_REQUIREMENT})
+            <= installed
+        )

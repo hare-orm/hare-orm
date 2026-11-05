@@ -16,9 +16,14 @@ AGGREGATE_SUBQUERY_PRIMARY_KEY_ALIAS_PREFIX = "hare pk "
 #: computes `.aggregate()` over for a `.group_by()` queryset - one row per group.
 AGGREGATE_SUBQUERY_GROUP_BY_ALIAS_PREFIX = "hare group "
 
-#: Alias of the VALUES table `bulk_update()` joins into its `UPDATE ... FROM (VALUES ...)` - a
-#: `_` is appended while it equals the updated table's own name.
+#: Preferred alias of the VALUES table joined by ``bulk_update()``; Identifiers.get_free_name
+#: selects a distinct name when it collides with the updated table.
 BULK_UPDATE_VALUES_ALIAS = "hare_bulk_update_values"
+
+BULK_UPDATE_DEFERRED_PREVIEW_MESSAGE = (
+    "bulk_update() SQL is deferred until write-time values are prepared for: {fields}. "
+    "Use preview() to inspect deferred_fields and the unknown transaction boundary."
+)
 
 #: Alias of the 0/1 column `bulk_update()` selects to tell an object its queryset filter excluded
 #: from one whose `Meta.optimistic_lock_field` was stale.
@@ -113,12 +118,31 @@ IGNORE_CONFLICTS_NO_RETURNING_REASON = "{dialect} has no RETURNING"
 #: The ``on_conflict_constraint`` naming the model's primary key, whatever name its constraint has.
 PRIMARY_KEY_CONFLICT_CONSTRAINT = "pk"
 
+BULK_INSERT_DEFERRED_PREVIEW_MESSAGE = (
+    "bulk_create() SQL is deferred until write-time values are prepared for: {fields}. "
+    "Use preview() to inspect deferred_fields and the unknown transaction boundary."
+)
+BULK_INSERT_COPY_PREVIEW_MESSAGE = (
+    "Bulk loading uses a driver command, not SQL statements; use preview() to inspect its bound commands"
+)
+
 #: An explicit bulk update request cannot return values on a database without RETURNING.
 BULK_UPDATE_RETURNING_UNSUPPORTED_MESSAGE = "bulk_update(returning=True) needs RETURNING, which {dialect} doesn't have"
 
 #: What a metric of aggregate() named as a column of the model is selected as - its own name would be the
 #: column's alias, which a database resolving aliases in WHERE reads for the column.
 AGGREGATE_FIELD_NAMED_METRIC_PREFIX = "hare metric "
+
+AGGREGATE_UNGROUPED_METRIC_MESSAGE = (
+    "aggregate() metric {key!r} over a .group_by() queryset reads a column that isn't grouped "
+    "by - it runs over the grouped rows, so it can only read the .group_by() fields and the "
+    "annotations. Group by that column too, or annotate it with an aggregate first."
+)
+AGGREGATE_UNSELECTED_METRIC_MESSAGE = (
+    "aggregate() metric {key!r} over a .values()/.values_list() query reads a column it doesn't "
+    "select - it runs over the rows the query returns (its groups, distinct rows or slice), so it "
+    "can only read the selected columns. Select that column too."
+)
 
 #: An update moving rows of a model with Meta.change_capture to keys an expression gives - their values read
 #: before it can't be told which row they were.

@@ -9,10 +9,6 @@ from typing import Any
 
 from hare.dialects.postgresql.enums import PartitionStrategy
 
-#: The most partitions a ``HashPartitioning`` creates - every partition is a table of its own, and
-#: a statement planned against thousands of them gets slow on PostgreSQL.
-HASH_PARTITION_COUNT_LIMIT = 1024
-
 #: The name of a hash partition of the remainder it holds - its table is ``<table>_p<remainder>``.
 HASH_PARTITION_NAME_TEMPLATE = "p{remainder}"
 
@@ -51,6 +47,3 @@ BOUND_VALUE_READERS_BY_COLUMN_TYPE: dict[str, Callable[[str], Any]] = {
     "timestamp with time zone": datetime.datetime.fromisoformat,
     "uuid": uuid.UUID,
 }
-
-#: The arguments of a column type - ``(10,2)`` of ``numeric(10,2)``.
-POSTGRESQL_TYPE_ARGUMENTS_PATTERN = re.compile(r"\(.*\)")

@@ -115,6 +115,12 @@ class ForeignKeyFieldInstance(RelationalField[TModel]):
             kwargs.pop("source_field", None)
         return path, args, kwargs
 
+    def get_declaration_values(self) -> dict[str, Any]:
+        """Keep the publication declaration without a generated generic-relation backlink."""
+        values = super().get_declaration_values()
+        values["generic_relation"] = None
+        return values
+
 
 #: The annotation of a nullable ``ForeignKeyField`` on a model.
 ForeignKeyNullableRelation = ForeignKeyFieldInstance[TModel] | None

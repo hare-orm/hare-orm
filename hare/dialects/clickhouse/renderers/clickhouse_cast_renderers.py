@@ -11,7 +11,6 @@ from hare.dialects.clickhouse.renderers.constants import (
 from hare.sql import functions
 from hare.sql.sql_context import SqlContext
 from hare.sql.terms.values.value_wrapper import ValueWrapper
-from hare.sql.types.sql_type import SqlType
 
 if TYPE_CHECKING:
     from hare.dialects.base.renderers.term_renderers import TermRenderers
@@ -36,7 +35,7 @@ class ClickhouseCastRenderers:
         """The conversion function of the type, a decimal or integer literal as it is - it is written as a
         decimal of its own scale, an integer of its own width (a decimal of 38 places would cut a wide one)."""
         as_type = function.as_type
-        type_name = as_type.name if type(as_type) is SqlType else str(as_type).upper()
+        type_name = str(as_type).upper()
         argument = function.args[0]
         argument_sql = function.get_arg_sql(argument, sql_context)
         if type_name == CLICKHOUSE_NUMERIC_TYPE_NAME:

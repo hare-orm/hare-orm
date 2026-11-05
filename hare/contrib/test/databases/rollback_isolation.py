@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import inspect
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from hare.contrib.test.databases.model_truncation import truncate_all_models
+from hare.contrib.test.databases.resource_cleanup import ResourceCleanup
 from hare.contrib.test.exceptions import RollbackIsolationEnd
+from hare.contrib.test.messages import ROLLBACK_ISOLATION_ACTIVE
 from hare.core.hare_context import HareContext
 from hare.core.routing import Routing
+from hare.dialects.base.client.transaction_lifecycle.transaction_callbacks import TransactionCallbacks
+from hare.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from contextvars import Token
     from types import TracebackType
 
-    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.client.transaction_client import TransactionClient
-    from hare.dialects.base.transactions.contexts.transaction_context import TransactionContext
-    from hare.dialects.base.transactions.transaction_callback import TransactionCallback
 
 
 class RollbackIsolation:
@@ -50,11 +50,14 @@ class RollbackIsolation:
 
     def __init__(self, context: HareContext | None = None) -> None:
         self.context = context
-        self.isolating_transactions: list[tuple[TransactionContext, TransactionClient]] = []
-        self.truncated_connections: list[DatabaseClient] = []
+        self.isolating_clients: list[TransactionClient] = []
         self.context_token: Token[HareContext | None] | None = None
+        self.cleanup = ResourceCleanup()
 
     async def __aenter__(self) -> HareContext:
+        if self.context_token is not None:
+            raise ConfigurationError(ROLLBACK_ISOLATION_ACTIVE)
+        self.cleanup = ResourceCleanup()
         context = self.context or HareContext.require_current()
         self.context_token = HareContext.current_context.set(context)
         # A test starts with none of the writes of the tests before it sending its reads anywhere.
@@ -62,18 +65,19 @@ class RollbackIsolation:
         try:
             for connection in context.connections.all():
                 if not connection.features.supports_transactions:
-                    self.truncated_connections.append(connection)
+                    self.cleanup.push(truncate_all_models, context=context, connections=[connection])
                     continue
                 transaction_context = connection._in_transaction()
                 transaction_client = await transaction_context.__aenter__()
+                self.cleanup.push(transaction_context.__aexit__, RollbackIsolationEnd, RollbackIsolationEnd(), None)
                 transaction_client._commit_refusal = (
                     f"The transaction isolating a test on {connection.connection_alias!r} can't be committed - "
                     "everything the test writes is rolled back when it ends. Open a transaction of your own "
                     "with Transactions.atomic() (a savepoint of the isolating one) instead."
                 )
-                self.isolating_transactions.append((transaction_context, transaction_client))
-        except BaseException:
-            await self.end(context)
+                self.isolating_clients.append(transaction_client)
+        except BaseException as error:
+            await self.end(error=error)
             raise
         return context
 
@@ -83,26 +87,26 @@ class RollbackIsolation:
         exception: BaseException | None,
         exception_traceback: TracebackType | None,
     ) -> None:
-        await self.end(self.context or HareContext.require_current())
+        await self.end(error=exception)
 
-    async def end(self, context: HareContext) -> None:
+    async def end(self, *, error: BaseException | None = None) -> None:
         """Rolls every isolating transaction back, empties the tables of the connections without
         transactions and restores the current context.
 
         Args:
-            context: The isolated context.
+            error: The original body or startup error, retained if cleanup also fails.
+
+        Every release finishes even when another fails or the caller is cancelled.
+        The context token is restored in the task that entered the isolation.
         """
         try:
-            while self.isolating_transactions:
-                transaction_context, _transaction_client = self.isolating_transactions.pop()
-                await transaction_context.__aexit__(RollbackIsolationEnd, RollbackIsolationEnd(), None)
-            if self.truncated_connections:
-                truncated_connections, self.truncated_connections = self.truncated_connections, []
-                await truncate_all_models(context=context, connections=truncated_connections)
+            await self.cleanup.close()
         finally:
+            self.isolating_clients.clear()
             if self.context_token is not None:
                 context_token, self.context_token = self.context_token, None
                 HareContext.current_context.reset(context_token)
+        self.cleanup.raise_errors(error)
 
     @asynccontextmanager
     async def capture_on_commit(self, *, execute: bool = False) -> AsyncGenerator[list[Callable[[], Any]]]:
@@ -116,34 +120,5 @@ class RollbackIsolation:
         Returns:
             The context giving the list the callbacks are added to when the block exits.
         """
-        marks = [len(client._on_commit_callbacks) for _context, client in self.isolating_transactions]
-        callbacks: list[Callable[[], Any]] = []
-        yield callbacks
-        while True:
-            new_entries = self.take_callbacks_since(marks)
-            if not new_entries:
-                return
-            # hare's own callbacks (events, the written instances' state) run, but aren't handed out.
-            callbacks.extend(entry.callback for entry in new_entries if entry.is_user_callback)
-            if not execute:
-                return
-            for entry in new_entries:
-                result = entry.callback()
-                if inspect.isawaitable(result):
-                    await result
-
-    def take_callbacks_since(self, marks: list[int]) -> list[TransactionCallback]:
-        """Takes the ``on_commit()`` callbacks registered on the isolating transactions after the
-        marks.
-
-        Args:
-            marks: How many callbacks each transaction held - left in place.
-
-        Returns:
-            The callbacks taken, in registration order per transaction.
-        """
-        entries: list[TransactionCallback] = []
-        for (_context, client), mark in zip(self.isolating_transactions, marks, strict=False):
-            entries.extend(client._on_commit_callbacks[mark:])
-            del client._on_commit_callbacks[mark:]
-        return entries
+        async with TransactionCallbacks.capture_on_commit(self.isolating_clients, execute=execute) as callbacks:
+            yield callbacks

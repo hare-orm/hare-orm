@@ -8,7 +8,8 @@ import dataclasses
 from collections.abc import Callable, Generator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
-from litestar.dto import DTOField, Mark, _codegen_backend as codegen_backend
+from litestar.dto import DTOField, Mark
+from litestar.dto._backend import DTOBackend
 from litestar.dto.base_dto import AbstractDTO
 from litestar.dto.data_structures import DTOFieldDefinition
 from litestar.types.empty import Empty
@@ -20,16 +21,14 @@ from hare.contrib.frameworks.litestar.constants import (
     DTO_READ_ONLY_CONSTRAINT,
     TO_MANY_RELATION_TYPES,
 )
+from hare.contrib.frameworks.litestar.hare_dto_backend import HareDTOBackend
 from hare.contrib.frameworks.litestar.hare_dto_extra_fields import HareDTOExtraFields
-from hare.contrib.frameworks.litestar.hare_transfer_function_factory import HareTransferFunctionFactory
 from hare.exceptions import NoValuesFetched
 from hare.models import Model
 from hare.query.queryset import QuerySet, RelatedQuerySet
 from hare.query.queryset.single_rows.none_awaitable_type import NoneAwaitableType
 
 if TYPE_CHECKING:
-    from litestar.dto._backend import DTOBackend
-
     from hare.fields.field import Field
 
 
@@ -61,18 +60,21 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
     Besides the model's fields it answers with what a subclass declares - read-only, ``null`` where a row
     has no value for it, and named by a path through the relations for the related rows' (``"author.age"``):
     ``extra_fields`` (a query's annotation, an attribute set on the row after it was read, with its type),
-    ``computed`` (a property or method of the model, typed by its return annotation) and
+    ``computed`` (a synchronous property or method of the model, typed by its return annotation) and
     ``related_values`` (a value of a related row, flattened)::
 
         class BookDTO(HareDTO[Book]):
             extra_fields = {"reviews_count": int}
             computed = ("title_length",)
             related_values = {"author_name": "author.name"}
+
+    Computed getters and methods receive only the row as ``self`` and must be callable without
+    additional arguments. Compute asynchronous values in the handler and expose them through ``extra_fields``.
     """
 
     #: Values read from a row by name, with their types - a query's annotation, an attribute set on the row.
     extra_fields: ClassVar[Mapping[str, Any]] = {}
-    #: Properties and methods of the model, typed by their return annotations.
+    #: Synchronous properties and methods called with only self, typed by their return annotations.
     computed: ClassVar[tuple[str, ...]] = ()
     #: Values of related rows, flattened: a name to the path of the related field.
     related_values: ClassVar[Mapping[str, str]] = {}
@@ -101,10 +103,7 @@ class HareDTO(AbstractDTO[ModelType], Generic[ModelType]):
             # they are, with no look for an extra field.
             cls.declared_extra_fields = None
             cls.attribute_accessor = staticmethod(HareDTO.read_attribute)  # type: ignore[method-assign]
-        # Litestar's generated transfer code - a nested row's functions too - comes from the factory its module
-        # names: the calls of HareDTO.attribute_accessor() need hare's.
-        codegen_backend.TransferFunctionFactory = HareTransferFunctionFactory  # type: ignore[misc]
-        super().create_for_field_definition(field_definition, handler_id, backend_class)
+        super().create_for_field_definition(field_definition, handler_id, backend_class or HareDTOBackend)
 
     def data_to_encodable_type(self, data: Any) -> Any:
         """Encodes a handler's response - ``null`` for no row, as from a handler returning

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.exceptions import UnSupportedError
@@ -53,9 +53,9 @@ class DeleteReturningQuery(DeleteQuery):
         self.query = self.query.returning(*self.returned_rows.get_returning_columns())
         return keeps_plan
 
-    def __await__(self) -> Generator[Any, None, list[Any]]:  # type: ignore[override]
+    async def _execute_bound(self) -> list[Any]:
         if self._is_none:
-            return self._return_none().__await__()
+            return await self._return_none()
         query = self._get_execution_query(True)
         features = query._connection.features
         # A soft delete, a cascade hare runs and an overridden delete read the rows in their
@@ -74,7 +74,7 @@ class DeleteReturningQuery(DeleteQuery):
                 f"{query._connection.dialect} "
                 "- the model has no primary key"
             )
-        return query._execute_returning().__await__()
+        return await query._execute_returning()
 
     async def _return_none(self) -> list[Any]:
         return []

@@ -29,16 +29,16 @@ class SqliteTextRenderers:
         Args:
             renderers: The renderers.
         """
-        renderers.register(functions.TextFunction, cls.render_text_function)
+        renderers.register_name(functions.TextFunction, cls.get_text_function_name)
         renderers.register(functions.CastTo, cls.render_cast_to)
 
     @staticmethod
-    def render_text_function(function: functions.TextFunction, sql_context: SqlContext) -> str:
-        args_sql = [function.get_arg_sql(arg, sql_context) for arg in function.args]
+    def get_text_function_name(function: functions.TextFunction, sql_context: SqlContext) -> str:
+        """Select a native name or register the text function on the connection."""
         name = SQLITE_NATIVE_TEXT_FUNCTIONS.get(function.name)
         if name is None:
             name = sql_context.note_connection_function(f"{SQLITE_TEXT_FUNCTION_PREFIX}{function.name.lower()}")
-        return f"{name}({','.join(args_sql)})"
+        return name
 
     @staticmethod
     def render_cast_to(function: functions.CastTo, sql_context: SqlContext) -> str:

@@ -4,7 +4,10 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from hare.core.extensions.snapshot_mapping import SnapshotMapping
+
 if TYPE_CHECKING:
+    from hare.dialects.base.client.database_client import DatabaseClient
     from hare.dialects.base.dialect import Dialect
     from hare.fields.field import Field
     from hare.query.filters.lookups.field_lookup import FieldLookup
@@ -24,7 +27,7 @@ class FilterOperators:
             overrides: The dialect's replacement of each lookup operator it replaces.
         """
         self.dialect = dialect
-        self.overrides = overrides
+        self.overrides = SnapshotMapping(overrides)
         #: The operators of the dialect's variants (``Dialect.variants``) - a registration is repeated there.
         self.mirrors: list[FilterOperators] = []
 
@@ -37,13 +40,7 @@ class FilterOperators:
             implementation: What runs in its place on this dialect - the operator itself when it builds the
                 dialect's SQL already.
         """
-        # Local import: the registries import the dialects package.
-        from hare.core.registries import Registries
-
-        self.overrides[operator] = implementation
-        for mirror in self.mirrors:
-            mirror.register_operator(operator, implementation)
-        Registries.changed()
+        self.overrides.register(operator, implementation, tuple(mirror.overrides for mirror in self.mirrors))
 
     def get_overridden_operator(
         self, operator: Callable[..., Any], field_lookup: FieldLookup | None
@@ -78,7 +75,7 @@ class FilterOperators:
             or self.get_overridden_operator(operator, field_lookup) is not None
         )
 
-    def get_operator(self, field_lookup: FieldLookup) -> Callable[..., Any]:
+    def get_operator(self, field_lookup: FieldLookup, connection: DatabaseClient | None = None) -> Callable[..., Any]:
         """The operator a lookup runs on this dialect, with the lookup's text function applied.
 
         Args:
@@ -97,6 +94,8 @@ class FilterOperators:
         columns: Sequence[Term],
         value_rows: Sequence[Sequence[Any]],
         array_element_fields: Sequence[Field[Any] | None] | None = None,
+        *,
+        connection: DatabaseClient | None = None,
     ) -> Criterion:
         """``columns IN value_rows`` through the dialect's ``__in`` operator, so a long list binds
         as few parameters as the dialect allows.
@@ -118,13 +117,13 @@ class FilterOperators:
             single_column_lookup = FieldLookup(
                 Lookups.is_in, array_element_field=array_element_fields[0] if array_element_fields else None
             )
-            in_operator = self.get_overridden_operator(Lookups.is_in, single_column_lookup) or Lookups.is_in
+            in_operator = self.get_operator(single_column_lookup, connection)
             return in_operator(columns[0], [row[0] for row in value_rows])
         row_lookup = FieldLookup(
             Lookups.row_is_in,
             array_element_fields=None if array_element_fields is None else tuple(array_element_fields),
         )
-        row_operator = self.get_overridden_operator(Lookups.row_is_in, row_lookup) or Lookups.row_is_in
+        row_operator = self.get_operator(row_lookup, connection)
         return row_operator(Tuple(*columns), [tuple(row) for row in value_rows])
 
     def get_unsupported_reason(self, lookup_info: LookupInfo) -> str | None:

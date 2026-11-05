@@ -5,6 +5,75 @@ an existing schema, and migrations.
 
 ## <a id="schema-editor"></a>8. DDL: the schema editor
 
+`TableDefinition` prepares a table's columns, constraints, storage clauses and comments for the
+same CREATE compiler in initial creation and table replacement. `TableCreation.get_create_plan()`
+prepares the complete creation, including triggers, before any command is sent. Its immutable
+`SchemaChangePlan` contains ordered `SchemaStatement` or runtime steps and the target definition.
+Both execution and collection consume those same steps. `plan.effects` describes runtime work
+such as reading the catalog or backfilling rows, without inspecting SQL text.
+
+`SchemaRequirements` in `hare.ddl` collects extension requirements from fields, indexes,
+constraints and explicit declarations. Live schema creation and migration state use this shared
+collector; creating tables does not import the migration autodetector. `SchemaReferences` reads
+structured field references from index keys, included columns and constraint predicates. Raw SQL
+does not supply inferred dependencies and requires explicitly ordered schema operations.
+
+`BoundIndexKey` distinguishes physical column names from prepared SQL expressions before rendering.
+A column named `lower(title)` is quoted as one identifier. Generated names use the same explicit
+distinction; punctuation is never used to guess whether a key is SQL.
+
+Migration files and `inspectdb` share `DeclarationValueSerializer` and `ImportManager` from
+`hare.declarations`. Imports receive stable aliases after callers reserve model and field names.
+Declaration comparisons use structured values, separately from Python source generation; an
+already constructed SQL term retains the opaque text that serialization writes as `RawSQLTerm`.
+
+A runtime default backfill is evaluated once when executed. SQL collection neither calls the
+default nor samples the clock: it records a comment describing the required action. Enum replacement
+likewise records its catalog-dependent work. Output containing these comments is a preview, not a
+complete standalone executable migration script.
+
+`TableRebuild.get_rebuild_plan()` prepares copying, replacement and recreation of declared
+dependent objects before the first DDL statement. Column expressions and constant defaults are
+compiled at this stage; clock defaults are explicit runtime copy steps. Unsupported callable
+rebuild defaults fail before creating the replacement. The plan carries both table definitions.
+Dialect overrides prepare their dependent objects and preconditions in the same plan.
+
+`get_add_field_plan()` prepares column definitions, backfill, the final NOT NULL change,
+constraints and indexes together. An unsupported later declaration therefore fails before the
+column is added. Runtime defaults retain a snapshot of the field settings. `get_remove_field_plan()`
+chooses an in-place drop or the dialect's prepared rebuild; automatic through tables use their
+separate removal plan. These compilers perform no database IO.
+
+`get_alter_field_plan()` includes relation-key changes, dependent indexes, generated columns,
+default and comment changes, and stored-value conversions. `ColumnConversionPrecondition` and
+`ColumnNullPrecondition` are explicit execution steps. Copying rows into a declared through model
+uses an execution-only step when defaults or generated keys are needed. A conversion that requires
+a primary key checks that requirement during preparation, before changing the column.
+
+`get_table_rename_plan()` prepares partition renames and separate-table index recreation along
+with the table rename. `get_delete_model_plan()` prepares dependent-object removal, automatic
+through tables, storage tables and objects surviving DROP TABLE. ClickHouse creation plans include
+an explicit replica-topology check when an unreplicated engine supplies distributed storage;
+collection records that check without connecting to the cluster.
+
+Column renames use `ColumnRenames.get_model_column_rename_plan()` and
+`get_table_column_rename_plan()`. `IndexStatements.get_indexes_before_column_rename_plan()` and
+`get_indexes_after_column_rename_plan()` prepare separate-table index removal and recreation;
+`GeneratedIndexNames.get_generated_index_names_change_plan()` prepares derived index and constraint names.
+Field and table rename operations compose all affected models, through tables and dependent objects
+before executing any step. A rebuild advertises `SchemaEffect.REPLACE_TABLE`, so generated names are
+not renamed again. Runtime checks retained by a nested plan remain runtime steps in the composed plan.
+
+`SchemaCleanup` finishes its cleanup even after cancellation and retains both errors if the
+operation and cleanup fail. Acquisition precedes this scope, so failed creation cannot drop an
+existing object. SQLite restores the previous `legacy_alter_table` setting after replacement.
+ClickHouse uses a unique temporary Distributed table for copying and drops it after the copy,
+including on failure; an unsuccessful CREATE does not enter that cleanup scope. Cluster placement
+checks precede dependent-object removal. PostgreSQL replacement uses `SchemaTransaction`, locking
+the source before copying and keeping replacement and dependency restoration in one transaction
+or savepoint. These scopes do not make nontransactional DDL atomic or infer an uncertain server
+outcome after a lost connection.
+
 `build_schema_editor_class()` returns a `BaseSchemaEditor` subclass. The editor runs the public
 operations (`create_model()`, `add_field()`, `alter_field()`, `add_index()`, ...) as the order of their
 steps; the statements of each type of change are written by its **parts** — `SchemaEditorPart` subclasses
@@ -45,11 +114,11 @@ The base renders standard DDL from the editor's class templates (`TABLE_CREATE_T
 `FIELD_TEMPLATE`, `INDEX_CREATE_TEMPLATE`, `FOREIGN_KEY_TEMPLATE`, `ADD_FIELD_TEMPLATE`,
 `ALTER_FIELD_TYPE_TEMPLATE`, `RENAME_INDEX_TEMPLATE`, ...); a dialect overrides the ones its database
 writes differently and sets a template to `None` where the statement doesn't exist — the change then
-rebuilds the table (`TableRebuild.remake_table(old_model, new_model, altered_fields=())`: a new table
+rebuilds the table (`TableRebuild.get_rebuild_plan(old_model, new_model, altered_fields=())`: a new table
 built from the model the change leads to, the rows copied from the old table field by field — a field
 of the same name, or the pair in `altered_fields` for a renamed one — the old table replaced). A database
 whose key and unique constraint names are taken in the whole schema while the old table exists overrides
-`remake_table()`: PostgreSQL keeps the rows in a copy while it drops the table and creates it anew under
+`get_rebuild_plan()`: PostgreSQL keeps the rows in a copy while it drops the table and creates it anew under
 the same names — its foreign keys from other tables, its views and the other objects of its model set
 again, its sequences kept with their values.
 `TableComments.get_table_comment_sql()` and `TableComments.get_column_comment_sql()` write a comment
@@ -76,8 +145,9 @@ such a value.
 ### <a id="names"></a>Names, and DDL from the migration state alone
 
 Every key, foreign key and unique constraint is created under a name hare computes — never one the
-database makes up — so a later migration finds it by the same name, and no DDL depends on what the
-catalog holds: `sqlmigrate` shows exactly the SQL `migrate` runs.
+database makes up — so a later migration finds it by the same name. `sqlmigrate` renders the same SQL
+for static `SchemaStatement` steps. Steps requiring the live catalog or Python execution remain explicit
+preview comments, not complete executable SQL.
 
 - A primary key: `ColumnDefinitions.get_primary_key_clause(name)` — ` CONSTRAINT <name> PRIMARY KEY` by
   default; a composite one, `PRIMARY_KEY_CONSTRAINT_CREATE_TEMPLATE`.
@@ -107,8 +177,8 @@ database refuse the statement.
 
 | Feature | Without it |
 |---|---|
-| `supports_foreign_keys` | No `FOREIGN KEY` constraints; hare runs every `on_delete` action and `PROTECT` check itself, as for a `db_constraint=False` relation. |
-| `supports_unique_constraints` | No unique constraints: a uniqueness is refused — a model's when it is bound, a migration's before its first statement; an automatic through table keeps no unique pair; an upsert targets the primary key only. |
+| `supports_foreign_keys` | Relations must declare `db_constraint=False`; hare runs their `on_delete` actions and `PROTECT` checks without a database foreign key. |
+| `supports_unique_constraints` | Uniqueness is refused — a model's when it is bound, a migration's before its first statement; an automatic through table keeps no unique pair. If `supports_insert_conflicts` is enabled, upsert targets the primary key only. |
 | `creates_tables_with_forward_references` | Set it when a table is created with a foreign key to one not created yet (the reference checked when a row is written) — `generate_schemas` then creates a cycle of foreign keys table by table; without it a table of the cycle gets the foreign keys to the tables after it once they exist. |
 | `supports_partial_indexes`, `supports_index_key_order`, `supports_index_nulls_order`, `supports_concurrent_indexes` | The index part is left out or rejected — a `PartialIndex` without the feature is created as the index of every row. |
 | `supports_deferrable_constraints`, `supports_not_valid_constraints` | The constraint type is rejected. |
@@ -117,8 +187,9 @@ database refuse the statement.
 | `alters_indexed_columns` | Clear it when the database refuses to change a column an index covers — hare drops the covering indexes around the change and creates them again. |
 
 A feature only says the database has it; the base editor writes none of its syntax. The dialect that sets
-one writes the SQL in its parts — the clauses below are class methods of a part, which the core calls as
-`dialect.schema_editor_class.<part>_class.<method>()` where it has no editor:
+one writes the SQL in its parts. Pure class or static methods can be called through
+`dialect.schema_editor_class.<part>_class`; instance methods and plan compilers use the part bound
+to an editor, with its client, configuration and SQL collection state:
 
 | Feature | What the dialect's parts implement |
 |---|---|
@@ -127,7 +198,7 @@ one writes the SQL in its parts — the clauses below are class methods of a par
 | Enum fields' `CHECK` (`EnumMembersCondition`) | `ConstraintStatements.get_enum_members_check_sql(quoted_column, value_sqls)` — the predicate: the column holds one of the members' values; ISO `IN (...)` by default. |
 | Exclusion constraints | `ConstraintStatements.get_exclusion_constraint_extension(constraint, fields_by_name)` — the extension a constraint needs; `ConstraintStatements.exclusion_constraint_sql(model, constraint)` — its definition. |
 | `supports_concurrent_indexes` | the editor's `add_index(model, index, concurrently)` and `remove_index(...)`; the base builds and drops the plain way. `IndexStatements.get_index_create_sql()` and `IndexStatements.get_index_drop_sql()` give the plain statements to start from. |
-| `supports_not_valid_constraints` | `ConstraintStatements.add_check_constraint_not_valid()` and `validate_constraint()`; the base adds the constraint as usual and validates nothing. |
+| `supports_not_valid_constraints` | `ConstraintStatements.get_unvalidated_check_add_plan()` and `get_constraint_validation_plan()`; the base adds the constraint as usual and validates nothing. |
 | `supports_extensions` | `Extensions.create_extension()`, `drop_extension()` and `get_extension_create_sql()`. |
 | `supports_enum_types` | `EnumTypes.get_enum_type_create_sql()`, `drop_enum_type()` and `alter_enum_type()` — the `ENUM` types of `NativeEnumField` columns. |
 | `supports_views` | `Views.get_view_create_sqls()`, `drop_view()` and `rename_view()`; the base `alter_view()` drops the view, creates the new one and grants on it again. |
@@ -137,7 +208,7 @@ one writes the SQL in its parts — the clauses below are class methods of a par
 | `supports_row_level_security` | `RowLevelSecurityPolicies.get_row_level_security_sqls()`, `get_policy_create_sqls()`, `drop_policy()`, `alter_policy()` and `rename_policy()` — see [`supports_row_level_security`](#supports-row-level-security) |
 | `supports_grants` | `Grants.get_grant_sqls()` and `get_revoke_sqls()`. |
 | `supports_collations` | `Extensions.create_collation()` and `drop_collation()`. |
-| `supports_schemas` | `Schemas.move_table_to_schema()`, for a model whose `Meta.schema` changes, and `move_to_schema(model, object, old_schema, new_schema)` of `Views`, `MaterializedViews`, `DatabaseFunctions` and `Sequences` — the model's own objects moved with its table (`UnSupportedError` by default, before any DDL). |
+| `supports_schemas` | `Schemas.get_table_schema_move_plan()`, for a model whose `Meta.schema` changes, and `get_schema_move_plan(model, object, old_schema, new_schema)` of `Views`, `MaterializedViews`, `DatabaseFunctions` and `Sequences` — the model's own objects moved with its table (`UnSupportedError` by default, before any DDL). |
 | Deferrable constraints | `TableClearing.defer_cascade_foreign_keys(model, connection)` — defers the foreign keys a cascade runs into. |
 | Test databases | `TableClearing.clear_tables(connection, quoted_tables)` — empties tables between tests (one script of `DELETE FROM` per table by default). |
 
@@ -149,8 +220,9 @@ one writes the SQL in its parts — the clauses below are class methods of a par
 `TenantCondition`), `TransactionStatements.get_tenant_setting_sql(tenant_texts)` (the statement after
 `BEGIN` setting the transaction's tenants) and the connection option `tenant_row_level_security`.
 
-The same goes for lookups only one database has: the dialect registers them from its `install()` with
-[`Field.register_lookup()`](../custom-lookups.md), the extension they need in `required_extension=`, their
+The same goes for lookups only one database has: the dialect returns `LookupRegistration` declarations
+in `ExtensionContribution.lookups` from `get_contribution()`, the extension in
+`RegisteredLookup.required_extension`, their
 operators [marked as ones only dialects implement](../custom-lookups.md#one-database) and implemented in
 the overrides of its `FilterOperators` — as PostgreSQL does for its trigram lookups. Its own fields it
 registers in its types (`TypeMapping.column_type`), the fields setting `COLUMN_TYPE_FROM_DIALECT = True`.
@@ -167,22 +239,34 @@ it in `Meta.table_options`, one entry per dialect, and a connection uses the ent
 `default_table_options`:
 
 ```python
+import dataclasses
+
+from hare import fields
+from hare.ddl import RawSQLTerm
+from hare.ddl.table_options import TableOptions
+from hare.exceptions import ConfigurationError
+from hare.models import Model
+
+
 @dataclasses.dataclass(frozen=True)
 class ColstoreTableOptions(TableOptions):
     engine: str = "MergeTree()"
     order_by: tuple[str, ...] = ()
     partition_by: RawSQLTerm | None = None
 
-    def raise_if_unsupported(self, model):
+    def raise_if_unsupported(self, model, features):
         if not self.order_by:
             raise ConfigurationError(f"{model.__name__}: ColstoreTableOptions needs order_by")
 
-    def get_create_suffix_sql(self, model, quote):
+    def get_create_suffix_sql(self, model, editor):
+        quote = editor.quote
         sql = f" ENGINE = {self.engine} ORDER BY ({', '.join(quote(column) for column in self.order_by)})"
         return sql + (f" PARTITION BY {self.partition_by.sql}" if self.partition_by else "")
 
 
 class Event(Model):
+    created_at = fields.DatetimeField()
+
     class Meta:
         primary_key = None
         table_options = [ColstoreTableOptions(order_by=("created_at",))]
@@ -211,11 +295,13 @@ cluster — take three more:
 | Hook | What it gives |
 |---|---|
 | `get_storage_table_name(table_name)` | The table the DDL of the model's columns and storage is written for — the model's own by default. |
-| `get_companion_table_sqls(model, quote, client, replaces=...)` | The statements creating the table put before the one storing the rows; none by default. |
+| `get_companion_table_sqls(model, editor, *, replaces=...)` | The statements creating the table put before the one storing the rows; none by default. |
 | `keeps_row_versions()` | Whether the table keeps several rows of one key that the database merges. |
 
-The table rebuild's `copy_table_rows(model, new_table_name, old_table_name, column_mapping)` copies the
-rows into the rebuilt table — one `INSERT ... SELECT` by default. The dialect's
+`TableRebuild.get_copy_columns(old_model, new_model, altered_fields=())` prepares `ColumnCopy`
+descriptions. `get_copy_plan(model, new_table_name, source_sql, columns)` turns them into a row-copy
+plan — a static `INSERT ... SELECT` where possible, or an explicit runtime step for deferred values. The
+dialect's
 `get_journal_table_options(connection)` stores the journal of applied migrations (ClickHouse's on a
 cluster is replicated), and `synchronize_table(connection, table_name)` waits for the rows other servers
 wrote to it before the journal is read.
@@ -242,9 +328,20 @@ and `QuerySet.update()`/`delete()` work; what needs a key to identify a row (`sa
 
 ## <a id="introspector"></a>9. Reading an existing schema: the introspector
 
+Physical type descriptions belong to the dialect, separately from a field's Python semantics.
+ClickHouse's `ClickhousePhysicalType` shares its immutable container tree between catalog mapping
+and binary codecs. PostgreSQL's `PostgresqlPhysicalType` shares declared names, array elements and
+modifiers between introspection, COPY preparation and rewrite analysis; its native wire decoder
+uses tokio-postgres's type tree, which does not contain column precision or length. SQLite's
+`SqlitePhysicalType` retains the declaration and applies storage affinity rules for introspection
+and STRICT tables. Unknown declarations remain opaque, and missing metadata stays unknown.
+
 `build_introspector_class()` returns a `SchemaIntrospector` subclass implementing
-`fetch_default_schema()`, `fetch_table_names(connection, schema, include_partitions)` and
-`fetch_tables(connection, tables, schema) -> list[TableInfo]`; `fetch_schema_names(connection)` lists the
+`fetch_default_schema(connection)`, `fetch_table_names(connection, schema, include_partitions)`,
+`fetch_catalog(connection, tables, schema) -> CatalogSnapshot` and the pure mapper
+`get_table_infos(snapshot, dialect) -> list[TableInfo]`. The shared `fetch_tables()` combines capture
+and mapping. Override `get_table_parts(snapshot, table_infos)` when drift needs physical catalog details
+beyond reconstructed declarations. `fetch_schema_names(connection)` lists the
 schemas for a [schema per tenant](../../soft-delete-versions-tenants/schema-per-tenant.md)
 (`UnSupportedError` by default). The rest — `inspectdb`, drift, the reverse type mapping to fields —
 works from the neutral `TableInfo`/`ColumnInfo`/`IndexInfo`/ `ForeignKeyInfo`. A table's storage goes
@@ -263,8 +360,11 @@ table, its name and a `definition` of plain values, lists and dicts compared as 
 entering creates it and sets its `client`, whose leaving removes it whatever happened, with
 `get_shadow_schema_name(schema)` (the shadow's schema of a schema of the models),
 `get_shadow_table_options(options)` (a table's options as the shadow takes them — ClickHouse puts a
-`Replicated*` table's Keeper path under its own) and `replace_shadow_names(text)` (a text the shadow
-printed, its names made the database's); None (the default) makes drift raise `UnSupportedError`.
+`Replicated*` table's Keeper path under its own) and `get_shadow_materialized_view(view)` (a view's
+independent storage placed in the shadow). `get_catalog_identities()` returns `CatalogIdentities`:
+drift applies its `map_part()` to both live and shadow catalog parts to compare logical identities.
+The default identity mapping is empty. Returning None from `build_shadow_database_class()` (the default)
+makes drift raise `UnSupportedError`.
 
 How the database echoes an expression back is the introspector's too: `NOW_EXPRESSIONS` (the spellings of
 the current time), `SEQUENCE_DEFAULT_PREFIXES` (a default drawing a sequence's next value),
@@ -287,11 +387,15 @@ with a list noting them, and one noted refuses the DDL (`UnSupportedError`) — 
 included, is never searched (the SQLite functions hare registers on each connection — see [SQLite:
 functions](../../dialects/sqlite/functions.md#in-constraints-and-indexes)).
 
-`ForeignKeyRebuild.add_foreign_key_constraint_not_valid()` and
-`ConstraintStatements.add_unique_constraint_using_index()` back `AddField(..., not_valid=True)` and
-`AddConstraint(..., using_index=...)`; the base adds the constraint checked, and builds the constraint's
-own index and drops the old one. The class method `ColumnTypeChanges.rewrites_table_on_alter()` tells
-which field changes rewrite the table — every column type change by default.
+`ForeignKeyRebuild.get_foreign_key_not_valid_plan()` and
+`ConstraintStatements.get_unique_constraint_using_index_plan()` back `AddField(..., not_valid=True)` and
+`AddConstraint(..., using_index=...)`. Both prepare plans before execution: the base checks the
+foreign key immediately, and creates the unique constraint's index before dropping the old one.
+Prepared steps declare `SchemaEffect.REWRITE_ROWS` when they
+rewrite stored rows. The type-change compiler uses
+`ColumnTypeChanges.column_type_change_rewrites_table(old_type, new_type)` for its statement;
+rebuild and stored-value conversion steps declare their effects directly. Operation reports and
+safety rules read the resulting plan, including work on dependent and through tables.
 
 The [migration safety check](../../migrations/zero-downtime.md#checking-migrations) takes its rules from
 `MigrationSafetyRules`: `get_rules()` lists them — the base gives the ones every database shares, a
@@ -300,5 +404,8 @@ dialect adds its own, each a `MigrationSafetyRule` subclass in a file of its own
 whole migration) returning a `MigrationRisk` from `context.get_risk(...)`. The `MigrationSafetyContext`
 it gets holds the migration and the operation, the states before and after it, the dialect and its
 `features`, `large_table_rows` and the rows of each table the migration changes (`table_row_counts`).
+`context.schema_plan` lazily prepares the actual AddField or AlterField plan without executing it;
+row-backfill and rewrite rules inspect its `effects`. The configured client's features and placement
+are used even when `MigrationSafetyChecker.check(..., read_catalog=False)` omits row counting.
 `count_table_rows(client, table_name, schema, at_most)` counts a table's rows up to `at_most` (an
 estimate will do), 0 for a missing table; the base returns None — every table counts as large.

@@ -2,8 +2,10 @@
 every request (allows_url=), each attempt's result written to the event's row (result_field=), no
 redirect followed."""
 
+import asyncio
 import hashlib
 import hmac
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -18,6 +20,37 @@ from tests.contrib.outbox.http_receiver import HttpReceiver
 from tests.contrib.outbox.models import SubscriberOutboxEvent
 
 pytestmark = pytest.mark.requires("http")
+
+
+@pytest.mark.database_independent
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_bytes", [b"POST /", b"POST / HTTP/1.1\r\ncontent-length: 10\r\n\r\nshort"])
+async def test_receiver_closes_incomplete_requests_at_context_exit(monkeypatch, request_bytes):
+    receiver = HttpReceiver()
+    entered = asyncio.Event()
+    respond = receiver.respond
+
+    async def observed_response(reader, writer):
+        entered.set()
+        await respond(reader, writer)
+
+    monkeypatch.setattr(receiver, "respond", observed_response)
+    writer = None
+    try:
+        async with receiver as url:
+            address = urlsplit(url)
+            reader, writer = await asyncio.open_connection(address.hostname, address.port)
+            writer.write(request_bytes)
+            await writer.drain()
+            await entered.wait()
+            handlers = tuple(receiver.handlers)
+        assert handlers and all(handler.done() for handler in handlers)
+        assert await reader.read() == b""
+        assert receiver.handlers == {}
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
 
 
 async def enqueue_for(url: str, secret: str | None = None) -> SubscriberOutboxEvent:

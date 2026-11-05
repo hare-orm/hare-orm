@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import datetime
-import time
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 
 from clickhouse_driver import Client
-from clickhouse_driver.result import QueryInfo
 
-from hare.dialects.clickhouse.constants import CLICKHOUSE_TYPE_WRAPPERS
 from hare.dialects.clickhouse.drivers.clickhouse_driver.client.clickhouse_driver_library_connection import (
     ClickhouseDriverLibraryConnection,
 )
@@ -22,33 +19,29 @@ from hare.dialects.clickhouse.drivers.clickhouse_driver.constants import (
     CLICKHOUSE_DRIVER_MICROSECONDS_PER_DAY,
     CLICKHOUSE_DRIVER_MICROSECONDS_PER_SECOND,
     CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME,
-    CLICKHOUSE_DRIVER_PING_AFTER_IDLE_SECONDS,
-    CLICKHOUSE_DRIVER_SECONDS_MOMENT_TYPE,
-    CLICKHOUSE_DRIVER_SECONDS_MOMENT_TYPE_PREFIX,
-    CLICKHOUSE_DRIVER_TICKS_MOMENT_TYPE_PREFIX,
     CLICKHOUSE_DRIVER_TUPLE_TYPE,
 )
 from hare.dialects.clickhouse.drivers.constants import CLICKHOUSE_MOMENT_EPOCH
-from hare.dialects.clickhouse.types.clickhouse_type_names import ClickhouseTypeNames
+from hare.dialects.clickhouse.types.clickhouse_physical_type import ClickhousePhysicalType
 from hare.native.native_modules import NativeModules
 
 
 class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the library ships no types
-    """clickhouse-driver's client as hare runs it:
+    """Native-protocol client with local codecs and separate totals rows.
 
-    - the library pings the server before every statement; a connection that ran a statement within
-      ``CLICKHOUSE_DRIVER_PING_AFTER_IDLE_SECONDS`` starts the next one without that round trip;
-    - the moments of a binary insert are written as the whole ticks of the server's column, at any
-      depth of an array, a map or a tuple - the library converts each through a time zone object and
-      a float, and writes a moment before 1970 with a fraction of a second one second late;
-    - the ProfileEvents block the server sends after each statement, which the library reads whole
-      and drops, is passed over unread (``ClickhouseDriverLibraryConnection``);
-    - the totals row of ``GROUP BY ... WITH TOTALS``, which the library adds to the rows, is kept apart
-      (``last_totals``).
+    Socket handling, pings, reconnection and service packets use the library lifecycle.
+    Datetimes written in binary blocks are converted to exact whole ticks before encoding.
     """
 
-    #: When the connection started its last statement, on the monotonic clock.
-    last_statement_time = 0.0
+    def __init__(self, **connection_settings: Any) -> None:
+        # Client.__init__ creates an unopened ordinary connection and initializes its settings.
+        # Replace that unused connection by construction, never by changing its Python class.
+        super().__init__(**connection_settings)
+        settings = {name: value for name, value in connection_settings.items() if name != "settings"}
+        self.connection = ClickhouseDriverLibraryConnection(**settings)
+        self.connection.context.settings = self.settings
+        self.connection.context.client_settings = self.client_settings
+
     #: The totals row of the last statement read - None for a statement without one.
     last_totals: Any = None
     #: ``rust.native.rows`` - converts a column's moments to ticks; None where it isn't built.
@@ -63,28 +56,6 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         data = result.get_result()
         self.last_totals = result.totals_rows[0] if result.totals_rows else None
         return data
-
-    def get_connection(self) -> Any:
-        connection = super().get_connection()
-        # The library makes its connections itself - each one it hands out is made hare's.
-        connection.__class__ = ClickhouseDriverLibraryConnection
-        return connection
-
-    def establish_connection(self, settings: dict[str, Any] | None) -> None:
-        now = time.monotonic()
-        connection = getattr(self, "connection", None)
-        if (
-            connection is None
-            or not connection.connected
-            or now - self.last_statement_time > CLICKHOUSE_DRIVER_PING_AFTER_IDLE_SECONDS
-        ):
-            super().establish_connection(settings)
-        else:
-            # What the library does after its ping answered.
-            self.make_query_settings(settings)
-            connection.check_query_execution()
-            self.last_query = QueryInfo()
-        self.last_statement_time = now
 
     def send_data(self, sample_block: Any, data: Any, types_check: bool = False, columnar: bool = False) -> int:
         if columnar:
@@ -105,16 +76,17 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         Returns:
             The values to write - the same ones for a column of anything but moments.
         """
-        moment_scale = cls._get_moment_scale(column_type)
-        if moment_scale is not None:
-            return cls._get_moment_ticks(values, moment_scale)
         if CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME not in column_type:
             return values
-        write_value = cls._get_value_writer(column_type)
+        physical_type = ClickhousePhysicalType.from_sql(column_type)
+        moment_scale = cls._get_moment_scale(physical_type)
+        if moment_scale is not None:
+            return cls._get_moment_ticks(values, moment_scale)
+        write_value = cls._get_value_writer(physical_type)
         return values if write_value is None else [write_value(value) for value in values]
 
     @classmethod
-    def _get_value_writer(cls, column_type: str) -> Callable[[Any], Any] | None:
+    def _get_value_writer(cls, column_type: ClickhousePhysicalType) -> Callable[[Any], Any] | None:
         """How a value of a type holding moments is written - each moment in it as its ticks.
 
         Args:
@@ -126,24 +98,22 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         moment_scale = cls._get_moment_scale(column_type)
         if moment_scale is not None:
             return lambda value: None if value is None else cls._get_moment_ticks([value], moment_scale)[0]
-        while column_type.startswith(CLICKHOUSE_TYPE_WRAPPERS):
-            column_type = column_type[column_type.index("(") + 1 : -1]
-        if CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME not in column_type:
+        column_type = column_type.unwrapped
+        if CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME not in column_type.sql:
             return None
-        type_name, arguments = ClickhouseTypeNames.get_type_parts(column_type)
-        if type_name == CLICKHOUSE_DRIVER_ARRAY_TYPE:
-            write_element = cls._get_value_writer(arguments[0])
+        if column_type.name == CLICKHOUSE_DRIVER_ARRAY_TYPE:
+            write_element = cls._get_value_writer(column_type.elements[0])
             if write_element is None:
                 return None
             return lambda value: None if value is None else [write_element(element) for element in value]
-        if type_name == CLICKHOUSE_DRIVER_MAP_TYPE:
-            write_key = cls._get_value_writer(arguments[0]) or cls._keep_value
-            write_item = cls._get_value_writer(arguments[1]) or cls._keep_value
+        if column_type.name == CLICKHOUSE_DRIVER_MAP_TYPE:
+            write_key = cls._get_value_writer(column_type.elements[0]) or cls._keep_value
+            write_item = cls._get_value_writer(column_type.elements[1]) or cls._keep_value
             return lambda value: (
                 None if value is None else {write_key(key): write_item(item) for key, item in value.items()}
             )
-        if type_name == CLICKHOUSE_DRIVER_TUPLE_TYPE:
-            element_writers = [cls._get_value_writer(cls._get_element_type(argument)) for argument in arguments]
+        if column_type.name == CLICKHOUSE_DRIVER_TUPLE_TYPE:
+            element_writers = [cls._get_value_writer(element) for element in column_type.elements]
             if all(write_element is None for write_element in element_writers):
                 return None
             writers = [write_element or cls._keep_value for write_element in element_writers]
@@ -167,20 +137,7 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         return value
 
     @staticmethod
-    def _get_element_type(element: str) -> str:
-        """The type of an element of a tuple's type - its name before it left out.
-
-        Args:
-            element: The element - ``name Type`` or ``Type``.
-
-        Returns:
-            The type.
-        """
-        head, _separator, rest = element.strip().partition(" ")
-        return rest.strip() if rest and "(" not in head else element.strip()
-
-    @staticmethod
-    def _get_moment_scale(column_type: str) -> int | None:
+    def _get_moment_scale(column_type: ClickhousePhysicalType) -> int | None:
         """The fractional digits of a second a column of moments keeps.
 
         Args:
@@ -189,14 +146,10 @@ class ClickhouseDriverLibraryClient(Client):  # type: ignore[misc]  # the librar
         Returns:
             The digits - 0 for a column of whole seconds - None for a column of anything else.
         """
-        while column_type.startswith(CLICKHOUSE_TYPE_WRAPPERS):
-            column_type = column_type[column_type.index("(") + 1 : -1]
-        if column_type.startswith(CLICKHOUSE_DRIVER_TICKS_MOMENT_TYPE_PREFIX):
-            parameters = column_type[len(CLICKHOUSE_DRIVER_TICKS_MOMENT_TYPE_PREFIX) : -1]
-            return int(parameters.partition(",")[0])
-        if column_type == CLICKHOUSE_DRIVER_SECONDS_MOMENT_TYPE or column_type.startswith(
-            CLICKHOUSE_DRIVER_SECONDS_MOMENT_TYPE_PREFIX
-        ):
+        column_type = column_type.unwrapped
+        if column_type.name == "DateTime64":
+            return column_type.precision
+        if column_type.name == CLICKHOUSE_DRIVER_MOMENT_TYPE_NAME:
             return 0
         return None
 

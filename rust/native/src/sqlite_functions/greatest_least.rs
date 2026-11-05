@@ -40,6 +40,7 @@ fn get_sort_keys(values: &[Bound<'_, PyAny>], compares_numbers: bool) -> PyResul
 
 /// The index of the first greatest (`wanted` `Greater`) or least (`Less`) key.
 fn pick_index<T>(keys: &[T], compare: impl Fn(&T, &T) -> Option<Ordering>, wanted: Ordering) -> Option<usize> {
+    keys.first()?;
     let mut picked = 0;
     for index in 1..keys.len() {
         match compare(&keys[index], &keys[picked]) {

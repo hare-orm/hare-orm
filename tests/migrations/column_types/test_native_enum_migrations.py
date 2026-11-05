@@ -13,8 +13,9 @@ import pytest
 
 from hare import Connections, fields
 from hare.contrib.test import requires_features
+from hare.ddl.schema_objects.enum_type import EnumType
 from hare.dialects.postgresql.fields.native_enum import NativeEnumField
-from hare.exceptions import ConfigurationError, OperationalError
+from hare.exceptions import ConfigurationError, OperationalError, UnSupportedError
 from hare.migrations.autodetection.operation_generator import OperationGenerator
 from hare.migrations.exceptions import FieldNarrowingDataLossError
 from hare.migrations.migration import Migration
@@ -31,6 +32,80 @@ from hare.migrations.writer import MigrationWriter
 from hare.transactions.transactions import Transactions
 
 TABLE = "enum_migration_ticket"
+
+
+@requires_features(supports_enum_types=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", ["enum_catalog_snapshot", 'enum "catalog snapshot'])
+async def test_enum_replacement_preserves_external_defaults_and_type_metadata(db_simple, schema):
+    connection = Connections.get("models")
+    quote = connection.dialect.literals.quote_identifier
+    literal = connection.dialect.literals.get_string_literal_sql
+    type_sql = f"{quote(schema)}.{quote('status')}"
+    table_sql = f"{quote(schema)}.{quote('external table')}"
+    old_spelling = f"{quote(schema)}.{quote('status__hare_old')}"
+    expression = (
+        f"(CASE WHEN {literal('::' + old_spelling)} = {literal('::' + type_sql)} "
+        f"THEN 'closed' ELSE 'open' END)::{type_sql}"
+    )
+    await connection.execute_script(f"CREATE SCHEMA {quote(schema)}")
+    try:
+        await connection.execute_script(
+            f"CREATE TYPE {type_sql} AS ENUM ('open', 'closed'); "
+            f"COMMENT ON TYPE {type_sql} IS 'original comment'; "
+            f"CREATE TABLE {table_sql} (state {type_sql} DEFAULT {expression}, "
+            f"visited {type_sql}[] DEFAULT ARRAY['open']::{type_sql}[])"
+        )
+        before = await connection.execute_dicts(
+            "SELECT typowner, obj_description(oid, 'pg_type') AS comment FROM pg_type WHERE oid = $1::regtype",
+            [type_sql],
+        )
+        permissions_sql = (
+            "SELECT permission.grantee, permission.is_grantable FROM pg_type type "
+            "CROSS JOIN LATERAL aclexplode(COALESCE(type.typacl, acldefault('T', type.typowner))) permission "
+            "WHERE type.oid = $1::regtype ORDER BY permission.grantee"
+        )
+        permissions_before = await connection.execute_dicts(permissions_sql, [type_sql])
+        editor = connection.dialect.schema_editor_class(connection)
+        await editor.enum_types.alter_enum_type(
+            EnumType("status", ["open", "closed"], schema),
+            EnumType("status", ["closed", "open"], schema),
+        )
+        await connection.execute(f"INSERT INTO {table_sql} DEFAULT VALUES", returns_rows=False)
+        assert await connection.execute_dicts(
+            f"SELECT state::text AS state, visited::text[] AS visited FROM {table_sql}"
+        ) == [{"state": "open", "visited": ["open"]}]
+        after = await connection.execute_dicts(
+            "SELECT typowner, obj_description(oid, 'pg_type') AS comment FROM pg_type WHERE oid = $1::regtype",
+            [type_sql],
+        )
+        assert after == [{"typowner": before[0]["typowner"], "comment": "original comment"}]
+        assert await connection.execute_dicts(permissions_sql, [type_sql]) == permissions_before
+    finally:
+        await connection.execute_script(f"DROP SCHEMA {quote(schema)} CASCADE")
+
+
+@requires_features(supports_enum_types=True)
+@pytest.mark.asyncio
+async def test_enum_replacement_refuses_unprepared_dependencies_before_ddl(db_simple):
+    connection = Connections.get("models")
+    await connection.execute_script(
+        "CREATE TYPE enum_with_domain AS ENUM ('open', 'closed'); "
+        "CREATE DOMAIN dependent_enum_domain AS enum_with_domain"
+    )
+    try:
+        editor = connection.dialect.schema_editor_class(connection)
+        with pytest.raises(UnSupportedError, match="explicit operations"):
+            await editor.enum_types.alter_enum_type(
+                EnumType("enum_with_domain", ["open", "closed"]),
+                EnumType("enum_with_domain", ["closed", "open"]),
+            )
+        assert editor.run_statement_count == 0
+        assert await connection.execute_dicts(
+            "SELECT enumlabel FROM pg_enum WHERE enumtypid = 'enum_with_domain'::regtype ORDER BY enumsortorder"
+        ) == [{"enumlabel": "open"}, {"enumlabel": "closed"}]
+    finally:
+        await connection.execute_script("DROP DOMAIN dependent_enum_domain; DROP TYPE enum_with_domain")
 
 
 class TicketState(Enum):

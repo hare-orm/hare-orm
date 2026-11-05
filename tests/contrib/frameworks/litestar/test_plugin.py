@@ -38,8 +38,6 @@ from tests.contrib.frameworks.litestar.broken_models import Draft
 from tests.contrib.frameworks.models import Chapter, Writer
 from tests.contrib.frameworks.queries import NamedWriterQuery
 
-REQUIRES = ("litestar",)
-
 pytestmark = pytest.mark.sqlite_only
 
 CONFIG = {
@@ -159,7 +157,9 @@ async def create_schema(app: Litestar) -> AsyncGenerator[None]:
 
 
 def build_app(**plugin_options: Any) -> Litestar:
-    return Litestar(ROUTES, plugins=[HarePlugin(CONFIG, **plugin_options)], lifespan=[create_schema])
+    return Litestar(
+        ROUTES, plugins=[HarePlugin(CONFIG, **plugin_options)], lifespan=[create_schema], logging_config=None
+    )
 
 
 async def names(client: AsyncTestClient) -> list[str]:
@@ -202,7 +202,9 @@ async def create_chapters(app: Litestar) -> AsyncGenerator[None]:
 
 @pytest.mark.asyncio
 async def test_composite_keys_from_the_path_and_from_repeated_parameters():
-    app = Litestar(ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_schema, create_chapters])
+    app = Litestar(
+        ROUTES, plugins=[HarePlugin(CONFIG)], lifespan=[create_schema, create_chapters], logging_config=None
+    )
     async with AsyncTestClient(app) as client:
         assert (await client.get("/chapters/1,2")).json() == {"title": "Middle", "writer": "boris"}
         response = await client.get("/chapters", params={"pk__in": ["1,1", "2,1"]})
@@ -240,9 +242,14 @@ async def test_meta_filters_are_parameters_before_the_application_starts():
         return [chapter.title for chapter in await chapters.fetch()]
 
     app = Litestar(
-        [*ROUTES, filtered_chapters], plugins=[HarePlugin(CONFIG)], lifespan=[create_schema, create_chapters]
+        [*ROUTES, filtered_chapters],
+        plugins=[HarePlugin(CONFIG)],
+        lifespan=[create_schema, create_chapters],
+        logging_config=None,
     )
-    assert {"writer", "writer__in", "title__icontains", "pk__in"} <= set(FilteredChapterQuery.model_fields)
+    assert {"writer", "writer__in", "title__icontains", "pk__in"} <= set(
+        FilteredChapterQuery.prepare_parameters().model_fields
+    )
     async with AsyncTestClient(app) as client:
         schema = (await client.get("/schema/openapi.json")).json()
         by_writer = await client.get("/filtered-chapters", params=[("writer__in", "1"), ("title__icontains", "ing")])
@@ -285,7 +292,7 @@ async def test_a_forbidden_parameter_answers_403():
     async def deleted_writers() -> None:
         raise RequestQueryForbidden("deleted", "The request may not see deleted rows")
 
-    app = Litestar([deleted_writers], plugins=[HarePlugin(CONFIG)])
+    app = Litestar([deleted_writers], plugins=[HarePlugin(CONFIG)], logging_config=None)
     async with AsyncTestClient(app) as client:
         response = await client.get("/deleted-writers")
     assert response.status_code == 403
@@ -303,7 +310,7 @@ async def test_a_value_another_service_failed_to_give_answers_502():
     async def writer_cards() -> None:
         raise ApiRequestError("API people: the request for 7 failed", "people")
 
-    app = Litestar([writer_cards], plugins=[HarePlugin(CONFIG)])
+    app = Litestar([writer_cards], plugins=[HarePlugin(CONFIG)], logging_config=None)
     async with AsyncTestClient(app) as client:
         response = await client.get("/writer-cards")
     assert response.status_code == 502
@@ -333,6 +340,7 @@ async def test_the_apps_own_exception_handler_wins():
         plugins=[HarePlugin(CONFIG)],
         lifespan=[create_schema],
         exception_handlers={DoesNotExist: answer_missing},
+        logging_config=None,
     )
     async with AsyncTestClient(app) as client:
         response = await client.get("/chapters/5,5")
@@ -372,7 +380,10 @@ async def test_atomic_requests_on_named_connections():
         "apps": {"models": {"models": ["tests.contrib.frameworks.models"], "default_connection": "default"}},
     }
     app = Litestar(
-        ROUTES, plugins=[HarePlugin(config, atomic_requests=["default", "reports"])], lifespan=[create_schema]
+        ROUTES,
+        plugins=[HarePlugin(config, atomic_requests=["default", "reports"])],
+        lifespan=[create_schema],
+        logging_config=None,
     )
     async with AsyncTestClient(app) as client:
         assert (await client.post("/writers/boris/fail")).status_code == 500
@@ -385,7 +396,7 @@ async def test_atomic_requests_on_named_connections():
 async def test_atomic_requests_naming_an_unknown_connection_fails_at_startup():
     plugin = HarePlugin(CONFIG, atomic_requests=["reports"])
     with pytest.raises(ConfigurationError, match="names the connection 'reports'"):
-        async with plugin.lifespan(Litestar([], plugins=[plugin])):
+        async with plugin.lifespan(Litestar([], plugins=[plugin], logging_config=None)):
             pass
 
 
@@ -412,7 +423,7 @@ async def test_a_wrong_request_query_fails_at_startup():
     }
     plugin = HarePlugin(config)
     with pytest.raises(ConfigurationError, match="DraftQuery.headline"):
-        async with plugin.lifespan(Litestar([], plugins=[plugin])):
+        async with plugin.lifespan(Litestar([], plugins=[plugin], logging_config=None)):
             pass
 
 
@@ -451,7 +462,9 @@ async def test_a_handler_returning_a_page_of_rows():
     async def writer_pages(writers: NamedDependency[WriterQuery]) -> Page[Writer]:
         return await writers.page()
 
-    app = Litestar([*ROUTES, writer_pages], plugins=[HarePlugin(CONFIG)], lifespan=[create_schema])
+    app = Litestar(
+        [*ROUTES, writer_pages], plugins=[HarePlugin(CONFIG)], lifespan=[create_schema], logging_config=None
+    )
     async with AsyncTestClient(app) as client:
         for name in ("anna", "boris", "carl"):
             await client.post(f"/writers/{name}")
@@ -503,7 +516,9 @@ async def test_a_request_query_built_for_a_model_is_a_dependency():
     async def built_writers(writers: NamedDependency[built_writer_query]) -> Page[Writer]:  # type: ignore[valid-type]
         return await writers.page()
 
-    app = Litestar([*ROUTES, built_writers], plugins=[HarePlugin(CONFIG)], lifespan=[create_schema])
+    app = Litestar(
+        [*ROUTES, built_writers], plugins=[HarePlugin(CONFIG)], lifespan=[create_schema], logging_config=None
+    )
     async with AsyncTestClient(app) as client:
         for name in ("carl", "anna", "boris"):
             await client.post(f"/writers/{name}")

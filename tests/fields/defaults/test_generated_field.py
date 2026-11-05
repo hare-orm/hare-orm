@@ -78,7 +78,7 @@ def test_dict_expression_resolves_per_dialect():
 def test_dict_expression_missing_dialect_raises():
     field = GeneratedField(expression={"sqlite": RawSQLTerm("a || b")}, output_field=TextField())
     field.model_field_name = "combined"
-    with pytest.raises(ConfigurationError, match="no expression for dialect 'postgresql'"):
+    with pytest.raises(ConfigurationError, match="Generated column 'combined' has no expression for postgresql"):
         field.get_generated_sql(DialectRegistry.get_dialect("postgresql"))
 
 
@@ -117,10 +117,7 @@ def test_expression_takes_raw_sql_terms(expression):
 
 @pytest.mark.database_independent
 def test_validators_kwarg_rejected():
-    """The database computes a GeneratedField's value - the application never assigns one, so
-    Field.validate() (which checks self.validators) is never called; to_db_value() delegates
-    entirely to output_field.to_db_value() instead. A validators= passed directly here used to
-    be silently accepted and then silently never run at all."""
+    """Generated values bypass application write validation; validators belong on input fields."""
     from hare.fields.validators import MaxValueValidator
 
     with pytest.raises(ConfigurationError, match="validators"):
@@ -130,15 +127,7 @@ def test_validators_kwarg_rejected():
 @pytest.mark.database_independent
 @pytest.mark.parametrize("kwarg_name", ["primary_key", "pk"])
 def test_primary_key_kwarg_rejected(kwarg_name):
-    """allows_generated=True lets a bare-declared auto-increment integer PK
-    (IntField(primary_key=True), whose GENERATED_SQL is a self-contained "SERIAL NOT NULL
-    PRIMARY KEY"-style string) pass ModelMeta's own custom-pk guard - but that guard can't tell
-    that guarantee apart from THIS class's own GENERATED_SQL, which is just the bare generation
-    clause with no type prefix and no primary-key marker at all. Confirmed live before this fix:
-    GeneratedField(primary_key=True) raised a raw Postgres syntax error at CREATE TABLE time
-    ("near ALWAYS", no column type before GENERATED ALWAYS AS) and produced a SQLite table with
-    no PRIMARY KEY constraint at all - looked accepted at class-definition time, guaranteed to
-    break (loudly on Postgres, silently on SQLite) on the very next step."""
+    """Computed columns cannot be declared as model primary keys, through either keyword."""
     with pytest.raises(ConfigurationError, match="primary_key"):
         GeneratedField(expression=RawSQLTerm("a + b"), output_field=IntField(), **{kwarg_name: True})
 
@@ -439,20 +428,26 @@ async def test_bulk_update_rejects_generated_field_in_fields(db_generated_field)
 
 
 @pytest.mark.asyncio
-async def test_bulk_update_returning_false_leaves_value_stale(db_generated_field):
-    """The default (returning=False) contract is unchanged - the in-memory
-    object keeps whatever GeneratedField value it had before the update, even though the
-    database recomputed a new one."""
-    created = await PricedItem.objects.create(price=100, quantity=1)
-    item = await PricedItem.objects.get(id=created.id)
-    assert item.total == 100
+@pytest.mark.parametrize("returning", (None, False))
+@pytest.mark.parametrize("batch_size", (None, 1))
+async def test_bulk_update_without_returning_leaves_computed_values_unloaded(
+    db_generated_field, returning, batch_size
+):
+    """A write reading nothing back leaves computed values unloaded until refresh_from_db()."""
+    for price in (100, 200):
+        await PricedItem.objects.create(price=price, quantity=1)
+    items = await PricedItem.objects.order_by("price")
+    assert [item.total for item in items] == [100, 200]
 
-    item.quantity = 99
-    await PricedItem.objects.bulk_update([item], fields=["quantity"])
+    for item in items:
+        item.quantity = 99
+    await PricedItem.objects.bulk_update(items, fields=["quantity"], returning=returning, batch_size=batch_size)
 
-    assert item.total == 100
-    refreshed = await PricedItem.objects.get(id=item.id)
-    assert refreshed.total == 9900
+    for item, expected in zip(items, (9900, 19800), strict=True):
+        with pytest.raises(NoValuesFetched):
+            _ = item.total
+        await item.refresh_from_db()
+        assert item.total == expected
 
 
 @pytest.mark.asyncio

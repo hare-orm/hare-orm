@@ -71,10 +71,11 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                 NULL; or ``kwargs`` points the new object's foreign key at a different row than
                 the parent instance.
         """
-        created_instance = await self._get_model_queryset(self._get_write_connection(using)).create(
+        connection = self._get_write_connection(using)
+        created_instance = await self._get_model_queryset(connection).create(
             **self._get_kwargs_with_parent_key(kwargs, "create")
         )
-        self._invalidate_local_cache()
+        self._invalidate_after_write(connection)
         return created_instance
 
     def bulk_create(
@@ -116,8 +117,7 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                 )
             for field_name, parent_value in zip(self.relation_fields, parent_values, strict=True):
                 setattr(obj, field_name, parent_value)
-        self._invalidate_local_cache()
-        return self._get_model_queryset(self._get_write_connection()).bulk_create(
+        query = self._get_model_queryset(self._get_write_connection()).bulk_create(
             objects,
             batch_size,
             ignore_conflicts=ignore_conflicts,
@@ -128,6 +128,8 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             returning=returning,
             use_copy=use_copy,
         )
+        query._on_write_complete = self._invalidate_after_write
+        return query
 
     async def get_or_create(
         self, defaults: dict[str, Any] | None = None, *, using: str | DatabaseClient | None = None, **kwargs: Any
@@ -140,11 +142,12 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             QueryError: The parent instance is not saved, or its referenced value is NULL; or
                 ``kwargs`` points the foreign key at a different row than the parent.
         """
-        result = await self._get_model_queryset(self._get_write_connection(using)).get_or_create(
+        connection = self._get_write_connection(using)
+        result = await self._get_model_queryset(connection).get_or_create(
             defaults, **self._get_kwargs_with_parent_key(kwargs, "get_or_create")
         )
         if result[1]:
-            self._invalidate_local_cache()
+            self._invalidate_after_write(connection)
         return result
 
     async def update_or_create(
@@ -163,10 +166,11 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             QueryError: The parent instance is not saved, or its referenced value is NULL; or
                 ``kwargs`` points the foreign key at a different row than the parent.
         """
-        result = await self._get_model_queryset(self._get_write_connection(using)).update_or_create(
+        connection = self._get_write_connection(using)
+        result = await self._get_model_queryset(connection).update_or_create(
             defaults, create_defaults, **self._get_kwargs_with_parent_key(kwargs, "update_or_create")
         )
-        self._invalidate_local_cache()
+        self._invalidate_after_write(connection)
         return result
 
     async def add(self, *objs: TModel, bulk: bool = True, using: str | DatabaseClient | None = None) -> None:
@@ -235,16 +239,16 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         """
         self._validate_nullable("clear")
         empty_values = dict.fromkeys(self.relation_fields)
+        connection = self._get_write_connection(using)
         if bulk:
-            await self._clone().using(using).update(**empty_values)
+            await self._clone().using(connection).update(**empty_values)
         else:
-            connection = self._get_write_connection(using)
             async with connection._in_transaction() as transaction_connection:
                 for instance in await self._clone().using(transaction_connection):
                     for field_name in self.relation_fields:
                         setattr(instance, field_name, None)
                     await instance.save(using=transaction_connection, update_fields=list(self.relation_fields))
-        self._invalidate_local_cache()
+        self._invalidate_after_write(connection)
 
     async def set(
         self, *objs: Any, bulk: bool = True, clear: bool = False, using: str | DatabaseClient | None = None
@@ -291,12 +295,6 @@ class ReverseRelation(RelatedQuerySet[TModel]):
             f"A {self.model.__name__} row given to remove() isn't related to {self.instance!r} in the database - "
             "moved to another one meanwhile, or not shown by its default scope; nothing was removed"
         )
-
-    def _invalidate_local_cache(self) -> None:
-        """Drops the fetched rows after a write through the relation - and again if the
-        transaction it ran in rolls back: rows read meanwhile may hold the write."""
-        super()._invalidate_local_cache()
-        self._reset_cache_on_rollback(self._get_write_connection(None))
 
     def _get_parent_key_values(self, method_name: str) -> list[Any]:
         """The parent instance's value(s) the related elements' foreign key references.
@@ -500,7 +498,9 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                     [
                         (instance, name, instance.__dict__.get(name, ROLLBACK_RESTORE_UNSET))
                         for instance in instances
-                        for name in (*relation_values, *cache_names)
+                        # Undo runs backwards: restore keys before the relation objects
+                        # whose caches a key's setter invalidates.
+                        for name in (*cache_names, *relation_values)
                     ],
                 )
             for instance in instances:
@@ -509,4 +509,4 @@ class ReverseRelation(RelatedQuerySet[TModel]):
                 if not bulk:
                     update_fields = list(self.relation_fields) if instance._saved_in_db else None
                     await instance.save(using=transaction_connection, update_fields=update_fields)
-        self._invalidate_local_cache()
+        self._invalidate_after_write(connection)

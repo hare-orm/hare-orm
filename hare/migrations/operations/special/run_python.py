@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from hare.migrations.operations.hare_operation import HareOperation
@@ -26,7 +27,6 @@ class RunPython(HareOperation):
     """
 
     reduces_to_sql = False
-    backward_reads_state_reached = False
 
     def __init__(
         self,
@@ -44,11 +44,12 @@ class RunPython(HareOperation):
         self.tenant_schema = tenant_schema
         self.reversible = reverse_code is not None
 
+    def snapshot(self) -> RunPython:
+        """Retain callable objects and bound methods without copying their external resources."""
+        return copy(self)
+
     def describe(self) -> str:
         return "Run Python code"
-
-    def state_forward(self, app_label: str, state: State) -> None:
-        return None
 
     async def database_forward(
         self,

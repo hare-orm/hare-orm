@@ -29,10 +29,14 @@ if TYPE_CHECKING:
 
 
 class DynamicField(Field[Any]):
-    """``Dynamic`` - a value of any type, kept with the type its Python value has (an int as
-    ``Int64``, a text as ``String``, a list as an ``Array`` of its values' type, ...)::
+    """``Dynamic`` - supported scalar and container values, each stored with its ClickHouse type::
 
         value = DynamicField(null=True)
+
+    Accepts booleans, integers, floats, text, Decimal, dates, datetimes, UUIDs, IP addresses, and
+    lists, tuples and dicts of supported values; enum members use their values. Integers select
+    the first fitting Int64/UInt64/Int128/UInt128/Int256/UInt256 type. Unsupported objects or values
+    outside the supported storage ranges raise ValidationError when written.
 
     A value is read back as it was written; a filter matches held values of the filter value's type
     only (``value=5`` doesn't match ``"5"``) - an int any held int, a decimal any held decimal, however

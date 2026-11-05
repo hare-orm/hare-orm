@@ -188,7 +188,7 @@ scope's value" below is the one value of that scope, and "inside the scope" mean
   an instance are checked the same way.
 - **A forward FK/O2O can't point at a row its own model's scope doesn't show.** `create()`, `save()`,
   `.update(...)`, `bulk_create()` and `bulk_update()` read the tenant of every tenant-scoped row a
-  written relation names (one query per relation and statement) and raise `QueryError` when it is outside
+  written relation names (batched reads for each relation) and raise `QueryError` when it is outside
   the scope **of the related model** — from a tenant-scoped model and from a shared one alike, as M2M
   `add()` rejects such a row. With one value for every model that is "the related row is the active
   tenant's". A related model with no scope or with `Tenancy.ALL` isn't checked, nor are
@@ -298,7 +298,7 @@ model: left out, `create()` fills it with the scope's value. Under a scope of se
 
 ## <a id="soft-delete"></a>With `Meta.soft_delete_field`
 
-A model can set both options at once — `Manager.get_queryset()` adds both filters independently, so a
+A model can set both options at once — query preparation adds both filters independently, so a
 model with both configured gets both applied on every default-manager query. The two escape hatches don't
 imply each other, though: `all_tenants()` still respects `soft_delete_field` (soft-deleted rows stay
 hidden unless you *also* call `include_deleted()`), and `include_deleted()` still respects `tenant_field`
@@ -326,7 +326,8 @@ way to enforce "no two rows for the same resource can have overlapping ranges" �
 automatic tenant scoping added underneath. Two rows with the same `fields`/`expressions` values under
 *different* tenants will still collide unless you explicitly include the tenant column in the constraint
 yourself (e.g.
-`ExclusionConstraint(expressions=[("company_id", "="), ("resource", "="), ("during", "&&")])`).
+`ExclusionConstraint(name="tenant_resource_overlap",
+expressions=[("company_id", "="), ("resource", "="), ("during", "&&")])`).
 
 ## <a id="rollout"></a>Rollout
 
@@ -338,7 +339,7 @@ query** against that model — recommended rollout:
    the auto-filter — `all_tenants()` is your bridge for code you haven't updated yet.
 3. Only then move on to the next model.
 
-The filter above is enforced in Python, at the `Manager.get_queryset()` layer — a raw SQL query or a bug
+The filter above is enforced in Python, at the query preparation layer — a raw SQL query or a bug
 that bypasses the ORM's default manager isn't covered by it. On PostgreSQL the database itself can
 enforce it too — see [Row level security](#row-level-security).
 
@@ -389,8 +390,9 @@ config = {**HARE_CONFIG, "connections": {"default": "postgresql://app@localhost/
 - **Roles.** PostgreSQL doesn't apply row level security to a superuser or a role with `BYPASSRLS`, and
   applies it to the table's owner only with `RowLevelSecurity.FORCED` — connect as a role it applies to.
 - The Python-side filter stays as it is — the policy is a second check under it, not a replacement.
-- Changing `Meta.tenant_field` doesn't change the policy's text by itself — rename the policy in the same
-  change so the migration drops and creates it.
+- Changing `Meta.tenant_field` doesn't change the policy's text by itself. Explicitly recreate it with
+  `RemovePolicy` and `AddPolicy` in a handwritten migration, adding it after the state has the new
+  `tenant_field`. Renaming the policy only changes its name and does not rebuild its predicate.
 
 SQLite and ClickHouse have no row level security: `Policy` there raises `UnSupportedError` before any
 SQL.

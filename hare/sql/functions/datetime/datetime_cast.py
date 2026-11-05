@@ -1,18 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from hare.sql.builder_methods import BuilderMethods
 from hare.sql.enums import DatetimeCastTarget
 from hare.sql.terms.functions.function import Function
 from hare.sql.terms.term import Term
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from typing import Self
-
-    from hare.sql.builder.tables.table import Table
-    from hare.sql.terms.node import TNode
 
 
 class DatetimeCast(Function):
@@ -21,6 +11,9 @@ class DatetimeCast(Function):
     The value is cast at the zone - by a cast of the database, or hare's date-part function returning
     the date as ``YYYY-MM-DD`` and the time as fixed-width ``HH:MM:SS.ffffff`` text.
     """
+
+    structure_attributes = ("args", "target", "use_local_zone_when_naive", "zone_name")
+    has_repeatable_value = True
 
     requires_dialect_renderer = True
 
@@ -44,25 +37,10 @@ class DatetimeCast(Function):
         """
         super().__init__("CAST", term, alias=alias)
         self.target = target
-        self.field = term
         self.zone_name = zone_name
         self.use_local_zone_when_naive = use_local_zone_when_naive
 
-    def nodes_(self) -> Iterator[TNode]:
-        yield from super().nodes_()
-        yield from self.field.nodes_()
-
-    @BuilderMethods.builder
-    def replace_table(self, current_table: Table | None, new_table: Table | None) -> Self:
-        """Replaces all occurrences of the specified table with the new table.
-
-        Args:
-            current_table: The table to be replaced.
-            new_table: The table to replace with.
-
-        Returns:
-            A copy of the term with the tables replaced.
-        """
-        self.args = [parameter.replace_table(current_table, new_table) for parameter in self.args]
-        self.field = self.field.replace_table(current_table, new_table)
-        return self
+    @property
+    def field(self) -> Term:
+        """The source expression, stored as the function's first argument."""
+        return self.args[0]

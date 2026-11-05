@@ -10,7 +10,7 @@ import pytest_asyncio
 
 from hare import fields
 from hare.core.hare_context import HareContext
-from hare.exceptions import ConfigurationError, FieldError, QueryError
+from hare.exceptions import ConfigurationError, FieldError
 from hare.models import Model
 from hare.query.expressions import OuterReference, Q, Subquery
 from hare.query.functions import Count
@@ -158,7 +158,11 @@ class DeferredErrorAuthor(Model):
 
 @pytest.mark.database_independent
 @pytest.mark.asyncio
-async def test_init_reports_every_invalid_query_built_before_it():
+async def test_init_reports_every_invalid_query_built_before_it(monkeypatch):
+    from hare.query.queryset.pending_calls.calls_before_setup import CallsBeforeSetup
+
+    monkeypatch.setattr(CallsBeforeSetup, "PENDING", [])
+    previous_meta = DeferredErrorAuthor._meta
     misspelled_filter = DeferredErrorAuthor.objects.filter(no_such_name="Ann")
     misspelled_ordering = DeferredErrorAuthor.objects.all().order_by("no_such_name")
     recursive_union = (
@@ -167,8 +171,9 @@ async def test_init_reports_every_invalid_query_built_before_it():
         .with_recursive("children")
     )
     valid = DeferredErrorAuthor.objects.filter(name="Ann")
-    with pytest.raises(ConfigurationError, match="Hare ORM is not initialized"):
-        valid.sql()
+    async with HareContext():
+        with pytest.raises(ConfigurationError, match="DeferredErrorAuthor has no default connection"):
+            valid.sql()
     module_name = "tests._deferred_query_error_models"
     module = types.ModuleType(module_name)
     module.DeferredErrorAuthor = DeferredErrorAuthor  # type: ignore[attr-defined]
@@ -192,12 +197,12 @@ async def test_init_reports_every_invalid_query_built_before_it():
         )
         assert "Unknown field no_such_name for ordering: DeferredErrorAuthor has no field 'no_such_name'" in message
         assert "with_recursive() can't be used on a union()" in message
-        with pytest.raises(FieldError, match="has no field 'no_such_name'"):
-            misspelled_filter.sql()
-        with pytest.raises(FieldError, match="Unknown field no_such_name"):
-            misspelled_ordering.sql()
-        with pytest.raises(QueryError, match="with_recursive"):
-            recursive_union.sql()
+        assert DeferredErrorAuthor._meta is previous_meta
+        for query in (misspelled_filter, misspelled_ordering, recursive_union, valid):
+            assert query._calls_before_setup is not None
+            assert query in CallsBeforeSetup.PENDING
+            with pytest.raises(ConfigurationError, match="DeferredErrorAuthor has no default connection"):
+                query.sql()
     finally:
         await context.__aexit__(None, None, None)
         sys.modules.pop(module_name, None)

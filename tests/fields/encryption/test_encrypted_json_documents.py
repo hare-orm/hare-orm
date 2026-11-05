@@ -19,8 +19,6 @@ from hare.query.expressions import F
 from tests.fields.models_encrypted import EncryptedDocumentRecord
 from tests.utils.operations import apply_operations
 
-REQUIRES = ("encryption",)
-
 SECRET_KEY = "test-field-encryption-secret"
 NEW_SECRET_KEY = "test-field-encryption-secret-2"
 
@@ -235,7 +233,7 @@ async def test_alter_field_switching_encrypt_keys_rewrites_the_stored_keys(db_en
     )
     plain_field = EncryptedJSONField(null=True)
     try:
-        await apply_operations("models", state, create_model, schema_editor=editor)
+        state = await apply_operations("models", state, create_model, schema_editor=editor)
         documents = {number: {"n": number, "items": [{"k": str(number)}]} for number in range(1, row_count + 1)}
         if documents:
             await connection.execute_many(
@@ -289,7 +287,7 @@ async def test_sqlmigrate_tells_the_keys_are_rewritten_in_python(db_encrypted_fi
     connection = Connections.get("models")
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=True)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(
@@ -304,7 +302,7 @@ async def test_sqlmigrate_tells_the_keys_are_rewritten_in_python(db_encrypted_fi
         AlterField(model_name="KeysSwitch", name="document", field=EncryptedJSONField(null=True, encrypt_keys=True))
     ]
     await migration.apply(state, dry_run=False, schema_editor=editor)
-    assert any("rewritten in Python" in sql for sql in editor.collected_sql)
+    assert editor.collected_sql.count("-- KeysSwitch.document: rewrite every non-NULL stored value in Python.") == 1
 
 
 @pytest.mark.asyncio
@@ -315,7 +313,7 @@ async def test_alter_field_without_a_key_configured_leaves_the_rows_as_they_were
     table_name = "encrypted_keys_switch_no_key"
     editor = connection.dialect.schema_editor_class(connection, atomic=True, collect_sql=False)
     state = State()
-    await apply_operations(
+    state = await apply_operations(
         "models",
         state,
         CreateModel(

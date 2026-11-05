@@ -6,10 +6,8 @@ from collections.abc import AsyncGenerator, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from hare.contrib.test import ReusableTestDatabases
-from hare.core.connections.connection_handler import ConnectionHandler
+from hare.contrib.test.databases.temporary_databases import TemporaryDatabases
 from hare.core.hare_context import HareContext
-from hare.dialects.base.connection.db_url_config_generator import DbUrlConfigGenerator
 
 
 class MultiDatabaseTestContext:
@@ -40,23 +38,10 @@ class MultiDatabaseTestContext:
         Returns:
             The initialized context; schemas are not generated.
         """
-        is_reusing_databases = ReusableTestDatabases.is_enabled()
-        with ReusableTestDatabases.track_new_leases() as own_lease_number_by_database_name:
-            connections_config = {
-                alias: DbUrlConfigGenerator.expand(db_url, testing=True, reuse_databases=is_reusing_databases)
-                for alias in connection_aliases
-            }
-        try:
-            async with HareContext() as ctx:
-                await ctx.init(
-                    config={"connections": connections_config, "apps": apps}, routers=routers, _create_db=True
-                )
-                yield ctx
-        finally:
-            try:
-                cleanup_connections = ConnectionHandler()
-                cleanup_connections._init_config(dict(connections_config))
-                for connection in cleanup_connections.all():
-                    await connection.db_delete()
-            finally:
-                ReusableTestDatabases.release_leases(own_lease_number_by_database_name)
+        async with TemporaryDatabases(
+            {"connections": dict.fromkeys(connection_aliases), "apps": apps},
+            db_url,
+            generate_schemas=False,
+            routers=routers,
+        ) as context:
+            yield context

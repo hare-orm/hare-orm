@@ -98,7 +98,7 @@ async def test_replaced_live_model_class_is_garbage_collected_after_queries_and_
         await live_widget.objects.bulk_create([live_widget(name="c")])
         await live_widget.objects.filter(name="c").update(name="d")
         await widget.delete()
-        assert any(key[0] is live_widget for key in StatementPlans.plans)
+        assert StatementPlans.plans.get_model_bucket(live_widget)
         return weakref.ref(live_widget)
 
     async with HareContext():
@@ -149,49 +149,37 @@ async def test_serialize_instances_cache_isolates_replaced_model_into_its_own_bu
             HareConfig.from_db_url("sqlite+aiosqlite://:memory:", {"models": ["tests.shared_models.testmodels"]})
         )
 
-        # _compiled_instance_serializer() directly (mirroring this file's own
-        # get_backward_relations()/_apply_lazy_relation_defaults()/_make_query() calls above) -
-        # serialize_instances() itself would route through the Rust hydrate accelerator instead
-        # when it's built (as it is in this dev checkout), never touching this Python-only cache.
+        # Each replacement model keeps a serializer with its own bound fields.
         first_widget = build_live_widget()
         Hare.register_live_models([first_widget], app_label="gc_live_serialize")
         # A different class under the same name needs the old one unregistered first.
         Hare.unregister_live_models([first_widget])
-        first_serializer = BulkWriteBatches.get_compiled_instance_serializer(
-            first_widget, ("name",), SQLITE_DIALECT.types
-        )
+        first_serializer = BulkWriteBatches.get_instance_serializer(first_widget, ("name",), SQLITE_DIALECT.types)
 
         second_widget = build_live_widget()
         Hare.register_live_models([second_widget], app_label="gc_live_serialize")
-        second_serializer = BulkWriteBatches.get_compiled_instance_serializer(
-            second_widget, ("name",), SQLITE_DIALECT.types
-        )
+        second_serializer = BulkWriteBatches.get_instance_serializer(second_widget, ("name",), SQLITE_DIALECT.types)
 
-        assert first_widget in BulkWriteBatches.SERIALIZE_INSTANCES_CACHE
-        assert second_widget in BulkWriteBatches.SERIALIZE_INSTANCES_CACHE
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(first_widget)
+        assert BulkWriteBatches.SERIALIZE_INSTANCES_CACHE.get_model_bucket(second_widget)
         assert first_serializer is not second_serializer
 
 
 @pytest.mark.database_independent
 def test_iter_never_yields_a_key_the_cache_would_not_serve() -> None:
-    """Every key `__iter__()`/`keys()` yields must be retrievable through `__getitem__()` right
-    after - the standard `Mapping` contract, relied on by `for key in cache: cache[key]` here and
-    in tests/query_plans/test_query_shape_cache.py. An entry written under another query builder than its
-    model's current one is a miss for `__getitem__()`, so iteration skips it too; a model whose
-    entries were discarded yields nothing."""
+    """The global mapping serves every iterated key, including keys containing model classes."""
     cache: Cache[tuple[Any, ...]] = Cache(max_size=8)
     try:
         cache[(Author, "shape")] = ("author value",)
         cache[(Book, "shape")] = ("book value",)
-        # As if Author's entry had been rendered while another context's builder was bound.
-        Author._meta.plan_cache_buckets[id(cache)][(0, ("shape",))] = (object(), ("author value",))
-
         for key in cache:
             cache[key]  # must never raise KeyError for a key __iter__ itself just yielded
-        assert list(cache) == [(Book, "shape")]
-        assert len(cache) == 1
+        assert list(cache) == [(Author, "shape"), (Book, "shape")]
+        assert len(cache) == 2
 
         cache.forget_model(Book)
+        assert len(cache) == 2
+        cache.clear()
         assert list(cache) == []
         assert list(cache.keys()) == []
         assert len(cache) == 0
@@ -225,15 +213,15 @@ async def test_a_value_without_sql_is_served_whichever_builder_the_model_is_boun
     cache: Cache[str] = Cache(max_size=8, holds_sql=False)
     sql_cache: Cache[str] = Cache(max_size=8)
     try:
-        cache[(Author, "schema")] = "value"
-        sql_cache[(Author, "schema")] = "sql"
+        cache.get_model_bucket(Author)[("schema",)] = "value"
+        sql_cache.get_model_bucket(Author)[("schema",)] = "sql"
         # As if Author were bound to another context's builder.
         monkeypatch.setattr(Author._meta, "basequery", QueryBuilder())
-        assert cache[(Author, "schema")] == "value"
-        assert list(cache) == [(Author, "schema")]
-        assert (Author, "schema") not in sql_cache
+        assert cache.get_model_bucket(Author)[("schema",)] == "value"
+        assert list(cache.get_model_bucket(Author)) == [("schema",)]
+        assert ("schema",) not in sql_cache.get_model_bucket(Author)
         cache.forget_model(Author)
-        assert (Author, "schema") not in cache
+        assert ("schema",) not in cache.get_model_bucket(Author)
     finally:
         cache.clear()
         sql_cache.clear()

@@ -1,6 +1,6 @@
-"""A JOIN to a related model must be scoped by that model's FULL default Manager scope (whatever
-its ``Meta.manager.get_queryset()`` applies), not just ``Meta.tenant_field``/
-``Meta.soft_delete_field`` - exactly like ``related_model.objects.all()`` itself."""
+"""JOINs and root queries share the explicit row provider, tenant and soft-delete policies."""
+
+from unittest.mock import patch
 
 import pytest
 
@@ -9,7 +9,8 @@ from hare.exceptions import (
     QueryError,
 )
 from hare.models.tenancy.tenancy import Tenancy
-from hare.query.managers.manager import Manager
+from hare.query.expressions import F, Q
+from hare.query.scopes.row_scope_binding import RowScopeBinding
 from hare.query.scopes.row_scopes import RowScopes
 from hare.sql import Table
 from tests.shared_models.testmodels import (
@@ -117,7 +118,8 @@ async def test_m2m_related_model_custom_manager_filter(db):
 
 
 @pytest.mark.asyncio
-async def test_custom_manager_combined_with_tenant_and_soft_delete(db):
+@pytest.mark.parametrize("predicate", ["q", "boolean_f"])
+async def test_custom_manager_combined_with_tenant_and_soft_delete(db, predicate):
     with Tenancy.scope(1):
         visible = await TenantActiveAuthor.objects.create(name="Visible", company_id=1)
         inactive = await TenantActiveAuthor.objects.create(name="Inactive", company_id=1, is_active=False)
@@ -131,11 +133,37 @@ async def test_custom_manager_combined_with_tenant_and_soft_delete(db):
             # A cross-tenant link, written as trusted seed data.
             await TenantActiveAuthorBook.objects.create(title="OtherTenant", author_id=other_tenant.id)
 
-        books = {book.title: book for book in await TenantActiveAuthorBook.objects.all().select_related("author")}
-        assert books["Visible"].author is not None
-        assert books["Inactive"].author is None
-        assert books["Deleted"].author is None
-        assert books["OtherTenant"].author is None
+        provider = TenantActiveAuthor._meta.manager.scope
+        condition = F("is_active") if predicate == "boolean_f" else Q(is_active=True)
+        with patch.object(provider, "get_condition", return_value=condition):
+            assert await TenantActiveAuthor.objects.all() == [visible]
+            for query in (
+                TenantActiveAuthorBook.objects.all().select_related("author"),
+                TenantActiveAuthorBook.objects.all().prefetch_related("author"),
+            ):
+                books = {book.title: book for book in await query}
+                assert books["Visible"].author is not None
+                assert books["Inactive"].author is None
+                assert books["Deleted"].author is None
+                assert books["OtherTenant"].author is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["root", "join", "prefetch"])
+async def test_provider_rejects_non_boolean_field_expression(db, shape):
+    with Tenancy.scope(1):
+        author = await TenantActiveAuthor.objects.create(name="Visible", company_id=1)
+        await TenantActiveAuthorBook.objects.create(title="Visible", author=author)
+        if shape == "root":
+            query = TenantActiveAuthor.objects.all()
+        elif shape == "join":
+            query = TenantActiveAuthorBook.objects.select_related("author")
+        else:
+            query = TenantActiveAuthorBook.objects.prefetch_related("author")
+        provider = TenantActiveAuthor._meta.manager.scope
+        with patch.object(provider, "get_condition", return_value=F("name")):
+            with pytest.raises(QueryError, match="must return a boolean value"):
+                await query
 
 
 @pytest.mark.asyncio
@@ -219,7 +247,6 @@ async def test_join_scope_uses_the_tenant_active_when_awaited(db):
         pytest.param(
             CrossRelationScopedBook, "filters across a relation", id="cross_relation_default_scope_raises_clear_error"
         ),
-        pytest.param(AnnotatedScopedBook, "annotate", id="annotated_default_scope_raises_clear_error"),
     ],
 )
 @pytest.mark.asyncio
@@ -344,15 +371,14 @@ async def test_prefetch_and_select_related_agree_on_custom_manager_scope(db):
 
 @pytest.mark.asyncio
 async def test_join_scope_override_is_always_reset(db):
-    """The ContextVar published for the related model's get_queryset() call must never leak out -
-    neither after a normal JOIN build nor after one that raises."""
+    """Execution bindings are reset after both successful and failed JOIN compilation."""
     await _create_authors_and_books()
-    assert RowScopes.requested_visibility.get() is None
+    assert RowScopeBinding.current.get() is None
     await ActiveAuthorBook.objects.all().select_related("author")
-    assert RowScopes.requested_visibility.get() is None
+    assert RowScopeBinding.current.get() is None
     with pytest.raises(ConfigurationError):
-        await AnnotatedScopedBook.objects.all().select_related("author")
-    assert RowScopes.requested_visibility.get() is None
+        await CrossRelationScopedBook.objects.all().select_related("author")
+    assert RowScopeBinding.current.get() is None
     # A plain query on the custom-manager model itself, after the JOIN, is unaffected.
     assert await ActiveAuthor.objects.filter(name="Inactive") == []
 
@@ -372,8 +398,8 @@ async def test_default_manager_join_scope_unchanged_for_plain_tenant_model(db):
         widgets = {w.name: w for w in await TenantScopedWidget.objects.all().select_related("factory")}
     assert widgets["W1"].factory is not None
     assert widgets["W2"].factory is None
-    assert not Manager.has_custom_get_queryset(TenantScopedFactory)
-    assert Manager.has_custom_get_queryset(ActiveAuthor)
+    assert TenantScopedFactory._meta.manager.scope is None
+    assert ActiveAuthor._meta.manager.scope is not None
 
 
 @pytest.mark.asyncio
@@ -509,3 +535,14 @@ async def test_nested_isnull_treats_tenant_soft_delete_and_manager_hidden_target
             assert await TenantActiveReview.objects.exclude(**{lookup: True}).values_list("text", flat=True) == [
                 "visible"
             ]
+
+
+@pytest.mark.asyncio
+async def test_queryset_factory_annotations_are_not_an_implicit_join_policy(db):
+    from tests.shared_models.testmodels import AnnotatedScopedAuthor
+
+    author = await AnnotatedScopedAuthor.objects.create(name="Visible")
+    await AnnotatedScopedBook.objects.create(title="Book", author=author)
+    books = await AnnotatedScopedBook.objects.select_related("author")
+    assert books[0].author.name == "Visible"
+    assert (await AnnotatedScopedAuthor.objects.get(id=author.id)).shout == "Visible"
