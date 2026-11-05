@@ -25,9 +25,9 @@ dependencies = [
     # installed (hare.fields.data.json's own try/except ImportError) - no platform restriction,
     # unlike ciso8601 above. orjson 3.10 and 3.11 take a list or dict nested 255 deep, past the
     # 254 JSONField keeps without the native module.
-    "orjson (>=3.12.0)",
+    "orjson (>=3.13.0)",
     "aiosqlite (>=0.22.0,<1.0.0)",
-    "anyio (>=4.0.0)",
+    "anyio (>=4.16.0)",
     # TypeVar defaults (PEP 696) are in typing only from Python 3.13.
     "typing-extensions (>=4.12.0)",
     # Windows ships no system IANA timezone database, so zoneinfo.ZoneInfo() (hare.time.timezone,
@@ -56,7 +56,7 @@ classifiers = [
 
 [project.optional-dependencies]
 ipython = [
-    "ipython>=8.18.0",
+    "ipython>=9.18.1",
     "nest-asyncio>=1.6.0",
 ]
 # asyncpg 0.31.0 is the first with Python 3.14.
@@ -79,15 +79,15 @@ clickhouse-driver = [
     "clickhouse-cityhash (>=1.0.2.5) ; python_version < '3.15'",
 ]
 opentelemetry = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
-tzlocal = ["tzlocal>=5.0"]
+tzlocal = ["tzlocal>=5.4.5"]
 # HareConfig.from_config_file() reading a .yml/.yaml file.
 yaml = ["pyyaml (>=6.0.3)"]
 # hare.contrib.factories - Faker() declarations.
-faker = ["faker (>=20.0)"]
+faker = ["faker (>=40.44.0)"]
 # Fernet at-rest encryption for hare.fields.EncryptedTextField/EncryptedJSONField.
-encryption = ["cryptography>=42.0"]
+encryption = ["cryptography>=50.0.2"]
 # hare.fields.PhoneField reading a number in any form, with region=.
-phone = ["phonenumbers>=8.13"]
+phone = ["phonenumbers>=9.0.42"]
 # hare.dialects.sqlite.vectors - VectorField's distances on SQLite (load_sqlite_vec=True).
 sqlite-vec = ["sqlite-vec (>=0.1.6)"]
 # pydantic: a JSONField whose field_type is a pydantic model, hare.contrib.pydantic's schemas of the models
@@ -186,7 +186,7 @@ twine = "*"
 maturin = "*"
 types-PyYAML = "*"
 types-pytz = "*"
-pre-commit = "^4.6.2"
+pre-commit = "^4.7.0"
 
 # The groups hold tools only: a package of an extra is installed by the extra, so a test environment
 # (tests/matrix/constants.py SUITE_ENVIRONMENTS) installs exactly what its tests require.
@@ -215,7 +215,7 @@ pyright = "*"
 optional = true
 
 [tool.poetry.group.pytz.dependencies]
-pytz = ">=2025.2"
+pytz = ">=2026.6"
 
 [tool.poetry.group.docs.dependencies]
 mkdocs = "*"
