@@ -75,6 +75,8 @@ class PreparedOperationExecution:
         run = operation.database_backward if backward else operation.database_forward
 
         async def execute() -> None:
+            if not collect_sql:
+                await editor.prepare_schema()
             await cls.run_atomic(migration, operation, editor, lambda: run(migration.app_label, *states, editor))
 
         if collect_sql:

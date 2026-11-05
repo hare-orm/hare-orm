@@ -110,6 +110,14 @@ class ClickhouseSchemaEditor(BaseSchemaEditor):
         super().__init__(connection, atomic, collect_sql)
         self.database_engines = MappingProxyType(dict(database_engines)) if database_engines is not None else None
 
+    async def prepare_schema(self) -> None:
+        """Refresh database placement before live schema compilation, without changing offline facts."""
+        if self.collect_sql or self.database_engines is not None or self.client.cluster is None:
+            return
+        async with self.client.acquire_connection():
+            pass
+        await self.client.cluster.refresh_databases()
+
     def get_schema_cluster(self, schema: str | None = None) -> str | None:
         """Choose schema placement from the target database before formatting SQL."""
         cluster = self.client.cluster

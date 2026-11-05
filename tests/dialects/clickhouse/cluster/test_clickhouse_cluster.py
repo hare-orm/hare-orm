@@ -583,13 +583,23 @@ async def test_a_script_of_the_user_runs_as_written_and_one_hare_builds_on_every
     try:
         await connection.execute_script('CREATE TABLE "written_as_is" ("id" Int64) ENGINE = MergeTree ORDER BY "id"')
         assert await get_servers_of_table("written_as_is") == 1
-        await connection.execute_built_script(
-            'CREATE TABLE "built_by_hare" ("id" Int64) ENGINE = MergeTree ORDER BY "id"'
+        await apply_operations(
+            "models",
+            State(),
+            CreateModel(
+                name="BuiltByHare",
+                fields=[("id", fields.BigIntField(primary_key=True, generated=False))],
+                options={"table": "built_by_hare"},
+            ),
+            schema_editor=connection.dialect.schema_editor_class(connection),
         )
         assert await get_servers_of_table("built_by_hare") == 2
     finally:
         await connection.execute_script('DROP TABLE IF EXISTS "written_as_is"')
-        await connection.execute_built_script('DROP TABLE IF EXISTS "built_by_hare"')
+        table = connection.dialect.schema_editor_class(connection).qualify_table_name(
+            "built_by_hare", connection.database
+        )
+        await connection.execute_built_script(f"DROP TABLE IF EXISTS {table} ON CLUSTER hare_sharded SYNC")
 
 
 @pytest.mark.asyncio

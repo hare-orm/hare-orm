@@ -149,14 +149,18 @@ async def test_pools_of_equal_attributes_are_summed_and_events_survive_closure(d
         (create_time,) = get_points(data, "db.client.connection.create_time", **independent)
         assert wait_time.count >= 2
         assert create_time.count >= 2
+        # Older SDKs export a cumulative histogram only when new measurements arrived.
+        # Leave one uncollected event to verify its history after both pools disappear.
+        await first.execute_dicts("SELECT 1 AS one")
     finally:
         await first.close()
         await second.close()
         for directory in (first_directory, second_directory):
             if directory is not None:
                 directory.cleanup()
-    assert get_points(metric_reader.get_metrics_data(), "db.client.connection.max", **independent) == []
-    assert get_points(metric_reader.get_metrics_data(), "db.client.connection.wait_time", **independent)[0].count >= 2
+    data = metric_reader.get_metrics_data()
+    assert get_points(data, "db.client.connection.max", **independent) == []
+    assert get_points(data, "db.client.connection.wait_time", **independent)[0].count == wait_time.count + 1
 
 
 @pytest.mark.asyncio

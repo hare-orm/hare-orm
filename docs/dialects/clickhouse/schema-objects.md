@@ -14,6 +14,8 @@ database
 propagates schema changes itself; mutations of distributed rows still address storage on all shards.
 
 A connected client captures database engines and refreshes them at schema-operation boundaries.
+Live asynchronous schema operations open the connection and refresh this snapshot before compilation,
+including after databases were created with raw SQL.
 Offline schema compilation with a cluster needs an explicit catalog snapshot:
 `ClickhouseSchemaEditor(connection, collect_sql=True, database_engines={"analytics": "Atomic"})`.
 Include each target database. An unknown engine is reported before rendering, rather than assumed.

@@ -74,6 +74,8 @@ class ClickhouseShadowDatabase(ShadowDatabase):
                     )
             self.client = self.connection.create_independent_client({"database": self.prefix})
             self.cleanup.push_async_callback(self.client.close)
+            async with self.client.acquire_connection():
+                pass
         except BaseException as error:
             # No __aexit__() follows a failed __aenter__() - the shadows created so far are dropped here.
             await self.__aexit__(type(error), error, error.__traceback__)

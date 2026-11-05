@@ -3,6 +3,7 @@ L2Distance/CosineDistance/InnerProduct and ``__nearby`` through the sqlite-vec e
 (``load_sqlite_vec=True``) - the tests needing the extension in the environment installing sqlite-vec."""
 
 import math
+import sqlite3
 from array import array
 
 import pytest
@@ -24,6 +25,8 @@ requires_sqlite_vec = pytest.mark.requires("sqlite-vec")
 
 @pytest_asyncio.fixture(scope="module")
 async def vector_db_module():
+    if not hasattr(sqlite3.Connection, "enable_load_extension"):
+        pytest.skip("this Python's SQLite was built without loadable extensions")
     async with hare_test_context(MODULES, db_url="sqlite+aiosqlite://:memory:?load_sqlite_vec=true") as context:
         yield context
 

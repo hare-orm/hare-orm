@@ -5,6 +5,7 @@ redirect followed."""
 import asyncio
 import hashlib
 import hmac
+from contextlib import suppress
 from urllib.parse import urlsplit
 
 import pytest
@@ -45,12 +46,15 @@ async def test_receiver_closes_incomplete_requests_at_context_exit(monkeypatch, 
             await entered.wait()
             handlers = tuple(receiver.handlers)
         assert handlers and all(handler.done() for handler in handlers)
-        assert await reader.read() == b""
+        # Closing an incomplete TCP request can produce EOF or a reset on the peer.
+        with suppress(ConnectionResetError):
+            assert await reader.read() == b""
         assert receiver.handlers == {}
     finally:
         if writer is not None:
             writer.close()
-            await writer.wait_closed()
+            with suppress(ConnectionResetError):
+                await writer.wait_closed()
 
 
 async def enqueue_for(url: str, secret: str | None = None) -> SubscriberOutboxEvent:

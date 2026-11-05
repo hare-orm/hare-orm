@@ -1,7 +1,8 @@
 """Mutation placement is compiled from declarations and scoped to its connection."""
 
+from contextlib import asynccontextmanager
 from functools import partial
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -201,11 +202,64 @@ async def test_schema_compilation_selects_storage_and_companion_before_rendering
         assert f'ALTER TABLE {logical} MODIFY COLUMN "rating"' in not_null.steps[1].sql
         assert all(step.recovery is None for step in not_null.steps)
         assert editor.table_clearing_class.get_model_target_sql(editor, model) == storage
+        flush = editor.table_rebuild.get_distributed_flush_plan(model)
+        database = prefix or '"default".'
+        assert flush.steps[0].sql == f'SYSTEM FLUSH DISTRIBUTED {database}"book" ON CLUSTER "alpha"'
         execute_script = AsyncMock()
         monkeypatch.setattr(connection, "execute_script", execute_script)
         raw = """ALTER TABLE "book" COMMENT COLUMN "rating" 'ON CLUSTER literal' """
         await connection.execute_built_script(raw)
         execute_script.assert_awaited_once_with(raw)
+    finally:
+        await Hare.close_connections()
+        context.__exit__(None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires("clickhouse-connect")
+@pytest.mark.parametrize("collect_sql,explicit_engines", [(False, None), (True, None), (False, {"default": "Atomic"})])
+async def test_schema_preparation_refreshes_live_facts_and_preserves_offline_compilation(
+    collect_sql, explicit_engines, monkeypatch
+):
+    pytest.importorskip("clickhouse_connect")
+    from hare.dialects.clickhouse.cluster.clickhouse_cluster import ClickhouseCluster
+    from hare.dialects.clickhouse.schema.clickhouse_schema_editor import ClickhouseSchemaEditor
+
+    context = await Hare.init(
+        {
+            "connections": {"default": "clickhouse+clickhouse-connect://localhost/default?cluster=alpha"},
+            "apps": {},
+        },
+        connect=False,
+    )
+    try:
+        connection = context.connections.get("default")
+        events = []
+
+        @asynccontextmanager
+        async def acquire_connection():
+            events.append("open")
+            yield None
+
+        async def refresh_databases(cluster):
+            events.append("refresh")
+            cluster.database_engines = MappingProxyType({"default": "Atomic", "library": "Replicated"})
+
+        monkeypatch.setattr(connection, "acquire_connection", acquire_connection)
+        monkeypatch.setattr(ClickhouseCluster, "refresh_databases", refresh_databases)
+        editor = ClickhouseSchemaEditor(connection, collect_sql=collect_sql, database_engines=explicit_engines)
+        await editor.prepare_schema()
+        if collect_sql or explicit_engines is not None:
+            assert events == []
+            assert connection.cluster.database_engines is None
+        else:
+            assert events == ["open", "refresh"]
+            assert editor.get_schema_cluster() == "alpha"
+            assert editor.get_schema_cluster("library") is None
+            assert events == ["open", "refresh"]
+            connection.cluster.database_engines = None
+            await editor.prepare_schema()
+            assert events == ["open", "refresh", "open", "refresh"]
     finally:
         await Hare.close_connections()
         context.__exit__(None, None, None)

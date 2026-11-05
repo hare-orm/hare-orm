@@ -233,6 +233,13 @@ class BaseSchemaEditor:
         """Compile the same mutation target used by a migration's row assignment."""
         return None
 
+    async def prepare_schema(self) -> None:
+        """Prepare dialect catalog facts before an asynchronous schema operation compiles SQL.
+
+        The base editor needs no additional facts. Dialects load their connection-specific
+        metadata here; synchronous plan builders and offline SQL collection perform no I/O.
+        """
+
     async def run_sql(self, sql: str, *, recovery: StatementRecovery | None = None) -> None:
         """Runs a DDL statement - a dialect's editor runs it its own way where it needs to.
 
@@ -361,6 +368,7 @@ class BaseSchemaEditor:
         Args:
             model: The model.
         """
+        await self.prepare_schema()
         await self.table_creation.get_create_plan(model).execute(self)
 
     async def rename_table(self, model: type[Model], old_name: str, new_name: str) -> None:
@@ -371,6 +379,7 @@ class BaseSchemaEditor:
             old_name: The table's name.
             new_name: Its new name.
         """
+        await self.prepare_schema()
         await self.get_table_rename_plan(model, old_name, new_name).execute(self)
 
     def get_table_rename_plan(self, model: type[Model], old_name: str, new_name: str) -> SchemaChangePlan:
@@ -387,6 +396,7 @@ class BaseSchemaEditor:
         Args:
             model: The model.
         """
+        await self.prepare_schema()
         await self.get_delete_model_plan(model).execute(self)
 
     def get_model_view_drop_sqls(self, model: type[Model], *, if_exists: bool = True) -> list[str]:
@@ -472,6 +482,7 @@ class BaseSchemaEditor:
                 without checking the existing rows (``get_foreign_key_not_valid_plan()``) -
                 a later ``get_constraint_validation_plan()`` checks them.
         """
+        await self.prepare_schema()
         await self.get_add_field_plan(
             old_model, new_model, field_name, foreign_key_not_valid=foreign_key_not_valid
         ).execute(self)
@@ -580,6 +591,7 @@ class BaseSchemaEditor:
         Raises:
             ConfigurationError: A generated field changes.
         """
+        await self.prepare_schema()
         await self.get_alter_column_plan(model, old_field, new_field).execute(self)
 
     def get_alter_column_plan(
@@ -880,6 +892,7 @@ class BaseSchemaEditor:
             candidate_referencing_models: Models of the target state that may hold relations to
                 `new_model` - a changed column type is carried over to their key columns.
         """
+        await self.prepare_schema()
         await self.get_alter_field_plan(old_model, new_model, field_name, candidate_referencing_models).execute(self)
 
     def get_alter_field_plan(
@@ -1016,6 +1029,7 @@ class BaseSchemaEditor:
             new_model: The model rendered from the state without it.
             field: The field, of ``old_model``.
         """
+        await self.prepare_schema()
         await self.get_remove_field_plan(old_model, new_model, field).execute(self)
 
     def get_remove_field_plan(
@@ -1053,6 +1067,7 @@ class BaseSchemaEditor:
             concurrently: Build it without blocking writes - on a dialect that can
                 (``Features.supports_concurrent_indexes``); elsewhere it is built the plain way.
         """
+        await self.prepare_schema()
         await self.get_add_index_plan(model, index, concurrently=concurrently).execute(self)
 
     def get_add_index_plan(self, model: type[Model], index: Index, concurrently: bool = False) -> SchemaChangePlan:
@@ -1069,6 +1084,7 @@ class BaseSchemaEditor:
             concurrently: Drop it without blocking reads and writes - on a dialect that can
                 (``Features.supports_concurrent_indexes``); elsewhere it is dropped the plain way.
         """
+        await self.prepare_schema()
         await self.get_remove_index_plan(model, index, concurrently=concurrently).execute(self)
 
     def get_remove_index_plan(self, model: type[Model], index: Index, concurrently: bool = False) -> SchemaChangePlan:
@@ -1083,6 +1099,7 @@ class BaseSchemaEditor:
             old_index: The index as declared before.
             new_index: The index as declared now.
         """
+        await self.prepare_schema()
         await self.get_rename_index_plan(model, old_index, new_index).execute(self)
 
     def get_rename_index_plan(self, model: type[Model], old_index: Index, new_index: Index) -> SchemaChangePlan:
@@ -1121,6 +1138,7 @@ class BaseSchemaEditor:
             model: The model.
             constraint: The constraint.
         """
+        await self.prepare_schema()
         await self.get_add_constraint_plan(model, constraint).execute(self)
 
     def get_add_constraint_plan(
@@ -1168,6 +1186,7 @@ class BaseSchemaEditor:
             model: The model.
             constraint: The constraint.
         """
+        await self.prepare_schema()
         await self.get_remove_constraint_plan(model, constraint).execute(self)
 
     def get_remove_constraint_plan(
@@ -1219,6 +1238,7 @@ class BaseSchemaEditor:
             old_constraint: The constraint as declared before.
             new_constraint: The constraint as declared now.
         """
+        await self.prepare_schema()
         await self.get_rename_constraint_plan(model, old_constraint, new_constraint).execute(self)
 
     def get_rename_constraint_plan(

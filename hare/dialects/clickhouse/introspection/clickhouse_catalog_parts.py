@@ -69,10 +69,11 @@ class ClickhouseCatalogParts:
     def get_index_definition(row: dict[str, Any]) -> dict[str, Any]:
         """Compare omitted native index arguments with their explicit defaults.
 
-        Keep every observed property and the immutable snapshot's original text. Only a
-        recognized argument-free index type is expanded; unknown declarations remain exact.
+        Keep the immutable snapshot's original text. Normalize the catalog's optional
+        outer expression parentheses and expand recognized argument-free index defaults.
         """
         definition = dict(row)
+        definition["expr"] = ClickhouseSqlParts.get_unwrapped(row["expr"])
         defaults = CLICKHOUSE_INDEX_TYPE_ARGUMENT_DEFAULTS.get(row["type"])
         if defaults and row["type_full"] == row["type"]:
             arguments = ", ".join(defaults[name] for name in CLICKHOUSE_INDEX_TYPE_ARGUMENTS[row["type"]])

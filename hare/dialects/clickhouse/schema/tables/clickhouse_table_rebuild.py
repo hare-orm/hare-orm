@@ -119,7 +119,9 @@ class ClickhouseTableRebuild(TableRebuild):
             return SchemaChangePlan(())
         cluster = client.cluster.name if client.cluster is not None else None
         sql = CLICKHOUSE_FLUSH_DISTRIBUTED_TEMPLATE.format(
-            table=self.editor.qualify_table_name(model._meta.db_table, model._meta.schema),
+            table=self.editor.qualify_table_name(
+                model._meta.db_table, model._meta.schema or client.database or CLICKHOUSE_DEFAULT_DATABASE
+            ),
             on_cluster=ClickhousePlacementPlan.get_cluster_sql(cluster, client.sql_context),
         )
         return SchemaChangePlan((SchemaStatement(sql),))

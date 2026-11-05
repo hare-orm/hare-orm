@@ -5,6 +5,10 @@ an existing schema, and migrations.
 
 ## <a id="schema-editor"></a>8. DDL: the schema editor
 
+Asynchronous schema operations call `await editor.prepare_schema()` before compiling their plans.
+A dialect can load connection metadata there; the base implementation does nothing. Synchronous
+plan builders and renderers perform no I/O. SQL collection uses explicit offline metadata instead.
+
 `TableDefinition` prepares a table's columns, constraints, storage clauses and comments for the
 same CREATE compiler in initial creation and table replacement. `TableCreation.get_create_plan()`
 prepares the complete creation, including triggers, before any command is sent. Its immutable

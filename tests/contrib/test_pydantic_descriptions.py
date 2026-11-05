@@ -96,7 +96,7 @@ async def test_schema_description_tracks_inheritance_aliases_rebuild_and_recursi
             writer: str = Field(validation_alias=AliasChoices("cached_name", AliasPath("author", "name")))
 
         class ByName(PydanticModel):
-            model_config = {"validate_by_alias": False, "validate_by_name": True}
+            model_config = {"populate_by_name": True, "validate_by_alias": False, "validate_by_name": True}
             source_model: ClassVar = book
             author: author_schema = Field(validation_alias="unavailable")
 

@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -46,6 +47,7 @@ def editor():
         collected_sql=[],
         events=events,
         check_constraints=check_constraints,
+        prepare_schema=AsyncMock(),
     )
 
 
