@@ -2,6 +2,8 @@ import pytest
 
 from hare import fields
 from hare.contrib.test import requires_features
+from hare.dialects.base.types.type_mapping import TypeMapping
+from hare.dialects.base.types.type_registry import TypeRegistry
 from hare.dialects.postgresql.constants import POSTGRESQL_DIALECT
 from hare.exceptions import UnSupportedError, ValidationError
 from hare.fields import ArrayField
@@ -703,3 +705,138 @@ def test_a_bulk_load_of_an_array_of_a_sized_type_is_refused_before_the_driver(ba
     assert column_type.endswith("[]")
     assert not parameters.supports_copy_column_type(column_type)
     assert parameters.supports_copy_column_type(parameters.get_copy_column_type(base_field))
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("count", [2, 8, 32])
+@pytest.mark.parametrize("operation", ["read", "write"])
+@pytest.mark.parametrize("dispatch", ["field", "mapping", "value_method", "selector", "child_hook", "binder"])
+def test_array_codecs_keep_custom_dispatch_nulls_and_callback_order(count, operation, dispatch, monkeypatch):
+    events = []
+
+    class RecordingInt(fields.IntField):
+        def to_db_value(self, value, instance):
+            events.append(("write", value, instance))
+            return super().to_db_value(value, instance)
+
+        def from_db_value(self, value):
+            events.append(("read", value))
+            return super().from_db_value(value)
+
+    class HookArray(ArrayField):
+        def encode_child(self, *args, **kwargs):
+            events.append(("child_write", args[1]))
+            return super().encode_child(*args, **kwargs)
+
+        def decode_child(self, *args, **kwargs):
+            events.append(("child_read", args[1]))
+            return super().decode_child(*args, **kwargs)
+
+    child = RecordingInt(null=True)
+    field = (HookArray if dispatch == "child_hook" else ArrayField)(child)
+    types = TypeRegistry()
+    if dispatch == "mapping":
+
+        def write(field, value, instance):
+            events.append(("mapped_write", value))
+            return field.to_db_value(value, instance)
+
+        def read(field, value):
+            events.append(("mapped_read", value))
+            return field.from_db_value(value)
+
+        types.register(RecordingInt, TypeMapping(to_db=write, to_python=read))
+    elif dispatch in {"value_method", "selector"}:
+        method_name = (
+            ("get_db_value" if operation == "write" else "get_python_value")
+            if dispatch == "value_method"
+            else ("get_db_converter" if operation == "write" else "get_python_converter")
+        )
+        original = getattr(types, method_name)
+
+        def tracked(*args):
+            events.append((method_name, *args))
+            return original(*args)
+
+        monkeypatch.setattr(types, method_name, tracked)
+    elif dispatch == "binder":
+
+        def unexpected_binding(*args):
+            pytest.fail("Per-value conversion must not switch to a custom binding helper")
+
+        monkeypatch.setattr(
+            types, "get_db_writer" if operation == "write" else "get_python_reader", unexpected_binding
+        )
+    values = [None if index % 3 == 0 else index for index in range(count)]
+    if operation == "write":
+        expected = [
+            field.encode_child(child, value, None, types, f"numbers[{index}]") for index, value in enumerate(values)
+        ]
+    else:
+        expected = [field.decode_child(child, value, types) for value in values]
+    expected_events = list(events)
+    events.clear()
+    actual = (
+        field.encode_value(values, None, types, "numbers")
+        if operation == "write"
+        else field.decode_value(values, types)
+    )
+    assert actual == expected
+    assert events == expected_events
+
+
+@pytest.mark.database_independent
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_array_codec_stops_at_the_first_element_error(operation):
+    visited = []
+
+    class CheckedInt(fields.IntField):
+        def to_db_value(self, value, instance):
+            visited.append(value)
+            return super().to_db_value(value, instance)
+
+        def from_db_value(self, value):
+            visited.append(value)
+            if value == "bad":
+                raise ValueError("unreadable element")
+            return super().from_db_value(value)
+
+    field = ArrayField(CheckedInt())
+    values = [0, 1, 2, "bad", 4, 5, 6, 7]
+    with pytest.raises((ValidationError, ValueError)) as caught:
+        if operation == "write":
+            field.encode_value(values, None, TypeRegistry(), "numbers")
+        else:
+            field.decode_value(values, TypeRegistry())
+    assert visited == values[:4]
+    if operation == "write":
+        assert "numbers[3]" in str(caught.value)
+    else:
+        assert str(caught.value) == "unreadable element"
+
+
+@pytest.mark.database_independent
+def test_array_reader_retains_unsized_iterables_and_nested_conversion():
+    types = TypeRegistry()
+    field = ArrayField(fields.IntField(null=True))
+    values = (str(index) if index % 3 else None for index in range(12))
+    assert field.decode_value(values, types) == [index if index % 3 else None for index in range(12)]
+    nested = ArrayField(field)
+    assert nested.decode_value([[str(index)] * 8 for index in range(8)], types) == [[index] * 8 for index in range(8)]
+
+
+@pytest.mark.database_independent
+def test_array_codecs_do_not_require_custom_lists_to_report_their_length():
+    class NoTypeComparison(type):
+        def __eq__(cls, other):
+            raise AssertionError("Eligibility must not invoke custom class equality")
+
+    class UnsizedList(list, metaclass=NoTypeComparison):
+        def __len__(self):
+            raise AssertionError("The per-element path does not inspect collection length")
+
+    types = TypeRegistry()
+    field = ArrayField(fields.IntField())
+    values = UnsizedList(range(12))
+    assert field.decode_value(values, types) == list(range(12))
+    assert field.encode_value(values, None, types, "numbers") == list(range(12))

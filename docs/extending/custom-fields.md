@@ -8,7 +8,12 @@ Container subclasses implement `encode_value(value, instance, types, path)`,
 `decode_value(value, types)` and `normalize_value(value, path)`. These hooks apply
 to root columns and nested values. The explicit `types` argument supplies child
 conversions, and `path` identifies the nested value in an error. Dialect container
-conversion does not select behavior by comparing method identities.
+conversion calls these hooks for both root and nested values.
+
+Long arrays of scalar values can bind a standard registry's element reader or writer once.
+Each non-NULL value still calls the field conversion in input order; write validation and
+indexed errors use the same child handler. Custom registry value/selection methods and
+custom child handlers retain per-element dispatch. Small arrays use that path as well.
 
 `JSONField.prepare_value()` validates a declared type and checks the document before
 encoding. The default encoder receives its JSON representation; a custom encoder
@@ -18,6 +23,12 @@ codec preserves integers beyond 64 bits. Optional JSON acceleration runs only af
 this preparation and does not change field policy or the raw driver API.
 
 A field of your own subclasses `hare.fields.Field`.
+
+Result readers select column keys and conversions before reading rows. If a driver returns a field's
+native Python type and the field declares `keeps_native_db_values = True`, that value needs no further
+conversion. `BooleanField` uses this for native booleans; a driver returning integers still converts them.
+Overriding `to_python()` or `from_db_value()` disables this shortcut for the subclass unless it explicitly
+declares `keeps_native_db_values = True` again. Registered dialect conversions retain priority.
 
 ## <a id="overrides"></a>What a field overrides
 

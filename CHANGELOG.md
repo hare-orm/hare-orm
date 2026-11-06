@@ -58,6 +58,8 @@ renames that section to its version and date.
 
 ### Changed
 
+- Reduce repeated work in query cloning, row materialization and bulk key/array conversion while preserving
+  custom conversion hooks and validation.
 - Connection clones retain effective construction settings; transactions, migrations and integrations use
   their owning context instead of an unrelated ambient connection.
 - Migration preparation snapshots declarations and assembles schema changes before execution; progress

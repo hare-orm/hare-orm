@@ -24,6 +24,7 @@ class PreparedBulkInsert:
     Consecutive key shapes stay in input order, including bulk loads. Each strategy
     binds its values and computes its actual chunks once. Returned-row matching uses
     the metadata retained for that exact chunk rather than rebuilding the grouping.
+    Calls without database-default candidates share one empty omission shape.
     """
 
     def __init__(self, bulk_create: BulkCreateQuery[Any], *, parameters_inline: bool = False) -> None:
@@ -39,12 +40,17 @@ class PreparedBulkInsert:
             or BulkCreateReports.reports_returned_rows(bulk_create)
             or bulk_create._connection.features.execute_many_scales_poorly
         )
+        empty_omitted_fields: frozenset[str] = frozenset()
         shapes = (
             (
                 obj,
                 (
                     obj._custom_generated_pk,
-                    frozenset(name for name in default_fields if isinstance(getattr(obj, name), DatabaseDefault)),
+                    (
+                        frozenset(name for name in default_fields if isinstance(getattr(obj, name), DatabaseDefault))
+                        if default_fields
+                        else empty_omitted_fields
+                    ),
                 ),
             )
             for obj in bulk_create._objects

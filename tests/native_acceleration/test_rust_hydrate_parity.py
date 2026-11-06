@@ -14,6 +14,7 @@ from hare.fields.data.choices import CharEnumFieldInstance, IntEnumFieldInstance
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 from tests.shared_models.testmodels import (
     BooleanFields,
     Currency,
@@ -33,9 +34,11 @@ from tests.utils.timezone_context import override_timezone
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize(
     ("field_class", "args"),
     [
+        (fields.BooleanField, ()),
         (fields.DatetimeField, ()),
         (fields.DateField, ()),
         (fields.TimeField, ()),
@@ -47,7 +50,7 @@ from tests.utils.timezone_context import override_timezone
         (CharEnumFieldInstance, (Currency,)),
     ],
 )
-def test_hydration_calls_custom_field_reader(field_class, args):
+def test_hydration_calls_custom_field_reader(field_class, args, native):
     calls = []
     converted = object()
 
@@ -57,9 +60,10 @@ def test_hydration_calls_custom_field_reader(field_class, args):
             return converted
 
     field = CustomField(*args)
-    reader = HydrationLayout.get_field_reader(field, SQL_DIALECT.types, frozenset())
+    native_types = frozenset({field.field_type}) if native else frozenset()
+    reader = HydrationLayout.get_field_reader(field, SQL_DIALECT.types, native_types)
     raw = object()
-    assert RowColumn(0, reader).read((raw,)) is converted
+    assert RowLayout((RowColumn(0, reader),)).read((raw,))[0] is converted
     assert calls == [raw]
 
 

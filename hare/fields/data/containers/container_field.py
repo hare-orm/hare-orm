@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hare.exceptions import ValidationError
@@ -222,6 +223,8 @@ class ContainerField(Field[Any]):
         instance: type[Model] | Model | None,
         types: TypeRegistry | None,
         path: str,
+        *,
+        writer: Callable[[Any, Any], Any] | None = None,
     ) -> Any:
         """The value bound for one held value.
 
@@ -231,6 +234,9 @@ class ContainerField(Field[Any]):
             instance: The model (class) it is written or compared for.
             types: The dialect's types; None for the fields' own.
             path: The path to the held value.
+            writer: A field writer already bound from the standard registry for several
+                scalar elements. None retains per-value registry dispatch. NULL handling,
+                nested-container dispatch and indexed validation errors use the same path.
 
         Returns:
             The value to bind.
@@ -249,7 +255,7 @@ class ContainerField(Field[Any]):
         try:
             if types is None:
                 return child_field.to_db_value(value, instance)
-            return types.get_db_value(child_field, value, instance)
+            return types.get_db_value(child_field, value, instance) if writer is None else writer(value, instance)
         except ValidationError as error:
             # The held field is bound to no model: its own message names no field - the path does.
             message = str(error).removeprefix(f"{child_field.model_field_name}: ").removeprefix(": ")

@@ -93,3 +93,7 @@ INSTANCE_STATE_ATTRIBUTE_NAMES = frozenset(
 WRITE_RESTORE_FAILURES_MESSAGE = "Write failed and instance restoration also failed"
 
 REFRESH_RESTORE_FAILURES_MESSAGE = "Refresh failed and instance restoration also failed"
+
+#: Bind stored-key codecs only for batches large enough to amortize their preparation,
+#: including container keys whose write/read conversion costs more than registry lookup.
+MIN_STORED_KEY_CODEC_BATCH_SIZE = 8

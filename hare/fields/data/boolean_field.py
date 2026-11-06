@@ -19,6 +19,7 @@ class BooleanField(Field[TBool]):
 
     field_type = bool
     SQL_TYPE = "BOOL"
+    keeps_native_db_values = True
 
     @overload
     def __init__(self: BooleanField[bool], *, null: Literal[False] = False, **kwargs: Any) -> None: ...

@@ -18,6 +18,7 @@ pytestmark = pytest.mark.database_independent
 
 @pytest.mark.parametrize("row_type", [DictRows, TupleRows, FlatRows, NamedRows])
 @pytest.mark.parametrize("by_position", [False, True])
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize(
     ("aliases", "expected_values", "expected_calls"),
     [
@@ -26,7 +27,7 @@ pytestmark = pytest.mark.database_independent
     ],
     ids=["scalar", "composite"],
 )
-def test_result_shapes_share_column_decoding(row_type, by_position, aliases, expected_values, expected_calls):
+def test_result_shapes_share_column_decoding(row_type, by_position, native, aliases, expected_values, expected_calls):
     reader = row_type(("target",), (aliases,))
     calls = []
 
@@ -34,9 +35,12 @@ def test_result_shapes_share_column_decoding(row_type, by_position, aliases, exp
         calls.append(value)
         return None if value is None else int(value)
 
-    converters = [(alias, decode) for alias in aliases]
+    converters = [(alias, None if native else decode) for alias in aliases]
     names = ("ignored", "second", "first")
     values = [(99, "2", "1"), (99, None, None), (99, None, "3")]
+    if native:
+        values = [(99, 2, 1), (99, None, None), (99, None, 3)]
+    original_values = list(values)
     rows = values if by_position else [dict(zip(names, row, strict=True)) for row in values]
     original_rows = [row.copy() if isinstance(row, dict) else row for row in rows]
     result = StatementResult(len(rows), rows, description=tuple((name,) for name in names))
@@ -50,9 +54,9 @@ def test_result_shapes_share_column_decoding(row_type, by_position, aliases, exp
         assert actual == [(value,) for value in expected_values]
         if row_type is NamedRows:
             assert [row.target for row in actual] == expected_values
-    assert calls == expected_calls
+    assert calls == ([] if native else expected_calls)
     assert rows == original_rows
-    assert values == [(99, "2", "1"), (99, None, None), (99, None, "3")]
+    assert values == original_values
 
 
 @pytest.mark.parametrize("by_position", [False, True])

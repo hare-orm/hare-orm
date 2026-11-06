@@ -51,6 +51,10 @@ class SpecificationCopying:
     ) -> None:
         """Copy the selected class's state into an already allocated query.
 
+        A standard QuerySet's fresh slot dictionary already contains exactly its declared state,
+        apart from execution-origin bookkeeping. Other classes use the selected class's slot order
+        and subset, preserving custom setters and transfers between different query classes.
+
         Args:
             source: The state being copied.
             target: The independent destination.
@@ -60,12 +64,19 @@ class SpecificationCopying:
         # Bypass query subclasses' pickle hooks; Python supplies mangled names and omits unset slots.
         state = object.__getstate__(source)
         slot_values = state[1] if isinstance(state, tuple) else {}
-        SpecificationCopying.copy_slots(
-            {
+        from hare.query.queryset.queryset import QuerySet
+
+        if type(source) is QuerySet and type(target) is QuerySet and specification_class is QuerySet:
+            for name in UNCOPIED_QUERY_SLOTS:
+                slot_values.pop(name, None)
+        else:
+            slot_values = {
                 name: slot_values[name]
                 for name in SpecificationCopying.get_slot_names(specification_class)
                 if name in slot_values
-            },
+            }
+        SpecificationCopying.copy_slots(
+            slot_values,
             target,
             specification_class.mutable_clone_slots,
         )

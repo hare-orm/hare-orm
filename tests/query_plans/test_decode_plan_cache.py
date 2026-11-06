@@ -58,15 +58,19 @@ def _build(queryset):
 
 @pytest.mark.database_independent
 @pytest.mark.parametrize("cache_path", ["row_columns", "prepared_columns", "decode_plan", "statement", "calls"])
-def test_cached_readers_follow_native_result_types(cache_path):
-    class ConvertedInt(fields.IntField):
+@pytest.mark.parametrize(
+    ("field_class", "field_type", "raw", "converted"),
+    [(fields.IntField, int, 7, 107), (fields.BooleanField, bool, False, True)],
+)
+def test_cached_readers_follow_native_result_types(cache_path, field_class, field_type, raw, converted):
+    class ConvertedField(field_class):
         keeps_native_db_values = True
 
         def from_db_value(self, value):
-            return value + 100
+            return converted
 
     class Number(Model):
-        number = ConvertedInt()
+        number = ConvertedField()
 
     module = ModuleType("native_reader_cache_models")
     module.Number = Number
@@ -79,8 +83,9 @@ def test_cached_readers_follow_native_result_types(cache_path):
         # No connection is opened. Copies keep every other cache dependency, including the
         # SQLite parameter adapter identity, equal while reader capabilities vary.
         client = copy(source_client)
-        if not native:
-            client.native_python_types = client.native_python_types - {int}
+        client.native_python_types = (
+            client.native_python_types | {field_type} if native else client.native_python_types - {field_type}
+        )
         query = None
         if cache_path != "row_columns":
             query = get_model_rows_query(Number.objects.all().using(client))
@@ -95,7 +100,7 @@ def test_cached_readers_follow_native_result_types(cache_path):
             if cache_path == "prepared_columns"
             else ModelRows(Number, client, decode_plan=query._decode_plan if query is not None else None)
         )
-        result = StatementResult(1, [(1, 7)])
+        result = StatementResult(1, [(1, raw)])
         result.description = (("id",), ("number",))
         columns = reader.get_columns(result)
         decoded.append(reader.read_batch(result, columns)[0].number)
@@ -105,7 +110,7 @@ def test_cached_readers_follow_native_result_types(cache_path):
             plans.append(query._decode_plan)
         else:
             plans.append(query._statement_plan)
-    assert decoded == [107, 7, 107]
+    assert decoded == [converted, raw, converted]
     assert plans[0] is not None
     assert plans[0] is plans[2]
     assert plans[0] is not plans[1]

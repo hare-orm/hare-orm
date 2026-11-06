@@ -6,6 +6,9 @@ import uuid
 from hare.lazy_loading.lazy_pattern import LazyPattern
 from hare.query.enums import Lookup
 
+#: Prepare an element codec only when enough values share it to amortize binding.
+ARRAY_ELEMENT_CODEC_MIN_LENGTH = 8
+
 #: A path segment naming an array element (``tags__0``, 0-indexed; a negative index counts from the
 #: end) or a tuple element (``point__1``).
 CONTAINER_INDEX_PATH_PATTERN = LazyPattern(r"-?\d+")

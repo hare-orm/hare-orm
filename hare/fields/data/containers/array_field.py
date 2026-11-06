@@ -8,6 +8,7 @@ from hare.classes.value_descriptions import ValueDescriptions
 from hare.exceptions import ConfigurationError, ValidationError
 from hare.fields.data.constants import ARRAY_VALUE_TYPE
 from hare.fields.data.containers.constants import (
+    ARRAY_ELEMENT_CODEC_MIN_LENGTH,
     ARRAY_LENGTH_PATH_SEGMENT,
     ARRAY_LIST_LOOKUPS,
     ARRAY_SLICE_PATH_PATTERN,
@@ -80,18 +81,47 @@ class ArrayField(ContainerField):
     def encode_value(
         self, value: Any, instance: type[Model] | Model | None, types: TypeRegistry | None, path: str
     ) -> Any:
+        """Write elements in order through the shared child validator and error-path handling.
+
+        Long scalar arrays reuse a standard registry's bound writer. Custom registry or child
+        dispatch and nested fields keep per-element selection; every field conversion still runs.
+        """
         if not isinstance(value, (list, tuple, set)):
             # A value that can't be iterated raises ValidationError, not a TypeError.
             raise ValidationError(f"{path}: expected a list/tuple/set, got {self.get_value_for_message(value)}")
         if isinstance(value, set):
             # A set has no stable order - stored sorted.
             value = sorted(value)
+        if (
+            types is not None
+            and (type(value) is list or type(value) is tuple)
+            and len(value) >= ARRAY_ELEMENT_CODEC_MIN_LENGTH
+            and not isinstance(self.base_field, ContainerField)
+            and getattr(self.encode_child, "__func__", None) is ContainerField.encode_child
+        ):
+            from hare.dialects.base.types.type_registry import TypeRegistry
+
+            if (
+                getattr(types.get_db_value, "__func__", None) is TypeRegistry.get_db_value
+                and getattr(types.get_db_converter, "__func__", None) is TypeRegistry.get_db_converter
+            ):
+                writer = TypeRegistry.get_db_writer(types, self.base_field)
+                return [
+                    self.encode_child(self.base_field, element, instance, types, f"{path}[{index}]", writer=writer)
+                    for index, element in enumerate(value)
+                ]
         return [
             self.encode_child(self.base_field, element, instance, types, f"{path}[{index}]")
             for index, element in enumerate(value)
         ]
 
     def decode_value(self, value: Any, types: TypeRegistry | None) -> Any:
+        """Read elements in order, binding a scalar field's standard codec once for long arrays.
+
+        NULL elements bypass the field reader. Small arrays, nested containers, unsized iterables
+        and custom registry or child-dispatch methods retain their per-element path. A bound reader
+        still calls every non-NULL element's field conversion and propagates its first exception.
+        """
         if isinstance(value, str):
             # A str here is an undecoded value or a scalar passed for an array - iterating it would
             # give a list of characters.
@@ -99,6 +129,21 @@ class ArrayField(ContainerField):
                 f"{self.get_path()}: expected an array value from the database, got a string "
                 f"({self.get_value_for_message(value)})"
             )
+        if (
+            types is not None
+            and (type(value) is list or type(value) is tuple)
+            and len(value) >= ARRAY_ELEMENT_CODEC_MIN_LENGTH
+            and not isinstance(self.base_field, ContainerField)
+            and getattr(self.decode_child, "__func__", None) is ContainerField.decode_child
+        ):
+            from hare.dialects.base.types.type_registry import TypeRegistry
+
+            if (
+                getattr(types.get_python_value, "__func__", None) is TypeRegistry.get_python_value
+                and getattr(types.get_python_converter, "__func__", None) is TypeRegistry.get_python_converter
+            ):
+                reader = TypeRegistry.get_python_reader(types, self.base_field)
+                return [None if element is None else reader(element) for element in value]
         return [self.decode_child(self.base_field, element, types) for element in value]
 
     def normalize_value(self, value: Any, path: str) -> Any:

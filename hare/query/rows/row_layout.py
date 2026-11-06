@@ -32,10 +32,24 @@ class RowLayout:
         logical composite groups are assembled separately by ``read()``.
         """
         for name, column in zip(names, self.columns, strict=True):
-            object.__setattr__(instance, name, column.read(row))
+            value = row[column.key]
+            if column.reader is not None:
+                value = column.reader(value)
+            object.__setattr__(instance, name, value)
 
     def read(self, row: Any) -> tuple[Any, ...]:
-        values = tuple(column.read(row) for column in self.columns)
+        """Decode selected columns in order, then assemble their logical groups.
+
+        Each field reader receives its raw value once, including NULL. Conversions
+        finish before composite groups are assembled; driver rows stay unchanged.
+        """
+        converted_values: list[Any] = []
+        for column in self.columns:
+            value = row[column.key]
+            if column.reader is not None:
+                value = column.reader(value)
+            converted_values.append(value)
+        values = tuple(converted_values)
         if not self.groups:
             return values
         grouped = []

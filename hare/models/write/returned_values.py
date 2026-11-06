@@ -6,6 +6,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.fields.constants import ROLLBACK_RESTORE_UNSET
+from hare.models.constants import MIN_STORED_KEY_CODEC_BATCH_SIZE
 from hare.models.write.rollback_restores import RollbackRestores
 
 if TYPE_CHECKING:
@@ -161,6 +162,11 @@ class ReturnedValues:
         """Instances' values of fields as the database stores them - ``get_stored_key()`` of each, a value of
         its field's native key type (``TypeRegistry.get_native_key_type()``) taken as it is.
 
+        For a batch using the registry's standard conversion methods, bind its field codecs once.
+        Values still pass through the same write/read callbacks in instance and field order. Custom
+        registry conversion methods and small batches retain per-value dispatch. NULL and native
+        key values bypass conversion in both paths.
+
         Args:
             types: The connection's type registry.
             fields: The fields.
@@ -180,6 +186,33 @@ class ReturnedValues:
             ReturnedValues.get_hashable,
         )
         stored_keys: list[tuple[Any, ...]] = []
+        if len(instances) >= MIN_STORED_KEY_CODEC_BATCH_SIZE:
+            from hare.dialects.base.types.type_registry import TypeRegistry
+
+            if (
+                getattr(get_db_value, "__func__", None) is TypeRegistry.get_db_value
+                and getattr(get_python_value, "__func__", None) is TypeRegistry.get_python_value
+                and getattr(types.get_db_converter, "__func__", None) is TypeRegistry.get_db_converter
+                and getattr(types.get_python_converter, "__func__", None) is TypeRegistry.get_python_converter
+            ):
+                codecs = [
+                    (
+                        field_name,
+                        native_type,
+                        TypeRegistry.get_db_writer(types, field),
+                        TypeRegistry.get_python_reader(types, field),
+                    )
+                    for field, field_name, native_type in field_readers
+                ]
+                for instance in instances:
+                    stored_values = []
+                    for field_name, native_type, write, read in codecs:
+                        value = getattr(instance, field_name)
+                        if value is not None and type(value) is not native_type:
+                            value = get_hashable(read(write(value, instance)))
+                        stored_values.append(value)
+                    stored_keys.append(tuple(stored_values))
+                return stored_keys
         for instance in instances:
             stored_values = []
             for field, field_name, native_type in field_readers:
@@ -196,12 +229,20 @@ class ReturnedValues:
         a dict or set (a JSON object, a key-value mapping) as the frozenset of its items: a database may give a
         mapping's keys back in an order of its own. Every value inside them too.
 
+        Ordinary scalar values remain unchanged. All floating-point NaNs share one marker so keys
+        compare equal even when Python's original NaN values do not.
+
         Args:
             value: The value.
 
         Returns:
             The value, or its tuples.
         """
+        value_type = type(value)
+        if value is None or value_type is int or value_type is str or value_type is bool or value_type is bytes:
+            return value
+        if value_type is float:
+            return ReturnedValues.NAN_KEY if math.isnan(value) else value
         if isinstance(value, Mapping):
             return frozenset((key, ReturnedValues.get_hashable(item)) for key, item in value.items())
         if isinstance(value, (list, tuple)):

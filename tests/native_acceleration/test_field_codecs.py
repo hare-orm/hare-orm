@@ -41,6 +41,7 @@ from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.query.rows.model_rows.model_columns import ModelColumns
 from hare.query.rows.native.hydration_layout import HydrationLayout
 from hare.query.rows.row_column import RowColumn
+from hare.query.rows.row_layout import RowLayout
 from hare.time import Timezone
 from tests.shared_models.testmodels import (
     BinaryFields,
@@ -401,8 +402,8 @@ UUID_VALUES = [
 
 
 def test_uuid_read_builds_a_plain_uuid():
-    column = RowColumn(0, SQLITE_TYPES.get_python_reader(UUIDFields._meta.fields_map["data"]))
-    value = column.read((str(SAMPLE_UUID),))
+    layout = RowLayout((RowColumn(0, SQLITE_TYPES.get_python_reader(UUIDFields._meta.fields_map["data"])),))
+    value = layout.read((str(SAMPLE_UUID),))[0]
     assert type(value) is uuid.UUID
     assert value == SAMPLE_UUID
     assert value.is_safe is uuid.SafeUUID.unknown
@@ -668,12 +669,12 @@ EXPRESSION_VALUES = [
 def test_expression_column_reads_match(field):
     for connection_alias, types, _native_types in CONNECTIONS:
         reader = types.get_python_reader(field)
-        column = RowColumn("result", reader)
+        layout = RowLayout((RowColumn("result", reader),))
         for use_timezone, zone in ZONES:
             with override_timezone(use_timezone=use_timezone, timezone=zone):
                 for raw in EXPRESSION_VALUES:
                     assert_same_outcome(
-                        run(lambda value: column.read({"result": value}), raw),
+                        run(lambda value: layout.read({"result": value})[0], raw),
                         run(types.get_python_value, field, raw),
                         f"{field.model_field_name} expression on {connection_alias}, {zone}",
                     )
@@ -683,10 +684,10 @@ def assert_container_reads_match(field: Any, raw_values: list[Any]) -> None:
     for use_timezone, zone in ZONES:
         with override_timezone(use_timezone=use_timezone, timezone=zone):
             reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-            column = RowColumn(0, reader)
+            layout = RowLayout((RowColumn(0, reader),))
             for raw in raw_values:
                 assert_same_outcome(
-                    run(lambda value: column.read((value,)), raw),
+                    run(lambda value: layout.read((value,))[0], raw),
                     run(POSTGRESQL_TYPES.get_python_value, field, raw),
                     f"{field.model_field_name} container in {zone}",
                 )
@@ -795,7 +796,7 @@ def test_an_array_subclass_reading_otherwise_is_read_by_the_field():
 
     field = UpperTextArray(base_field=fields.TextField())
     reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-    assert RowColumn(0, reader).read((["hello", "World"],)) == ["HELLO", "WORLD"]
+    assert RowLayout((RowColumn(0, reader),)).read((["hello", "World"],))[0] == ["HELLO", "WORLD"]
 
 
 def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
@@ -805,5 +806,5 @@ def test_a_range_subclass_reading_otherwise_is_read_by_the_field():
 
     field = ShiftedIntRange()
     reader = HydrationLayout.get_field_reader(field, POSTGRESQL_TYPES, PostgresqlClient.native_python_types)
-    value = RowColumn(0, reader).read((Range(1, 4),))
+    value = RowLayout((RowColumn(0, reader),)).read((Range(1, 4),))[0]
     assert (value.lower, value.upper) == (2, 5)

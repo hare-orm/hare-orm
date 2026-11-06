@@ -85,3 +85,24 @@ def test_custom_queryset_copies_mutable_state_through_its_hook(uses_slots):
     assert branch.label == "declared"
     assert not hasattr(branch, "optional")
     assert type(branch) is TaggedQuerySet
+
+
+@pytest.mark.database_independent
+def test_standard_queryset_copy_omits_execution_origin_and_keeps_prefetch_sets_independent():
+    from hare.query.queryset import QuerySet
+    from hare.query.queryset.query_specification import QuerySpecification
+
+    queryset = QuerySet(Tournament)
+    queryset._plan_origin = object()
+    queryset._prefetch_map = {"events": {"participants"}}
+    branch = copy(queryset)
+    assert not hasattr(branch, "_plan_origin")
+    branch._prefetch_map["events"].add("tournament")
+    assert queryset._prefetch_map == {"events": {"participants"}}
+
+    # A transfer selecting only the base declaration must not copy QuerySet-only slots.
+    target = QuerySet.__new__(QuerySet)
+    SpecificationCopying.copy_state(queryset, target, QuerySpecification)
+    assert target.model is Tournament
+    assert not hasattr(target, "_annotation_descriptions")
+    assert not hasattr(target, "_plan_origin")
