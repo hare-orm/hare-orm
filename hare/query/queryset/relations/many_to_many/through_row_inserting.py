@@ -67,7 +67,7 @@ class ThroughRowInserting:
             None if using_client is None else ManyToManyMembers.get_connection_of(relation.model, using_client),
         )
         ManyToManyMembers.validate_related_instances(relation, instances)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
+        connection = ThroughRows.through_table_connection(relation, for_write=True, using=using)
         if WrittenConnections.is_recording:
             WrittenConnections.record(connection.connection_alias)
         relation._reset_cache_on_rollback(connection)

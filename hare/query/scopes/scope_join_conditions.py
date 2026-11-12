@@ -48,6 +48,8 @@ class ScopeJoinConditions:
         # at module level - importing it back here at module level would be circular.
         from hare.query.scopes.row_scopes import RowScopes
 
+        if connection is not None and related_model._meta.checks_tenant_client:
+            related_model._meta.check_tenant_client(connection)
         join_table, join_criterion = joins[-1]
         ambient_criterion = RowScopes.of(related_model).get_criterion(
             join_table,
@@ -68,12 +70,18 @@ class ScopeJoinConditions:
         connection: DatabaseClient | None,
     ) -> None:
         """ANDs a through model's own default scope into ``joins[0]`` of a many-to-many hop, in place -
-        a soft-deleted through row is no link. A no-op for any other relation and for a through
-        table without a model.
+        a soft-deleted through row is no link. The selected client is checked for the declaring
+        model and any explicit through model; an automatic through table has no model scope.
+        A no-op for any other relation.
         """
         if not isinstance(related_field, ManyToManyFieldInstance):
             return
         through_model = related_field.through_model_class
+        if connection is not None:
+            declaring_model = related_field.related_model if related_field._generated else related_field.model
+            for model in (declaring_model,) if through_model is None else (declaring_model, through_model):
+                if model._meta.checks_tenant_client:
+                    model._meta.check_tenant_client(connection)
         if through_model is None:
             return
         # Local import: same circularity reasoning as ScopeJoinConditions.fold_ambient_scope_into_join() above.
@@ -128,6 +136,8 @@ class ScopeJoinConditions:
         )
         if visible_criterion is None:
             return
+        if connection is not None and related_meta.checks_tenant_client:
+            related_meta.check_tenant_client(connection)
         link_criterion = KeyColumns.row_equality(
             [through_table[column] for column in related_field.forward_keys],
             [visible_table[column] for column in KeyColumns.get_source_columns(related_meta)],

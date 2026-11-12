@@ -385,6 +385,10 @@ config = {**HARE_CONFIG, "connections": {"default": "postgresql://app@localhost/
   transaction, in one begun with no tenant, or under a scope by model not naming the model, they raise
   `QueryError` before any SQL instead of returning nothing. A query under another scope than the one the
   transaction began in raises `QueryError` too: the transaction's setting can't follow it.
+  These requirements also apply to related tables reached by a JOIN or subquery. Reusing a
+  prepared query plan does not carry a previous transaction's tenant settings to another client.
+  Passing the transaction client explicitly with `using(client)` keeps the same scope requirement;
+  it cannot switch the tenants already installed in that transaction.
 - A model with a `TenantCondition` policy on a connection without `tenant_row_level_security` raises
   `ConfigurationError` on its first query; one without `Meta.tenant_field` when it is declared.
 - **Roles.** PostgreSQL doesn't apply row level security to a superuser or a role with `BYPASSRLS`, and

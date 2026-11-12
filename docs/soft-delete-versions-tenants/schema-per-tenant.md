@@ -129,11 +129,17 @@ with Tenancy.scope(7):
   scope is entered); values naming the same schema (`7` and `"7"`) are the same tenant here too.
   A scope naming different schemas for the connection's tenant models raises `QueryError` on a query
   of the connection — it works in one schema.
-- A tenant's model queried with no scope, a scope of several tenants (`Tenancy.any_of(...)`),
+- Without an explicitly selected tenant client, a tenant's model queried with no scope, a scope of
+  several tenants (`Tenancy.any_of(...)`),
   `Tenancy.ALL`, or a scope given model by model naming none of the connection's tenant models raises
   `QueryError` — its table is reached inside a scope of a single tenant. A shared model works in every
   one of them, through the connection's own client.
-- A queryset runs in the schema of the tenant active when it is awaited, as a `Meta.tenant_field` model's
+- An explicit `.using(alias/client)` or `using=` on an instance or relation must also select a
+  tenant-schema client. Select the connection inside `Tenancy.scope(...)`, or pass a client already
+  bound to one tenant's schema. A shared client is refused before SQL, including for embedded
+  queries; explicitly selecting a connection does not disable the model's tenant checks.
+- A queryset without a pinned client runs in the schema of the tenant active when it is awaited, as a
+  `Meta.tenant_field` model's
   queryset filters by that tenant: built inside `Tenancy.scope("acme")` and awaited inside
   `Tenancy.scope(7)`, it reads `tenant_7`; awaited with no scope, it raises `QueryError`. The queries it
   runs then (`prefetch_related()`, a subquery) use the same schema, as for a

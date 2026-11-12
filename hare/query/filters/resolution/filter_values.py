@@ -490,15 +490,16 @@ class FilterValues:
         Returns:
             The copy of a dict, list or set; any other value itself.
         """
-        value_type = type(value)
-        if value_type is dict or (written and value_type is list):
+        if isinstance(value, dict) or (written and isinstance(value, list)):
             try:
                 return copy.deepcopy(value)
             except RecursionError:
                 # Nested deeper than a copy reaches - deeper than JSON holds: the field refuses it as it is.
                 return value
-        if value_type is list or value_type is set:
-            return value_type(value)
+        if isinstance(value, list):
+            return list(value)
+        if isinstance(value, set):
+            return set(iter(value))
         return value
 
     @staticmethod

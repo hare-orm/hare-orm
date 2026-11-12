@@ -84,6 +84,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         # loaded from or saved to - taken after the router and before the model's default
         # connection, looked up when the query runs.
         "_instance_connection_alias",
+        "_instance_connection_model",
         "_annotations",
         "_q_object_list",
         # Incremented once per .filter()/.exclude() call - the generation its Q objects are stamped
@@ -207,6 +208,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         "_connection_explicitly_chosen": SpecificationSlotPlanRole.CONNECTION,
         "_router_fallback_connection": SpecificationSlotPlanRole.CONNECTION,
         "_instance_connection_alias": SpecificationSlotPlanRole.CONNECTION,
+        "_instance_connection_model": SpecificationSlotPlanRole.CONNECTION,
         "_annotations": SpecificationSlotPlanRole.DESCRIBED,
         "_q_object_list": SpecificationSlotPlanRole.DESCRIBED,
         "_filter_call_counter": SpecificationSlotPlanRole.DESCRIBED,
@@ -260,6 +262,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
         self._connection_explicitly_chosen: bool = False
         self._router_fallback_connection: DatabaseClient | None = None
         self._instance_connection_alias: str | None = None
+        self._instance_connection_model: type[Model] | None = None
         self._annotations: dict[str, Expression | Term] = {}
         self._q_object_list: list[Q] = []
         #: The filter calls kept unbuilt: (is exclude(), generation, Q conditions, kwargs) each.
@@ -736,6 +739,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
     _router_fallback_connection: DatabaseClient | None
 
     _instance_connection_alias: str | None
+    _instance_connection_model: type[Model] | None
 
     _visibility: RowVisibility
 
@@ -810,7 +814,7 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
                 its tenants (``MetaInfo.check_tenant_client()``).
         """
         if self._connection:
-            return self._connection
+            return ModelConnectionChoice.get_checked(self.model, self._connection)
         context = HareContext.require_current()
         # The connection is chosen under the tenant this query's WHERE was built for, not the one
         # active when the query is awaited - a router routing by tenant, or a connection with a schema
@@ -827,10 +831,16 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             connection = ModelConnectionChoice.get_routed(context, self.model, for_write)
             if connection is None:
                 if self._instance_connection_alias is not None:
-                    connection = context.connections.get(self._instance_connection_alias)
-                elif self._router_fallback_connection is not None:
+                    connection = ModelConnectionChoice.get_instance_fallback(
+                        context,
+                        self.model,
+                        self._instance_connection_model,
+                        self._instance_connection_alias,
+                        for_write,
+                    )
+                if connection is None and self._router_fallback_connection is not None:
                     connection = self._router_fallback_connection
-                else:
+                if connection is None:
                     connection = ModelConnectionChoice.get_default(context, self.model)
             return ModelConnectionChoice.get_checked(self.model, connection)
         finally:
@@ -876,10 +886,14 @@ class QuerySpecification(Plannable, Generic[TModel], abstract=True):
             The query bound to a connection.
         """
         execution_query = copy(self)
-        if execution_query._connection is None:
-            execution_query._apply_connection(
+        bound_connection = execution_query._connection
+        if bound_connection is None:
+            bound_connection = (
                 execution_query.get_connection(for_write=for_write) if connection is None else connection
             )
+            execution_query._apply_connection(bound_connection)
+        if execution_query.model._meta.checks_tenant_client or bound_connection.sets_tenants:
+            ModelConnectionChoice.get_checked(execution_query.model, bound_connection)
         return execution_query
 
     def _get_compiler(self) -> QuerySpecification[Any]:

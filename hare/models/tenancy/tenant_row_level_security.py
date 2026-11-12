@@ -23,6 +23,30 @@ class TenantRowLevelSecurity:
     model runs in a transaction that set them."""
 
     @staticmethod
+    def check_transaction_scope(client: DatabaseClient) -> None:
+        """Keep a transaction's installed tenant scope unchanged, including explicit clients.
+
+        Called for a transaction client whose tenant settings have been installed. Schema
+        selection is separate: a pinned schema client does not need an ambient schema scope.
+
+        Args:
+            client: The transaction whose original scope must still be active.
+
+        Raises:
+            QueryError: The active scope differs from the transaction's original one.
+        """
+        from hare.models.tenancy.tenancy import Tenancy
+
+        scope = Tenancy.current.get()
+        transaction_scope = client.tenant_scope  # type: ignore[attr-defined]
+        if scope is not transaction_scope and scope != transaction_scope:
+            raise QueryError(
+                f"The transaction on {client.connection_alias!r} sees the rows of the tenant scope "
+                f"{transaction_scope!r} it began in - a query in it can't switch to {scope!r}; open the "
+                "transaction inside the tenant scope"
+            )
+
+    @staticmethod
     def get_transaction_setting(client: DatabaseClient) -> tuple[Any, str | None]:
         """The tenant scope a transaction begins in and the statement setting its tenants.
 

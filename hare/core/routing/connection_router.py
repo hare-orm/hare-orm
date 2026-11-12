@@ -64,7 +64,9 @@ class ConnectionRouter:
                     return chosen_connection
         return None
 
-    def _route_connection(self, model: type[Model], action: str) -> DatabaseClient | None:
+    def _route_connection(
+        self, model: type[Model], action: str, get_connection: Callable[[str], DatabaseClient]
+    ) -> DatabaseClient | None:
         connection_alias = self._get_routers_choice(model, action)
         if connection_alias is None:
             # No configured router returned anything for this action - genuinely "no router
@@ -73,21 +75,29 @@ class ConnectionRouter:
             return None
         # An alias a router returned must resolve - a broken router raises instead of falling back
         # to the default connection.
-        return Connections.get(connection_alias)
+        return get_connection(connection_alias)
 
-    def db_for_read(self, model: type[Model]) -> DatabaseClient | None:
+    def db_for_read(
+        self, model: type[Model], *, get_connection: Callable[[str], DatabaseClient] = Connections.get
+    ) -> DatabaseClient | None:
         """Returns the connection to use for reading `model`, or None if no router applies - the
         connection `model` is written through when the task wrote there (within
-        ``read_your_writes_seconds``) or runs inside ``Routing.using_primary()``."""
+        ``read_your_writes_seconds``) or runs inside ``Routing.using_primary()``.
+
+        Args:
+            model: The model being routed.
+            get_connection: Turns a chosen alias into its client. Metadata comparisons use the
+                base client; query execution uses the active transaction and tenant client.
+        """
         if not self._routers:
             return None
         written = WrittenConnections.current.get()
         reads_primary = PrimaryReads.is_active()
         if written is not None or reads_primary:
-            write_connection = self._route_connection(model, "db_for_write")
+            write_connection = self._route_connection(model, "db_for_write", get_connection)
             if write_connection is None and model._meta.default_connection is not None:
                 # No router chose one - the model is written through its default connection.
-                write_connection = Connections.get(model._meta.default_connection)
+                write_connection = get_connection(model._meta.default_connection)
             if write_connection is not None and (
                 reads_primary
                 or (
@@ -96,13 +106,20 @@ class ConnectionRouter:
                 )
             ):
                 return write_connection
-        return self._route_connection(model, "db_for_read")
+        return self._route_connection(model, "db_for_read", get_connection)
 
-    def db_for_write(self, model: type[Model]) -> DatabaseClient | None:
+    def db_for_write(
+        self, model: type[Model], *, get_connection: Callable[[str], DatabaseClient] = Connections.get
+    ) -> DatabaseClient | None:
         """Returns the connection to use for writing `model`, or None if no router applies - the
         write itself records the connection (``WrittenConnections``), not this choice: a check of
-        what the connection supports writes nothing."""
+        what the connection supports writes nothing.
+
+        Args:
+            model: The model being routed.
+            get_connection: Turns a chosen alias into its client; see ``db_for_read()``.
+        """
         if not self._routers:
             return None
 
-        return self._route_connection(model, "db_for_write")
+        return self._route_connection(model, "db_for_write", get_connection)

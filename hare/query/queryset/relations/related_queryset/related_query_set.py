@@ -48,6 +48,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         "from_fields",
         "relation_rows",
         "_bound_key_values",
+        "_bound_connection_alias",
         "_is_bound",
         "_rollback_reset_layers",
         # The obj's RelationRows holds its relation object weakly.
@@ -76,6 +77,8 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         self.relation_rows = RelationRows() if relation_rows is None else relation_rows
         #: The obj's key values the query settings were made for.
         self._bound_key_values: tuple[Any, ...] | None = None
+        #: The instance's connection alias these query settings were made for.
+        self._bound_connection_alias: str | None = None
         #: Whether the query settings were made - a relation read off the obj with its rows
         #: fetched makes them on their first use.
         self._is_bound = False
@@ -123,6 +126,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         for name, value in state.items():
             setattr(self, name, value)
         self._bound_key_values = None
+        self._bound_connection_alias = None
         self._is_bound = False
 
     @property
@@ -178,7 +182,11 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
                 key_values = RelationValues.get_relation_key_values(
                     instance, self.from_fields, f"The relation to {self.model.__name__}"
                 )
-            if key_values == self._bound_key_values and not manager.overrides_get_queryset:
+            if (
+                key_values == self._bound_key_values
+                and instance._connection_alias == self._bound_connection_alias
+                and not manager.overrides_get_queryset
+            ):
                 return
             relation_rows = self.relation_rows
             bound_settings = relation_rows.bound_settings
@@ -229,6 +237,7 @@ class RelatedQuerySet(QuerySet[TModel, TModel]):
         """
         SpecificationCopying.copy_state(queryset, self)
         self._bound_key_values = key_values
+        self._bound_connection_alias = self.instance._connection_alias
         self._is_bound = True
 
     def _clone(self) -> Self:

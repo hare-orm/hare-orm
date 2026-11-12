@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeVar
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.core.routing.written_connections import WrittenConnections
 from hare.fields.field import Field as ModelField
 from hare.query.expressions import Q
@@ -142,12 +143,16 @@ class BoundQuery(QuerySpecification[TModel], Generic[TModel], abstract=True):
         """
         execution_query = self if self._is_execution_query else self.__copy__()
         execution_query._is_execution_query = True
-        if execution_query._connection is None:
-            execution_query._apply_connection(  # type: ignore[unreachable]
+        bound_connection: DatabaseClient | None = execution_query._connection
+        if bound_connection is None:
+            bound_connection = (
                 execution_query.get_connection(for_write=for_write) if connection is None else connection
             )
+            execution_query._apply_connection(bound_connection)
+        if execution_query.model._meta.checks_tenant_client or bound_connection.sets_tenants:
+            ModelConnectionChoice.get_checked(execution_query.model, bound_connection)
         if for_write and WrittenConnections.is_recording:
-            WrittenConnections.record(execution_query._connection.connection_alias)
+            WrittenConnections.record(bound_connection.connection_alias)
         return execution_query
 
     @property

@@ -4,7 +4,6 @@ from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generator, TypeVar
 
 from hare.classes.value_descriptions import ValueDescriptions
-from hare.core.connections.connections import Connections
 from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.exceptions import (
     FieldError,
@@ -551,7 +550,7 @@ class Model(metaclass=ModelMeta):
 
         if self._await_when_save:
             await InstanceSaving.set_async_default_field(self)
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
+        connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
         if Tenancy.has_tenant_scoped_relations(self.__class__):
             await Tenancy.check_relation_targets(
                 self.__class__,
@@ -591,7 +590,7 @@ class Model(metaclass=ModelMeta):
         """
         self._meta.raise_if_no_primary_key(f"{self.__class__.__name__}.delete() of one row")
         TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
+        connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
         # On a database without transactions the cascade, the row and their report are one step a cancel can't split.
         await WriteSteps.get_whole_run(connection, InstanceDeletion.delete_and_report(self, connection))
 
@@ -614,7 +613,7 @@ class Model(metaclass=ModelMeta):
                 concurrently.
         """
         TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
+        connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
         InstanceDeletion.check_deletable(self)
         await DeletionCollector.check_protected(type(self), [self.pk], connection)
         await DeletionCollector.check_protected_transitively(type(self), [self.pk], connection)
@@ -638,7 +637,7 @@ class Model(metaclass=ModelMeta):
             IncompleteInstanceError: The primary key was not loaded.
         """
         TenantWriteRules.check_existing_object(self, "delete")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
+        connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
         if not self._saved_in_db:
             raise QueryError("Can't preview deleting unpersisted record")
         if not all(hasattr(self, pk_name) for pk_name in self._meta.primary_key_attribute_names):
@@ -670,7 +669,7 @@ class Model(metaclass=ModelMeta):
         TenantWriteRules.check_existing_object(self, "restore")
         if not self._meta.soft_delete_field:
             raise QueryError(f"{type(self).__name__} has no Meta.soft_delete_field configured")
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self, True)
+        connection = InstanceConnections.get_connection_for_instance(self, True, using=using)
         if not self._saved_in_db:
             raise QueryError("Can't restore unpersisted record")
         if not all(hasattr(self, pk_name) for pk_name in self._meta.primary_key_attribute_names):
@@ -783,7 +782,7 @@ class Model(metaclass=ModelMeta):
             raise IncompleteInstanceError(
                 PARTIAL_INSTANCE_WITHOUT_KEY_MESSAGE.format(model_name=self.__class__.__name__, action="refresh")
             )
-        connection = Connections.get_client(using) or InstanceConnections.get_connection_for_instance(self)
+        connection = InstanceConnections.get_connection_for_instance(self, using=using)
         refreshed_obj = await InstanceRefresh.get_queryset(self, connection, fields).get(pk=self.pk)
         InstanceRefresh.apply(self, refreshed_obj, fields)
 

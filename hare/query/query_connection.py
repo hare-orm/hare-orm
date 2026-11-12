@@ -98,6 +98,9 @@ class QueryConnection:
             QueryConnection.raise_if_model_on_another_connection(
                 specification.model, outer_connection, outer_model, embedded_as
             )
+        meta = specification.model._meta
+        if meta.checks_tenant_client:
+            meta.check_tenant_client(outer_connection)
         bound_query = copy(specification)
         bound_query._plan_origin = specification
         bound_query._apply_connection(outer_connection)

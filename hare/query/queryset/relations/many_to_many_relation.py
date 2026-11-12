@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from hare.core.connections.connections import Connections
 from hare.exceptions import (
     QueryError,
 )
@@ -112,7 +111,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         if not objs:
             return
         through_model = self.field.through_model_class
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         if through_model is not None and through_model._meta.change_capture_needs is not None:
             # The links' captured changes are written with them.
             async with ChangeCapturing.transaction(connection) as transaction_connection:
@@ -181,7 +180,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         if len(related_instances) == len(objs):
             await ThroughRowUnlinking.remove_or_clear(self, related_instances, using)
             return
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
         forward_pk_values = [
             ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers)
@@ -234,7 +233,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             QueryError: ``self.instance`` is not saved.
         """
         ManyToManyMembers.validate_owner_saved(self)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         # Checked before the object is written - a database without transactions keeps what a failure
         # leaves.
         ThroughDefaults.through_defaults_columns_and_values(self, through_defaults, connection.dialect.types)
@@ -268,7 +267,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
         """
         members = await self._get_set_members(objs)
         ManyToManyMembers.validate_owner_saved(self)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         writers = KeyColumns.get_instance_writers(self.model._meta, connection.dialect.types)
         members_by_pk_values = {
             ManyToManyMembers.get_member_pk_db_values(self, member, writers=writers): member for member in members
@@ -344,7 +343,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             QueryError: ``defaults`` conflicts with ``kwargs``.
         """
         ManyToManyMembers.validate_owner_saved(self)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         async with connection._in_transaction() as transaction_connection:
             related_connection = ManyToManyMembers.get_connection_of(self.model, transaction_connection)
             if (
@@ -387,7 +386,7 @@ class ManyToManyRelation(RelatedQuerySet[TModel]):
             QueryError: ``defaults`` conflicts with ``kwargs``.
         """
         ManyToManyMembers.validate_owner_saved(self)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(self, for_write=True)
+        connection = ThroughRows.through_table_connection(self, for_write=True, using=using)
         async with connection._in_transaction() as transaction_connection:
             related_connection = ManyToManyMembers.get_connection_of(self.model, transaction_connection)
             if (

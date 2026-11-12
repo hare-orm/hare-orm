@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from hare.classes.deferred_import import DeferredImport
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.exceptions import IntegrityError, QueryError, ValidationError
 from hare.query.key_columns import KeyColumns
 
@@ -37,7 +38,8 @@ class ManyToManyMembers:
         Returns:
             The connection.
         """
-        if connection.connection_alias == model.get_routed_connection(for_write=True).connection_alias:
+        model_connection = ModelConnectionChoice.get_metadata_connection(model, for_write=True)
+        if connection.connection_alias == model_connection.connection_alias:
             return connection
         return model.get_connection(for_write=True)
 

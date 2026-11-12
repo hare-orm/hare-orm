@@ -9,6 +9,9 @@
 "tests/writes/rules" = ["encryption"]
 
 [modules]
+"tests/contracts/test_tenant_connection_paths.py" = { requires = [], cells = [] }
+"tests/contracts/test_transaction_scope_paths.py" = { requires = [], cells = [] }
+"tests/contracts/test_filter_value_snapshots.py" = { requires = [], cells = [] }
 "tests/migrations/tables/test_schema_rollback.py" = { requires = [], cells = [] }
 "tests/multiple_connections/test_router_consulted_once.py" = { requires = [], cells = [] }
 "tests/fields/value_types/test_json_column_reader.py" = { requires = [], cells = [] }
@@ -691,6 +694,7 @@
 "tests/multiple_connections/test_subquery_exists_cross_db_guard.py" = { requires = [], cells = [] }
 "tests/multiple_connections/test_transactions_distributed.py" = { requires = [], cells = [] }
 "tests/multiple_connections/test_two_databases.py" = { requires = [], cells = [] }
+"tests/contracts/test_relation_connection_paths.py" = { requires = [], cells = [] }
 "tests/native_acceleration/test_field_codecs.py" = { requires = [], cells = ["asyncpg"] }
 "tests/native_acceleration/test_field_codecs_asyncpg.py" = { requires = ["asyncpg"], cells = ["asyncpg"] }
 "tests/native_acceleration/test_field_codecs_pydantic.py" = { requires = ["pydantic"], cells = ["pydantic"] }

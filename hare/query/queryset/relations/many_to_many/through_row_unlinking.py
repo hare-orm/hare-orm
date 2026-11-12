@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from hare.core.connections.connections import Connections
 from hare.core.routing.written_connections import WrittenConnections
 from hare.instrumentation.capture.captured_write import CapturedWrite
 from hare.instrumentation.capture.change_capturing import ChangeCapturing
@@ -62,7 +61,7 @@ class ThroughRowUnlinking:
             visibility: See ``ThroughRowUnlinking.unlink()``.
         """
         through_model = relation.field.through_model_class
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
+        connection = ThroughRows.through_table_connection(relation, for_write=True, using=using)
         if through_model is not None and through_model._meta.change_capture_needs is not None:
             # The links' captured changes are written with them.
             async with ChangeCapturing.transaction(connection) as transaction_connection:
@@ -173,7 +172,7 @@ class ThroughRowUnlinking:
         ManyToManyMembers.validate_owner_saved(relation)
         if instances:
             ManyToManyMembers.validate_related_instances(relation, instances)
-        connection = Connections.get_client(using) or ThroughRows.through_table_connection(relation, for_write=True)
+        connection = ThroughRows.through_table_connection(relation, for_write=True, using=using)
         if WrittenConnections.is_recording:
             WrittenConnections.record(connection.connection_alias)
         relation._reset_cache_on_rollback(connection)

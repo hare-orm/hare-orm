@@ -31,7 +31,7 @@ class QueryKeyCompiler:
         ("rows_plan_slots", "_describe_over_rows"),
     )
     #: The connection settings of an unbound query's key (``get_connection_structure()``).
-    UNBOUND_CONNECTION_STRUCTURE: ClassVar[tuple[None, None, None, None, None]] = (None, None, None, None, None)
+    UNBOUND_CONNECTION_STRUCTURE: ClassVar[tuple[None, ...]] = (None, None, None, None, None, None)
     #: The forms whose slot names a method of the query, called for the value.
     METHOD_PLAN_KEY_FORMS: ClassVar[frozenset[PlanKeyForm]] = frozenset(
         {PlanKeyForm.DESCRIBED, PlanKeyForm.BOUND_VALUES_METHOD, PlanKeyForm.METHOD}
@@ -133,7 +133,9 @@ class QueryKeyCompiler:
     @staticmethod
     def get_connection_structure(connection: DatabaseClient | None) -> tuple[Any, ...]:
         """The settings of a connection a plan key holds - read on every description, so a changed
-        setting selects another plan; five absent ones for an unbound query.
+        setting selects another plan; absent ones for an unbound query. Whether the client has
+        installed transaction tenants is structural too: a plan using related tables cannot
+        skip their client checks by crossing from that transaction to an ordinary client.
 
         Args:
             connection: The connection, None for an unbound query.
@@ -149,6 +151,7 @@ class QueryKeyCompiler:
             connection.native_python_types,
             connection.parameter_binding_key,
             connection.sql_context_key,
+            connection.sets_tenants,
         )
 
     @staticmethod

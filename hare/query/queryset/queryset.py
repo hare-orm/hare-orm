@@ -21,7 +21,6 @@ from hare.exceptions import (
 from hare.fields.data.temporal.date_field import DateField
 from hare.fields.data.temporal.datetime_field import DatetimeField
 from hare.models.class_building.generic_foreign_keys import GenericForeignKeys
-from hare.models.instances.instance_connections import InstanceConnections
 from hare.models.write.rules.enums import WriteType
 from hare.models.write.rules.row_write_rules import RowWriteRules
 from hare.models.write.rules.tenant_write_rules import TenantWriteRules
@@ -2394,9 +2393,12 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
         if (
             obj._connection_alias is not None
             and self.model._meta.default_connection == type(obj)._meta.default_connection
-            and not InstanceConnections.is_routed(type(obj))
         ):
             self._instance_connection_alias = obj._connection_alias
+            self._instance_connection_model = type(obj)
+        else:
+            self._instance_connection_alias = None
+            self._instance_connection_model = None
 
     def _share_ambient_scope(self, query: TDerivedQuery) -> TDerivedQuery:
         """Hands this queryset's default scope (``.all_tenants()``/``.include_deleted()`` state
@@ -2410,6 +2412,7 @@ class QuerySet(QuerySpecification[TModel], Generic[TModel, TRow, TAnnotations]):
             ``query`` itself, with the ambient scope set.
         """
         query._instance_connection_alias = self._instance_connection_alias
+        query._instance_connection_model = self._instance_connection_model
         return self._share_default_scope(query)
 
     def __await__(self) -> Generator[Any, None, list[TRow]]:

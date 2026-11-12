@@ -411,7 +411,11 @@ and a row without its expected result fails a completeness test instead of being
 | Keyless rows × operation | repeated rows × slices, iteration, count, existence, aggregation and returning, including refusals before SQL | `test_keyless_query_paths.py` |
 | Prefetch slice × query shape | composite many-to-many relations × masks, windows, distinct, repeated rows and separate connections | `test_prefetch_query_shapes.py` |
 | Query columns × identifier | letter case and byte length × set operations, windows, recursion and old values returned by updates | `test_query_column_names.py` |
-| Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations | `test_query_shape_interactions.py` |
+| Query shape × operation | composite aliases, nullable subqueries and their slices, ordering joins and grouped rows × filtering, summaries and set operations; single/composite keys × result shapes, ordering and slices, checked against Python keys | `test_query_shape_interactions.py` |
+| Relation × connection choice | reverse FK and many-to-many, single/composite source and target keys × saved connection changes, runtime routers, explicit `using()`, result shapes, summaries, union and sliced prefetch | `test_relation_connection_paths.py` |
+| Mutable input × call snapshot | list/set/dict and their subclasses × filter/exclude/`Q`, pending JSON writes and nested values, with single/composite keys | `test_filter_value_snapshots.py` |
+| Write path × nested outcome | update/save/bulk update/soft delete × inner/outer commit and rollback, single/composite keys, tenant isolation and commit/rollback callbacks | `test_transaction_scope_paths.py` |
+| Tenant model × selected client | single/composite keys × reads, writes, relations and embedded queries; missing template/scope, explicit aliases/clients and remembered aliases; a valid tenant client remains usable | `test_tenant_connection_paths.py` |
 | JSON aggregate × element type | binary and interval `FIELD_SAMPLES` × scalar/nested arrays/generated outputs; refusal before SQL and exact `ArrayAgg` values | `test_json_aggregate_inputs.py` |
 | Write path × observer | every method writing rows (`writes/write_methods.py`) × `ChangeCapture`, `RowsChanged`, validators, `auto_now`, optimistic lock, tenant scope, encryption, `GeneratedField` | `writes/` |
 | Extra × entry point | every module importable in the environment, the dialect registry, the CLI, a URL of a driver without its package | `entry_points/` |

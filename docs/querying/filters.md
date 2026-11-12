@@ -8,7 +8,7 @@ compares.
 
 A value is taken as it is at the call: a list or set given to `filter()`, `exclude()` or `Q()` is copied,
 and a dict whole, so changing it before the query runs changes no query — the same for the values of
-`update()`, its lists copied whole too.
+`update()`, its lists copied whole too. Subclasses of these containers follow the same snapshot rules.
 
 ## <a id="generic-set"></a>The generic set of every ordinary field
 

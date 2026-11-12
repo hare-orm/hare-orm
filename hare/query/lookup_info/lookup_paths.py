@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from hare.core.connections.model_connection_choice import ModelConnectionChoice
 from hare.core.hare_context import HareContext
 from hare.exceptions import ConfigurationError, FieldError, QueryError
 from hare.fields.field import Field
@@ -54,6 +55,9 @@ class LookupPaths:
     def crosses_connections(related_field: RelationalField[Any]) -> bool:
         """Whether a relation joins its model to one on another connection.
 
+        This compares routing metadata without requiring an ambient tenant. The selected
+        execution client is checked when a query or relation operation uses its tables.
+
         Args:
             related_field: The relation.
 
@@ -64,8 +68,8 @@ class LookupPaths:
         if HareContext.get_current() is None:
             return False
         try:
-            connection = related_field.model.get_connection(for_write=False)
-            related_connection = related_field.related_model.get_connection(for_write=False)
+            connection = ModelConnectionChoice.get_metadata_connection(related_field.model)
+            related_connection = ModelConnectionChoice.get_metadata_connection(related_field.related_model)
         except ConfigurationError:
             # A model of no connection - one of a migration's state, its DDL written - crosses none; a query of
             # it fails asking for its connection.
@@ -87,7 +91,8 @@ class LookupPaths:
         if not isinstance(related_field, ManyToManyFieldInstance):
             return False
         declaring_model = related_field.related_model if related_field._generated else related_field.model
-        return declaring_model.get_connection(for_write=False) is related_field.model.get_connection(for_write=False)
+        declaring_connection = ModelConnectionChoice.get_metadata_connection(declaring_model)
+        return declaring_connection is ModelConnectionChoice.get_metadata_connection(related_field.model)
 
     @staticmethod
     def get_joins_for_related_field(

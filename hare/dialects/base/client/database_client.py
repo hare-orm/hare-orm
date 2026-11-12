@@ -148,6 +148,8 @@ class DatabaseClient(abc.ABC):
     command_timeout: float | None = None
     #: Whether the connection goes through a pooler sharing server connections by transaction.
     transaction_pooling: bool = False
+    #: Whether this client has installed the active tenants for its current transaction.
+    sets_tenants: bool = False
 
     @property
     def parameter_binding_key(self) -> object | None:

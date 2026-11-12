@@ -232,6 +232,8 @@ class ManyToManyScopeChecks:
         )
         if visible_target_criterion is None:
             return None
+        if connection is not None and related_meta.checks_tenant_client:
+            related_meta.check_tenant_client(connection)
         link_criterion = KeyColumns.row_equality(
             [through_table[column] for column in relation.field.forward_keys],
             [target_table[column] for column in KeyColumns.get_source_columns(related_meta)],

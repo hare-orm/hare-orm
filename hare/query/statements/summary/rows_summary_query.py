@@ -85,6 +85,7 @@ class RowsSummaryQuery(RowsSourceQuery):
             self._connection_explicitly_chosen = source._connection_explicitly_chosen
             self._router_fallback_connection = source._router_fallback_connection
             self._instance_connection_alias = source._instance_connection_alias
+            self._instance_connection_model = source._instance_connection_model
             self._limit = source._limit
             self._offset = source._offset
             self._is_none = source._is_none

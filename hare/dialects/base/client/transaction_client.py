@@ -190,15 +190,9 @@ class TransactionClient(DatabaseClient, abc.ABC):
                     f"{schema_name or 'no tenant'!r}; open the transaction inside the tenant scope"
                 )
         if self.tenant_row_level_security:
-            from hare.models.tenancy.tenancy import Tenancy
+            from hare.models.tenancy.tenant_row_level_security import TenantRowLevelSecurity
 
-            scope = Tenancy.current.get()
-            if scope is not self.tenant_scope and scope != self.tenant_scope:
-                raise QueryError(
-                    f"The transaction on {self.connection_alias!r} sees the rows of the tenant scope "
-                    f"{self.tenant_scope!r} it began in - a query in it can't switch to {scope!r}; open the "
-                    "transaction inside the tenant scope"
-                )
+            TenantRowLevelSecurity.check_transaction_scope(self)
         return self
 
     def _get_top_level_transaction(self) -> TransactionClient:
@@ -312,7 +306,6 @@ class TransactionClient(DatabaseClient, abc.ABC):
     #: set its tenants for the ``TenantCondition`` policies - not under no scope. A nested transaction
     #: takes its outer one's.
     tenant_scope: Any = None
-    sets_tenants: bool = False
 
     def _set_transaction_options(self, options: TransactionOptions) -> None:
         """Records the options this wrapper's transaction runs with.

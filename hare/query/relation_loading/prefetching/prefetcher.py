@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 from hare.dialects.base.clauses.enums import RowLockStrength
 from hare.fields.relations.fields.relational_field import RelationalField
-from hare.models.instances.instance_connections import InstanceConnections
 from hare.query.relation_loading.prefetching.declarations import PrefetchNode
 from hare.query.relation_loading.prefetching.direct_relation_prefetch import DirectRelationPrefetch
 from hare.query.relation_loading.prefetching.enums import PrefetchRowsStrategy, PrefetchStrategy
@@ -121,10 +120,11 @@ class Prefetcher:
             # The prefetch query is marked as pinned too, so a nested prefetch gets the same
             # offer.
             related_query._connection_explicitly_chosen = True
-        elif not InstanceConnections.is_routed(self.model):
+        else:
             # The related rows live where the parent rows were read from - looked up by alias
             # at execution time, after the router and before the default connection.
             related_query._instance_connection_alias = self.connection.connection_alias
+            related_query._instance_connection_model = self.model
         return related_query
 
     async def _fetch_node(self, objs: Iterable[Model], node: PrefetchNode, request: PrefetchRequest) -> PrefetchResult:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from hare.core.connections.connections import Connections
 from hare.exceptions import (
     DoesNotExist,
     IntegrityError,
@@ -49,9 +48,7 @@ class ReverseRelation(RelatedQuerySet[TModel]):
         Returns:
             The connection.
         """
-        if (connection := Connections.get_client(using)) is not None:
-            return connection
-        return InstanceConnections.get_connection_for_instance(self.instance, True, model=self.model)
+        return InstanceConnections.get_connection_for_instance(self.instance, True, model=self.model, using=using)
 
     async def create(self, *, using: str | DatabaseClient | None = None, **kwargs: Any) -> TModel:
         """

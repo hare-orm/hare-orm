@@ -21,7 +21,9 @@ class ThroughRows:
     and the report of the links changed."""
 
     @staticmethod
-    def through_table_connection(relation: ManyToManyRelation[Any], for_write: bool) -> DatabaseClient:
+    def through_table_connection(
+        relation: ManyToManyRelation[Any], for_write: bool, *, using: str | DatabaseClient | None = None
+    ) -> DatabaseClient:
         """The connection the through table lives on: that of the model declaring the forward side of
         the field - the instance's model from the forward side, the related model from the backward
         one.
@@ -29,9 +31,16 @@ class ThroughRows:
         Args:
             relation: The many-to-many relation of an instance.
             for_write: Whether the connection is one to write through.
+            using: An explicit connection, subject to the declaring model's tenant checks.
         """
         owning_model = relation.model if relation.field._generated else type(relation.instance)
-        return InstanceConnections.get_connection_for_instance(relation.instance, for_write, model=owning_model)
+        connection = InstanceConnections.get_connection_for_instance(
+            relation.instance, for_write, model=owning_model, using=using
+        )
+        through_model = relation.field.through_model_class
+        if through_model is not None and through_model._meta.checks_tenant_client:
+            through_model._meta.check_tenant_client(connection)
+        return connection
 
     @staticmethod
     def holds_sensitive_keys(relation: ManyToManyRelation[Any]) -> bool:

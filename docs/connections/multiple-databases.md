@@ -41,6 +41,11 @@ goes there by default: `save()`, `delete()`, `restore()`, `refresh_from_db()`,
 `prefetch_related_objects()`, awaiting a forward relation (`await book.author`), and the relations of the
 instance (`author.books.all()`/`.filter()`/`.count()`/`.values()`, M2M `add()`/`remove()`/`clear()`):
 
+After `save(using=...)`, new queries obtained from the instance's relations follow that connection
+even when its primary key is unchanged. A queryset explicitly pinned with `.using()` keeps its choice.
+The source model's router is consulted when the relation query executes, including for a queryset
+created earlier; changing its routing does not require rebuilding the instance or relation.
+
 ```python
 book = await Book.objects.all().using("replica").get(title="Notes")
 author = await book.author          # read from "replica", not from "default"

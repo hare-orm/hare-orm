@@ -88,6 +88,9 @@ renames that section to its version and date.
 
 ### Fixed
 
+- Keep relation queries on the instance's current connection and apply router choices at execution time.
+- Enforce tenant-client and transaction-scope checks for explicit clients, nested queries and relation writes.
+- Snapshot supported container subclasses consistently in filters and pending JSON writes.
 - Preserve dependent schema objects across generated-column replacement, renames and table/schema changes, and
   retain representable catalog details during introspection.
 - Correct expression traversal, query-plan reuse and value conversion across nested queries, containers,

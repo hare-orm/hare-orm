@@ -53,6 +53,39 @@ async def shape_rows():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "field_names", "keys"),
+    [
+        (ShapeItem, ("id",), [(number,) for number in range(1, 7)]),
+        (ShapeShelf, ("store", "number"), [("A", 1), ("A", 2), ("B", 1)]),
+    ],
+)
+async def test_sliced_row_shapes_and_summaries_match_python_keys(shape_rows, model, field_names, keys):
+    for members in (keys, keys[::2]):
+        values = [key[0] if len(field_names) == 1 else key for key in members]
+        for descending in (False, True):
+            ordered_keys = sorted(members, reverse=descending)
+            orderings = [f"-{name}" if descending else name for name in field_names]
+            source = model.objects.filter(pk__in=values).order_by(*orderings)
+            for start, stop in ((0, None), (0, 0), (1, 3), (8, None)):
+                expected = ordered_keys[start:stop]
+                sliced = source[start:stop]
+                shapes = [
+                    (sliced, lambda obj: tuple(getattr(obj, name) for name in field_names)),
+                    (sliced.only(*field_names), lambda obj: tuple(getattr(obj, name) for name in field_names)),
+                    (sliced.values(*field_names), lambda row: tuple(row[name] for name in field_names)),
+                    (sliced.values_list(*field_names), tuple),
+                    (sliced.values_list(*field_names, named=True), tuple),
+                ]
+                if len(field_names) == 1:
+                    shapes.append((sliced.values_list(field_names[0], flat=True), lambda value: (value,)))
+                for query, identity in shapes:
+                    assert [identity(row) for row in await query] == expected
+                    assert await query.count() == len(expected)
+                    assert await query.exists() == bool(expected)
+
+
+@pytest.mark.asyncio
 async def test_composite_null_lookups_validate_values_in_every_condition(shape_rows):
     cases = [(ShapeItem, [5], [1, 2, 3, 4, 6])]
     if DatabaseUnderTest.get_dialect().features.supports_unique_constraints:

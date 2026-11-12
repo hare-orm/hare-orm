@@ -74,6 +74,7 @@ class QuerySetCombination:
         combined_queryset._connection_explicitly_chosen = queryset._connection_explicitly_chosen
         combined_queryset._router_fallback_connection = queryset._router_fallback_connection
         combined_queryset._instance_connection_alias = queryset._instance_connection_alias
+        combined_queryset._instance_connection_model = queryset._instance_connection_model
         combined_queryset._visibility = queryset._visibility
         first_branch = queryset
         if combination is not None and combination.prefetched_relations:

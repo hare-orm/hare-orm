@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hare.contrib.test import hare_test_context
+from hare.contrib.test import capture_queries, hare_test_context
 from hare.core.connections.connections import Connections
 from hare.ddl import TenantCondition
 from hare.dialects.base.client.database_client import DatabaseClient
@@ -215,6 +215,65 @@ async def test_a_connection_without_the_option_refuses_the_model():
             async with Transactions.atomic("models"):
                 with pytest.raises(ConfigurationError, match="no tenant_row_level_security"):
                     await RlsNote.objects.count()
+
+
+@pytest.mark.parametrize("row_shape", ["models", "values", "count", "exists"])
+@pytest.mark.asyncio
+async def test_a_kept_related_policy_plan_requires_transaction_tenants(row_shape):
+    """A shared model's JOIN must not reuse its transaction plan on an ordinary client."""
+    skip_if_not_postgres()
+    async with tenant_context() as (_, role):
+        with Tenancy.scope(1):
+            async with Transactions.atomic("models") as connection:
+                await as_role(connection, role)
+                await connection.execute("INSERT INTO rls_mention VALUES (1, 1)")
+                query = RlsMention.objects.filter(note__text="one")
+                for _ in range(2):
+                    if row_shape == "models":
+                        assert [obj.id for obj in await query] == [1]
+                    elif row_shape == "values":
+                        assert await query.values_list("id", flat=True) == [1]
+                    elif row_shape == "count":
+                        assert await query.count() == 1
+                    else:
+                        assert await query.exists() is True
+            async with capture_queries() as captured:
+                with pytest.raises(QueryError, match="inside a transaction"):
+                    if row_shape == "models":
+                        await query
+                    elif row_shape == "values":
+                        await query.values_list("id", flat=True)
+                    elif row_shape == "count":
+                        await query.count()
+                    else:
+                        await query.exists()
+            assert captured.count == 0
+
+
+@pytest.mark.parametrize("related", [False, True])
+@pytest.mark.asyncio
+async def test_explicit_policy_clients_keep_the_transactions_original_scope(related):
+    """Pinning the client does not replace the transaction's original tenant scope."""
+    skip_if_not_postgres()
+    async with tenant_context() as (_, role):
+        with Tenancy.scope(1):
+            async with Transactions.atomic("models") as connection:
+                await as_role(connection, role)
+                await connection.execute("INSERT INTO rls_mention VALUES (1, 1)")
+                source = RlsMention.objects.filter(note__text="one") if related else RlsNote.objects.all()
+                query = source.using(connection)
+                operations = (query.all, lambda: query.values_list("id", flat=True), query.count, query.exists)
+                for _ in range(2):
+                    assert [obj.id for obj in await operations[0]()] == [1]
+                    assert await operations[1]() == [1]
+                    assert await operations[2]() == 1
+                    assert await operations[3]() is True
+                async with capture_queries() as captured:
+                    with Tenancy.scope(2):
+                        for operation in operations:
+                            with pytest.raises(QueryError, match="began in"):
+                                await operation()
+                assert captured.count == 0
 
 
 @pytest.mark.database_independent

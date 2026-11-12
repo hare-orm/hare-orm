@@ -88,6 +88,59 @@ class ModelConnectionChoice:
         return context.connections.get(default_connection)
 
     @staticmethod
+    def get_metadata_connection(model: type[Model], *, for_write: bool = False) -> DatabaseClient:
+        """The base client of a model's route, without selecting an ambient tenant.
+
+        Relation metadata only compares which configured connections hold the two tables.
+        It must remain readable outside a tenant scope and inside a transaction opened on an
+        explicitly selected tenant client. Actual table access checks that selected client.
+        Router ordering and read-your-writes use the same algorithm as execution.
+
+        Args:
+            model: The model whose configured connection is compared.
+            for_write: Whether to compare its write route rather than its read route.
+        """
+        context = HareContext.require_current()
+        get_connection = context.connections.get_main
+        connection = (
+            context.router.db_for_write(model, get_connection=get_connection)
+            if for_write
+            else context.router.db_for_read(model, get_connection=get_connection)
+        )
+        if connection is not None:
+            return connection
+        default_connection = model._meta.default_connection
+        if default_connection is None:
+            raise ConfigurationError(MISSING_DEFAULT_CONNECTION_MESSAGE.format(model_name=model.__name__))
+        return get_connection(default_connection)
+
+    @staticmethod
+    def get_instance_fallback(
+        context: HareContext,
+        model: type[Model],
+        source_model: type[Model] | None,
+        connection_alias: str | None,
+        for_write: bool,
+    ) -> DatabaseClient | None:
+        """The source instance's connection, when neither model's routing prevents inheritance.
+
+        Call after asking the router about ``model``. The source model's decision is read for
+        this execution too; no instance or earlier routing decision is retained by a queryset.
+        """
+        if connection_alias is None:
+            return None
+        if source_model is not None:
+            if model._meta.default_connection != source_model._meta.default_connection:
+                return None
+            if (
+                source_model is not model
+                and context.router.has_routers
+                and ModelConnectionChoice.get_routed(context, source_model, for_write) is not None
+            ):
+                return None
+        return context.connections.get(connection_alias)
+
+    @staticmethod
     def get_checked(model: type[Model], connection: DatabaseClient) -> DatabaseClient:
         """The connection, once the model's tenancy allows a query of it on the connection.
 
@@ -102,6 +155,10 @@ class ModelConnectionChoice:
             ConfigurationError: The tenancy needs a setting of the connection it lacks.
             QueryError: The tenancy needs a single active tenant, or a transaction that set its tenants.
         """
+        if connection.sets_tenants:
+            from hare.models.tenancy.tenant_row_level_security import TenantRowLevelSecurity
+
+            TenantRowLevelSecurity.check_transaction_scope(connection)
         meta = model._meta
         if meta.checks_tenant_client:
             meta.check_tenant_client(connection)

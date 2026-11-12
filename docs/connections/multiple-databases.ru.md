@@ -43,6 +43,11 @@ async with Transactions.autonomous() as connection:
 (`author.books.all()`/`.filter()`/`.count()`/`.values()`, `add()`/`remove()`/`clear()` у
 «многие-ко-многим»):
 
+После `save(using=...)` новые запросы связей объекта используют это подключение, даже если первичный
+ключ не изменился. Queryset с явно заданным `.using()` сохраняет выбранное подключение.
+Решение роутера исходной модели проверяется при выполнении запроса связи, в том числе созданного
+ранее: смена маршрутизации не требует пересоздавать объект или связь.
+
 ```python
 book = await Book.objects.all().using("replica").get(title="Notes")
 author = await book.author          # прочитан из "replica", а не из "default"
