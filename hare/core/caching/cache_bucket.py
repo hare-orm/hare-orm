@@ -66,10 +66,11 @@ class CacheBucket(MutableMapping[Any, TValue], Generic[TValue]):
             return
         entry_key = (Registries.current(), key)
         with self.lock:
+            # Readers take no lock: evict before publishing a new key to preserve the bound.
+            if len(self.entries) >= self.max_size and entry_key not in self.entries:
+                self.entries.popitem(last=False)
             self.entries[entry_key] = value
             self.entries.move_to_end(entry_key)
-            if len(self.entries) > self.max_size:
-                self.entries.popitem(last=False)
 
     def store(self, key: Any, value: TValue) -> TValue:
         """Store a computed result under the same bound as every other assignment."""

@@ -1,6 +1,5 @@
 import importlib.metadata as importlib_metadata
 import os
-import re
 import shutil
 import subprocess  # nosec
 import sys
@@ -24,11 +23,7 @@ def test_version():
 
 
 def run_shell(cmd: list[str], **kw) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, **kw)  # nosec
-
-
-def _capture_output(cmd: list[str], **kw) -> str:
-    return run_shell(cmd, text=True, capture_output=True, encoding="utf-8", **kw).stdout
+    return subprocess.run(cmd, check=True, **kw)  # nosec
 
 
 @unittest.skipIf(
@@ -52,8 +47,19 @@ def test_added_by_poetry_v2():
             run_shell([*poetry, "new", package, f"--python=~{py}"], env=env)  # nosec
             with chdir(package):
                 run_shell([*poetry, "config", "--local", "virtualenvs.in-project", "true"], env=env)  # nosec
-                run_shell([*poetry, "env", "use", py], env=env)  # nosec
-                r = run_shell([*poetry, "add", str(hare_orm)], env=env)  # nosec
-                assert r.returncode == 0
-                out = _capture_output([*poetry, "run", "pip", "list"], env=env)  # nosec
-                assert re.search(rf"hare-orm\s*{__version__}", out)
+                run_shell([*poetry, "env", "use", sys.executable], env=env)  # nosec
+                run_shell([*poetry, "add", str(hare_orm)], env=env)  # nosec
+                # Read the installed distribution and import it without the checkout's PYTHONPATH.
+                source = (
+                    "import sys; from importlib.metadata import version; import hare; "
+                    "print(version('hare-orm')); print(hare.__version__); "
+                    "print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+                )
+                result = run_shell(
+                    [*poetry, "run", "python", "-I", "-c", source],
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    encoding="utf-8",
+                )
+                assert result.stdout.splitlines() == [__version__, __version__, py]

@@ -404,6 +404,37 @@ def test_a_hit_read_without_the_lock_keeps_its_value_when_cleared_meanwhile():
 
 
 @pytest.mark.database_independent
+@pytest.mark.parametrize("replace_existing", [False, True])
+def test_cache_bound_holds_while_a_writer_publishes_an_entry(replace_existing):
+    from hare.core.caching.cache_bucket import CacheBucket
+
+    published, release = Event(), Event()
+
+    class PausedEntries(OrderedDict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if value == 10:
+                published.set()
+                assert release.wait(10), "writer watchdog"
+
+    bucket = CacheBucket[int](2)
+    bucket[0] = 0
+    bucket[1] = 1
+    bucket.entries = PausedEntries(bucket.entries)
+    key = 1 if replace_existing else 2
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        writer = executor.submit(bucket.store, key, 10)
+        try:
+            assert published.wait(10), "writer start watchdog"
+            assert len(bucket) == bucket.entry_count == 2
+            assert set(bucket) == ({0, 1} if replace_existing else {1, 2})
+            assert bucket.peek(key) == 10
+        finally:
+            release.set()
+        assert writer.result(timeout=10) == 10
+
+
+@pytest.mark.database_independent
 def test_lock_free_reads_survive_concurrent_evictions_and_clears():
     """Readers hitting a bucket while other threads store past its bound and clear it get the stored
     value or the default - never an error of a reorder, an iteration or a count racing a write."""
