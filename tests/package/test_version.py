@@ -48,7 +48,8 @@ def test_added_by_poetry_v2():
     with tempfile.TemporaryDirectory(dir=hare_orm.parent, ignore_cleanup_errors=True) as project_root:
         with chdir(project_root):
             package = "foo"
-            run_shell([*poetry, "new", package, f"--python=^{py}"], env=env)  # nosec
+            # Test the selected minor without claiming unsupported future Python versions.
+            run_shell([*poetry, "new", package, f"--python=~{py}"], env=env)  # nosec
             with chdir(package):
                 run_shell([*poetry, "config", "--local", "virtualenvs.in-project", "true"], env=env)  # nosec
                 run_shell([*poetry, "env", "use", py], env=env)  # nosec

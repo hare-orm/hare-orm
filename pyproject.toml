@@ -202,6 +202,8 @@ codespell = "*"
 twine = "*"
 # Builds rust.native (make build_native, build_native_linux).
 maturin = "*"
+# Retags and inspects the platform wheels during build and release checks.
+wheel = "*"
 types-PyYAML = "*"
 types-pytz = "*"
 pre-commit = "^4.6.2"

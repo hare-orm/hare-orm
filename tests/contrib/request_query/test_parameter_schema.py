@@ -16,6 +16,7 @@ from hare.contrib.request_query.declaration.filter_parameter_builder import Filt
 from hare.contrib.request_query.declaration.request_query_registry import RequestQueryRegistry
 from hare.contrib.request_query.exceptions import InvalidRequestQuery
 from hare.core.hare_context import HareContext
+from hare.dialects.dialect_registry import DialectRegistry
 from hare.exceptions import ConfigurationError
 from hare.query.expressions import F
 
@@ -167,7 +168,10 @@ async def test_explicit_field_value_suppresses_a_shared_url_alias(book_query, se
     assert (query.first, query.second) == (11, expected)
 
 
-async def test_concurrent_preparation_publishes_one_completed_generation(book_query, monkeypatch):
+@pytest.mark.parametrize("invalidate", [False, True])
+async def test_concurrent_preparation_publishes_one_completed_generation(book_query, monkeypatch, invalidate):
+    # Loading dialects invalidates schema candidates; test that separately below.
+    DialectRegistry.get_connected_dialects()
     entered, release, reader_started = Event(), Event(), Event()
     original = DeclarationBuilder.build
     original_fields = book_query.model_fields
@@ -177,6 +181,8 @@ async def test_concurrent_preparation_publishes_one_completed_generation(book_qu
         calls.append(builder.request_query_class)
         entered.set()
         assert release.wait(5)
+        if invalidate and len(calls) == 1:
+            RequestQueryRegistry.forget_parameters(book_query)
         return original(builder)
 
     def read():
@@ -195,7 +201,8 @@ async def test_concurrent_preparation_publishes_one_completed_generation(book_qu
         finally:
             release.set()
         assert first.result(5) is second.result(5)
-    assert len(calls) == 1
+    assert len(calls) == (2 if invalidate else 1)
+    assert first.result() is book_query.prepare_parameters()
 
 
 async def test_declaration_uses_the_current_annotation_and_immutable_mappings(book_query):
